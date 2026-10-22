@@ -1,0 +1,36 @@
+[package]
+name = "foreman-server"
+description = "Agent meta-harness: a SQLite issue tracker that runs coding agents, behind a small REST API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "foreman_server"
+
+[dependencies]
+foreman-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum = "0.8"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "signal", "net", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "fs"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+getrandom = "0.3"
+
+toml = "0.9"
+dirs = "6"
+clap = { version = "4.6", features = ["derive", "env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+[[bin]]
+name = "foreman-server"
+path = "src/main.rs"

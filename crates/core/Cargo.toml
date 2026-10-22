@@ -1,0 +1,11 @@
+[package]
+name = "foreman-core"
+description = "Wire types shared by the foreman server and its clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
