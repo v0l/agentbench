@@ -25,10 +25,20 @@ enum Filter {
     All,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Where {
+    Local,
+    Remote,
+}
+
 struct Connect {
+    place: Where,
     url: String,
     token: String,
+}
+
+pub struct LocalServer {
+    pub start: Box<dyn Fn() -> Result<Server, String> + Send + Sync>,
 }
 
 struct AddProject {
@@ -76,6 +86,9 @@ struct Transcript {
 pub struct App {
     client: Option<Client>,
     connect: Option<Connect>,
+    local: Option<std::sync::Arc<LocalServer>>,
+    remote: bool,
+    starting: Option<std::sync::mpsc::Receiver<Result<Server, String>>>,
     overview: Option<Overview>,
     cursor: Option<Id>,
     watching: bool,
@@ -106,12 +119,26 @@ impl App {
         storage: Option<&dyn eframe::Storage>,
         default_url: Option<String>,
     ) -> App {
+        App::with_local(ctx, storage, default_url, None)
+    }
+
+    pub fn with_local(
+        ctx: &egui::Context,
+        storage: Option<&dyn eframe::Storage>,
+        default_url: Option<String>,
+        local: Option<LocalServer>,
+    ) -> App {
         install(ctx);
         let url = storage.and_then(|s| s.get_string("url")).or(default_url).unwrap_or_default();
         let token = storage.and_then(|s| s.get_string("token")).unwrap_or_default();
+        let remote = local.is_none()
+            || storage.and_then(|s| s.get_string("remote")).as_deref() == Some("true");
         let mut app = App {
             client: None,
             connect: None,
+            local: local.map(std::sync::Arc::new),
+            remote,
+            starting: None,
             overview: None,
             cursor: None,
             watching: false,
@@ -135,8 +162,10 @@ impl App {
             markdown: markdown::Cache::default(),
             follow: true,
         };
-        if url.is_empty() || token.is_empty() {
-            app.connect = Some(Connect { url, token });
+        if !app.remote {
+            app.start_local(ctx);
+        } else if url.is_empty() || token.is_empty() {
+            app.connect = Some(Connect { place: Where::Remote, url, token });
         } else {
             app.connect_to(ctx, Server { url, token });
         }
@@ -144,9 +173,48 @@ impl App {
     }
 
     pub fn store(&self, storage: &mut dyn eframe::Storage) {
-        if let Some(c) = &self.client {
+        storage.set_string("remote", self.remote.to_string());
+        if let Some(c) = self.client.as_ref().filter(|_| self.remote) {
             storage.set_string("url", c.server.url.clone());
             storage.set_string("token", c.server.token.clone());
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        !self.remote
+    }
+
+    fn start_local(&mut self, ctx: &egui::Context) {
+        let Some(local) = self.local.clone() else {
+            return;
+        };
+        self.client = None;
+        self.overview = None;
+        self.offline = None;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((local.start)());
+            ctx.request_repaint();
+        });
+        self.starting = Some(rx);
+    }
+
+    fn poll_starting(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.starting else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(server)) => {
+                self.starting = None;
+                self.connect_to(ctx, server);
+            }
+            Ok(Err(e)) => {
+                self.starting = None;
+                self.offline = Some((e, Instant::now()));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.starting = None,
         }
     }
 
@@ -264,7 +332,16 @@ impl App {
         }
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, ctx: &egui::Context) {
+        self.poll_starting(ctx);
+        if self.client.is_none() {
+            if let (false, Some((_, at)), None) = (self.remote, &self.offline, &self.starting)
+                && at.elapsed() >= RETRY
+            {
+                self.start_local(ctx);
+            }
+            return;
+        }
         let Some(client) = &mut self.client else {
             return;
         };
@@ -276,6 +353,11 @@ impl App {
             return;
         };
         match &self.offline {
+            Some((_, at)) if at.elapsed() >= RETRY && !self.remote && self.local.is_some() => {
+                self.client = None;
+                self.offline = None;
+                self.start_local(ctx);
+            }
             Some((_, at)) if at.elapsed() >= RETRY => {
                 self.offline = None;
                 client.overview();
@@ -341,9 +423,14 @@ impl App {
                     let (url, token) = self
                         .client
                         .as_ref()
+                        .filter(|_| self.remote)
                         .map(|c| (c.server.url.clone(), c.server.token.clone()))
                         .unwrap_or_default();
-                    self.connect = Some(Connect { url, token });
+                    let place = if self.remote { Where::Remote } else { Where::Local };
+                    self.connect = Some(Connect { place, url, token });
+                }
+                if !self.remote {
+                    chip(ui, "this machine", OK, self.overview.is_some());
                 }
             });
         });
@@ -387,6 +474,7 @@ impl App {
                     status(ui, false, e);
                     hint(ui, "retrying every few seconds");
                 }
+                None if self.starting.is_some() => note(ui, "starting the foreman server", LEGEND),
                 None => note(ui, "connecting", LEGEND),
             }
             return;
@@ -959,36 +1047,77 @@ impl App {
             return;
         };
         let (mut go, mut close) = (false, false);
-        let can_close = self.client.is_some();
-        let m = egui::Modal::new(egui::Id::new("connect")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
-            ui.set_width(480.0);
-            modal_title(ui, "Connect to a foreman server");
-            section(ui, "server", "where foreman-server listens", |ui| {
-                row_help(ui, "address", "Run foreman-server on the machine with your repos. Its default is 127.0.0.1:7420. Put a tunnel or DNAT in front to reach it from elsewhere.", |ui| {
-                    field(ui, &mut c.url, "127.0.0.1:7420");
-                });
-                row_help(ui, "token", "Printed by `foreman-server token`.", |ui| {
-                    secret(ui, &mut c.token);
+        let can_close = self.client.is_some() || self.starting.is_some();
+        let has_local = self.local.is_some();
+        let m = egui::Modal::new(egui::Id::new("connect"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(480.0);
+                modal_title(ui, "Which foreman server");
+                if has_local {
+                    segments(
+                        ui,
+                        &mut c.place,
+                        &[(Where::Local, "this machine", None), (Where::Remote, "remote", None)],
+                    );
+                    ui.add_space(8.0);
+                }
+                match c.place {
+                    Where::Local => section(ui, "this machine", "runs beside the window", |ui| {
+                        note(
+                            ui,
+                            "Foreman starts its server in the background on this machine and keeps it running after the window closes, so agents carry on working.",
+                            LEGEND,
+                        );
+                    }),
+                    Where::Remote => section(ui, "remote", "a foreman server elsewhere", |ui| {
+                        row_help(
+                            ui,
+                            "address",
+                            "Where the server listens, through whatever tunnel or DNAT you put in front of it.",
+                            |ui| {
+                                field(ui, &mut c.url, "https://foreman.example.com");
+                            },
+                        );
+                        row_help(ui, "token", "Printed by `foreman token` on that machine.", |ui| {
+                            secret(ui, &mut c.token);
+                        });
+                    }),
+                };
+                footer(ui, |ui| {
+                    let ready = c.place == Where::Local
+                        || (!c.url.trim().is_empty() && !c.token.trim().is_empty());
+                    if ui
+                        .add(Key::new("connect").solid(READOUT).enabled(ready).min_width(100.0))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if can_close
+                        && ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked()
+                    {
+                        close = true;
+                    }
                 });
             });
-            footer(ui, |ui| {
-                let ready = !c.url.trim().is_empty() && !c.token.trim().is_empty();
-                if ui.add(Key::new("connect").solid(READOUT).enabled(ready).min_width(100.0)).clicked() {
-                    go = true;
-                }
-                if can_close && ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked() {
-                    close = true;
-                }
-            });
-        });
         if m.should_close() && can_close {
             close = true;
         }
         if go {
+            let place = c.place;
             let server =
                 Server { url: c.url.trim().to_string(), token: c.token.trim().to_string() };
             self.connect = None;
-            self.connect_to(ctx, server);
+            match place {
+                Where::Local => {
+                    self.remote = false;
+                    self.start_local(ctx);
+                }
+                Where::Remote => {
+                    self.remote = true;
+                    self.connect_to(ctx, server);
+                }
+            }
         } else if close {
             self.connect = None;
         }
@@ -1309,7 +1438,7 @@ impl App {
 
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
-        self.tick();
+        self.tick(&ctx);
         let narrow = ctx.content_rect().width() < 720.0;
 
         egui::Panel::top("header")
@@ -1356,6 +1485,11 @@ impl App {
         });
         self.modals(&ctx);
         self.markdown.sweep();
+        if let Some((_, at)) = &self.offline {
+            ctx.request_repaint_after(
+                RETRY.saturating_sub(at.elapsed()) + Duration::from_millis(50),
+            );
+        }
         if self.current_session().is_some_and(|s| s.status == SessionStatus::Running) {
             ctx.request_repaint_after(Duration::from_millis(500));
         }

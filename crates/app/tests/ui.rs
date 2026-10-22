@@ -215,3 +215,39 @@ fn the_client_reaches_the_server() {
         _ => panic!("odd reply"),
     }
 }
+
+#[test]
+fn without_a_local_server_the_window_asks_where_to_connect() {
+    let h = Harness::builder()
+        .with_size([900.0, 600.0])
+        .build_eframe(|cc| App::new(&cc.egui_ctx, None, None));
+    assert!(!h.state().is_local());
+}
+
+#[test]
+fn the_window_starts_its_own_server_by_default() {
+    let rig = rig();
+    let url = format!("http://{}", rig.url);
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(move |cc| {
+        let url = url.clone();
+        let local = foreman::LocalServer {
+            start: Box::new(move || {
+                Ok(foreman::client::Server { url: url.clone(), token: TOKEN.into() })
+            }),
+        };
+        App::with_local(&cc.egui_ctx, None, None, Some(local))
+    });
+    assert!(h.state().is_local());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+}
+
+#[test]
+fn a_saved_remote_choice_is_kept() {
+    let mut storage = Mem::default();
+    storage.0.insert("remote".into(), "true".into());
+    let h = Harness::builder().with_size([900.0, 600.0]).build_eframe(move |cc| {
+        let local = foreman::LocalServer { start: Box::new(|| Err("must not start".into())) };
+        App::with_local(&cc.egui_ctx, Some(&storage), None, Some(local))
+    });
+    assert!(!h.state().is_local());
+}

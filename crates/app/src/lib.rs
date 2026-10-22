@@ -1,10 +1,22 @@
 pub mod app;
 pub mod client;
 
-pub use app::App;
+pub use app::{App, LocalServer};
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn run_native(url: Option<String>) -> eframe::Result<()> {
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn local_server(home: Option<std::path::PathBuf>) -> LocalServer {
+    LocalServer {
+        start: Box::new(move || {
+            let local = foreman_server::local::Local::open(home.clone())?;
+            let me = std::env::current_exe().map_err(|e| e.to_string())?;
+            local.ensure(&me, &["serve"])?;
+            Ok(client::Server { url: local.url(), token: local.token.clone() })
+        }),
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn run_native(home: Option<std::path::PathBuf>) -> eframe::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([420.0, 480.0])
@@ -14,7 +26,9 @@ pub fn run_native(url: Option<String>) -> eframe::Result<()> {
     eframe::run_native(
         "foreman",
         opts,
-        Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, cc.storage, url)))),
+        Box::new(move |cc| {
+            Ok(Box::new(App::with_local(&cc.egui_ctx, cc.storage, None, Some(local_server(home)))))
+        }),
     )
 }
 

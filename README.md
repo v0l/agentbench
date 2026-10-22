@@ -17,16 +17,23 @@ its REST API, so it can sit on another machine.
 ## Run
 
 ```sh
-cargo run --release -p foreman-server -- add ~/git/snort
-cargo run --release -p foreman-server -- token
-cargo run --release -p foreman-server
 cargo run --release -p foreman
 ```
 
-The server listens on `127.0.0.1:7420`. Reaching it from elsewhere (DNAT, a
-tunnel, a reverse proxy) is up to you. Every `/api` route needs
-`Authorization: Bearer <token>`; `foreman-server token --rotate` makes a new
-one.
+The window starts the server in the background if it is not already running,
+and connects to it. The server keeps running after the window closes so agents
+carry on, and a later window reuses it. To use a server on another machine
+instead, pick remote under the `...` key.
+
+The same binary is the server: `foreman serve`, `foreman add ~/git/snort`,
+`foreman token`, `foreman agents`. `foreman-server` is the same commands
+without the window, for headless machines.
+
+The server listens on `127.0.0.1:7420`; set `listen` in `foreman.toml` to
+change it. Reaching it from elsewhere (DNAT, a tunnel, a reverse proxy) is up
+to you. Every `/api` route needs `Authorization: Bearer <token>`;
+`foreman token --rotate` makes a new one. Its log is `server.log` beside the
+database.
 
 Data lives in `$FOREMAN_HOME` (default `~/.local/share/foreman`):
 `foreman.db` and an optional `foreman.toml`.
