@@ -62,6 +62,19 @@ pub fn read(ws: &Workspace, args: &Value) -> Option<Result<Media, String>> {
     Some(load(ws, path, kind, args))
 }
 
+/// A file the user attached, read for the model the way `read_file` would, under the name they gave it.
+pub fn attachment(file: &Path, name: &str) -> Result<Media, String> {
+    let kind = kind(name)
+        .or_else(|| kind(&file.to_string_lossy()))
+        .ok_or_else(|| format!("{name} is not a picture, sound or video"))?;
+    let bytes = fs::metadata(file).map_err(|e| format!("{name}: {e}"))?.len();
+    match kind {
+        Kind::Image => image(file, name, bytes),
+        Kind::Audio => audio(file, name, bytes),
+        Kind::Video => video(file, name, bytes, FRAMES),
+    }
+}
+
 fn load(ws: &Workspace, path: &str, kind: Kind, args: &Value) -> Result<Media, String> {
     let file = ws.resolve_for(path, Access::Read)?;
     let shown = ws.shown(&file);

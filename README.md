@@ -91,6 +91,13 @@ output_tokens = "/usage/output"
 The pointers are JSON pointers into each line. `{prompt}` in `args` passes the
 prompt as an argument instead of stdin.
 
+## Attachments
+
+Drop files on the chat, paste a picture with ctrl+v, or use **attach**. Up to 8
+files of 20 MB each go with a message and are kept with the chat. The foreman
+agent is shown pictures, sound and video directly; pi, claude, codex and other
+CLI agents are told where each file was written so they can read it.
+
 ## Chat titles
 
 A new chat is named from the start of your first message. Once the agent has
@@ -169,7 +176,8 @@ cargo apk build -p foreman --lib --release
 | `POST /api/issues/{id}/start` `{agent, place, model?, prompt?}` | run an agent on it |
 | `POST /api/sessions` `{project_id, agent, place, prompt?}` | start an agent |
 | `GET /api/sessions/{id}/messages?after=N` | transcript |
-| `POST /api/sessions/{id}/messages` `{text}` | next turn |
+| `POST /api/sessions/{id}/messages` `{text, attachments?}` | next turn; each attachment is `{name, mime, data}`, data base64 |
+| `GET /api/sessions/{id}/attachments/{file}` | the bytes of a file sent in that chat |
 | `POST /api/sessions/{id}/answer` `{question, answer}` | answer an agent's question |
 | `POST /api/sessions/{id}/interrupt` | stop the turn |
 

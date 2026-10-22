@@ -35,8 +35,43 @@ pub struct Context {
     pub token: String,
 }
 
+/// A file the user sent with a message, written out where an agent can read it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attached {
+    pub name: String,
+    pub mime: String,
+    pub path: PathBuf,
+}
+
+/// A message sent while the agent works, and anything sent with it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Steer {
+    pub text: String,
+    pub files: Vec<Attached>,
+}
+
+impl From<&str> for Steer {
+    fn from(text: &str) -> Steer {
+        Steer { text: text.to_string(), files: Vec::new() }
+    }
+}
+
+/// The prompt with a line naming each attached file, for agents that read files themselves.
+pub fn with_files(prompt: &str, files: &[Attached]) -> String {
+    if files.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = prompt.to_string();
+    out.push_str("\n\nAttached files, read them from these paths:\n");
+    for f in files {
+        out.push_str(&format!("- {} ({}): {}\n", f.name, f.mime, f.path.display()));
+    }
+    out
+}
+
 pub struct Turn<'a> {
     pub prompt: &'a str,
+    pub files: &'a [Attached],
     pub cwd: &'a Path,
     pub model: Option<&'a str>,
     pub resume: Option<&'a str>,
@@ -70,7 +105,7 @@ pub trait Io: Send + Sync {
     fn stopped(&self) -> bool {
         self.stop().is_cancelled()
     }
-    fn steer(&self) -> Option<String>;
+    fn steer(&self) -> Option<Steer>;
     async fn ask(&self, question: Question) -> Result<String, String>;
     /// Put several questions at once; one answer back for each, in order.
     async fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String>;
@@ -205,7 +240,7 @@ pub fn defaults() -> Vec<Box<dyn Agent>> {
 pub struct TestIo {
     pub events: Mutex<Vec<Event>>,
     pub stop: CancellationToken,
-    pub inbox: Mutex<Vec<String>>,
+    pub inbox: Mutex<Vec<Steer>>,
     pub answers: Mutex<Vec<String>>,
     pub api: Arc<dyn Api>,
 }
@@ -236,7 +271,7 @@ impl Io for TestIo {
     fn stop(&self) -> &CancellationToken {
         &self.stop
     }
-    fn steer(&self) -> Option<String> {
+    fn steer(&self) -> Option<Steer> {
         let mut inbox = self.inbox.lock().unwrap();
         (!inbox.is_empty()).then(|| inbox.remove(0))
     }
@@ -338,5 +373,18 @@ mod tests {
         assert!(b.contains("http://127.0.0.1:7420/api/issues"));
         assert!(b.contains("branch main"));
         assert!(b.contains("\"project_id\": 4"));
+    }
+
+    #[test]
+    fn attached_files_are_named_with_their_paths_for_cli_agents() {
+        let files = [Attached {
+            name: "shot.png".into(),
+            mime: "image/png".into(),
+            path: PathBuf::from("/tmp/foreman/x/1.png"),
+        }];
+        let p = with_files("look", &files);
+        assert!(p.starts_with("look\n\nAttached files"), "{p}");
+        assert!(p.contains("- shot.png (image/png): /tmp/foreman/x/1.png"), "{p}");
+        assert_eq!(with_files("look", &[]), "look");
     }
 }

@@ -304,6 +304,7 @@ mod tests {
     fn launch_resumes_a_thread_and_briefs_only_a_new_one() {
         let c = crate::agent::context();
         let turn = |resume| Turn {
+            files: &[],
             prompt: "hi",
             cwd: Path::new("/tmp"),
             model: None,

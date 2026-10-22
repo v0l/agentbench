@@ -248,6 +248,7 @@ mod tests {
         let c = crate::agent::context();
         let l = Claude::new("claude").launch(
             &Turn {
+                files: &[],
                 prompt: "hi",
                 cwd: Path::new("/tmp"),
                 model: Some("sonnet"),

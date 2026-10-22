@@ -1,7 +1,9 @@
-use crate::agent::{Agent, Api, CancellationToken, Context, Event, Io, Turn, async_trait};
+use crate::agent::{
+    Agent, Api, Attached, CancellationToken, Context, Event, Io, Steer, Turn, async_trait,
+};
 use crate::store::{Store, StoreError};
 use crate::titles::Titles;
-use foreman_core::{Entry, Id, Question, Session, SessionId, SessionStatus};
+use foreman_core::{Attachment, Entry, Id, Question, Session, SessionId, SessionStatus, Upload};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -17,8 +19,21 @@ type Waiting = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<String>>>>>;
 #[derive(Clone)]
 struct Live {
     stop: CancellationToken,
-    inbox: Arc<Mutex<Vec<String>>>,
+    inbox: Arc<Mutex<Vec<Message>>>,
     questions: Waiting,
+}
+
+/// What the user sent: the words, and the files kept with them.
+#[derive(Clone, Debug, Default)]
+struct Message {
+    text: String,
+    attachments: Vec<Attachment>,
+}
+
+impl Message {
+    fn entry(&self) -> Entry {
+        Entry::User { text: self.text.clone(), attachments: self.attachments.clone() }
+    }
 }
 
 #[derive(Clone)]
@@ -141,11 +156,75 @@ impl Runner {
     }
 
     pub fn send(&self, session: &Session, text: &str) -> Result<(), StoreError> {
+        self.send_with(session, text, &[])
+    }
+
+    /// Send a message with files attached. The files are kept with the session.
+    pub fn send_with(
+        &self,
+        session: &Session,
+        text: &str,
+        uploads: &[Upload],
+    ) -> Result<(), StoreError> {
         let text = text.trim();
-        if let Some((cmd, arg)) = foreman_core::parse_slash(text) {
+        if uploads.is_empty()
+            && let Some((cmd, arg)) = foreman_core::parse_slash(text)
+        {
             return self.command(session, cmd.name, arg);
         }
-        self.send_text(session, text, Mode::Chat)
+        if uploads.len() > foreman_core::ATTACHMENTS_MAX {
+            return Err(StoreError(format!(
+                "at most {} files go with one message",
+                foreman_core::ATTACHMENTS_MAX
+            )));
+        }
+        let decoded = uploads
+            .iter()
+            .map(|u| {
+                use base64::Engine;
+                let data = base64::engine::general_purpose::STANDARD
+                    .decode(u.data.trim())
+                    .map_err(|e| StoreError(format!("{} is not base64: {e}", u.name)))?;
+                if data.len() > foreman_core::ATTACHMENT_MAX {
+                    return Err(StoreError(format!(
+                        "{} is over {} MB",
+                        u.name,
+                        foreman_core::ATTACHMENT_MAX >> 20
+                    )));
+                }
+                Ok((u, data))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if text.is_empty() && decoded.is_empty() {
+            return Err(StoreError("nothing to send".into()));
+        }
+        let mut attachments = Vec::new();
+        for (u, data) in decoded {
+            let name = file_name(&u.name);
+            let mime = Some(u.mime.trim())
+                .filter(|m| !m.is_empty())
+                .or_else(|| foreman_core::mime_for(&name))
+                .unwrap_or("application/octet-stream");
+            attachments.push(self.store.add_attachment(session.id, &name, mime, &data)?);
+        }
+        self.send_text(session, Message { text: text.to_string(), attachments }, Mode::Chat)
+    }
+
+    /// The files of a message, written to a folder of this session's so an agent can read them.
+    fn materialise(&self, session: SessionId, attachments: &[Attachment]) -> Vec<Attached> {
+        let dir = std::env::temp_dir().join("foreman").join(session.to_string());
+        let _ = std::fs::create_dir_all(&dir);
+        attachments
+            .iter()
+            .filter_map(|a| {
+                let path = dir.join(a.file_name());
+                if !path.is_file() {
+                    let (_, data) = self.store.attachment(a.id).ok()?;
+                    std::fs::write(&path, data).ok()?;
+                }
+                Some(Attached { name: a.name.clone(), mime: a.mime.clone(), path })
+            })
+            .collect()
     }
 
     fn command(&self, session: &Session, name: &str, arg: &str) -> Result<(), StoreError> {
@@ -197,30 +276,31 @@ impl Runner {
                         "stop the agent or let it finish before compacting".into(),
                     ));
                 }
-                self.send_text(session, COMPACT_PROMPT, Mode::Compact)
+                let prompt = Message { text: COMPACT_PROMPT.into(), attachments: Vec::new() };
+                self.send_text(session, prompt, Mode::Compact)
             }
             other => Err(StoreError(format!("/{other} is handled by the window"))),
         }
     }
 
-    fn send_text(&self, session: &Session, text: &str, mode: Mode) -> Result<(), StoreError> {
+    fn send_text(&self, session: &Session, msg: Message, mode: Mode) -> Result<(), StoreError> {
         let agent = self
             .agent(&session.agent)
             .ok_or_else(|| StoreError(format!("no agent named {}", session.agent)))?;
-        if text.is_empty() {
+        if msg.text.is_empty() && msg.attachments.is_empty() {
             return Err(StoreError("nothing to send".into()));
         }
         {
             let live = self.live();
             if let Some(l) = live.get(&session.id) {
-                l.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(text.to_string());
+                l.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg.clone());
                 drop(live);
                 // Show it at once. A steerable agent only reads the inbox between steps, which
                 // can be a while, and the composer has already cleared by then.
                 let shown = if agent.steerable() {
-                    Entry::User { text: text.to_string() }
+                    msg.entry()
                 } else {
-                    Entry::Notice { text: format!("queued for when this turn ends: {text}") }
+                    Entry::Notice { text: format!("queued for when this turn ends: {}", msg.text) }
                 };
                 self.store.add_message(session.id, &shown)?;
                 self.changed.notify_waiters();
@@ -235,7 +315,7 @@ impl Runner {
         self.live().insert(session.id, live.clone());
         let runner = self.clone();
         let session_id = session.id;
-        let first = text.to_string();
+        let first = msg;
         tokio::spawn(async move {
             let Live { stop, inbox, questions } = live;
             let mut next = Some(first);
@@ -263,7 +343,11 @@ impl Runner {
                 }
                 let mut queued = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 if !queued.is_empty() {
-                    next = Some(queued.drain(..).collect::<Vec<_>>().join("\n\n"));
+                    let all: Vec<Message> = queued.drain(..).collect();
+                    next = Some(Message {
+                        text: all.iter().map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n\n"),
+                        attachments: all.into_iter().flat_map(|m| m.attachments).collect(),
+                    });
                     shown = agent.steerable();
                 }
             }
@@ -294,10 +378,10 @@ impl Runner {
         &self,
         agent: &dyn Agent,
         session: &Session,
-        prompt: &str,
+        msg: &Message,
         shown: bool,
         stop: &CancellationToken,
-        inbox: &Arc<Mutex<Vec<String>>>,
+        inbox: &Arc<Mutex<Vec<Message>>>,
         questions: &Waiting,
         mode: Mode,
     ) -> SessionStatus {
@@ -309,7 +393,7 @@ impl Runner {
             .map(|m| m.entry)
             .collect();
         let entry = match mode {
-            Mode::Chat => Entry::User { text: prompt.to_string() },
+            Mode::Chat => msg.entry(),
             Mode::Compact => Entry::Notice { text: "compacting the conversation".into() },
         };
         if !shown && self.store.add_message(session.id, &entry).is_err() {
@@ -321,6 +405,7 @@ impl Runner {
         });
         let fresh_after_summary =
             session.agent_session.is_none() && summary.as_ref().is_some_and(|s| !s.is_empty());
+        let prompt = msg.text.as_str();
         let prompt_text;
         let prompt = if fresh_after_summary && !agent.steerable() {
             prompt_text = format!(
@@ -331,6 +416,7 @@ impl Runner {
         } else {
             prompt
         };
+        let files = self.materialise(session.id, &msg.attachments);
         let _ = self.store.set_status(session.id, SessionStatus::Running);
         self.changed.notify_waiters();
         let cwd = PathBuf::from(&session.cwd);
@@ -338,6 +424,7 @@ impl Runner {
         let resume = session.agent_session.as_deref().filter(|_| agent.resumable());
         let turn = Turn {
             prompt,
+            files: &files,
             cwd: &cwd,
             model: session.model.as_deref(),
             resume,
@@ -354,6 +441,7 @@ impl Runner {
             questions: questions.clone(),
             steerable: agent.steerable(),
             api: self.api.clone(),
+            runner: self.clone(),
         };
         let result = agent.run(&turn, &sink).await;
         sink.flush();
@@ -388,6 +476,14 @@ impl Runner {
     }
 }
 
+/// A name safe to write to disk and show: the last part of what was sent, never empty.
+fn file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default().trim();
+    let clean: String =
+        base.chars().filter(|c| !c.is_control()).collect::<String>().chars().take(120).collect();
+    if clean.is_empty() || clean == "." || clean == ".." { "file".to_string() } else { clean }
+}
+
 const COMPACT_PROMPT: &str = "Summarise this conversation so another agent can carry on from it without the transcript. \
 Keep: what the user asked for, decisions made and why, files changed, what is done, what is left, and anything you were about to do. \
 Be specific with file paths and names. Reply with the summary only, as markdown, no preamble.";
@@ -415,9 +511,10 @@ struct Sink {
     changed: Arc<Notify>,
     state: Mutex<SinkState>,
     stop: CancellationToken,
-    inbox: Arc<Mutex<Vec<String>>>,
+    inbox: Arc<Mutex<Vec<Message>>>,
     questions: Waiting,
     steerable: bool,
+    runner: Runner,
     api: Arc<dyn Api>,
 }
 
@@ -586,12 +683,15 @@ impl Io for Sink {
         &self.stop
     }
 
-    fn steer(&self) -> Option<String> {
+    fn steer(&self) -> Option<Steer> {
         if !self.steerable {
             return None;
         }
         let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
-        (!inbox.is_empty()).then(|| inbox.remove(0))
+        let msg = (!inbox.is_empty()).then(|| inbox.remove(0))?;
+        drop(inbox);
+        let files = self.runner.materialise(self.session, &msg.attachments);
+        Some(Steer { text: msg.text, files })
     }
 
     async fn ask(&self, question: Question) -> Result<String, String> {
@@ -678,7 +778,7 @@ mod tests {
         assert_eq!(done.agent_session.as_deref(), Some("abc"));
         assert_eq!(done.usage.input_tokens, 7);
         let msgs = runner.store().messages(s.id, 0).unwrap();
-        assert_eq!(msgs[0].entry, Entry::User { text: "hello".into() });
+        assert_eq!(msgs[0].entry, Entry::user("hello"));
         assert_eq!(msgs[1].entry, Entry::Assistant { text: format!("got hello in {}", s.id) });
     }
 
@@ -778,8 +878,8 @@ mod tests {
         }
         async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
             for _ in 0..200 {
-                if let Some(text) = io.steer() {
-                    io.emit(Event::Steered { text });
+                if let Some(steer) = io.steer() {
+                    io.emit(Event::Steered { text: steer.text });
                     io.emit(Event::Done);
                     return Ok(());
                 }
@@ -802,7 +902,7 @@ mod tests {
                 .unwrap()
                 .into_iter()
                 .filter_map(|m| match m.entry {
-                    Entry::User { text } => Some(text),
+                    Entry::User { text, .. } => Some(text),
                     _ => None,
                 })
                 .collect()
@@ -810,6 +910,97 @@ mod tests {
         assert_eq!(users(&runner), ["go", "left instead"]);
         wait_idle(&runner, s.id).await;
         assert_eq!(users(&runner), ["go", "left instead"]);
+    }
+
+    struct Looker(Mutex<Vec<Steer>>);
+
+    #[async_trait]
+    impl Agent for Looker {
+        fn name(&self) -> &str {
+            "looker"
+        }
+        fn label(&self) -> &str {
+            "Looker"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn steerable(&self) -> bool {
+            true
+        }
+        async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(Steer { text: turn.prompt.into(), files: turn.files.to_vec() });
+            for _ in 0..200 {
+                if let Some(steer) = io.steer() {
+                    self.0.lock().unwrap().push(steer);
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err("never steered".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_sent_mid_turn_reaches_the_agent_with_its_steer() {
+        use base64::Engine;
+        let seen = Arc::new(Looker(Mutex::new(Vec::new())));
+        struct Shared(Arc<Looker>);
+        #[async_trait]
+        impl Agent for Shared {
+            fn name(&self) -> &str {
+                "looker"
+            }
+            fn label(&self) -> &str {
+                "Looker"
+            }
+            fn available(&self) -> bool {
+                true
+            }
+            fn about(&self) -> String {
+                "test".into()
+            }
+            fn resumable(&self) -> bool {
+                false
+            }
+            fn steerable(&self) -> bool {
+                true
+            }
+            async fn run(&self, t: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+                self.0.run(t, io).await
+            }
+        }
+        let (runner, s) = setup(Box::new(Shared(seen.clone())));
+        runner.send(&s, "go").unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let upload = Upload {
+            name: "clip.wav".into(),
+            mime: String::new(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"RIFF"),
+        };
+        runner.send_with(&s, "and this", &[upload]).unwrap();
+        wait_idle(&runner, s.id).await;
+        let got = seen.0.lock().unwrap().clone();
+        assert_eq!(got[0].text, "go");
+        assert!(got[0].files.is_empty());
+        assert_eq!(got[1].text, "and this");
+        assert_eq!(got[1].files[0].name, "clip.wav");
+        assert_eq!(got[1].files[0].mime, "audio/wav", "the type is worked out from the name");
+        assert_eq!(std::fs::read(&got[1].files[0].path).unwrap(), b"RIFF");
+        let shown = runner.store().messages(s.id, 0).unwrap();
+        assert!(matches!(
+            &shown[1].entry,
+            Entry::User { text, attachments } if text == "and this" && attachments.len() == 1
+        ));
     }
 
     struct Asker;
@@ -1028,7 +1219,7 @@ mod tests {
         assert!(
             !msgs
                 .iter()
-                .any(|e| matches!(e, Entry::User { text } if text.starts_with("Summarise"))),
+                .any(|e| matches!(e, Entry::User { text, .. } if text.starts_with("Summarise"))),
             "the compact prompt is not shown as yours"
         );
         assert!(

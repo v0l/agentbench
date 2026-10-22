@@ -1,4 +1,4 @@
-use super::{Agent, Decoder, Event, Io, Turn, async_trait, brief, resolve};
+use super::{Agent, Decoder, Event, Io, Turn, async_trait, brief, resolve, with_files};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -74,7 +74,17 @@ impl<T: Cli> Agent for T {
     }
 
     async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
-        let launch = self.launch(turn, &brief(turn.context));
+        let prompt = with_files(turn.prompt, turn.files);
+        let told = Turn {
+            prompt: &prompt,
+            files: &[],
+            cwd: turn.cwd,
+            model: turn.model,
+            resume: turn.resume,
+            history: turn.history,
+            context: turn.context,
+        };
+        let launch = self.launch(&told, &brief(turn.context));
         run_process(self, launch, turn, io).await
     }
 }

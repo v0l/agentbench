@@ -66,6 +66,10 @@ async fn auth(State(api): State<Api>, headers: HeaderMap, req: Request, next: Ne
     next.run(req).await
 }
 
+/// Room for a message with every attachment it may carry, base64 encoded.
+const BODY_MAX: usize =
+    foreman_core::ATTACHMENTS_MAX * foreman_core::ATTACHMENT_MAX * 4 / 3 + (1 << 20);
+
 pub fn router(api: Api) -> Router {
     let protected = Router::new()
         .route("/api/overview", get(overview))
@@ -90,6 +94,8 @@ pub fn router(api: Api) -> Router {
         .route("/api/sessions/{id}/messages", get(messages).post(send))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/sessions/{id}/answer", post(answer))
+        .route("/api/sessions/{id}/attachments/{file}", get(attachment))
+        .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
         .layer(middleware::from_fn_with_state(api.clone(), auth));
     Router::new()
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
@@ -504,8 +510,8 @@ async fn spawn(api: &Api, new: NewSession) -> Result<foreman_core::Session, Fail
     let prompt = new.prompt.clone().filter(|p| !p.trim().is_empty()).or_else(|| {
         issue.as_ref().map(|i| issue_prompt(i, &store.comments(i.id).unwrap_or_default()))
     });
-    if let Some(prompt) = prompt {
-        api.runner.send(&session, &prompt)?;
+    if prompt.is_some() || !new.attachments.is_empty() {
+        api.runner.send_with(&session, prompt.as_deref().unwrap_or_default(), &new.attachments)?;
     }
     changed(api);
     Ok(store.session(session.id)?)
@@ -571,7 +577,9 @@ async fn send(
     if !std::path::Path::new(&session.cwd).is_dir() {
         return Err(bad(format!("{} no longer exists", session.cwd)));
     }
-    api.runner.send(&session, &msg.text).map_err(|e| Failure(StatusCode::CONFLICT, e.0))?;
+    api.runner
+        .send_with(&session, &msg.text, &msg.attachments)
+        .map_err(|e| Failure(StatusCode::CONFLICT, e.0))?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -590,6 +598,23 @@ async fn answer(
     }
     api.runner.answer(id, &a.question, answers).map_err(|e| Failure(StatusCode::CONFLICT, e.0))?;
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn attachment(
+    State(api): State<Api>,
+    Path((id, file)): Path<(SessionId, Id)>,
+) -> Result<Response, Failure> {
+    let (a, data) = api.runner.store().session_attachment(id, file)?;
+    let disposition = format!("inline; filename=\"{}\"", a.name.replace(['"', '\\'], "_"));
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, a.mime),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+            (axum::http::header::CACHE_CONTROL, "private, max-age=31536000, immutable".into()),
+        ],
+        data,
+    )
+        .into_response())
 }
 
 async fn interrupt(State(api): State<Api>, Path(id): Path<SessionId>) -> Reply<serde_json::Value> {
@@ -710,6 +735,100 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("session {sid} never settled");
+    }
+
+    #[tokio::test]
+    async fn an_attached_file_is_kept_shown_and_handed_to_the_agent() {
+        use base64::Engine;
+        let f = fixture();
+        let pid = project(&f).await;
+        let png = b"\x89PNG fake bytes";
+        let body = json!({
+            "project_id": pid,
+            "agent": "echo",
+            "place": {"kind": "main"},
+            "prompt": "look at this",
+            "attachments": [{
+                "name": "../shot.png",
+                "mime": "image/png",
+                "data": base64::engine::general_purpose::STANDARD.encode(png),
+            }],
+        });
+        let (s, session) = call(&f.app, "POST", "/api/sessions", Some(body), T).await;
+        assert_eq!(s, StatusCode::OK, "{session}");
+        let id = sid(&session);
+        settle(&f.api, id).await;
+        let (_, msgs) = call(&f.app, "GET", &format!("/api/sessions/{id}/messages"), None, T).await;
+        let first = &msgs[0]["entry"];
+        assert_eq!(first["text"], "look at this");
+        let file = &first["attachments"][0];
+        assert_eq!(
+            (file["name"].as_str(), file["mime"].as_str()),
+            (Some("shot.png"), Some("image/png"))
+        );
+        let aid = file["id"].as_i64().unwrap();
+        let said = msgs[1]["entry"]["text"].as_str().unwrap();
+        assert!(said.contains("look at this"), "{said}");
+        let path =
+            std::env::temp_dir().join("foreman").join(id.to_string()).join(format!("{aid}.png"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            png,
+            "the file is written where the agent is told"
+        );
+
+        let req = axum::http::Request::builder()
+            .uri(format!("/api/sessions/{id}/attachments/{aid}"))
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let res = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["content-type"], "image/png");
+        assert_eq!(&res.into_body().collect().await.unwrap().to_bytes()[..], png);
+
+        let (_, other) = call(
+            &f.app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "echo", "place": {"kind": "main"}})),
+            T,
+        )
+        .await;
+        let (s, _) = call(
+            &f.app,
+            "GET",
+            &format!("/api/sessions/{}/attachments/{aid}", sid(&other)),
+            None,
+            T,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NOT_FOUND, "another chat cannot read it");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_base64_is_refused() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, session) = call(
+            &f.app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "echo", "place": {"kind": "main"}})),
+            T,
+        )
+        .await;
+        let body = json!({"text": "x", "attachments": [{"name": "a.png", "mime": "image/png", "data": "%%%"}]});
+        let (s, e) = call(
+            &f.app,
+            "POST",
+            &format!("/api/sessions/{}/messages", sid(&session)),
+            Some(body),
+            T,
+        )
+        .await;
+        assert_eq!(s, StatusCode::CONFLICT, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("base64"), "{e}");
     }
 
     #[tokio::test]

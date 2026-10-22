@@ -168,6 +168,7 @@ pub struct App {
     confirm: Option<Confirm>,
     settings: Option<Settings>,
     save_requested: bool,
+    tray: crate::attach::Tray,
     /// Models on the server the foreman agent is saved to use. None until asked.
     agent_models: HashMap<String, Result<Vec<String>, String>>,
     asking_models: HashSet<String>,
@@ -233,6 +234,7 @@ impl App {
             confirm: None,
             settings: None,
             save_requested: false,
+            tray: crate::attach::Tray::default(),
             agent_models: HashMap::new(),
             asking_models: HashSet::new(),
             markdown: markdown::Cache::default(),
@@ -382,6 +384,14 @@ impl App {
         if let Some(st) = &mut self.settings {
             st.face.size = size;
         }
+    }
+
+    pub fn pending_files(&self) -> usize {
+        self.tray.files.len()
+    }
+
+    pub fn thumbnails_ready(&self) -> usize {
+        self.tray.ready()
     }
 
     pub fn text_size(&self) -> f32 {
@@ -601,6 +611,10 @@ impl App {
             self.font_load = None;
             ctx.set_fonts(defs);
         }
+        if let Some(problem) = self.tray.poll(ctx) {
+            self.notice = Some((false, problem));
+        }
+        self.take_dropped(ctx);
         let wants = self
             .start
             .as_ref()
@@ -1653,7 +1667,7 @@ impl App {
             "what should it do"
         };
         let sent = self.composer(ui, agent_ready && !needs_branch, false, hint_text);
-        if let (Some(text), Some(f)) = (sent, self.fresh.clone()) {
+        if let (Some((text, attachments)), Some(f)) = (sent, self.fresh.clone()) {
             let place = match f.place {
                 PlaceChoice::Main => Place::Main,
                 PlaceChoice::Existing(id) => Place::Existing { worktree_id: id },
@@ -1666,8 +1680,8 @@ impl App {
                 title: None,
                 model: Some(f.model.trim().to_string()).filter(|m| !m.is_empty()),
                 issue_id: None,
-                prompt: Some(text),
-                attachments: Vec::new(),
+                prompt: Some(text).filter(|t| !t.is_empty()),
+                attachments,
             };
             if let Some(c) = &mut self.client {
                 c.add_session(&new);
@@ -1733,13 +1747,110 @@ impl App {
         }
     }
 
+    /// Files dropped on the window go to the composer when it is on screen.
+    fn take_dropped(&mut self, ctx: &egui::Context) {
+        if self.tab != Tab::Chat || self.settings.is_some() {
+            return;
+        }
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for f in dropped {
+            let name = f
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| f.name.clone());
+            let tx = self.tray.sender();
+            match (f.bytes, f.path) {
+                (Some(bytes), _) => {
+                    crate::attach::arrive(tx, ctx.clone(), name, bytes.to_vec());
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                (None, Some(path)) => {
+                    let ctx = ctx.clone();
+                    crate::spawn_blocking(move || match std::fs::read(&path) {
+                        Ok(data) => crate::attach::arrive(tx, ctx, name, data),
+                        Err(e) => {
+                            let _ = tx.send(crate::attach::Arrived::Failed(format!("{name}: {e}")));
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn attachments_row(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let mut drop_at = None;
+        ui.horizontal_wrapped(|ui| {
+            for (i, f) in self.tray.files.iter().enumerate() {
+                let chip = ui.horizontal(|ui| {
+                    if let Some(tex) = &f.preview {
+                        let s = tex.size_vec2();
+                        let h = 28.0;
+                        ui.add(egui::Image::new((tex.id(), Vec2::new(s.x * h / s.y.max(1.0), h))));
+                    }
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} {}",
+                            f.name,
+                            crate::attach::size(f.size as u64)
+                        ))
+                        .font(mono(11.0))
+                        .color(VALUE),
+                    );
+                    let x = ui.small_button("x");
+                    x.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            format!("remove {}", f.name),
+                        )
+                    });
+                    x.clicked()
+                });
+                if chip.inner {
+                    drop_at = Some(i);
+                }
+                ui.add_space(8.0);
+            }
+        });
+        if let Some(i) = drop_at {
+            self.tray.files.remove(i);
+        }
+        let _ = ctx;
+    }
+
+    /// Ctrl+V with a picture on the clipboard: egui only passes text pastes on, so the key is
+    /// watched here and the clipboard read for an image off the UI thread.
+    pub fn watch_paste(&mut self, ctx: &egui::Context, raw: &egui::RawInput) {
+        if self.tab != Tab::Chat || self.settings.is_some() {
+            return;
+        }
+        let pasted = raw.events.iter().any(|e| match e {
+            egui::Event::Key { key: egui::Key::V, pressed: false, modifiers, .. } => {
+                modifiers.command
+            }
+            egui::Event::Key { key: egui::Key::Paste, pressed: false, .. } => true,
+            _ => false,
+        });
+        if pasted {
+            crate::attach::paste(self.tray.sender(), ctx.clone());
+        }
+    }
+
     fn composer(
         &mut self,
         ui: &mut Ui,
         ready: bool,
         busy: bool,
         hint_text: &str,
-    ) -> Option<String> {
+    ) -> Option<(String, Vec<foreman_core::Upload>)> {
+        if !self.tray.files.is_empty() {
+            self.attachments_row(ui);
+            ui.add_space(4.0);
+        }
         let edit = prose(ui, &mut self.draft, hint_text, 3);
         self.slash_menu(ui, edit.rect);
         let enter = edit.has_focus()
@@ -1755,21 +1866,30 @@ impl App {
             hint(
                 ui,
                 if busy {
-                    "enter steers the agent, shift+enter for a new line, / for commands"
+                    "enter steers the agent, shift+enter for a new line, / for commands, drop or paste files"
                 } else {
-                    "enter sends, shift+enter for a new line, / for commands"
+                    "enter sends, shift+enter for a new line, / for commands, drop or paste files"
                 },
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let can = ready && !self.draft.trim().is_empty();
+                let can = ready && (!self.draft.trim().is_empty() || !self.tray.files.is_empty());
                 let label = if busy { "steer" } else { "send" };
                 if (ui.add(Key::new(label).solid(READOUT).enabled(can).min_width(100.0)).clicked()
                     || (enter && can))
                     && can
                 {
-                    out = Some(self.draft.trim().to_string());
+                    out = Some((self.draft.trim().to_string(), self.tray.take()));
                     self.draft.clear();
                     self.follow = true;
+                }
+                if crate::attach::can_pick() {
+                    let key = ui.add(Key::new("attach").outline(VALUE));
+                    key.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "attach")
+                    });
+                    if key.clicked() {
+                        crate::attach::pick(self.tray.sender(), ui.ctx().clone());
+                    }
                 }
             });
         });
@@ -1871,8 +1991,9 @@ impl App {
         } else {
             "tell the agent what to do next"
         };
-        if let Some(text) = self.composer(ui, !missing, s.status.busy(), hint_text) {
-            match foreman_core::parse_slash(&text).map(|(c, _)| c.name) {
+        if let Some((text, files)) = self.composer(ui, !missing, s.status.busy(), hint_text) {
+            let slash = files.is_empty().then(|| foreman_core::parse_slash(&text)).flatten();
+            match slash.map(|(c, _)| c.name) {
                 Some("new") => {
                     let tree = self.worktree(s.worktree_id).cloned();
                     self.new_chat(tree.as_ref());
@@ -1883,7 +2004,7 @@ impl App {
                 Some("close") => self.confirm = Some(Confirm::Session(s.id, s.title.clone())),
                 _ => {
                     if let Some(c) = &mut self.client {
-                        c.send_message(s.id, &text);
+                        c.send_with(s.id, &text, files);
                     }
                 }
             }
@@ -2003,7 +2124,7 @@ impl App {
 
     fn entry(&mut self, ui: &mut Ui, m: &Message, session: SessionId) {
         match &m.entry {
-            Entry::User { text } => {
+            Entry::User { text, attachments } => {
                 ui.add_space(6.0);
                 rail_block(ui, READOUT, PANEL, |ui| {
                     Line::new()
@@ -2014,7 +2135,13 @@ impl App {
                         .size(10.0)
                         .show(ui);
                     ui.add_space(2.0);
-                    markdown::show(ui, &mut self.markdown, text, m.id as usize);
+                    if !text.is_empty() {
+                        markdown::show(ui, &mut self.markdown, text, m.id as usize);
+                    }
+                    if !attachments.is_empty() {
+                        ui.add_space(4.0);
+                        self.attached(ui, session, attachments);
+                    }
                 });
                 ui.add_space(4.0);
             }
@@ -2081,6 +2208,47 @@ impl App {
                 ui.add_space(4.0);
             }
         }
+    }
+
+    /// The files a message carried: pictures as thumbnails, anything else as a named chip.
+    fn attached(&mut self, ui: &mut Ui, session: SessionId, files: &[foreman_core::Attachment]) {
+        let client = self.client.as_ref();
+        let ctx = ui.ctx().clone();
+        ui.horizontal_wrapped(|ui| {
+            for a in files {
+                let label = format!("{} {}", a.name, crate::attach::size(a.size));
+                if a.is_image()
+                    && let Some(c) = client
+                {
+                    let thumb = self.tray.thumb(session, a, |tx| {
+                        let (key, ctx) = ((session, a.id), ctx.clone());
+                        c.attachment(session, a.id, move |bytes| {
+                            let img = bytes.as_deref().and_then(crate::attach::decode);
+                            let _ = tx.send((key, img));
+                            ctx.request_repaint();
+                        });
+                    });
+                    match thumb {
+                        crate::attach::Thumb::Ready(tex) => {
+                            let s = tex.size_vec2();
+                            let h = s.y.min(160.0);
+                            ui.add(egui::Image::new((
+                                tex.id(),
+                                Vec2::new(s.x * h / s.y.max(1.0), h),
+                            )))
+                            .on_hover_text(&label);
+                            continue;
+                        }
+                        crate::attach::Thumb::Loading => {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                            spinner(ui, r.center(), 8.0, LEGEND);
+                        }
+                        crate::attach::Thumb::Failed => {}
+                    }
+                }
+                chip(ui, &label, LEGEND, false);
+            }
+        });
     }
 
     fn tool_row(
@@ -2914,6 +3082,10 @@ fn tool_summary(name: &str, input: &serde_json::Value) -> String {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.watch_paste(ctx, raw);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.frame(ui);
     }

@@ -813,6 +813,23 @@ impl Store {
             .ok_or_else(|| not_found("attachment", id))
     }
 
+    /// The attachment's bytes, only if it belongs to `session`.
+    pub fn session_attachment(
+        &self,
+        session: SessionId,
+        id: Id,
+    ) -> Result<(foreman_core::Attachment, Vec<u8>)> {
+        let (a, data) = self.attachment(id)?;
+        let owner: SessionId =
+            self.db().query_row("SELECT session_id FROM attachments WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })?;
+        if owner != session {
+            return Err(not_found("attachment", id));
+        }
+        Ok((a, data))
+    }
+
     pub fn update_message(&self, id: Id, entry: &Entry) -> Result<()> {
         let db = self.db();
         let session_id: SessionId =
@@ -995,7 +1012,7 @@ mod tests {
         let s = Store::memory().unwrap();
         let (p, main) = project(&s, "/r");
         let sess = s.add_session(main.id, "pi", "t", None, None).unwrap();
-        s.add_message(sess.id, &Entry::User { text: "hi".into() }).unwrap();
+        s.add_message(sess.id, &Entry::user("hi")).unwrap();
         issue(&s, p.id, "a");
         s.delete_project(p.id).unwrap();
         assert!(s.sessions().unwrap().is_empty());
@@ -1008,14 +1025,14 @@ mod tests {
         let s = Store::memory().unwrap();
         let (_, main) = project(&s, "/r");
         let sess = s.add_session(main.id, "pi", "t", None, None).unwrap();
-        let m1 = s.add_message(sess.id, &Entry::User { text: "hi".into() }).unwrap();
+        let m1 = s.add_message(sess.id, &Entry::user("hi")).unwrap();
         s.add_message(sess.id, &Entry::Assistant { text: "yo".into() }).unwrap();
         assert_eq!(s.messages(sess.id, 0).unwrap().len(), 2);
         assert_eq!(
             s.messages(sess.id, m1.id).unwrap()[0].entry,
             Entry::Assistant { text: "yo".into() }
         );
-        s.update_message(m1.id, &Entry::User { text: "edited".into() }).unwrap();
+        s.update_message(m1.id, &Entry::user("edited")).unwrap();
         assert_eq!(s.messages(sess.id, 0).unwrap()[0].entry.text(), "edited");
     }
 
@@ -1099,7 +1116,7 @@ mod tests {
         let s = Store::memory().unwrap();
         let (_, main) = testing::project(&s, "/tmp");
         let a = s.add_session(main.id, "x", "a", None, None).unwrap();
-        s.add_message(a.id, &Entry::User { text: "old".into() }).unwrap();
+        s.add_message(a.id, &Entry::user("old")).unwrap();
         s.delete_session(a.id).unwrap();
         let b = s.add_session(main.id, "x", "b", None, None).unwrap();
         assert_ne!(a.id, b.id);

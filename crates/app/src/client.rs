@@ -293,7 +293,16 @@ impl Client {
     }
 
     pub fn send_message(&mut self, session: SessionId, text: &str) {
-        let body = SendMessage { text: text.to_string(), attachments: Vec::new() };
+        self.send_with(session, text, Vec::new());
+    }
+
+    pub fn send_with(
+        &mut self,
+        session: SessionId,
+        text: &str,
+        attachments: Vec<foreman_core::Upload>,
+    ) {
+        let body = SendMessage { text: text.to_string(), attachments };
         self.act(Method::POST, &format!("/api/sessions/{session}/messages"), Some(&body), "");
     }
 
@@ -357,6 +366,28 @@ impl Client {
                 }
             };
             reply(list)
+        });
+    }
+
+    /// Fetch an attachment's bytes and hand them to `done` off the UI thread.
+    pub fn attachment(
+        &self,
+        session: SessionId,
+        id: Id,
+        done: impl FnOnce(Option<Vec<u8>>) + Send + 'static,
+    ) {
+        let req = self
+            .request(Method::GET, &format!("/api/sessions/{session}/attachments/{id}"), None)
+            .header("Accept", "*/*")
+            .timeout(Duration::from_secs(60));
+        let wake = self.wake.clone();
+        crate::spawn(async move {
+            let bytes = match req.send().await {
+                Ok(r) if r.status().is_success() => r.bytes().await.ok().map(|b| b.to_vec()),
+                _ => None,
+            };
+            done(bytes);
+            wake();
         });
     }
 

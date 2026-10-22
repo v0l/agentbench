@@ -140,7 +140,7 @@ pub fn transcript(entries: &[Entry]) -> String {
     let mut replied = false;
     for e in foreman_core::since_summary(entries) {
         let line = match e {
-            Entry::User { text } => format!("Person: {}", clip(text, USER_CLIP)),
+            Entry::User { text, .. } => format!("Person: {}", clip(text, USER_CLIP)),
             Entry::Assistant { text } if !text.trim().is_empty() => {
                 replied = true;
                 format!("Agent: {}", clip(text, REPLY_CLIP))
@@ -320,7 +320,7 @@ mod tests {
 
     fn said(user: &str, agent: &str) -> Vec<Entry> {
         vec![
-            Entry::User { text: user.into() },
+            Entry::user(user),
             Entry::Thinking { text: "hm".into() },
             Entry::Assistant { text: agent.into() },
         ]
@@ -330,7 +330,7 @@ mod tests {
     fn the_transcript_is_the_talk_and_waits_for_a_reply() {
         let t = transcript(&said("fix the login loop", "found it in auth.rs"));
         assert_eq!(t, "Person: fix the login loop\n\nAgent: found it in auth.rs");
-        let only_user = [Entry::User { text: "hello".into() }];
+        let only_user = [Entry::user("hello")];
         assert_eq!(transcript(&only_user), "", "no title until the agent has answered");
         let long = transcript(&said(&"x".repeat(5000), &"y".repeat(5000)));
         assert!(long.len() < TRANSCRIPT_MAX + 100, "{}", long.len());

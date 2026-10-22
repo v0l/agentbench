@@ -197,6 +197,7 @@ mod tests {
     fn the_prompt_goes_on_stdin_unless_an_argument_takes_it() {
         let c = crate::agent::context();
         let turn = Turn {
+            files: &[],
             prompt: "do it",
             cwd: Path::new("/tmp"),
             model: Some("m"),
@@ -222,6 +223,7 @@ mod tests {
         assert!(!s.resumable());
         let c = crate::agent::context();
         let turn = Turn {
+            files: &[],
             prompt: "x",
             cwd: Path::new("/"),
             model: None,

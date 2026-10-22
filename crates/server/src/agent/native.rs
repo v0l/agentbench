@@ -471,7 +471,14 @@ fn history(entries: &[Entry]) -> Vec<Value> {
                 "role": "user",
                 "content": format!("Here is a summary of our conversation so far. Carry on from it.\n\n{text}"),
             })),
-            Entry::User { text } => out.push(json!({ "role": "user", "content": text })),
+            Entry::User { text, attachments } if !attachments.is_empty() => {
+                let names: Vec<&str> = attachments.iter().map(|a| a.name.as_str()).collect();
+                out.push(json!({
+                    "role": "user",
+                    "content": format!("{text}\n\n(attached earlier: {})", names.join(", ")),
+                }))
+            }
+            Entry::User { text, .. } => out.push(json!({ "role": "user", "content": text })),
             Entry::Assistant { text } => out.push(json!({ "role": "assistant", "content": text })),
             Entry::Tool { name, input, output, error, .. } => {
                 let result = match (output, error) {
@@ -580,7 +587,7 @@ impl Agent for Native {
         let workspace = Workspace::open(turn.cwd)?;
         let mut messages = vec![json!({ "role": "system", "content": system(turn, &base) })];
         messages.extend(history(turn.history));
-        messages.push(json!({ "role": "user", "content": turn.prompt }));
+        messages.push(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(&base);
         for _ in 0..model.steps.max(1) {
             if io.stopped() {
@@ -662,9 +669,9 @@ impl Agent for Native {
                 messages.push(json!({ "role": "user", "content": content }));
             }
             let mut steered = false;
-            while let Some(text) = io.steer() {
-                io.emit(Event::Steered { text: text.clone() });
-                messages.push(json!({ "role": "user", "content": text }));
+            while let Some(steer) = io.steer() {
+                io.emit(Event::Steered { text: steer.text.clone() });
+                messages.push(user_message(&steer.text, &steer.files).await);
                 steered = true;
             }
             if reply.calls.is_empty() && !steered {
@@ -679,6 +686,32 @@ impl Agent for Native {
         io.emit(Event::Done);
         Ok(())
     }
+}
+
+/// What the user said, with any pictures, sound or video they attached shown to the model.
+/// Anything that cannot be shown is named with its path so the model can read it.
+async fn user_message(text: &str, files: &[super::Attached]) -> Value {
+    if files.is_empty() {
+        return json!({ "role": "user", "content": text });
+    }
+    let files = files.to_vec();
+    let read = tokio::task::spawn_blocking(move || {
+        files.iter().map(|f| (f.clone(), media::attachment(&f.path, &f.name))).collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    let mut parts = vec![json!({ "type": "text", "text": text })];
+    let mut unread = Vec::new();
+    for (file, media) in read {
+        match media {
+            Ok(m) => parts.extend(m.parts),
+            Err(_) => unread.push(file),
+        }
+    }
+    if !unread.is_empty() {
+        parts[0] = json!({ "type": "text", "text": super::with_files(text, &unread) });
+    }
+    json!({ "role": "user", "content": parts })
 }
 
 /// Move the rest of this turn, and the chat after it, to another level.
@@ -1202,7 +1235,15 @@ mod tests {
 
     async fn run(native: &Native, dir: &Path, prompt: &str, io: &TestIo) -> Result<(), String> {
         let c = context();
-        let turn = Turn { prompt, cwd: dir, model: None, resume: None, history: &[], context: &c };
+        let turn = Turn {
+            prompt,
+            files: &[],
+            cwd: dir,
+            model: None,
+            resume: None,
+            history: &[],
+            context: &c,
+        };
         native.run(&turn, io).await
     }
 
@@ -1372,12 +1413,44 @@ mod tests {
         assert!(tool_at < messages.len() - 1, "media must follow every tool result");
     }
 
+    #[tokio::test]
+    async fn an_attached_picture_is_shown_to_the_model_with_the_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("1.png");
+        std::fs::write(&shot, b"PNGDATA").unwrap();
+        let (url, asked) = stub(vec![vec![say("a red box")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let c = context();
+        let files = [crate::agent::Attached {
+            name: "screen.png".into(),
+            mime: "image/png".into(),
+            path: shot,
+        }];
+        let turn = Turn {
+            prompt: "what is this",
+            files: &files,
+            cwd: dir.path(),
+            model: None,
+            resume: None,
+            history: &[],
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        let sent = asked.recv().unwrap();
+        let last = sent["messages"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["role"], "user");
+        assert_eq!(last["content"][0]["text"], "what is this");
+        let url = last["content"][2]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "{last}");
+    }
+
     #[test]
     fn a_summary_replaces_what_came_before_it() {
         let entries = vec![
-            Entry::User { text: "old".into() },
+            Entry::user("old"),
             Entry::Summary { text: "we fixed login".into() },
-            Entry::User { text: "next".into() },
+            Entry::user("next"),
         ];
         let h = history(&entries);
         assert_eq!(h.len(), 2);
@@ -1388,7 +1461,7 @@ mod tests {
     #[test]
     fn earlier_turns_are_replayed_from_the_transcript() {
         let entries = vec![
-            Entry::User { text: "hi".into() },
+            Entry::user("hi"),
             Entry::Thinking { text: "hmm".into() },
             Entry::Tool {
                 call_id: "c".into(),
@@ -1796,6 +1869,7 @@ mod tests {
         let io = TestIo::new(Arc::new(FakeApi));
         let c = context();
         let turn = Turn {
+            files: &[],
             prompt: "x",
             cwd: dir.path(),
             model: Some("low"),

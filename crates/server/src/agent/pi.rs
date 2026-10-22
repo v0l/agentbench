@@ -337,6 +337,7 @@ mod tests {
         let pi = Pi::new("pi");
         let c = crate::agent::context();
         let turn = |prompt, model, resume| Turn {
+            files: &[],
             prompt,
             cwd: Path::new("/tmp"),
             model,

@@ -101,7 +101,7 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn foreman_server::agent::Agent>>) ->
         .unwrap();
     let main_tree = store.main_worktree(project.id).unwrap();
     let session = store.add_session(main_tree.id, "echo", "say hello", None, None).unwrap();
-    store.add_message(session.id, &Entry::User { text: "say hello".into() }).unwrap();
+    store.add_message(session.id, &Entry::user("say hello")).unwrap();
     store
         .add_message(session.id, &Entry::Assistant { text: "Hello from **the agent**.".into() })
         .unwrap();
@@ -266,7 +266,7 @@ fn sending_from_the_window_runs_the_agent() {
     until(&mut h, "the reply", |h| h.state().transcript_len(session.id) >= 5);
     shot(&mut h, "reply");
     let msgs = rig.store.messages(session.id, 0).unwrap();
-    assert_eq!(msgs[3].entry, Entry::User { text: "ping".into() });
+    assert_eq!(msgs[3].entry, Entry::user("ping"));
     assert_eq!(msgs[4].entry, Entry::Assistant { text: "echo: ping".into() });
 }
 
@@ -673,7 +673,9 @@ fn a_busy_transcript_reads_cleanly() {
     let add = |e: Entry| {
         rig.store.add_message(s.id, &e).unwrap();
     };
-    add(Entry::User { text: "The current credit system isnt very good. Look at how credits are applied and tell me what to change.".into() });
+    add(Entry::user(
+        "The current credit system isnt very good. Look at how credits are applied and tell me what to change.",
+    ));
     add(Entry::Thinking {
         text: "I should find where credits are deducted first. Probably in the billing worker."
             .into(),
@@ -933,7 +935,7 @@ fn new_chat_stays_blank_while_other_agents_work() {
     until(&mut h, "my chat", |h| h.state().open().is_some());
     let mine = rig.store.session(h.state().open().unwrap()).unwrap();
     let first = rig.store.messages(mine.id, 0).unwrap();
-    assert!(matches!(&first[0].entry, Entry::User { text } if text == "mine"), "{first:?}");
+    assert!(matches!(&first[0].entry, Entry::User { text, .. } if text == "mine"), "{first:?}");
 }
 
 #[test]
@@ -964,7 +966,7 @@ fn each_new_chat_from_the_tree_is_a_new_session() {
         assert!(!seen.contains(&id), "{word}: reopened chat {id}");
         let first = rig.store.messages(id, 0).unwrap();
         assert!(
-            matches!(&first[0].entry, Entry::User { text } if text == word),
+            matches!(&first[0].entry, Entry::User { text, .. } if text == word),
             "{word}: {first:?}"
         );
         seen.push(id);
@@ -978,7 +980,7 @@ fn a_new_chat_after_a_deleted_one_shows_none_of_its_messages() {
     let tree = rig.store.main_worktree(main).unwrap();
     let old = rig.store.add_session(tree.id, "echo", "old talk", None, None).unwrap();
     for text in ["one", "two", "three"] {
-        rig.store.add_message(old.id, &Entry::User { text: text.into() }).unwrap();
+        rig.store.add_message(old.id, &Entry::user(text)).unwrap();
     }
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
@@ -1004,4 +1006,53 @@ fn a_new_chat_after_a_deleted_one_shows_none_of_its_messages() {
     until(&mut h, "its reply", |h| h.state().transcript_len(id) >= 2);
     h.run_steps(5);
     assert_eq!(h.state().transcript_len(id), 2, "only this chat's own messages");
+}
+
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(w, h, image::Rgba([40, 160, 220, 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
+fn drop_file(h: &mut Harness<'_, App>, name: &str, bytes: Vec<u8>) {
+    h.input_mut().dropped_files.push(egui::DroppedFile {
+        name: name.into(),
+        bytes: Some(bytes.into()),
+        ..Default::default()
+    });
+    h.step();
+}
+
+#[test]
+fn a_dropped_picture_is_sent_with_the_message_and_shown_in_the_chat() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    click(&mut h, 80.0, 110.0);
+    h.run_steps(3);
+    drop_file(&mut h, "shot.png", png(64, 40));
+    drop_file(&mut h, "notes.bin", vec![1, 2, 3]);
+    until(&mut h, "both files in the composer", |h| h.state().pending_files() == 2);
+    h.get_by_label("remove notes.bin").click();
+    h.run_steps(2);
+    assert_eq!(h.state().pending_files(), 1);
+    shot(&mut h, "composer-attachment");
+    click(&mut h, 800.0, 330.0);
+    h.event(egui::Event::Text("what is this".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    until(&mut h, "a chat", |h| h.state().open().is_some());
+    assert_eq!(h.state().pending_files(), 0, "sent files leave the composer");
+    let id = h.state().open().unwrap();
+    let first = rig.store.messages(id, 0).unwrap();
+    let Entry::User { text, attachments } = &first[0].entry else { panic!("{first:?}") };
+    assert_eq!(text, "what is this");
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(
+        (attachments[0].name.as_str(), attachments[0].mime.as_str()),
+        ("shot.png", "image/png")
+    );
+    until(&mut h, "the thumbnail", |h| h.state().thumbnails_ready() == 1);
+    shot(&mut h, "chat-attachment");
 }

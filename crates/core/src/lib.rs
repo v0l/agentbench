@@ -293,6 +293,8 @@ impl Attachment {
 pub enum Entry {
     User {
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
     },
     Question {
         id: String,
@@ -330,6 +332,10 @@ pub enum Entry {
 }
 
 impl Entry {
+    pub fn user(text: impl Into<String>) -> Entry {
+        Entry::User { text: text.into(), attachments: Vec::new() }
+    }
+
     pub fn text(&self) -> &str {
         match self {
             Entry::User { text, .. }
@@ -691,11 +697,7 @@ mod tests {
 
     #[test]
     fn history_starts_at_the_last_summary() {
-        let e = vec![
-            Entry::User { text: "a".into() },
-            Entry::Summary { text: "s1".into() },
-            Entry::User { text: "b".into() },
-        ];
+        let e = vec![Entry::user("a"), Entry::Summary { text: "s1".into() }, Entry::user("b")];
         assert_eq!(since_summary(&e).len(), 2);
         assert_eq!(since_summary(&e[..1]).len(), 1);
     }
