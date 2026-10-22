@@ -79,10 +79,15 @@ impl Installed {
 }
 
 /// Bind the chosen fonts to egui's families and scale them to the chosen size.
+pub fn apply(ctx: &egui::Context, face: &Typeface, installed: &Installed) {
+    ctx.set_fonts(definitions(face, installed));
+}
+
+/// The font set for `face`. Reads the font files, so call it off the UI thread.
 ///
 /// The system face goes first and egui's own fonts stay behind it, so a symbol the
 /// system font lacks (arrows, emoji) still draws.
-pub fn apply(ctx: &egui::Context, face: &Typeface, installed: &Installed) {
+pub fn definitions(face: &Typeface, installed: &Installed) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     let put = |defs: &mut FontDefinitions, key: &str, data: Option<FontData>| {
         data.map(|d| defs.font_data.insert(key.to_owned(), Arc::new(d))).is_some()
@@ -113,7 +118,7 @@ pub fn apply(ctx: &egui::Context, face: &Typeface, installed: &Installed) {
     for data in defs.font_data.values_mut() {
         Arc::make_mut(data).tweak.scale *= scale;
     }
-    ctx.set_fonts(defs);
+    defs
 }
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]

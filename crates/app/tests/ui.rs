@@ -293,6 +293,34 @@ fn the_client_reaches_the_server() {
 }
 
 #[test]
+fn a_server_that_never_answers_is_offline_not_a_hang() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in listener.incoming().flatten() {
+            held.push(s);
+        }
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut c = foreman::client::Client::new(
+        foreman::client::Server { url, token: TOKEN.into() },
+        move || {
+            let _ = tx.send(());
+        },
+    )
+    .with_patience(Duration::from_millis(500));
+    let started = Instant::now();
+    c.overview();
+    rx.recv_timeout(Duration::from_secs(5)).expect("a reply, not a hang");
+    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    match c.poll().pop() {
+        Some(foreman::client::Reply::Offline(_)) => {}
+        _ => panic!("expected the server to be called offline"),
+    }
+}
+
+#[test]
 fn without_a_local_server_the_window_asks_where_to_connect() {
     let rig = rig();
     let mut h = Harness::builder()
@@ -732,10 +760,16 @@ fn a_new_text_size_applies_on_save_and_is_kept() {
     h.get_by_label("settings").click();
     h.run_steps(2);
     until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
+    until(&mut h, "the installed fonts", |h| h.query_all_by_label("choose font").count() == 2);
+    let line = |h: &Harness<'_, App>| {
+        h.ctx.fonts_mut(|f| f.row_height(&egui::FontId::proportional(foreman::fonts::BASE)))
+    };
+    let before = line(&h);
     h.state_mut().settings_set_text_size(16.0);
     h.state_mut().settings_save();
     until(&mut h, "the save", |h| h.state().settings_loaded().is_none());
     assert_eq!(h.state().text_size(), 16.0);
+    until(&mut h, "the bigger fonts", |h| line(h) > before * 1.15);
     let mut kept = Mem::default();
     h.state().store(&mut kept);
     assert_eq!(kept.0.get("font_size").map(String::as_str), Some("16"));

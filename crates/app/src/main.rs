@@ -13,8 +13,7 @@ fn main() -> std::process::ExitCode {
         };
     }
     logging();
-    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    exit(rt.block_on(run(cli)))
+    exit(foreman::runtime().block_on(run(cli)))
 }
 
 #[cfg(any(target_arch = "wasm32", target_os = "android"))]

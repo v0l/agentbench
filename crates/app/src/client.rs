@@ -1,12 +1,13 @@
-use ehttp::Method;
 use foreman_core::{
     Comment, Id, IssuePatch, Message, NewComment, NewIssue, NewProject, NewSession, NewWorktree,
     Overview, SendMessage, SessionId,
 };
+use reqwest::Method;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use web_time::Duration;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Server {
@@ -43,24 +44,86 @@ pub enum Reply {
 
 pub struct Client {
     pub server: Server,
+    http: reqwest::Client,
     tx: Sender<Reply>,
     rx: Receiver<Reply>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    patience: Duration,
     pub pending: usize,
 }
 
-fn describe(r: &ehttp::Response) -> String {
+/// How long an ordinary request may take before the window calls the server offline.
+const PATIENCE: Duration = Duration::from_secs(20);
+/// The long poll asks the server to hold for this long, and gives up a little after.
+const WATCH_WAIT: u64 = 20;
+
+async fn describe(r: reqwest::Response) -> String {
     #[derive(serde::Deserialize)]
     struct Err {
         error: String,
     }
-    r.json::<Err>().map(|e| e.error).unwrap_or_else(|_| format!("{} {}", r.status, r.status_text))
+    let status = r.status();
+    match r.json::<Err>().await {
+        Ok(e) => e.error,
+        Err(_) => status.to_string(),
+    }
+}
+
+fn reason(e: &reqwest::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = cause.source();
+    }
+    out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http() -> reqwest::Client {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    let tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("the ring provider supports the default TLS versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    reqwest::Client::builder()
+        .tls_backend_preconfigured(tls)
+        .connect_timeout(Duration::from_secs(5))
+        .tcp_keepalive(Duration::from_secs(15))
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build()
+        .expect("an http client")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn http() -> reqwest::Client {
+    reqwest::Client::new()
 }
 
 impl Client {
     pub fn new(server: Server, wake: impl Fn() + Send + Sync + 'static) -> Client {
         let (tx, rx) = channel();
-        Client { server, tx, rx, wake: Arc::new(wake), pending: 0 }
+        Client {
+            server,
+            http: http(),
+            tx,
+            rx,
+            wake: Arc::new(wake),
+            patience: PATIENCE,
+            pending: 0,
+        }
+    }
+
+    /// How long an ordinary request may take before the server is called offline.
+    pub fn with_patience(mut self, patience: Duration) -> Client {
+        self.patience = patience;
+        self
     }
 
     pub fn poll(&mut self) -> Vec<Reply> {
@@ -69,41 +132,65 @@ impl Client {
         replies
     }
 
-    fn request(&self, method: Method, path: &str, body: Option<Vec<u8>>) -> ehttp::Request {
+    fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+    ) -> reqwest::RequestBuilder {
         let url = format!("{}{path}", self.server.base());
-        let auth = format!("Bearer {}", self.server.token.trim());
-        let mut headers = vec![("Accept", "application/json"), ("Authorization", auth.as_str())];
-        if body.is_some() {
-            headers.push(("Content-Type", "application/json"));
+        let mut req = self
+            .http
+            .request(method, url)
+            .header("Accept", "application/json")
+            .bearer_auth(self.server.token.trim())
+            .timeout(self.patience);
+        if let Some(body) = body {
+            req = req.header("Content-Type", "application/json").body(body);
         }
-        let mut req = ehttp::Request::new(method, url, ehttp::Headers::new(&headers));
-        req.body = body.unwrap_or_default();
         req
     }
 
+    /// Send a request in the background; its reply arrives through [`Client::poll`].
     fn send<T: DeserializeOwned + 'static>(
         &mut self,
-        req: ehttp::Request,
+        req: reqwest::RequestBuilder,
         done: impl FnOnce(T) -> Reply + Send + 'static,
+    ) {
+        self.dispatch(req, move |res| match res {
+            Err(r) => r,
+            Ok(bytes) if bytes.is_empty() => match serde_json::from_slice::<T>(b"null") {
+                Ok(v) => done(v),
+                Err(_) => Reply::Done(String::new()),
+            },
+            Ok(bytes) => match serde_json::from_slice::<T>(&bytes) {
+                Ok(v) => done(v),
+                Err(e) => Reply::Failed(format!("unexpected reply: {e}")),
+            },
+        });
+    }
+
+    fn dispatch(
+        &mut self,
+        req: reqwest::RequestBuilder,
+        finish: impl FnOnce(Result<Vec<u8>, Reply>) -> Reply + Send + 'static,
     ) {
         let tx = self.tx.clone();
         let wake = self.wake.clone();
         self.pending += 1;
-        ehttp::fetch(req, move |res| {
-            let reply = match res {
-                Err(e) => Reply::Offline(e),
-                Ok(r) if r.status == 401 => Reply::Offline("the server refused the token".into()),
-                Ok(r) if !r.ok => Reply::Failed(describe(&r)),
-                Ok(r) if r.bytes.is_empty() => match serde_json::from_slice::<T>(b"null") {
-                    Ok(v) => done(v),
-                    Err(_) => Reply::Done(String::new()),
-                },
-                Ok(r) => match r.json::<T>() {
-                    Ok(v) => done(v),
-                    Err(e) => Reply::Failed(format!("unexpected reply: {e}")),
+        crate::spawn(async move {
+            let res = match req.send().await {
+                Err(e) => Err(Reply::Offline(reason(&e))),
+                Ok(r) if r.status() == 401 => {
+                    Err(Reply::Offline("the server refused the token".into()))
+                }
+                Ok(r) if !r.status().is_success() => Err(Reply::Failed(describe(r).await)),
+                Ok(r) => match r.bytes().await {
+                    Ok(b) => Ok(b.to_vec()),
+                    Err(e) => Err(Reply::Offline(reason(&e))),
                 },
             };
-            let _ = tx.send(reply);
+            let _ = tx.send(finish(res));
             wake();
         });
     }
@@ -122,9 +209,9 @@ impl Client {
         struct Changes {
             cursor: Id,
         }
-        let mut req =
-            self.request(Method::GET, &format!("/api/changes?since={since}&wait=20"), None);
-        req.timeout = Some(std::time::Duration::from_secs(40));
+        let req = self
+            .request(Method::GET, &format!("/api/changes?since={since}&wait={WATCH_WAIT}"), None)
+            .timeout(Duration::from_secs(WATCH_WAIT + 10));
         self.send(req, |c: Changes| Reply::Changed(c.cursor));
     }
 
@@ -257,20 +344,19 @@ impl Client {
 
     fn fetch_models(
         &mut self,
-        req: ehttp::Request,
+        req: reqwest::RequestBuilder,
         reply: impl Fn(Result<Vec<String>, String>) -> Reply + Send + 'static,
     ) {
-        let tx = self.tx.clone();
-        let wake = self.wake.clone();
-        self.pending += 1;
-        ehttp::fetch(req, move |res| {
+        let req = req.timeout(Duration::from_secs(40));
+        self.dispatch(req, move |res| {
             let list = match res {
-                Err(e) => Err(e),
-                Ok(r) if !r.ok => Err(describe(&r)),
-                Ok(r) => r.json::<Vec<String>>().map_err(|e| e.to_string()),
+                Err(Reply::Failed(e) | Reply::Offline(e)) => Err(e),
+                Err(_) => Err("no reply".to_string()),
+                Ok(bytes) => {
+                    serde_json::from_slice::<Vec<String>>(&bytes).map_err(|e| e.to_string())
+                }
             };
-            let _ = tx.send(reply(list));
-            wake();
+            reply(list)
         });
     }
 

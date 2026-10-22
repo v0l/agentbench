@@ -140,6 +140,7 @@ pub struct App {
     face: Typeface,
     installed: std::sync::Arc<Installed>,
     font_scan: Option<std::sync::mpsc::Receiver<Installed>>,
+    font_load: Option<std::sync::mpsc::Receiver<egui::FontDefinitions>>,
     local: Option<std::sync::Arc<LocalServer>>,
     remote: bool,
     starting: Option<std::sync::mpsc::Receiver<Result<Server, String>>>,
@@ -204,6 +205,7 @@ impl App {
             face,
             installed,
             font_scan: scan_fonts(ctx),
+            font_load: None,
             local: local.map(std::sync::Arc::new),
             remote,
             starting: None,
@@ -274,7 +276,7 @@ impl App {
         self.offline = None;
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
-        std::thread::spawn(move || {
+        crate::spawn_blocking(move || {
             let _ = tx.send((local.start)());
             ctx.request_repaint();
         });
@@ -384,6 +386,17 @@ impl App {
 
     pub fn text_size(&self) -> f32 {
         self.face.size
+    }
+
+    /// Read the chosen font files in the background and swap them in when they are ready.
+    fn load_fonts(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (face, installed, ctx) = (self.face.clone(), self.installed.clone(), ctx.clone());
+        crate::spawn_blocking(move || {
+            let _ = tx.send(fonts::definitions(&face, &installed));
+            ctx.request_repaint();
+        });
+        self.font_load = Some(rx);
     }
 
     /// What the save button does, for tests that cannot click a painted key.
@@ -582,7 +595,11 @@ impl App {
         if let Some(found) = self.font_scan.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.font_scan = None;
             self.installed = std::sync::Arc::new(found);
-            fonts::apply(ctx, &self.face, &self.installed);
+            self.load_fonts(ctx);
+        }
+        if let Some(defs) = self.font_load.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.font_load = None;
+            ctx.set_fonts(defs);
         }
         let wants = self
             .start
@@ -989,7 +1006,7 @@ impl App {
         if save {
             if st.face != self.face {
                 self.face = st.face.clone();
-                fonts::apply(ctx, &self.face, &self.installed);
+                self.load_fonts(ctx);
             }
             if st.loaded
                 && let Some(c) = &mut self.client
