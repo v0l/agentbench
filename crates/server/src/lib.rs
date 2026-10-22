@@ -57,8 +57,12 @@ impl Config {
     }
 
     pub fn agents(&self) -> Vec<Box<dyn Agent>> {
+        self.agents_with(agent::native::Shared::new(self.model.clone()))
+    }
+
+    pub fn agents_with(&self, model: agent::native::Shared) -> Vec<Box<dyn Agent>> {
         let mut all: Vec<Box<dyn Agent>> = vec![
-            Box::new(agent::Native::new(self.model.clone())),
+            Box::new(agent::Native::shared(model)),
             Box::new(agent::Pi::new(self.pi.clone().unwrap_or_else(|| "pi".into()))),
             Box::new(agent::Claude::new(self.claude.clone().unwrap_or_else(|| "claude".into()))),
             Box::new(agent::Codex::new(self.codex.clone().unwrap_or_else(|| "codex".into()))),
@@ -91,9 +95,51 @@ pub async fn serve(
     serve_with(store, agents, listen, None, shutdown).await
 }
 
+pub fn saved_model(store: &store::Store, fallback: &agent::native::Model) -> agent::native::Model {
+    store
+        .setting("model")
+        .ok()
+        .flatten()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| fallback.clone())
+}
+
+pub async fn serve_config(
+    store: store::Store,
+    config: &Config,
+    listen: SocketAddr,
+    web: Option<PathBuf>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
+    let model = agent::native::Shared::new(saved_model(&store, &config.model));
+    let agents = config.agents_with(model.clone());
+    serve_inner(store, agents, Some(model), listen, web, shutdown).await
+}
+
 pub async fn serve_with(
     store: store::Store,
     agents: Vec<Box<dyn Agent>>,
+    listen: SocketAddr,
+    web: Option<PathBuf>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
+    serve_inner(store, agents, None, listen, web, shutdown).await
+}
+
+pub async fn serve_agents(
+    store: store::Store,
+    agents: Vec<Box<dyn Agent>>,
+    model: Option<agent::native::Shared>,
+    listen: SocketAddr,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
+    serve_inner(store, agents, model, listen, None, shutdown).await
+}
+
+async fn serve_inner(
+    store: store::Store,
+    agents: Vec<Box<dyn Agent>>,
+    model: Option<agent::native::Shared>,
     listen: SocketAddr,
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -106,7 +152,7 @@ pub async fn serve_with(
     let runner = runner::Runner::new(store, agents);
     *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
         runner::Base { url: local_url(listen), token: token.clone() };
-    let api = api::Api { runner, token };
+    let api = api::Api { runner, token, model };
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     let listener =
         tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;

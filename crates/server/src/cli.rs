@@ -1,4 +1,4 @@
-use crate::{Config, DEFAULT_LISTEN, home, serve_with, store::Store, token};
+use crate::{Config, DEFAULT_LISTEN, home, saved_model, serve_config, store::Store, token};
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -62,7 +62,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                 .or(config.listen)
                 .unwrap_or_else(|| DEFAULT_LISTEN.parse().expect("default listen address"));
             let web = cli.web.or(config.web.clone());
-            serve_with(store, config.agents(), listen, web, async {
+            serve_config(store, &config, listen, web, async {
                 let _ = tokio::signal::ctrl_c().await;
             })
             .await
@@ -80,7 +80,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Command::Agents => {
-            for a in config.agents() {
+            let model = crate::agent::native::Shared::new(saved_model(&store, &config.model));
+            for a in config.agents_with(model) {
                 let info = a.info();
                 println!(
                     "{:<10} {:<14} {}",

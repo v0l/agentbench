@@ -216,6 +216,32 @@ pub struct AgentInfo {
     pub label: String,
     pub available: bool,
     pub resumable: bool,
+    #[serde(default)]
+    pub about: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelSettings {
+    pub url: String,
+    pub model: String,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub has_key: bool,
+}
+
+pub fn short_title(text: &str, max: usize) -> String {
+    let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
+    let first = first.trim_start_matches('#').trim();
+    if first.chars().count() <= max {
+        return first.to_string();
+    }
+    let cut: String = first.chars().take(max).collect();
+    let word = match cut.rfind(' ') {
+        Some(i) if i > max / 2 => &cut[..i],
+        _ => &cut,
+    };
+    format!("{}…", word.trim_end_matches([',', '.', ';', ':', ' ']))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -403,6 +429,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.place, Place::New { branch: "fix-login".into() });
+    }
+
+    #[test]
+    fn titles_stop_at_a_word() {
+        assert_eq!(short_title("fix it", 40), "fix it");
+        assert_eq!(
+            short_title("The current credit system isnt very good, there isnt a way for users", 40),
+            "The current credit system isnt very…"
+        );
+        assert_eq!(short_title("\n\n  ## Plan\nmore", 40), "Plan");
+        assert_eq!(short_title(&"x".repeat(50), 10), format!("{}…", "x".repeat(10)));
     }
 
     #[test]

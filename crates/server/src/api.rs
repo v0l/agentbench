@@ -16,11 +16,13 @@ use serde_json::json;
 use std::time::Duration;
 
 const LONG_POLL: Duration = Duration::from_secs(25);
+const TITLE_MAX: usize = 40;
 
 #[derive(Clone)]
 pub struct Api {
     pub runner: Runner,
     pub token: String,
+    pub model: Option<crate::agent::native::Shared>,
 }
 
 pub struct Failure(StatusCode, String);
@@ -69,6 +71,8 @@ pub fn router(api: Api) -> Router {
         .route("/api/overview", get(overview))
         .route("/api/changes", get(changes))
         .route("/api/agents", get(agents))
+        .route("/api/settings/model", get(get_model).put(put_model))
+        .route("/api/settings/models", post(list_models))
         .route("/api/projects", get(list_projects).post(add_project))
         .route("/api/projects/{id}", delete(delete_project))
         .route("/api/projects/{id}/sync", post(sync_project))
@@ -136,6 +140,57 @@ async fn changes(State(api): State<Api>, Query(q): Query<Since>) -> Reply<serde_
 
 async fn agents(State(api): State<Api>) -> Reply<Vec<foreman_core::AgentInfo>> {
     Ok(Json(api.runner.agents().iter().map(|a| a.info()).collect()))
+}
+
+fn masked(m: &crate::agent::native::Model) -> foreman_core::ModelSettings {
+    foreman_core::ModelSettings {
+        url: m.url.clone(),
+        model: m.model.clone(),
+        key: String::new(),
+        has_key: !m.key.trim().is_empty(),
+    }
+}
+
+async fn get_model(State(api): State<Api>) -> Reply<foreman_core::ModelSettings> {
+    let shared = api.model.as_ref().ok_or_else(|| bad("this server has no foreman agent"))?;
+    Ok(Json(masked(&shared.get())))
+}
+
+async fn put_model(
+    State(api): State<Api>,
+    Json(new): Json<foreman_core::ModelSettings>,
+) -> Reply<foreman_core::ModelSettings> {
+    let shared = api.model.as_ref().ok_or_else(|| bad("this server has no foreman agent"))?;
+    let mut m = shared.get();
+    m.url = new.url.trim().to_string();
+    m.model = new.model.trim().to_string();
+    if !new.key.trim().is_empty() {
+        m.key = new.key.trim().to_string();
+    } else if !new.has_key {
+        m.key.clear();
+    }
+    if m.url.is_empty() {
+        return Err(bad("the server address is empty"));
+    }
+    let text = serde_json::to_string(&m).map_err(|e| bad(e.to_string()))?;
+    api.runner.store().set_setting("model", &text)?;
+    shared.set(m.clone());
+    changed(&api);
+    Ok(Json(masked(&m)))
+}
+
+async fn list_models(
+    State(api): State<Api>,
+    Json(probe): Json<foreman_core::ModelSettings>,
+) -> Reply<Vec<String>> {
+    let saved = api.model.as_ref().map(|m| m.get()).unwrap_or_default();
+    let key = if probe.key.trim().is_empty() && probe.has_key { saved.key } else { probe.key };
+    let url = probe.url.trim().trim_end_matches('/').to_string();
+    let list = tokio::task::spawn_blocking(move || crate::agent::native::models(&url, &key))
+        .await
+        .map_err(|e| bad(e.to_string()))?
+        .map_err(bad)?;
+    Ok(Json(list))
 }
 
 async fn list_projects(State(api): State<Api>) -> Reply<Vec<foreman_core::Project>> {
@@ -330,7 +385,7 @@ async fn spawn(api: &Api, new: NewSession) -> Result<foreman_core::Session, Fail
         .clone()
         .filter(|t| !t.trim().is_empty())
         .or_else(|| issue.as_ref().map(|i| format!("#{} {}", i.id, i.title)))
-        .or_else(|| new.prompt.as_deref().map(|p| p.trim().chars().take(60).collect()))
+        .or_else(|| new.prompt.as_deref().map(|p| foreman_core::short_title(p, TITLE_MAX)))
         .unwrap_or_else(|| format!("{} on {}", agent.label(), worktree.label()));
     let model = new.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
     let session =
@@ -480,7 +535,11 @@ mod tests {
             output_tokens: None,
             plain: false,
         };
-        let api = Api { runner: Runner::new(store, vec![Box::new(echo)]), token: "secret".into() };
+        let api = Api {
+            runner: Runner::new(store, vec![Box::new(echo)]),
+            token: "secret".into(),
+            model: None,
+        };
         Fixture { app: router(api.clone()), api, _dir: dir, repo: repo_path }
     }
 
@@ -531,6 +590,42 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("session {sid} never settled");
+    }
+
+    #[tokio::test]
+    async fn the_foreman_model_is_set_live_and_its_key_never_read_back() {
+        let f = fixture();
+        let shared = crate::agent::native::Shared::new(crate::agent::native::Model::default());
+        let api = Api { model: Some(shared.clone()), ..f.api.clone() };
+        let app = router(api);
+        let (s, m) = call(&app, "GET", "/api/settings/model", None, T).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(m["has_key"], false);
+        let (s, m) = call(
+            &app,
+            "PUT",
+            "/api/settings/model",
+            Some(json!({"url": "http://10.0.0.5:8001/v1", "model": "qwen", "key": "sk-1", "has_key": false})),
+            T,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{m}");
+        assert_eq!(m["key"], "");
+        assert_eq!(m["has_key"], true);
+        assert_eq!(shared.get().key, "sk-1");
+        assert_eq!(shared.get().url, "http://10.0.0.5:8001/v1");
+        call(
+            &app,
+            "PUT",
+            "/api/settings/model",
+            Some(json!({"url": "http://10.0.0.5:8001/v1", "model": "other", "key": "", "has_key": true})),
+            T,
+        )
+        .await;
+        assert_eq!(shared.get().key, "sk-1", "an empty key keeps the saved one");
+        assert_eq!(shared.get().model, "other");
+        let saved = f.api.runner.store().setting("model").unwrap().unwrap();
+        assert!(saved.contains("\"other\""));
     }
 
     #[tokio::test]
@@ -696,6 +791,7 @@ mod tests {
         let api = Api {
             runner: Runner::new(f.api.runner.store().clone(), vec![Box::new(slow)]),
             token: "secret".into(),
+            model: None,
         };
         let app = router(api.clone());
         let (_, sess) = call(

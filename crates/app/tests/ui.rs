@@ -119,9 +119,21 @@ fn rig_with(extra: Vec<Box<dyn foreman_server::agent::Agent>>) -> Rig {
     drop(listener);
     let s = store.clone();
     rt.spawn(async move {
+        let config = foreman_server::Config {
+            model: foreman_server::agent::native::Model {
+                url: "http://127.0.0.1:9/v1".into(),
+                model: "test-model".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let model = foreman_server::agent::native::Shared::new(config.model.clone());
         let mut agents: Vec<Box<dyn foreman_server::agent::Agent>> = vec![Box::new(echo)];
+        agents.push(Box::new(foreman_server::agent::Native::shared(model.clone())));
         agents.extend(extra);
-        foreman_server::serve(s, agents, addr, std::future::pending()).await.unwrap();
+        foreman_server::serve_agents(s, agents, Some(model), addr, std::future::pending())
+            .await
+            .unwrap();
     });
     std::thread::sleep(Duration::from_millis(200));
     Rig { url: addr.to_string(), store, _dir: dir, _rt: rt }
@@ -406,4 +418,87 @@ fn the_buttons_on_an_issue_card_work() {
     h.run_steps(3);
     shot(&mut h, "more");
     assert!(h.state().issue_open().is_some(), "more opens the issue");
+}
+
+#[test]
+fn a_busy_transcript_reads_cleanly() {
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "foreman", "The current credit system isnt very good, there isnt a way for users to see what they paid", None, None).unwrap();
+    let add = |e: Entry| {
+        rig.store.add_message(s.id, &e).unwrap();
+    };
+    add(Entry::User { text: "The current credit system isnt very good. Look at how credits are applied and tell me what to change.".into() });
+    add(Entry::Thinking {
+        text: "I should find where credits are deducted first. Probably in the billing worker."
+            .into(),
+    });
+    add(Entry::Tool {
+        call_id: "1".into(),
+        name: "search_files".into(),
+        input: serde_json::json!({"pattern": "apply_credit"}),
+        output: Some("src/billing.rs:88: fn apply_credit(\nsrc/api.rs:210: apply_credit(".into()),
+        error: false,
+    });
+    add(Entry::Tool {
+        call_id: "2".into(),
+        name: "read_file".into(),
+        input: serde_json::json!({"path": "src/billing.rs", "offset": 80, "limit": 40}),
+        output: Some("fn apply_credit(user: &User, amount: u64) {\n    ...\n}".into()),
+        error: false,
+    });
+    add(Entry::Thinking {
+        text: "Credits are applied without a ledger row, so the user can never see them.".into(),
+    });
+    add(Entry::Tool {
+        call_id: "3".into(),
+        name: "edit_file".into(),
+        input: serde_json::json!({"path": "src/billing.rs", "old": "    user.credit += amount;", "new": "    user.credit += amount;\n    ledger.record(user, amount, Reason::Credit);"}),
+        output: Some("edited src/billing.rs".into()),
+        error: false,
+    });
+    add(Entry::Tool {
+        call_id: "4".into(),
+        name: "bash".into(),
+        input: serde_json::json!({"command": "cargo test -p billing"}),
+        output: Some(
+            "error[E0425]: cannot find value `ledger`\n --> src/billing.rs:91\n[exit 101 in 4.2s]"
+                .into(),
+        ),
+        error: true,
+    });
+    add(Entry::Assistant { text: "Credits are added to the balance with no **ledger row**, which is why users cannot see them.\n\n1. Record every credit in `ledger`.\n2. Show the ledger on the billing page.\n\n```rust\nledger.record(user, amount, Reason::Credit);\n```".into() });
+    add(Entry::Tool {
+        call_id: "5".into(),
+        name: "list_files".into(),
+        input: serde_json::json!({}),
+        output: None,
+        error: false,
+    });
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 9);
+    h.run_steps(3);
+    shot(&mut h, "transcript");
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 2000.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.event(egui::Event::PointerMoved(egui::pos2(800.0, 300.0)));
+    h.run_steps(4);
+    shot(&mut h, "transcript-top");
+}
+
+#[test]
+fn the_agent_key_opens_the_model_settings() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    click(&mut h, 988.0, 23.0);
+    until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
+    h.run_steps(3);
+    shot(&mut h, "settings");
 }

@@ -27,6 +27,8 @@ impl Server {
 
 pub enum Reply {
     Overview(Overview),
+    Model(foreman_core::ModelSettings),
+    Models(Result<Vec<String>, String>),
     Changed(Id),
     Messages(Id, Vec<Message>),
     Comments(Id, Vec<Comment>),
@@ -205,6 +207,32 @@ impl Client {
         let body =
             foreman_core::Answer { question: question.to_string(), answer: answer.to_string() };
         self.act(Method::POST, &format!("/api/sessions/{session}/answer"), Some(&body), "");
+    }
+
+    pub fn model(&mut self) {
+        let req = self.request(Method::GET, "/api/settings/model", None);
+        self.send(req, Reply::Model);
+    }
+
+    pub fn set_model(&mut self, m: &foreman_core::ModelSettings) {
+        let req = self.request(Method::PUT, "/api/settings/model", Self::json(m));
+        self.send(req, Reply::Model);
+    }
+
+    pub fn models(&mut self, m: &foreman_core::ModelSettings) {
+        let tx = self.tx.clone();
+        let wake = self.wake.clone();
+        let req = self.request(Method::POST, "/api/settings/models", Self::json(m));
+        self.pending += 1;
+        ehttp::fetch(req, move |res| {
+            let reply = match res {
+                Err(e) => Reply::Models(Err(e)),
+                Ok(r) if !r.ok => Reply::Models(Err(describe(&r))),
+                Ok(r) => Reply::Models(r.json::<Vec<String>>().map_err(|e| e.to_string())),
+            };
+            let _ = tx.send(reply);
+            wake();
+        });
     }
 
     pub fn interrupt(&mut self, session: Id) {

@@ -57,13 +57,34 @@ impl Model {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct Shared(std::sync::Arc<std::sync::RwLock<Model>>);
+
+impl Shared {
+    pub fn new(model: Model) -> Shared {
+        Shared(std::sync::Arc::new(std::sync::RwLock::new(model)))
+    }
+
+    pub fn get(&self) -> Model {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn set(&self, model: Model) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = model;
+    }
+}
+
 #[derive(Default)]
 pub struct Native {
-    pub model: Model,
+    pub model: Shared,
 }
 
 impl Native {
     pub fn new(model: Model) -> Native {
+        Native { model: Shared::new(model) }
+    }
+
+    pub fn shared(model: Shared) -> Native {
         Native { model }
     }
 }
@@ -276,13 +297,14 @@ impl Agent for Native {
     }
 
     fn available(&self) -> bool {
-        !self.model.model.trim().is_empty()
+        !self.model.get().model.trim().is_empty()
     }
 
     fn about(&self) -> String {
-        match self.model.model.trim() {
-            "" => "no model set: add [model] to foreman.toml".into(),
-            m => format!("{m} at {}", self.model.url),
+        let m = self.model.get();
+        match m.model.trim() {
+            "" => "no model set: open settings and pick a server and model".into(),
+            name => format!("{name} at {}", m.url),
         }
     }
 
@@ -295,8 +317,12 @@ impl Agent for Native {
     }
 
     fn run(&self, turn: &Turn, io: &dyn Io) -> Result<(), String> {
-        if self.model.model.trim().is_empty() {
-            return Err("pick a model for the foreman agent under settings".into());
+        let mut model = self.model.get();
+        if let Some(m) = turn.model.map(str::trim).filter(|m| !m.is_empty()) {
+            model.model = m.to_string();
+        }
+        if model.model.trim().is_empty() {
+            return Err("pick a server and model for the foreman agent under settings".into());
         }
         let workspace = Workspace::open(turn.cwd)?;
         let http = ureq::Agent::config_builder()
@@ -311,11 +337,11 @@ impl Agent for Native {
         messages.extend(history(turn.history));
         messages.push(json!({ "role": "user", "content": turn.prompt }));
         let tools = tool_list();
-        for _ in 0..self.model.steps.max(1) {
+        for _ in 0..model.steps.max(1) {
             if io.stopped() {
                 return Err("stopped".into());
             }
-            let reply = self.complete(&http, &messages, &tools, io)?;
+            let reply = complete(&model, &http, &messages, &tools, io)?;
             if let Some(u) = reply.usage {
                 io.emit(Event::Usage(u));
             }
@@ -368,39 +394,76 @@ impl Agent for Native {
                 return Ok(());
             }
         }
-        Err(format!("stopped after {} steps; send a message to carry on", self.model.steps))
+        Err(format!("stopped after {} steps; send a message to carry on", model.steps))
     }
 }
 
-impl Native {
-    fn complete(
-        &self,
-        http: &ureq::Agent,
-        messages: &[Value],
-        tools: &Value,
-        io: &dyn Io,
-    ) -> Result<Reply, String> {
-        let body = json!({
-            "model": self.model.model.trim(),
-            "messages": messages,
-            "tools": tools,
-            "stream": true,
-            "stream_options": { "include_usage": true },
-        });
-        let mut req = http.post(self.model.endpoint()).header("content-type", "application/json");
-        if !self.model.key.trim().is_empty() {
-            req = req.header("authorization", format!("Bearer {}", self.model.key.trim()));
-        }
-        let resp = req.send(body.to_string()).map_err(|e| format!("{}: {e}", self.model.url))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.into_body().read_to_string().unwrap_or_default();
-            return Err(format!("{status}: {}", text.trim()));
-        }
-        let reader = std::io::BufReader::new(resp.into_body().into_reader());
-        read_stream(reader, io)
+pub fn models(url: &str, key: &str) -> Result<Vec<String>, String> {
+    let base = url.trim().trim_end_matches('/').trim_end_matches("/chat/completions");
+    if base.is_empty() {
+        return Err("the server address is empty".into());
     }
+    let http = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    let mut req = http.get(format!("{base}/models"));
+    if !key.trim().is_empty() {
+        req = req.header("authorization", format!("Bearer {}", key.trim()));
+    }
+    let resp = req.call().map_err(|e| format!("{base}: {e}"))?;
+    let status = resp.status();
+    let text = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("{status}: {}", text.trim()));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|e| format!("not a model list: {e}"))?;
+    let mut ids: Vec<String> = v
+        .get("data")
+        .or_else(|| v.get("models"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("id").or_else(|| m.get("name")).and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
 
+fn complete(
+    model: &Model,
+    http: &ureq::Agent,
+    messages: &[Value],
+    tools: &Value,
+    io: &dyn Io,
+) -> Result<Reply, String> {
+    let body = json!({
+        "model": model.model.trim(),
+        "messages": messages,
+        "tools": tools,
+        "stream": true,
+        "stream_options": { "include_usage": true },
+    });
+    let mut req = http.post(model.endpoint()).header("content-type", "application/json");
+    if !model.key.trim().is_empty() {
+        req = req.header("authorization", format!("Bearer {}", model.key.trim()));
+    }
+    let resp = req.send(body.to_string()).map_err(|e| format!("{}: {e}", model.url))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.into_body().read_to_string().unwrap_or_default();
+        return Err(format!("{status}: {}", text.trim()));
+    }
+    let reader = std::io::BufReader::new(resp.into_body().into_reader());
+    read_stream(reader, io)
+}
+
+impl Native {
     fn tool(
         &self,
         name: &str,
@@ -799,10 +862,31 @@ mod tests {
     }
 
     #[test]
+    fn the_model_list_is_read_from_the_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Some(Ok(mut s)) = listener.incoming().next() {
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                assert!(head.starts_with("get /v1/models"), "{head}");
+                assert!(head.contains("authorization: bearer k"), "{head}");
+                let body = r#"{"data":[{"id":"b"},{"id":"a"},{"id":"a"}]}"#;
+                let _ = s.write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+                        .as_bytes(),
+                );
+            }
+        });
+        assert_eq!(models(&url, "k").unwrap(), ["a", "b"]);
+    }
+
+    #[test]
     fn without_a_model_it_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let io = TestIo::new(Arc::new(FakeApi));
         let e = run(&Native::default(), dir.path(), "x", &io).unwrap_err();
-        assert!(e.contains("pick a model"));
+        assert!(e.contains("pick a server and model"), "{e}");
     }
 }

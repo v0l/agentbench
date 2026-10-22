@@ -88,6 +88,7 @@ pub trait Agent: Send + Sync {
             label: self.label().to_string(),
             available: self.available(),
             resumable: self.resumable(),
+            about: self.about(),
         }
     }
 }

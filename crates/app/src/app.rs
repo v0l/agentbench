@@ -13,6 +13,7 @@ use web_time::{Duration, Instant};
 const SIDE_W: f32 = 320.0;
 const RETRY: Duration = Duration::from_secs(3);
 const TREE_INDENT: f32 = 16.0;
+const TAB_TITLE: usize = 32;
 const TREE_X: f32 = 5.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,6 +80,13 @@ struct Start {
     prompt: String,
 }
 
+struct Settings {
+    model: foreman_core::ModelSettings,
+    loaded: bool,
+    models: Option<Result<Vec<String>, String>>,
+    asking: bool,
+}
+
 enum Confirm {
     Project(Id, String),
     Worktree(Id, String, bool),
@@ -121,9 +129,11 @@ pub struct App {
     start: Option<Start>,
     new_worktree: Option<(Id, String)>,
     confirm: Option<Confirm>,
+    settings: Option<Settings>,
     markdown: markdown::Cache,
     follow: bool,
     fresh_at: i64,
+    thinking: bool,
 }
 
 impl App {
@@ -174,9 +184,11 @@ impl App {
             start: None,
             new_worktree: None,
             confirm: None,
+            settings: None,
             markdown: markdown::Cache::default(),
             follow: true,
             fresh_at: 0,
+            thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
         };
         if !app.remote {
             app.start_local(ctx);
@@ -190,6 +202,7 @@ impl App {
 
     pub fn store(&self, storage: &mut dyn eframe::Storage) {
         storage.set_string("remote", self.remote.to_string());
+        storage.set_string("thinking", self.thinking.to_string());
         if let Some(c) = self.client.as_ref().filter(|_| self.remote) {
             storage.set_string("url", c.server.url.clone());
             storage.set_string("token", c.server.token.clone());
@@ -256,6 +269,10 @@ impl App {
             .collect();
         out.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         out
+    }
+
+    pub fn settings_loaded(&self) -> Option<bool> {
+        self.settings.as_ref().map(|s| s.loaded)
     }
 
     pub fn issue_open(&self) -> Option<Id> {
@@ -348,12 +365,41 @@ impl App {
             Reply::Comments(iid, c) => {
                 self.comments.insert(iid, c);
             }
+            Reply::Model(m) => {
+                if let Some(st) = &mut self.settings {
+                    if st.loaded {
+                        self.settings = None;
+                        self.notice =
+                            Some((true, format!("foreman agent uses {} at {}", m.model, m.url)));
+                    } else {
+                        st.model = m;
+                        st.loaded = true;
+                    }
+                }
+                if let Some(c) = &mut self.client {
+                    c.overview();
+                }
+            }
+            Reply::Models(list) => {
+                if let Some(st) = &mut self.settings {
+                    st.asking = false;
+                    if let (Ok(l), true) = (&list, st.model.model.trim().is_empty()) {
+                        st.model.model = l.first().cloned().unwrap_or_default();
+                    }
+                    st.models = Some(list);
+                }
+            }
             Reply::Done(said) => {
                 if !said.is_empty() {
                     self.notice = Some((true, said));
                 }
             }
-            Reply::Failed(e) => self.notice = Some((false, e)),
+            Reply::Failed(e) => {
+                if self.settings.as_ref().is_some_and(|s| !s.loaded) {
+                    self.settings = None;
+                }
+                self.notice = Some((false, e));
+            }
             Reply::Offline(e) => {
                 self.watching = false;
                 self.offline = Some((e, Instant::now()));
@@ -432,7 +478,7 @@ impl App {
             let issues_label = format!("issues {open}");
             let chat_label = self
                 .current_session()
-                .map(|s| s.title.clone())
+                .map(|s| foreman_core::short_title(&s.title, TAB_TITLE))
                 .unwrap_or_else(|| "new chat".to_string());
             let opts: Vec<(Tab, &str)> =
                 vec![(Tab::Chat, chat_label.as_str()), (Tab::Issues, issues_label.as_str())];
@@ -472,11 +518,111 @@ impl App {
                     let place = if self.remote { Where::Remote } else { Where::Local };
                     self.connect = Some(Connect { place, url, token });
                 }
+                if ui.add(Key::new("agent").outline(VALUE)).clicked() {
+                    self.open_settings();
+                }
                 if !self.remote {
                     chip(ui, "this machine", OK, self.overview.is_some());
                 }
             });
         });
+    }
+
+    fn open_settings(&mut self) {
+        self.settings = Some(Settings {
+            model: foreman_core::ModelSettings {
+                url: String::new(),
+                model: String::new(),
+                key: String::new(),
+                has_key: false,
+            },
+            loaded: false,
+            models: None,
+            asking: false,
+        });
+        if let Some(c) = &mut self.client {
+            c.model();
+        }
+    }
+
+    fn settings_modal(&mut self, ctx: &egui::Context) {
+        let Some(st) = &mut self.settings else {
+            return;
+        };
+        let (mut save, mut close, mut probe) = (false, false, false);
+        let m = egui::Modal::new(egui::Id::new("settings"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(520.0);
+                modal_title(ui, "Foreman agent");
+                if !st.loaded {
+                    hint(ui, "asking the server");
+                    footer(ui, |ui| {
+                        close = ui.add(Key::new("close").outline(VALUE).min_width(100.0)).clicked();
+                    });
+                    return;
+                }
+                section(ui, "model server", "any OpenAI compatible endpoint", |ui| {
+                    row_help(ui, "address", "The base URL, ending in /v1 for most servers.", |ui| {
+                        if field(ui, &mut st.model.url, "http://localhost:11434/v1").changed() {
+                            st.models = None;
+                        }
+                    });
+                    let explain = if st.model.has_key {
+                        "Sent as a bearer token. A key is saved; leave this empty to keep it."
+                    } else {
+                        "Sent as a bearer token. Leave empty if the server needs none."
+                    };
+                    row_help(ui, "key", explain, |ui| {
+                        if secret(ui, &mut st.model.key).changed() {
+                            st.models = None;
+                        }
+                    });
+                    row(ui, "model", |ui| {
+                        match &st.models {
+                            Some(Ok(list)) if !list.is_empty() => {
+                                let list = list.clone();
+                                choice(ui, "model-pick", &mut st.model.model, list.into_iter().map(|m| (m.clone(), m)));
+                            }
+                            _ => {
+                                field_then(ui, &mut st.model.model, "model name", 110.0, |ui| {
+                                    probe = ui
+                                        .add(Key::new(if st.asking { "asking" } else { "list models" }).outline(VALUE).enabled(!st.asking && !st.model.url.trim().is_empty()))
+                                        .clicked();
+                                });
+                            }
+                        }
+                    });
+                    match &st.models {
+                        Some(Err(e)) => status(ui, false, e),
+                        Some(Ok(l)) => status(ui, true, &format!("{} models on the server", l.len())),
+                        None => {}
+                    }
+                });
+                ui.add_space(8.0);
+                hint(ui, "Saved on the server and used by every new turn of the foreman agent. Other agents keep their own settings.");
+                footer(ui, |ui| {
+                    let ready = !st.model.url.trim().is_empty() && !st.model.model.trim().is_empty();
+                    save = ui.add(Key::new("save").solid(READOUT).enabled(ready).min_width(100.0)).clicked();
+                    close = ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked();
+                });
+            });
+        if m.should_close() {
+            close = true;
+        }
+        if probe {
+            st.asking = true;
+            if let Some(c) = &mut self.client {
+                c.models(&st.model);
+            }
+        }
+        if save {
+            if let Some(c) = &mut self.client {
+                c.set_model(&st.model);
+            }
+        } else if close {
+            self.settings = None;
+        }
     }
 
     fn default_agent(&self) -> String {
@@ -1027,7 +1173,17 @@ impl App {
                 ui.allocate_ui(Vec2::new(200.0, KEY_H), |ui| {
                     choice(ui, "fresh-tree", &mut fresh.worktree, opts);
                 });
-                field_then(ui, &mut fresh.model, "model, default if empty", 0.0, |_| {});
+                let default = o
+                    .agents
+                    .iter()
+                    .find(|a| a.name == fresh.agent)
+                    .map(|a| a.about.clone())
+                    .unwrap_or_default();
+                let hint_text = match fresh.agent.as_str() {
+                    "foreman" => format!("model, {}", short_about(&default)),
+                    _ => "model, the agent's default if empty".to_string(),
+                };
+                field_then(ui, &mut fresh.model, &hint_text, 0.0, |_| {});
             });
         });
         ui.add_space(10.0);
@@ -1129,6 +1285,9 @@ impl App {
             }
             line.show(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if toggle(ui, "thinking", self.thinking).clicked() {
+                    self.thinking = !self.thinking;
+                }
                 if s.status.busy()
                     && ui.add(Key::new("stop").outline(FAULT)).clicked()
                     && let Some(c) = &mut self.client
@@ -1240,78 +1399,145 @@ impl App {
     fn entry(&mut self, ui: &mut Ui, m: &Message, session: Id) {
         match &m.entry {
             Entry::User { text } => {
-                card(
-                    ui,
-                    Some(READOUT),
-                    |ui| {
-                        Line::new()
-                            .legend("you")
-                            .gap(8.0)
-                            .note(ago(m.created_at))
-                            .size(10.5)
-                            .show(ui);
-                    },
-                    |ui| {
-                        markdown::show(ui, &mut self.markdown, text, m.id as usize);
-                    },
-                );
+                ui.add_space(6.0);
+                rail_block(ui, READOUT, PANEL, |ui| {
+                    Line::new()
+                        .legend("you")
+                        .size(10.0)
+                        .gap(8.0)
+                        .note(ago(m.created_at))
+                        .size(10.0)
+                        .show(ui);
+                    ui.add_space(2.0);
+                    markdown::show(ui, &mut self.markdown, text, m.id as usize);
+                });
+                ui.add_space(4.0);
             }
             Entry::Assistant { text } => {
-                markdown::show(ui, &mut self.markdown, text, m.id as usize);
+                egui::Frame::NONE
+                    .inner_margin(Margin { left: 4, right: 4, top: 2, bottom: 2 })
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        markdown::show(ui, &mut self.markdown, text, m.id as usize);
+                    });
             }
             Entry::Thinking { text } => {
-                let first = text.lines().next().unwrap_or_default();
-                egui::CollapsingHeader::new(
-                    egui::RichText::new(format!("thinking  {first}"))
-                        .font(figure(11.0))
-                        .color(LEGEND),
-                )
-                .id_salt(("think", m.id))
-                .show(ui, |ui| note(ui, text, LEGEND));
+                if !self.thinking {
+                    return;
+                }
+                rail_block(ui, egui::Color32::TRANSPARENT, egui::Color32::TRANSPARENT, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(text.trim()).italics().size(12.0).color(LEGEND),
+                        )
+                        .wrap(),
+                    );
+                });
             }
             Entry::Tool { name, input, output, error, .. } => {
-                let rail = match (output, error) {
-                    (None, _) => TRACE,
-                    (Some(_), true) => FAULT,
-                    (Some(_), false) => ETCH,
-                };
-                card(
-                    ui,
-                    Some(rail),
-                    |ui| {
-                        Line::new()
-                            .legend(name)
-                            .gap(8.0)
-                            .value(tool_summary(name, input))
-                            .size(11.0)
-                            .elided(ui);
-                    },
-                    |ui| match output {
-                        None => hint(ui, "running"),
-                        Some(out) if out.trim().is_empty() => hint(ui, "no output"),
-                        Some(out) => {
-                            let shown: String = out.lines().take(14).collect::<Vec<_>>().join("\n");
-                            ui.label(
-                                egui::RichText::new(shown).font(mono(11.0)).color(if *error {
-                                    FAULT
-                                } else {
-                                    VALUE
-                                }),
-                            );
-                            let more = out.lines().count().saturating_sub(14);
-                            if more > 0 {
-                                hint(ui, &format!("{more} more lines"));
-                            }
-                        }
-                    },
-                );
+                self.tool_row(ui, m.id, name, input, output.as_deref(), *error)
             }
             Entry::Question { id, question, answer } => {
                 self.question(ui, session, id, question, answer.as_deref())
             }
-            Entry::Error { text } => status(ui, false, text),
-            Entry::Notice { text } => note(ui, text, LEGEND),
+            Entry::Error { text } => {
+                rail_block(ui, FAULT, FAULT.gamma_multiply(0.08), |ui| {
+                    Line::new().legend("error").tint(FAULT).size(10.0).show(ui);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text).font(mono(11.5)).color(FAULT))
+                            .wrap(),
+                    );
+                });
+            }
+            Entry::Notice { text } => {
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    Line::new().note(text.clone()).size(11.0).wrapped(ui);
+                });
+            }
         }
+    }
+
+    fn tool_row(
+        &mut self,
+        ui: &mut Ui,
+        id: Id,
+        name: &str,
+        input: &serde_json::Value,
+        output: Option<&str>,
+        error: bool,
+    ) {
+        let (tint, state) = match (output, error) {
+            (None, _) => (TRACE, "running"),
+            (Some(_), true) => (FAULT, "failed"),
+            (Some(_), false) => (LEGEND, ""),
+        };
+        let open_id = egui::Id::new(("tool-open", id));
+        let mut open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(error);
+        let body = tool_body(name, input);
+        let rail = if error {
+            FAULT
+        } else if output.is_none() {
+            TRACE
+        } else {
+            ETCH
+        };
+        rail_block(ui, rail, egui::Color32::TRANSPARENT, |ui| {
+            let head = ui
+                .horizontal(|ui| {
+                    let mark = if output.is_none() {
+                        "◌"
+                    } else if open {
+                        "▾"
+                    } else {
+                        "▸"
+                    };
+                    ui.label(egui::RichText::new(mark).font(mono(11.0)).color(tint));
+                    let mut line = Line::new().legend(name).size(10.0).tint(tint).gap(8.0);
+                    line = line.value(tool_summary(name, input)).size(11.0).tint(VALUE);
+                    if !state.is_empty() {
+                        line = line.gap(10.0).legend(state).size(9.5).tint(tint);
+                    }
+                    line.elided(ui);
+                })
+                .response
+                .interact(Sense::click());
+            if head.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if head.clicked() {
+                open = !open;
+            }
+            if !open {
+                if let Some(out) = output.filter(|o| !o.trim().is_empty()) {
+                    let first = out.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+                    let more = out.lines().count().saturating_sub(1);
+                    let tail = if more > 0 { format!("   +{more} lines") } else { String::new() };
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{}{tail}", first.trim()))
+                                    .font(mono(10.5))
+                                    .color(LEGEND.gamma_multiply(0.8)),
+                            )
+                            .truncate(),
+                        );
+                    });
+                }
+                return;
+            }
+            if let Some(b) = &body {
+                ui.add_space(2.0);
+                code_block(ui, b, VALUE, ("tool-in", id));
+            }
+            if let Some(out) = output {
+                ui.add_space(4.0);
+                let text = if out.trim().is_empty() { "no output" } else { out };
+                code_block(ui, text, if error { FAULT } else { LEGEND }, ("tool-out", id));
+            }
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(open_id, open));
     }
 
     fn modals(&mut self, ctx: &egui::Context) {
@@ -1321,6 +1547,7 @@ impl App {
         self.start_modal(ctx);
         self.worktree_modal(ctx);
         self.confirm_modal(ctx);
+        self.settings_modal(ctx);
     }
 
     fn connect_modal(&mut self, ctx: &egui::Context) {
@@ -1777,6 +2004,13 @@ impl App {
     }
 }
 
+fn short_about(about: &str) -> String {
+    match about.split_once(" at ") {
+        Some((model, _)) => format!("default {model}"),
+        None => about.to_string(),
+    }
+}
+
 fn now_ms() -> i64 {
     web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
@@ -1808,6 +2042,76 @@ fn ago(ms: i64) -> String {
         s if s < 3600 => format!("{}m ago", s / 60),
         s if s < 86_400 => format!("{}h ago", s / 3600),
         s => format!("{}d ago", s / 86_400),
+    }
+}
+
+fn rail_block(ui: &mut Ui, rail: egui::Color32, fill: egui::Color32, body: impl FnOnce(&mut Ui)) {
+    let r = egui::Frame::NONE
+        .fill(fill)
+        .inner_margin(Margin { left: 12, right: 8, top: 4, bottom: 4 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui);
+        });
+    let rect = r.response.rect;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.left() + 3.0, rect.bottom())),
+        0.0,
+        rail,
+    );
+}
+
+fn code_block(
+    ui: &mut Ui,
+    text: &str,
+    colour: egui::Color32,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+) {
+    egui::Frame::NONE.fill(CHASSIS).corner_radius(2).inner_margin(Margin::symmetric(8, 5)).show(
+        ui,
+        |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical()
+                .id_salt(salt)
+                .max_height(320.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(text.trim_end()).font(mono(11.0)).color(colour),
+                        )
+                        .wrap(),
+                    );
+                });
+        },
+    );
+}
+
+fn tool_body(name: &str, input: &serde_json::Value) -> Option<String> {
+    let pick = |k: &str| input.get(k).and_then(|v| v.as_str());
+    if let Some(c) = pick("command") {
+        return (c.lines().count() > 1 || c.len() > 120).then(|| format!("$ {c}"));
+    }
+    match name {
+        "edit_file" | "edit" => {
+            let old = pick("old").or(pick("oldText"))?;
+            let new = pick("new").or(pick("newText")).unwrap_or_default();
+            let mut out = String::new();
+            for l in old.lines() {
+                out.push_str(&format!("- {l}\n"));
+            }
+            for l in new.lines() {
+                out.push_str(&format!("+ {l}\n"));
+            }
+            Some(out)
+        }
+        "write_file" | "write" => {
+            pick("content").map(|c| c.lines().take(40).collect::<Vec<_>>().join("\n"))
+        }
+        _ if input.is_object() && input.as_object().is_some_and(|o| o.len() > 1) => {
+            serde_json::to_string_pretty(input).ok()
+        }
+        _ => None,
     }
 }
 

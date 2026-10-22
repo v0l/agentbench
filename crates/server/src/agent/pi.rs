@@ -58,6 +58,7 @@ struct PiDecoder {
     tools: HashMap<String, String>,
     error: Option<String>,
     texted: bool,
+    thought: bool,
 }
 
 impl Decoder for PiDecoder {
@@ -82,6 +83,14 @@ impl Decoder for PiDecoder {
                 let Some(update) = v.get("assistantMessageEvent") else {
                     return vec![];
                 };
+                if str_at(update, "type") == Some("thinking_delta") {
+                    self.thought = true;
+                    let delta = str_at(update, "delta").unwrap_or_default();
+                    return match delta.is_empty() {
+                        true => vec![],
+                        false => vec![Event::Thinking { text: delta.to_string() }],
+                    };
+                }
                 if str_at(update, "type") != Some("text_delta") {
                     return vec![];
                 }
@@ -150,7 +159,8 @@ impl PiDecoder {
             return vec![];
         };
         let mut out = Vec::new();
-        if let Some(blocks) = m.get("content").and_then(Value::as_array) {
+        let streamed = std::mem::take(&mut self.thought);
+        if let Some(blocks) = m.get("content").and_then(Value::as_array).filter(|_| !streamed) {
             let thinking: Vec<&str> = blocks
                 .iter()
                 .filter(|b| str_at(b, "type") == Some("thinking"))
@@ -208,7 +218,11 @@ mod tests {
     fn a_tool_run_decodes_in_order() {
         let events = decode_all(&Pi::new("pi"), RUN);
         assert_eq!(events[0], Event::Started { agent_session: "s-1".into() });
-        assert_eq!(events[1], Event::Thinking { text: "I'll run it.".into() });
+        assert_eq!(
+            events[1],
+            Event::Thinking { text: "hmm".into() },
+            "thinking streams as it comes"
+        );
         assert!(
             matches!(&events[2], Event::Usage(u) if u.input_tokens == 10 && u.cost_usd == 0.25)
         );
@@ -231,6 +245,17 @@ mod tests {
             .collect();
         assert_eq!(text, "pong");
         assert_eq!(events.last(), Some(&Event::Done));
+    }
+
+    #[test]
+    fn unstreamed_thinking_comes_whole_at_the_end_of_the_message() {
+        let events = decode_all(
+            &Pi::new("pi"),
+            &[
+                r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"plan it\n"}]}}"#,
+            ],
+        );
+        assert_eq!(events, vec![Event::Thinking { text: "plan it".into() }]);
     }
 
     #[test]
