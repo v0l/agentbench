@@ -1,6 +1,7 @@
 mod claude;
 mod codex;
 mod command;
+pub mod files;
 pub mod native;
 mod pi;
 mod process;

@@ -1,4 +1,4 @@
-use super::{Agent, Context, Event, Io, Turn, brief};
+use super::{Agent, Context, Event, Io, Turn, brief, files};
 use egui_bench::agent::skillset;
 use egui_bench::agent::tools::{self, Spec, object, string};
 use egui_bench::agent::workspace::Workspace;
@@ -180,10 +180,36 @@ fn bash_spec() -> Spec {
 }
 
 fn file_specs() -> Vec<Spec> {
-    tools::builtin()
+    let mut specs: Vec<Spec> = tools::builtin()
         .into_iter()
-        .filter(|s| !matches!(s.name.as_str(), "bash" | "request_access" | "workspace"))
-        .collect()
+        .filter(|s| {
+            !matches!(s.name.as_str(), "bash" | "request_access" | "workspace" | "edit_file")
+        })
+        .collect();
+    specs.push(Spec::new(
+        "edit_file",
+        "Replace exact text in a file in the worktree. Each edits[].oldText must match the file and appear once; \
+         every edit is matched against the file as it was before this call, so do not overlap them. Put several \
+         changes to one file in one call. Read the file first. The answer shows the diff.",
+        object(
+            json!({
+                "path": string("A path in the worktree, relative to it"),
+                "edits": {
+                    "type": "array",
+                    "items": object(
+                        json!({
+                            "oldText": string("The exact text to replace, with enough lines round it to be unique"),
+                            "newText": string("What to put there"),
+                        }),
+                        &["oldText", "newText"],
+                    ),
+                },
+                "all": { "type": "boolean", "description": "Replace every occurrence of each oldText" },
+            }),
+            &["path", "edits"],
+        ),
+    ));
+    specs
 }
 
 pub fn specs() -> Vec<Spec> {
@@ -363,13 +389,16 @@ impl Agent for Native {
             }
             messages.push(message);
             for call in &reply.calls {
-                let input: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
+                let parsed = files::args(&call.args);
+                let input = parsed.clone().unwrap_or(Value::String(call.args.clone()));
                 io.emit(Event::ToolStart {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
                     input: input.clone(),
                 });
-                let result = self.tool(&call.name, &input, &workspace, turn.context, io);
+                let name = files::canonical(&call.name);
+                let result =
+                    parsed.and_then(|args| self.tool(name, &args, &workspace, turn.context, io));
                 let (output, error) = match &result {
                     Ok(o) => (o.clone(), false),
                     Err(e) => (e.clone(), true),
@@ -478,26 +507,34 @@ impl Native {
     ) -> Result<String, String> {
         let text = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
         let need = |k: &str| text(k).ok_or_else(|| format!("missing `{k}`"));
-        let number = |k: &str| args.get(k).and_then(Value::as_u64).map(|n| n as usize);
+        let path = || files::text(args, &files::PATH).map(str::to_string);
+        let need_path = || path().ok_or_else(|| "missing `path`".to_string());
+        let number = |keys: &[&str]| files::number(args, keys);
         match name {
-            "list_files" => ws.list(text("path").as_deref(), number("depth")),
-            "read_file" => ws.read(&need("path")?, number("offset"), number("limit")),
-            "write_file" => ws.write(&need("path")?, &text("content").unwrap_or_default()),
-            "edit_file" => ws.edit(
-                &need("path")?,
-                &need("old")?,
-                &text("new").unwrap_or_default(),
-                args.get("all").and_then(Value::as_bool).unwrap_or(false),
+            "list_files" => ws.list(path().as_deref(), number(&["depth"])),
+            "read_file" => {
+                let offset = number(&["offset", "start_line", "line"]);
+                let limit = number(&["limit", "lines", "max_lines"])
+                    .or_else(|| Some(number(&["end_line"])? + 1 - offset.unwrap_or(1)));
+                ws.read(&need_path()?, offset, limit)
+            }
+            "write_file" => ws.write(
+                &need_path()?,
+                files::text(args, &["content", "text", "contents"]).unwrap_or_default(),
             ),
-            "search_files" => ws.search(&need("pattern")?, text("path").as_deref()),
+            "edit_file" => files::edit(ws, args),
+            "search_files" => ws.search(
+                files::text(args, &["pattern", "query", "regex"]).ok_or("missing `pattern`")?,
+                path().as_deref(),
+            ),
             "load_skill" => {
                 let skills = skillset::discover(&skillset::roots(ws.root()), &[]);
                 skillset::load(&skills, text("name").as_deref(), text("file").as_deref())
             }
             "bash" => bash(
                 ws.root(),
-                &need("command")?,
-                args.get("timeout_s").and_then(Value::as_u64),
+                files::text(args, &["command", "cmd"]).ok_or("missing `command`")?,
+                number(&["timeout_s", "timeout"]).map(|n| n as u64),
                 cx,
                 io,
             ),
@@ -514,7 +551,13 @@ impl Native {
                 .api()
                 .call(n, args, cx.session)
                 .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default()),
-            other => Err(format!("no tool called {other}")),
+            other => {
+                let names: Vec<String> = specs().into_iter().map(|s| s.name).collect();
+                Err(format!(
+                    "there is no tool called {other:?}; the tools are: {}",
+                    names.join(", ")
+                ))
+            }
         }
     }
 }
@@ -897,6 +940,41 @@ mod tests {
             }
         });
         assert_eq!(models(&url, "k").unwrap(), ["a", "b"]);
+    }
+
+    #[test]
+    fn pi_shaped_calls_and_bad_json_are_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+        let (url, asked) = stub(vec![
+            vec![call(
+                "c1",
+                "edit",
+                json!({"path": "a.txt", "edits": [{"oldText": "world", "newText": "foreman"}]}),
+            )],
+            vec![
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"read_file","arguments":"{\"path\": "}}]}}]}),
+            ],
+            vec![call("c3", "frobnicate", json!({}))],
+            vec![say("done")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "hello foreman\n");
+        let ends: Vec<(String, bool, String)> = io
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::ToolEnd { name, error, output, .. } => Some((name, error, output)),
+                _ => None,
+            })
+            .collect();
+        assert!(!ends[0].1, "pi's edit shape works: {}", ends[0].2);
+        assert!(ends[0].2.contains("+foreman"), "{}", ends[0].2);
+        assert!(ends[1].1 && ends[1].2.contains("not valid JSON"), "{}", ends[1].2);
+        assert!(ends[2].1 && ends[2].2.contains("the tools are:"), "{}", ends[2].2);
+        let _ = asked.recv();
     }
 
     #[test]
