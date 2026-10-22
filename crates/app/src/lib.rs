@@ -57,7 +57,11 @@ pub fn run_native(home: Option<std::path::PathBuf>) -> eframe::Result<()> {
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([420.0, 480.0])
         .with_title("foreman")
-        .with_app_id("foreman");
+        .with_app_id("foreman")
+        .with_icon(
+            eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png"))
+                .unwrap_or_default(),
+        );
     let opts = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "foreman",
