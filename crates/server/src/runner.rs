@@ -92,10 +92,58 @@ impl Runner {
     }
 
     pub fn send(&self, session: &Session, text: &str) -> Result<(), StoreError> {
+        let text = text.trim();
+        if let Some((cmd, arg)) = foreman_core::parse_slash(text) {
+            return self.command(session, cmd.name, arg);
+        }
+        self.send_text(session, text, Mode::Chat)
+    }
+
+    fn command(&self, session: &Session, name: &str, arg: &str) -> Result<(), StoreError> {
+        let note = |text: String| -> Result<(), StoreError> {
+            self.store.add_message(session.id, &Entry::Notice { text })?;
+            self.changed.notify_waiters();
+            Ok(())
+        };
+        match name {
+            "stop" => {
+                if !self.interrupt(session.id) {
+                    note("nothing to stop".into())?;
+                }
+                Ok(())
+            }
+            "clear" => {
+                if self.is_running(session.id) {
+                    return Err(StoreError("stop the agent before clearing".into()));
+                }
+                self.store.add_message(session.id, &Entry::Summary { text: String::new() })?;
+                self.store.clear_agent_session(session.id)?;
+                note("the agent starts afresh from here; the transcript above is kept".into())
+            }
+            "model" => {
+                let model = Some(arg).filter(|m| !m.is_empty());
+                self.store.set_model(session.id, model)?;
+                note(match model {
+                    Some(m) => format!("this chat now uses {m}"),
+                    None => "this chat now uses the agent's default model".into(),
+                })
+            }
+            "compact" => {
+                if self.is_running(session.id) {
+                    return Err(StoreError(
+                        "stop the agent or let it finish before compacting".into(),
+                    ));
+                }
+                self.send_text(session, COMPACT_PROMPT, Mode::Compact)
+            }
+            other => Err(StoreError(format!("/{other} is handled by the window"))),
+        }
+    }
+
+    fn send_text(&self, session: &Session, text: &str, mode: Mode) -> Result<(), StoreError> {
         let agent = self
             .agent(&session.agent)
             .ok_or_else(|| StoreError(format!("no agent named {}", session.agent)))?;
-        let text = text.trim();
         if text.is_empty() {
             return Err(StoreError("nothing to send".into()));
         }
@@ -136,10 +184,10 @@ impl Runner {
                     Err(_) => break,
                 };
                 let status =
-                    runner.turn(agent.as_ref(), &session, &prompt, &stop, &inbox, &questions);
+                    runner.turn(agent.as_ref(), &session, &prompt, &stop, &inbox, &questions, mode);
                 let _ = runner.store.set_status(session_id, status);
                 runner.changed.notify_waiters();
-                if status != SessionStatus::Idle {
+                if status != SessionStatus::Idle || mode == Mode::Compact {
                     break;
                 }
                 let mut queued = inbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -169,6 +217,7 @@ impl Runner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn turn(
         &self,
         agent: &dyn Agent,
@@ -177,6 +226,7 @@ impl Runner {
         stop: &Arc<AtomicBool>,
         inbox: &Arc<Mutex<Vec<String>>>,
         questions: &Arc<Mutex<HashMap<String, Sender<String>>>>,
+        mode: Mode,
     ) -> SessionStatus {
         let history: Vec<Entry> = self
             .store
@@ -185,9 +235,29 @@ impl Runner {
             .into_iter()
             .map(|m| m.entry)
             .collect();
-        if self.store.add_message(session.id, &Entry::User { text: prompt.to_string() }).is_err() {
+        let shown = match mode {
+            Mode::Chat => Entry::User { text: prompt.to_string() },
+            Mode::Compact => Entry::Notice { text: "compacting the conversation".into() },
+        };
+        if self.store.add_message(session.id, &shown).is_err() {
             return SessionStatus::Failed;
         }
+        let summary = history.iter().rev().find_map(|e| match e {
+            Entry::Summary { text } => Some(text.clone()),
+            _ => None,
+        });
+        let fresh_after_summary =
+            session.agent_session.is_none() && summary.as_ref().is_some_and(|s| !s.is_empty());
+        let prompt_text;
+        let prompt = if fresh_after_summary && !agent.steerable() {
+            prompt_text = format!(
+                "Here is a summary of our conversation so far. Carry on from it.\n\n{}\n\n---\n\n{prompt}",
+                summary.unwrap_or_default()
+            );
+            prompt_text.as_str()
+        } else {
+            prompt
+        };
         let _ = self.store.set_status(session.id, SessionStatus::Running);
         self.changed.notify_waiters();
         let cwd = PathBuf::from(&session.cwd);
@@ -205,7 +275,7 @@ impl Runner {
             store: self.store.clone(),
             session: session.id,
             changed: self.changed.clone(),
-            state: Mutex::new(SinkState::default()),
+            state: Mutex::new(SinkState { capture: mode == Mode::Compact, ..SinkState::default() }),
             stop: stop.clone(),
             inbox: inbox.clone(),
             questions: questions.clone(),
@@ -218,6 +288,19 @@ impl Runner {
         if stop.load(Ordering::Relaxed) {
             sink.entry(Entry::Notice { text: "stopped".into() });
             return SessionStatus::Stopped;
+        }
+        if mode == Mode::Compact && result.is_ok() && !errored {
+            let text = std::mem::take(&mut sink.lock().captured);
+            if text.trim().is_empty() {
+                sink.entry(Entry::Error { text: "the agent gave no summary".into() });
+                return SessionStatus::Failed;
+            }
+            let _ = self
+                .store
+                .add_message(session.id, &Entry::Summary { text: text.trim().to_string() });
+            let _ = self.store.clear_agent_session(session.id);
+            self.changed.notify_waiters();
+            return SessionStatus::Idle;
         }
         match result {
             Ok(()) if !errored => SessionStatus::Idle,
@@ -232,8 +315,20 @@ impl Runner {
     }
 }
 
+const COMPACT_PROMPT: &str = "Summarise this conversation so another agent can carry on from it without the transcript. \
+Keep: what the user asked for, decisions made and why, files changed, what is done, what is left, and anything you were about to do. \
+Be specific with file paths and names. Reply with the summary only, as markdown, no preamble.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Chat,
+    Compact,
+}
+
 #[derive(Default)]
 struct SinkState {
+    capture: bool,
+    captured: String,
     text: Option<(Id, String)>,
     dirty: Option<Instant>,
     thinking: Option<(Id, String)>,
@@ -289,6 +384,12 @@ impl Sink {
 
     fn append(&self, delta: &str, thinking: bool) {
         let mut st = self.lock();
+        if st.capture {
+            if !thinking {
+                st.captured.push_str(delta);
+            }
+            return;
+        }
         let slot = if thinking { &mut st.thinking } else { &mut st.text };
         if let Some((_, text)) = slot {
             text.push_str(delta);
@@ -620,6 +721,134 @@ mod tests {
                 .any(|e| matches!(e, Entry::Question { answer: Some(a), .. } if a == "blue"))
         );
         assert_eq!(msgs.last().unwrap().text(), "you picked blue");
+    }
+
+    struct Echo(Mutex<Vec<(String, Option<String>, usize)>>);
+
+    impl Agent for Echo {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn label(&self) -> &str {
+            "Echo"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            true
+        }
+        fn run(&self, turn: &Turn, io: &dyn Io) -> Result<(), String> {
+            self.0.lock().unwrap().push((
+                turn.prompt.to_string(),
+                turn.model.map(str::to_string),
+                foreman_core::since_summary(turn.history).len(),
+            ));
+            io.emit(Event::Started { agent_session: "s1".into() });
+            let reply = if turn.prompt.starts_with("Summarise") { "We said hello." } else { "ok" };
+            io.emit(Event::Text { delta: reply.into() });
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_commands_compact_clear_and_pick_a_model() {
+        let store = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&store, "/tmp");
+        let s = store.add_session(main.id, "echo", "t", None, None).unwrap();
+        let seen = std::sync::Arc::new(Echo(Mutex::new(Vec::new())));
+        struct Shared(std::sync::Arc<Echo>);
+        impl Agent for Shared {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn label(&self) -> &str {
+                self.0.label()
+            }
+            fn available(&self) -> bool {
+                true
+            }
+            fn about(&self) -> String {
+                self.0.about()
+            }
+            fn resumable(&self) -> bool {
+                true
+            }
+            fn run(&self, t: &Turn, io: &dyn Io) -> Result<(), String> {
+                self.0.run(t, io)
+            }
+        }
+        let runner = Runner::new(store.clone(), vec![Box::new(Shared(seen.clone()))]);
+        let fresh = |runner: &Runner| runner.store().session(s.id).unwrap();
+
+        runner.send(&fresh(&runner), "hello").unwrap();
+        wait_idle(&runner, s.id).await;
+        assert_eq!(fresh(&runner).agent_session.as_deref(), Some("s1"));
+
+        runner.send(&fresh(&runner), "/model qwen-big").unwrap();
+        assert_eq!(fresh(&runner).model.as_deref(), Some("qwen-big"));
+
+        runner.send(&fresh(&runner), "/compact").unwrap();
+        wait_idle(&runner, s.id).await;
+        let msgs: Vec<Entry> =
+            store.messages(s.id, 0).unwrap().into_iter().map(|m| m.entry).collect();
+        assert!(msgs.contains(&Entry::Summary { text: "We said hello.".into() }), "{msgs:?}");
+        assert!(
+            !msgs
+                .iter()
+                .any(|e| matches!(e, Entry::User { text } if text.starts_with("Summarise"))),
+            "the compact prompt is not shown as yours"
+        );
+        assert!(
+            !msgs
+                .iter()
+                .any(|e| matches!(e, Entry::Assistant { text } if text == "We said hello.")),
+            "the summary is not shown twice"
+        );
+        assert_eq!(
+            fresh(&runner).agent_session,
+            None,
+            "the agent starts a new session from the summary"
+        );
+
+        runner.send(&fresh(&runner), "next").unwrap();
+        wait_idle(&runner, s.id).await;
+        let calls = seen.0.lock().unwrap().clone();
+        let last = calls.last().unwrap();
+        assert!(
+            last.0.contains("We said hello.") && last.0.ends_with("next"),
+            "a resumable cli agent gets the summary in its prompt: {}",
+            last.0
+        );
+        assert_eq!(last.1.as_deref(), Some("qwen-big"));
+
+        runner.send(&fresh(&runner), "/clear").unwrap();
+        let s2 = fresh(&runner);
+        assert_eq!(s2.agent_session, None);
+        runner.send(&s2, "after").unwrap();
+        wait_idle(&runner, s.id).await;
+        let calls = seen.0.lock().unwrap().clone();
+        assert_eq!(calls.last().unwrap().0, "after", "clear forgets, with no summary to carry");
+        assert_eq!(
+            calls.last().unwrap().2,
+            2,
+            "the history starts at the clear: its marker and its notice"
+        );
+
+        assert!(runner.send(&fresh(&runner), "/stop").is_ok());
+        let notes: Vec<String> = store
+            .messages(s.id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::Notice { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(notes.iter().any(|n| n == "nothing to stop"));
     }
 
     #[tokio::test]

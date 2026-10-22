@@ -594,6 +594,24 @@ impl Store {
         Store::changed(&db, "session", id)
     }
 
+    pub fn clear_agent_session(&self, id: Id) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "UPDATE sessions SET agent_session = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now(), id],
+        )?;
+        Store::changed(&db, "session", id)
+    }
+
+    pub fn set_model(&self, id: Id, model: Option<&str>) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "UPDATE sessions SET model = ?1, updated_at = ?2 WHERE id = ?3",
+            params![model, now(), id],
+        )?;
+        Store::changed(&db, "session", id)
+    }
+
     pub fn set_agent_session(&self, id: Id, agent_session: &str) -> Result<()> {
         let db = self.db();
         db.execute(

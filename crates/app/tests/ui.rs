@@ -502,3 +502,49 @@ fn the_agent_key_opens_the_model_settings() {
     h.run_steps(3);
     shot(&mut h, "settings");
 }
+
+#[test]
+fn close_stops_and_deletes_the_chat() {
+    let rig = rig();
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(2);
+    shot(&mut h, "close-header");
+    click(&mut h, 1236.0, 69.0);
+    h.run_steps(3);
+    shot(&mut h, "close-confirm");
+    click(&mut h, 760.0, 437.0);
+    until(&mut h, "the chat to go", |h| h.state().open().is_none());
+    let start = Instant::now();
+    while rig.store.session(session.id).is_ok() {
+        assert!(start.elapsed() < Duration::from_secs(5), "the session was not deleted");
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(rig.store.messages(session.id, 0).unwrap().is_empty(), "its messages went with it");
+}
+
+#[test]
+fn slash_shows_the_commands_and_new_opens_a_fresh_chat() {
+    let rig = rig();
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    click(&mut h, 800.0, 730.0);
+    h.event(egui::Event::Text("/".into()));
+    h.run_steps(3);
+    shot(&mut h, "slash");
+    h.event(egui::Event::Text("new".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(h.state().open(), None, "/new leaves the chat for a fresh one");
+    assert!(rig.store.session(session.id).is_ok(), "the old chat is kept");
+}

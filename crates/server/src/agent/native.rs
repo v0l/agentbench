@@ -235,8 +235,12 @@ fn system(turn: &Turn) -> String {
 
 fn history(entries: &[Entry]) -> Vec<Value> {
     let mut out = Vec::new();
-    for e in entries {
+    for e in foreman_core::since_summary(entries) {
         match e {
+            Entry::Summary { text } => out.push(json!({
+                "role": "user",
+                "content": format!("Here is a summary of our conversation so far. Carry on from it.\n\n{text}"),
+            })),
             Entry::User { text } => out.push(json!({ "role": "user", "content": text })),
             Entry::Assistant { text } => out.push(json!({ "role": "assistant", "content": text })),
             Entry::Tool { name, input, output, error, .. } => {
@@ -822,6 +826,19 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(tool["content"], "The user answered: blue");
+    }
+
+    #[test]
+    fn a_summary_replaces_what_came_before_it() {
+        let entries = vec![
+            Entry::User { text: "old".into() },
+            Entry::Summary { text: "we fixed login".into() },
+            Entry::User { text: "next".into() },
+        ];
+        let h = history(&entries);
+        assert_eq!(h.len(), 2);
+        assert!(h[0]["content"].as_str().unwrap().contains("we fixed login"));
+        assert_eq!(h[1]["content"], "next");
     }
 
     #[test]

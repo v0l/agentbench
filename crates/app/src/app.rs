@@ -864,22 +864,42 @@ impl App {
             SessionStatus::Idle => (OK, "idle"),
         };
         let top = ui.cursor().top();
+        let mut close = false;
         let resp = ui
             .horizontal(|ui| {
                 ui.add_space(TREE_INDENT * 2.0);
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 16.0), Sense::hover());
                 ui.painter().circle_filled(rect.center(), 3.0, tint);
-                Line::new()
-                    .value(&s.title)
-                    .tint(if on { READOUT } else { VALUE })
-                    .size(11.5)
-                    .gap(6.0)
-                    .note(format!("{} {}", s.agent, word))
-                    .size(10.5)
-                    .elided(ui)
+                let hovered = ui.rect_contains_pointer(ui.max_rect());
+                let reserve = if hovered { 18.0 } else { 0.0 };
+                ui.allocate_ui(Vec2::new(ui.available_width() - reserve, 16.0), |ui| {
+                    Line::new()
+                        .value(&s.title)
+                        .tint(if on { READOUT } else { VALUE })
+                        .size(11.5)
+                        .gap(6.0)
+                        .note(format!("{} {}", s.agent, word))
+                        .size(10.5)
+                        .elided(ui)
+                });
+                if hovered {
+                    let x = ui
+                        .add(
+                            egui::Label::new(egui::RichText::new("×").size(14.0).color(LEGEND))
+                                .sense(Sense::click()),
+                        )
+                        .on_hover_text("close and delete this chat");
+                    if x.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    close = x.clicked();
+                }
             })
             .response
             .interact(Sense::click());
+        if close {
+            self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
+        }
         let row = resp.rect;
         let x = row.left() + TREE_INDENT + TREE_X;
         let stroke = Stroke::new(1.0, ETCH);
@@ -887,7 +907,7 @@ impl App {
         let reach = if last { elbow } else { row.bottom() + ui.spacing().item_spacing.y };
         ui.painter().vline(x, top - ui.spacing().item_spacing.y..=reach, stroke);
         ui.painter().hline(x..=row.left() + TREE_INDENT * 2.0 - 2.0, elbow, stroke);
-        if resp.clicked() {
+        if resp.clicked() && !close {
             self.open_session(s.id, s.project_id);
         }
         resp.context_menu(|ui| {
@@ -898,7 +918,7 @@ impl App {
                 }
                 ui.close();
             }
-            if ui.add(Key::new("delete session").outline(FAULT).min_width(150.0)).clicked() {
+            if ui.add(Key::new("close chat").outline(FAULT).min_width(150.0)).clicked() {
                 self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
                 ui.close();
             }
@@ -1218,6 +1238,63 @@ impl App {
         }
     }
 
+    fn slash_menu(&mut self, ui: &mut Ui, field: egui::Rect) {
+        let typed = self.draft.trim_start();
+        if !typed.starts_with('/') || typed.contains(char::is_whitespace) {
+            return;
+        }
+        let typed = typed.trim_start_matches('/').to_string();
+        let matches: Vec<&foreman_core::Slash> =
+            foreman_core::SLASH.iter().filter(|c| c.name.starts_with(&typed)).collect();
+        if matches.is_empty() {
+            return;
+        }
+        let height = matches.len() as f32 * 24.0 + 10.0;
+        let at = egui::pos2(field.left(), field.top() - height - 4.0);
+        let mut picked = None;
+        egui::Area::new(egui::Id::new("slash-menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(at)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::NONE
+                    .fill(PANEL)
+                    .stroke(Stroke::new(1.0, ETCH))
+                    .corner_radius(2)
+                    .inner_margin(Margin::symmetric(8, 5))
+                    .show(ui, |ui| {
+                        ui.set_width(field.width() - 16.0);
+                        for c in matches {
+                            let r = ui
+                                .horizontal(|ui| {
+                                    ui.set_min_height(20.0);
+                                    Line::new()
+                                        .set(format!("/{}", c.name))
+                                        .size(12.0)
+                                        .gap(6.0)
+                                        .value(c.args)
+                                        .size(11.0)
+                                        .tint(LEGEND)
+                                        .gap(12.0)
+                                        .note(c.about)
+                                        .size(11.0)
+                                        .elided(ui);
+                                })
+                                .response
+                                .interact(Sense::click());
+                            if r.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if r.clicked() {
+                                picked = Some(c);
+                            }
+                        }
+                    });
+            });
+        if let Some(c) = picked {
+            self.draft = format!("/{}{}", c.name, if c.args.is_empty() { "" } else { " " });
+        }
+    }
+
     fn composer(
         &mut self,
         ui: &mut Ui,
@@ -1226,6 +1303,7 @@ impl App {
         hint_text: &str,
     ) -> Option<String> {
         let edit = prose(ui, &mut self.draft, hint_text, 3);
+        self.slash_menu(ui, edit.rect);
         let enter = edit.has_focus()
             && ui.input(|i| {
                 i.key_pressed(egui::Key::Enter) && (i.modifiers.command || !i.modifiers.shift)
@@ -1239,9 +1317,9 @@ impl App {
             hint(
                 ui,
                 if busy {
-                    "enter steers the agent, shift+enter for a new line"
+                    "enter steers the agent, shift+enter for a new line, / for commands"
                 } else {
-                    "enter sends, shift+enter for a new line"
+                    "enter sends, shift+enter for a new line, / for commands"
                 },
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1285,6 +1363,13 @@ impl App {
             }
             line.show(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(Key::new("close").outline(FAULT))
+                    .on_hover_text("stop it and delete this chat")
+                    .clicked()
+                {
+                    self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
+                }
                 if toggle(ui, "thinking", self.thinking).clicked() {
                     self.thinking = !self.thinking;
                 }
@@ -1347,10 +1432,22 @@ impl App {
         } else {
             "tell the agent what to do next"
         };
-        if let Some(text) = self.composer(ui, !missing, s.status.busy(), hint_text)
-            && let Some(c) = &mut self.client
-        {
-            c.send_message(s.id, &text);
+        if let Some(text) = self.composer(ui, !missing, s.status.busy(), hint_text) {
+            match foreman_core::parse_slash(&text).map(|(c, _)| c.name) {
+                Some("new") => {
+                    let tree = self.worktree(s.worktree_id).cloned();
+                    self.new_chat(tree.as_ref());
+                    if let Some(f) = &mut self.fresh {
+                        f.agent = s.agent.clone();
+                    }
+                }
+                Some("close") => self.confirm = Some(Confirm::Session(s.id, s.title.clone())),
+                _ => {
+                    if let Some(c) = &mut self.client {
+                        c.send_message(s.id, &text);
+                    }
+                }
+            }
         }
     }
 
@@ -1454,6 +1551,16 @@ impl App {
                     ui.add_space(4.0);
                     Line::new().note(text.clone()).size(11.0).wrapped(ui);
                 });
+            }
+            Entry::Summary { text } if text.is_empty() => {
+                heading(ui, "cleared: the agent starts afresh here");
+            }
+            Entry::Summary { text } => {
+                heading(ui, "compacted: the agent carries on from this summary");
+                rail_block(ui, OK, PANEL, |ui| {
+                    markdown::show(ui, &mut self.markdown, text, m.id as usize);
+                });
+                ui.add_space(4.0);
             }
         }
     }
@@ -1905,9 +2012,9 @@ impl App {
                 "remove",
             ),
             Confirm::Session(_, name) => (
-                format!("Delete {name}?"),
-                "The transcript is deleted. The worktree and the agent's own session files stay.",
-                "delete",
+                format!("Close {name}?"),
+                "The agent is stopped if it is working and the conversation is deleted. The worktree and its changes stay.",
+                "close and delete",
             ),
             Confirm::Issue(_, name) => (
                 format!("Delete {name}?"),
@@ -1928,7 +2035,12 @@ impl App {
                             match c {
                                 Confirm::Project(id, _) => client.remove_project(*id),
                                 Confirm::Worktree(id, _, _) => client.remove_worktree(*id, true),
-                                Confirm::Session(id, _) => client.delete_session(*id),
+                                Confirm::Session(id, _) => {
+                                    client.delete_session(*id);
+                                    if self.session == Some(*id) {
+                                        self.session = None;
+                                    }
+                                }
                                 Confirm::Issue(id, _) => client.delete_issue(*id),
                             }
                         }

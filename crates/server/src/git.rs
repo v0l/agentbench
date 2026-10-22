@@ -163,8 +163,17 @@ pub mod testing {
                 "init",
             ],
         ] {
-            let ok = Command::new("git").arg("-C").arg(dir).args(&args).status().unwrap().success();
-            assert!(ok, "git {args:?}");
+            let run =
+                || Command::new("git").arg("-C").arg(dir).args(&args).output().expect("git runs");
+            let mut out = run();
+            for _ in 0..3 {
+                if out.status.success() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                out = run();
+            }
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         }
     }
 }

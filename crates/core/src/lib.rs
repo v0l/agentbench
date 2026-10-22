@@ -181,6 +181,7 @@ pub struct Question {
 pub enum Entry {
     User { text: String },
     Question { id: String, question: Question, answer: Option<String> },
+    Summary { text: String },
     Assistant { text: String },
     Thinking { text: String },
     Tool { call_id: String, name: String, input: Value, output: Option<String>, error: bool },
@@ -198,6 +199,7 @@ impl Entry {
             | Entry::Notice { text } => text,
             Entry::Tool { name, .. } => name,
             Entry::Question { question, .. } => &question.text,
+            Entry::Summary { text } => text,
         }
     }
 }
@@ -230,9 +232,46 @@ pub struct ModelSettings {
     pub has_key: bool,
 }
 
+pub struct Slash {
+    pub name: &'static str,
+    pub args: &'static str,
+    pub about: &'static str,
+}
+
+pub const SLASH: [Slash; 6] = [
+    Slash { name: "new", args: "", about: "start a fresh chat in this worktree with this agent" },
+    Slash { name: "close", args: "", about: "stop the agent and delete this chat" },
+    Slash { name: "stop", args: "", about: "interrupt what the agent is doing" },
+    Slash {
+        name: "compact",
+        args: "",
+        about: "summarise the conversation and carry on from the summary",
+    },
+    Slash {
+        name: "clear",
+        args: "",
+        about: "forget the conversation so far; the transcript stays",
+    },
+    Slash { name: "model", args: "<id>", about: "use another model for this chat" },
+];
+
+pub fn parse_slash(text: &str) -> Option<(&'static Slash, &str)> {
+    let rest = text.trim().strip_prefix('/')?;
+    let (name, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    SLASH.iter().find(|c| c.name == name).map(|c| (c, arg.trim()))
+}
+
+pub fn since_summary(entries: &[Entry]) -> &[Entry] {
+    match entries.iter().rposition(|e| matches!(e, Entry::Summary { .. })) {
+        Some(i) => &entries[i..],
+        None => entries,
+    }
+}
+
 pub fn short_title(text: &str, max: usize) -> String {
     let first = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
-    let first = first.trim_start_matches('#').trim();
+    let heading = first.trim_start_matches('#');
+    let first = if heading.starts_with(' ') { heading.trim() } else { first };
     if first.chars().count() <= max {
         return first.to_string();
     }
@@ -432,6 +471,28 @@ mod tests {
     }
 
     #[test]
+    fn slash_commands_parse_with_their_argument() {
+        assert_eq!(parse_slash("/compact").map(|(c, a)| (c.name, a)), Some(("compact", "")));
+        assert_eq!(
+            parse_slash(" /model  qwen3 ").map(|(c, a)| (c.name, a)),
+            Some(("model", "qwen3"))
+        );
+        assert!(parse_slash("/nope").is_none());
+        assert!(parse_slash("not a command").is_none());
+    }
+
+    #[test]
+    fn history_starts_at_the_last_summary() {
+        let e = vec![
+            Entry::User { text: "a".into() },
+            Entry::Summary { text: "s1".into() },
+            Entry::User { text: "b".into() },
+        ];
+        assert_eq!(since_summary(&e).len(), 2);
+        assert_eq!(since_summary(&e[..1]).len(), 1);
+    }
+
+    #[test]
     fn titles_stop_at_a_word() {
         assert_eq!(short_title("fix it", 40), "fix it");
         assert_eq!(
@@ -439,6 +500,7 @@ mod tests {
             "The current credit system isnt very…"
         );
         assert_eq!(short_title("\n\n  ## Plan\nmore", 40), "Plan");
+        assert_eq!(short_title("#12 Fix login", 40), "#12 Fix login");
         assert_eq!(short_title(&"x".repeat(50), 10), format!("{}…", "x".repeat(10)));
     }
 

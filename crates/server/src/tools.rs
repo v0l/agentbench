@@ -161,6 +161,7 @@ fn kind(e: &Entry) -> &'static str {
         Entry::Question { .. } => "question",
         Entry::Error { .. } => "error",
         Entry::Notice { .. } => "notice",
+        Entry::Summary { .. } => "summary",
     }
 }
 
