@@ -218,7 +218,7 @@ fn foreman_specs() -> Vec<Spec> {
             "read_session",
             "Read the last messages of another session in this project, to see what it did.",
             object(
-                json!({ "id": id("The session number"), "last": id("How many messages, default 20") }),
+                json!({ "id": string("The session id, as list_sessions gives it"), "last": id("How many messages, default 20") }),
                 &["id"],
             ),
         ),
@@ -1040,7 +1040,7 @@ mod tests {
             &self,
             tool: &str,
             args: &Value,
-            session: foreman_core::Id,
+            session: foreman_core::SessionId,
         ) -> Result<Value, String> {
             Ok(json!({ "tool": tool, "args": args, "session": session }))
         }
@@ -1319,7 +1319,7 @@ mod tests {
             ok.contains(&dir.path().canonicalize().unwrap().display().to_string())
                 || ok.contains(&dir.path().display().to_string())
         );
-        assert!(ok.contains("\n1\n"));
+        assert!(ok.contains(&format!("\n{}\n", crate::agent::test_session())));
         let bad = bash(dir.path(), "echo oops >&2; exit 3", None, &c, &io).unwrap_err();
         assert!(bad.contains("oops") && bad.contains("exit 3"), "{bad}");
         let slow = bash(dir.path(), "sleep 5", Some(1), &c, &io).unwrap_err();

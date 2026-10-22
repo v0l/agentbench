@@ -15,7 +15,7 @@ pub use native::Native;
 pub use pi::Pi;
 pub use process::{Cli, Launch};
 
-use foreman_core::{AgentInfo, Entry, Id, Question, Usage};
+use foreman_core::{AgentInfo, Entry, Question, SessionId, Usage};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -25,12 +25,12 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]
 pub struct Context {
-    pub session: Id,
-    pub project_id: Id,
+    pub session: SessionId,
+    pub project_id: foreman_core::Id,
     pub project: String,
     pub project_path: String,
     pub branch: Option<String>,
-    pub issue: Option<Id>,
+    pub issue: Option<foreman_core::Id>,
     pub api_url: String,
     pub token: String,
 }
@@ -73,7 +73,7 @@ pub trait Io: Send + Sync {
 }
 
 pub trait Api: Send + Sync {
-    fn call(&self, tool: &str, args: &Value, session: Id) -> Result<Value, String>;
+    fn call(&self, tool: &str, args: &Value, session: SessionId) -> Result<Value, String>;
 }
 
 pub trait Agent: Send + Sync {
@@ -254,7 +254,7 @@ pub struct NoApi;
 
 #[cfg(test)]
 impl Api for NoApi {
-    fn call(&self, tool: &str, _args: &Value, _session: Id) -> Result<Value, String> {
+    fn call(&self, tool: &str, _args: &Value, _session: SessionId) -> Result<Value, String> {
         Err(format!("no api for {tool}"))
     }
 }
@@ -262,7 +262,7 @@ impl Api for NoApi {
 #[cfg(test)]
 pub fn context() -> Context {
     Context {
-        session: 1,
+        session: test_session(),
         project_id: 4,
         project: "demo".into(),
         project_path: "/tmp/demo".into(),
@@ -271,6 +271,11 @@ pub fn context() -> Context {
         api_url: "http://127.0.0.1:7420".into(),
         token: "t".into(),
     }
+}
+
+#[cfg(test)]
+pub fn test_session() -> SessionId {
+    "00000000-0000-4000-8000-000000000001".parse().unwrap()
 }
 
 #[cfg(test)]
@@ -322,7 +327,7 @@ mod tests {
     fn the_brief_names_the_session_and_the_api() {
         let b = brief(&context());
         assert!(b.contains("inside foreman"));
-        assert!(b.contains("session 1 in the project demo"));
+        assert!(b.contains(&format!("session {} in the project demo", test_session())));
         assert!(b.contains("http://127.0.0.1:7420/api/issues"));
         assert!(b.contains("branch main"));
         assert!(b.contains("\"project_id\": 4"));

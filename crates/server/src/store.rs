@@ -1,6 +1,6 @@
 use foreman_core::{
     Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue, Project,
-    Session, SessionStatus, Usage, Worktree,
+    Session, SessionId, SessionStatus, Usage, Worktree,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::Path;
@@ -86,6 +86,70 @@ CREATE TABLE attachments (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX attachments_session ON attachments(session_id);
+"#,
+    r#"
+CREATE TEMP TABLE session_ids AS
+    SELECT id AS old,
+        lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' ||
+        substr(lower(hex(randomblob(2))), 2) || '-' ||
+        substr('89ab', 1 + (abs(random()) % 4), 1) || substr(lower(hex(randomblob(2))), 2) || '-' ||
+        lower(hex(randomblob(6))) AS new
+    FROM sessions;
+CREATE TABLE sessions_new (
+    id TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    worktree_id INTEGER NOT NULL REFERENCES worktrees(id) ON DELETE RESTRICT,
+    agent TEXT NOT NULL,
+    title TEXT NOT NULL,
+    model TEXT,
+    issue_id INTEGER REFERENCES issues(id) ON DELETE SET NULL,
+    status TEXT NOT NULL,
+    agent_session TEXT,
+    usage TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    title_auto INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO sessions_new
+    SELECT m.new, s.project_id, s.worktree_id, s.agent, s.title, s.model, s.issue_id, s.status,
+        s.agent_session, s.usage, s.created_at, s.updated_at, s.title_auto
+    FROM sessions s JOIN session_ids m ON m.old = s.id;
+CREATE TABLE messages_new (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    entry TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+INSERT INTO messages_new
+    SELECT x.id, m.new, x.entry, x.created_at FROM messages x JOIN session_ids m ON m.old = x.session_id;
+CREATE TABLE attachments_new (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    data BLOB NOT NULL,
+    created_at INTEGER NOT NULL
+);
+INSERT INTO attachments_new
+    SELECT x.id, m.new, x.name, x.mime, x.data, x.created_at FROM attachments x JOIN session_ids m ON m.old = x.session_id;
+CREATE TABLE changes_new (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    ref_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+INSERT INTO changes_new SELECT id, kind, CAST(ref_id AS TEXT), created_at FROM changes;
+DROP TABLE attachments;
+DROP TABLE messages;
+DROP TABLE sessions;
+DROP TABLE changes;
+ALTER TABLE sessions_new RENAME TO sessions;
+ALTER TABLE messages_new RENAME TO messages;
+ALTER TABLE attachments_new RENAME TO attachments;
+ALTER TABLE changes_new RENAME TO changes;
+CREATE INDEX messages_session ON messages(session_id, id);
+CREATE INDEX attachments_session ON attachments(session_id);
+DROP TABLE session_ids;
 "#,
 ];
 
@@ -208,7 +272,7 @@ fn message_row(row: &Row) -> rusqlite::Result<Message> {
     })
 }
 
-fn not_found(what: &str, id: Id) -> StoreError {
+fn not_found(what: &str, id: impl std::fmt::Display) -> StoreError {
     StoreError(format!("{what} {id} not found"))
 }
 
@@ -226,13 +290,16 @@ impl Store {
 
     fn setup(conn: Connection) -> Result<Store> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         for (i, step) in SCHEMA.iter().enumerate().skip(version.max(0) as usize) {
-            conn.execute_batch(step)?;
-            conn.pragma_update(None, "user_version", i as i64 + 1)?;
+            conn.execute_batch(&format!(
+                "BEGIN; {step}; PRAGMA user_version = {}; COMMIT;",
+                i + 1
+            ))?;
         }
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Store { conn: Arc::new(Mutex::new(conn)) })
     }
 
@@ -240,10 +307,10 @@ impl Store {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn changed(conn: &Connection, kind: &str, ref_id: Id) -> Result<()> {
+    fn changed(conn: &Connection, kind: &str, ref_id: impl std::fmt::Display) -> Result<()> {
         conn.execute(
             "INSERT INTO changes (kind, ref_id, created_at) VALUES (?1, ?2, ?3)",
-            params![kind, ref_id, now()],
+            params![kind, ref_id.to_string(), now()],
         )?;
         Ok(())
     }
@@ -252,7 +319,7 @@ impl Store {
         Ok(self.db().query_row("SELECT COALESCE(MAX(id), 0) FROM changes", [], |r| r.get(0))?)
     }
 
-    pub fn changes_since(&self, cursor: Id) -> Result<Vec<(Id, String, Id)>> {
+    pub fn changes_since(&self, cursor: Id) -> Result<Vec<(Id, String, String)>> {
         let db = self.db();
         let mut stmt = db
             .prepare("SELECT id, kind, ref_id FROM changes WHERE id > ?1 ORDER BY id LIMIT 1000")?;
@@ -556,7 +623,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn session(&self, id: Id) -> Result<Session> {
+    pub fn session(&self, id: SessionId) -> Result<Session> {
         self.db()
             .query_row(&format!("{SESSION_SELECT} WHERE s.id = ?1"), [id], session_row)
             .optional()?
@@ -576,11 +643,12 @@ impl Store {
             return Err(StoreError(format!("{} no longer exists", worktree.path)));
         }
         let t = now();
-        let id = {
+        let id = SessionId(uuid::Uuid::new_v4());
+        {
             let db = self.db();
             db.execute(
-                "INSERT INTO sessions (project_id, worktree_id, agent, title, model, issue_id, status, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                "INSERT INTO sessions (id, project_id, worktree_id, agent, title, model, issue_id, status, created_at, updated_at)
+                 VALUES (?9, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
                 params![
                     worktree.project_id,
                     worktree_id,
@@ -589,17 +657,16 @@ impl Store {
                     model,
                     issue_id,
                     SessionStatus::Idle.as_str(),
-                    t
+                    t,
+                    id
                 ],
             )?;
-            let id = db.last_insert_rowid();
             Store::changed(&db, "session", id)?;
-            id
-        };
+        }
         self.session(id)
     }
 
-    pub fn set_status(&self, id: Id, status: SessionStatus) -> Result<()> {
+    pub fn set_status(&self, id: SessionId, status: SessionStatus) -> Result<()> {
         let db = self.db();
         db.execute(
             "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE id = ?3",
@@ -608,7 +675,7 @@ impl Store {
         Store::changed(&db, "session", id)
     }
 
-    pub fn clear_agent_session(&self, id: Id) -> Result<()> {
+    pub fn clear_agent_session(&self, id: SessionId) -> Result<()> {
         let db = self.db();
         db.execute(
             "UPDATE sessions SET agent_session = NULL, updated_at = ?1 WHERE id = ?2",
@@ -619,13 +686,13 @@ impl Store {
 
     /// Mark a session's title as a stand-in (cut from the first message) that a
     /// model may replace once there is a conversation to name.
-    pub fn set_title_auto(&self, id: Id, auto: bool) -> Result<()> {
+    pub fn set_title_auto(&self, id: SessionId, auto: bool) -> Result<()> {
         self.db()
             .execute("UPDATE sessions SET title_auto = ?1 WHERE id = ?2", params![auto, id])?;
         Ok(())
     }
 
-    pub fn title_is_auto(&self, id: Id) -> Result<bool> {
+    pub fn title_is_auto(&self, id: SessionId) -> Result<bool> {
         self.db()
             .query_row("SELECT title_auto FROM sessions WHERE id = ?1", [id], |r| r.get(0))
             .optional()?
@@ -634,7 +701,7 @@ impl Store {
 
     /// Give a session its real title. Unless `force`, only a stand-in title is
     /// replaced, so a name someone chose is never overwritten.
-    pub fn set_title(&self, id: Id, title: &str, force: bool) -> Result<bool> {
+    pub fn set_title(&self, id: SessionId, title: &str, force: bool) -> Result<bool> {
         let title = title.trim();
         if title.is_empty() {
             return Err(StoreError("a title needs some text".into()));
@@ -651,7 +718,7 @@ impl Store {
         Ok(n > 0)
     }
 
-    pub fn set_model(&self, id: Id, model: Option<&str>) -> Result<()> {
+    pub fn set_model(&self, id: SessionId, model: Option<&str>) -> Result<()> {
         let db = self.db();
         db.execute(
             "UPDATE sessions SET model = ?1, updated_at = ?2 WHERE id = ?3",
@@ -660,7 +727,7 @@ impl Store {
         Store::changed(&db, "session", id)
     }
 
-    pub fn set_agent_session(&self, id: Id, agent_session: &str) -> Result<()> {
+    pub fn set_agent_session(&self, id: SessionId, agent_session: &str) -> Result<()> {
         let db = self.db();
         db.execute(
             "UPDATE sessions SET agent_session = ?1, updated_at = ?2 WHERE id = ?3",
@@ -669,7 +736,7 @@ impl Store {
         Store::changed(&db, "session", id)
     }
 
-    pub fn add_usage(&self, id: Id, delta: &Usage) -> Result<()> {
+    pub fn add_usage(&self, id: SessionId, delta: &Usage) -> Result<()> {
         let mut usage = self.session(id)?.usage;
         usage.add(delta);
         let db = self.db();
@@ -680,7 +747,7 @@ impl Store {
         Store::changed(&db, "session", id)
     }
 
-    pub fn delete_session(&self, id: Id) -> Result<()> {
+    pub fn delete_session(&self, id: SessionId) -> Result<()> {
         let db = self.db();
         if db.execute("DELETE FROM sessions WHERE id = ?1", [id])? == 0 {
             return Err(not_found("session", id));
@@ -693,7 +760,7 @@ impl Store {
         Ok(db.execute("UPDATE sessions SET status = 'stopped' WHERE status = 'running'", [])?)
     }
 
-    pub fn add_message(&self, session_id: Id, entry: &Entry) -> Result<Message> {
+    pub fn add_message(&self, session_id: SessionId, entry: &Entry) -> Result<Message> {
         let db = self.db();
         let t = now();
         db.execute(
@@ -709,7 +776,7 @@ impl Store {
     /// Keep a file sent with a message. It goes when the session does.
     pub fn add_attachment(
         &self,
-        session_id: Id,
+        session_id: SessionId,
         name: &str,
         mime: &str,
         data: &[u8],
@@ -748,7 +815,7 @@ impl Store {
 
     pub fn update_message(&self, id: Id, entry: &Entry) -> Result<()> {
         let db = self.db();
-        let session_id: Id =
+        let session_id: SessionId =
             db.query_row("SELECT session_id FROM messages WHERE id = ?1", [id], |r| r.get(0))?;
         db.execute(
             "UPDATE messages SET entry = ?1 WHERE id = ?2",
@@ -757,7 +824,7 @@ impl Store {
         Store::changed(&db, "message", session_id)
     }
 
-    pub fn messages(&self, session_id: Id, after: Id) -> Result<Vec<Message>> {
+    pub fn messages(&self, session_id: SessionId, after: Id) -> Result<Vec<Message>> {
         let db = self.db();
         let mut stmt =
             db.prepare("SELECT * FROM messages WHERE session_id = ?1 AND id > ?2 ORDER BY id")?;
@@ -981,7 +1048,10 @@ mod tests {
         let c1 = s.cursor().unwrap();
         assert!(c1 > c0);
         s.add_comment(i.id, &NewComment { author: None, body: "x".into() }).unwrap();
-        assert_eq!(s.changes_since(c1).unwrap(), vec![(c1 + 1, "issue".to_string(), i.id)]);
+        assert_eq!(
+            s.changes_since(c1).unwrap(),
+            vec![(c1 + 1, "issue".to_string(), i.id.to_string())]
+        );
     }
 
     #[test]
@@ -1022,5 +1092,60 @@ mod tests {
         assert!(!s.title_is_auto(a.id).unwrap());
         assert!(s.set_title(a.id, "Forced", true).unwrap());
         assert!(s.set_title(a.id, " ", true).is_err());
+    }
+
+    #[test]
+    fn a_deleted_chats_id_is_never_given_to_the_next() {
+        let s = Store::memory().unwrap();
+        let (_, main) = testing::project(&s, "/tmp");
+        let a = s.add_session(main.id, "x", "a", None, None).unwrap();
+        s.add_message(a.id, &Entry::User { text: "old".into() }).unwrap();
+        s.delete_session(a.id).unwrap();
+        let b = s.add_session(main.id, "x", "b", None, None).unwrap();
+        assert_ne!(a.id, b.id);
+        assert!(s.messages(b.id, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn numbered_sessions_get_uuids_and_keep_their_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for step in &SCHEMA[..3] {
+                conn.execute_batch(step).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 3).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO projects VALUES (1, 'demo', '/r', 'main', NULL, 0);
+                INSERT INTO worktrees VALUES (1, 1, '/r', 'main', NULL, 1, 0, 0, 0);
+                INSERT INTO sessions VALUES (7, 1, 1, 'pi', 'kept', NULL, NULL, 'idle', 'pi-1', '{}', 5, 6, 1);
+                INSERT INTO sessions VALUES (9, 1, 1, 'pi', 'other', NULL, NULL, 'idle', NULL, '{}', 5, 6, 0);
+                INSERT INTO messages VALUES (1, 7, '{"kind":"user","text":"hello"}', 5);
+                INSERT INTO messages VALUES (2, 9, '{"kind":"user","text":"there"}', 5);
+                INSERT INTO attachments VALUES (1, 7, 'a.png', 'image/png', x'00', 5);
+                INSERT INTO changes VALUES (40, 'session', 7, 5);
+                "#,
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let all = s.sessions().unwrap();
+        assert_eq!(all.len(), 2);
+        let kept = all.iter().find(|x| x.title == "kept").unwrap();
+        let other = all.iter().find(|x| x.title == "other").unwrap();
+        assert_ne!(kept.id, other.id);
+        assert_eq!(kept.agent_session.as_deref(), Some("pi-1"));
+        assert!(s.title_is_auto(kept.id).unwrap());
+        assert_eq!(kept.id.0.get_version_num(), 4);
+        let msgs = s.messages(kept.id, 0).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].entry.text(), "hello");
+        assert_eq!(s.attachment(1).unwrap().0.name, "a.png");
+        assert_eq!(s.cursor().unwrap(), 40, "the change cursor carries on");
+        s.delete_session(kept.id).unwrap();
+        assert!(s.messages(kept.id, 0).unwrap().is_empty(), "deletes still cascade");
+        assert_eq!(s.messages(other.id, 0).unwrap().len(), 1);
     }
 }

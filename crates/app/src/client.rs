@@ -1,7 +1,7 @@
 use ehttp::Method;
 use foreman_core::{
     Comment, Id, IssuePatch, Message, NewComment, NewIssue, NewProject, NewSession, NewWorktree,
-    Overview, SendMessage,
+    Overview, SendMessage, SessionId,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -34,7 +34,7 @@ pub enum Reply {
     Models(Result<Vec<String>, String>),
     AgentModels(String, Result<Vec<String>, String>),
     Changed(Id),
-    Messages(Id, Vec<Message>),
+    Messages(SessionId, Vec<Message>),
     Comments(Id, Vec<Comment>),
     Done(String),
     Failed(String),
@@ -128,7 +128,7 @@ impl Client {
         self.send(req, |c: Changes| Reply::Changed(c.cursor));
     }
 
-    pub fn messages(&mut self, session: Id, after: Id) {
+    pub fn messages(&mut self, session: SessionId, after: Id) {
         let req = self.request(
             Method::GET,
             &format!("/api/sessions/{session}/messages?after={after}"),
@@ -205,12 +205,12 @@ impl Client {
         self.send(req, Reply::Started);
     }
 
-    pub fn send_message(&mut self, session: Id, text: &str) {
+    pub fn send_message(&mut self, session: SessionId, text: &str) {
         let body = SendMessage { text: text.to_string(), attachments: Vec::new() };
         self.act(Method::POST, &format!("/api/sessions/{session}/messages"), Some(&body), "");
     }
 
-    pub fn answer(&mut self, session: Id, question: &str, answers: &[String]) {
+    pub fn answer(&mut self, session: SessionId, question: &str, answers: &[String]) {
         let body = foreman_core::Answer {
             question: question.to_string(),
             answer: answers.join(", "),
@@ -274,7 +274,7 @@ impl Client {
         });
     }
 
-    pub fn interrupt(&mut self, session: Id) {
+    pub fn interrupt(&mut self, session: SessionId) {
         self.act::<()>(
             Method::POST,
             &format!("/api/sessions/{session}/interrupt"),
@@ -283,7 +283,7 @@ impl Client {
         );
     }
 
-    pub fn delete_session(&mut self, session: Id) {
+    pub fn delete_session(&mut self, session: SessionId) {
         self.act::<()>(
             Method::DELETE,
             &format!("/api/sessions/{session}"),

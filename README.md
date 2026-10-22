@@ -173,5 +173,8 @@ cargo apk build -p foreman --lib --release
 | `POST /api/sessions/{id}/answer` `{question, answer}` | answer an agent's question |
 | `POST /api/sessions/{id}/interrupt` | stop the turn |
 
+Sessions are named by UUID, so a deleted chat's id is never handed to a new one.
+Projects, worktrees, issues and messages keep plain numbers.
+
 `place` is `{"kind": "main"}`, `{"kind": "existing", "worktree_id": 3}` or
 `{"kind": "new", "branch": "fix-login"}`.

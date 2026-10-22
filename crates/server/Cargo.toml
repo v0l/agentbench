@@ -10,7 +10,7 @@ license.workspace = true
 name = "foreman_server"
 
 [dependencies]
-foreman-core.workspace = true
+foreman-core = { workspace = true, features = ["rusqlite"] }
 serde.workspace = true
 serde_json.workspace = true
 axum = "0.8"

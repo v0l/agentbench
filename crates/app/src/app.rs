@@ -7,7 +7,8 @@ use egui_bench::markdown;
 use egui_bench::prelude::*;
 use foreman_core::{
     Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue, NewProject,
-    NewSession, NewWorktree, Overview, Place, Question, Session, SessionStatus, Worktree,
+    NewSession, NewWorktree, Overview, Place, Question, Session, SessionId, SessionStatus,
+    Worktree,
 };
 use std::collections::{HashMap, HashSet};
 use web_time::{Duration, Instant};
@@ -123,7 +124,7 @@ struct Settings {
 enum Confirm {
     Project(Id, String),
     Worktree(Id, String, bool),
-    Session(Id, String),
+    Session(SessionId, String),
     Issue(Id, String),
 }
 
@@ -152,10 +153,10 @@ pub struct App {
     drafts: HashMap<String, Vec<Slot>>,
     filter: Filter,
     project: Option<Id>,
-    session: Option<Id>,
+    session: Option<SessionId>,
     issue: Option<Id>,
     collapsed: HashSet<Id>,
-    transcripts: HashMap<Id, Transcript>,
+    transcripts: HashMap<SessionId, Transcript>,
     comments: HashMap<Id, Vec<Comment>>,
     draft: String,
     comment: String,
@@ -405,7 +406,7 @@ impl App {
         self.issue
     }
 
-    pub fn open(&self) -> Option<Id> {
+    pub fn open(&self) -> Option<SessionId> {
         self.session
     }
 
@@ -413,7 +414,7 @@ impl App {
         self.notice.as_ref().filter(|(ok, _)| !ok).map(|(_, t)| t.clone())
     }
 
-    pub fn transcript_len(&self, session: Id) -> usize {
+    pub fn transcript_len(&self, session: SessionId) -> usize {
         self.transcripts.get(&session).map_or(0, |t| t.messages.len())
     }
 
@@ -563,7 +564,7 @@ impl App {
         }
     }
 
-    fn fetch_messages(&mut self, sid: Id) {
+    fn fetch_messages(&mut self, sid: SessionId) {
         let t = self.transcripts.entry(sid).or_default();
         if t.loading {
             return;
@@ -1325,7 +1326,7 @@ impl App {
         });
     }
 
-    pub fn open_session(&mut self, sid: Id, project: Id) {
+    pub fn open_session(&mut self, sid: SessionId, project: Id) {
         self.session = Some(sid);
         self.project = Some(project);
         self.tab = Tab::Chat;
@@ -1877,7 +1878,7 @@ impl App {
     fn questions(
         &mut self,
         ui: &mut Ui,
-        session: Id,
+        session: SessionId,
         id: &str,
         qs: &[Question],
         done: Option<&[String]>,
@@ -1906,7 +1907,7 @@ impl App {
                             .size(10.0)
                             .show(ui);
                     }
-                    let salt = id.len() * 7919 + session as usize + n * 104_729;
+                    let salt = id.len() * 7919 + session.0.as_u128() as usize + n * 104_729;
                     markdown::show(ui, &mut self.markdown, &q.text, salt);
                     if let Some(a) = done {
                         let said = a.get(n).map(String::as_str).unwrap_or_default();
@@ -1983,7 +1984,7 @@ impl App {
         );
     }
 
-    fn entry(&mut self, ui: &mut Ui, m: &Message, session: Id) {
+    fn entry(&mut self, ui: &mut Ui, m: &Message, session: SessionId) {
         match &m.entry {
             Entry::User { text } => {
                 ui.add_space(6.0);
@@ -2912,7 +2913,7 @@ mod tests {
     #[test]
     fn status_counts_skip_empty_statuses_and_lead_with_attention() {
         let s = |status| Session {
-            id: 0,
+            id: SessionId::default(),
             project_id: 1,
             worktree_id: 1,
             agent: "a".into(),

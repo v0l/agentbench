@@ -9,7 +9,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use foreman_core::{
     Answer, ApiError, Id, IssuePatch, IssueState, NewComment, NewIssue, NewProject, NewSession,
-    NewWorktree, Overview, Place, SendMessage, branch_slug, issue_prompt,
+    NewWorktree, Overview, Place, SendMessage, SessionId, branch_slug, issue_prompt,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -454,7 +454,10 @@ async fn sessions(State(api): State<Api>) -> Reply<Vec<foreman_core::Session>> {
     Ok(Json(api.runner.store().sessions()?))
 }
 
-async fn session(State(api): State<Api>, Path(id): Path<Id>) -> Reply<foreman_core::Session> {
+async fn session(
+    State(api): State<Api>,
+    Path(id): Path<SessionId>,
+) -> Reply<foreman_core::Session> {
     Ok(Json(api.runner.store().session(id)?))
 }
 
@@ -548,7 +551,10 @@ async fn start_issue(
     Ok(Json(session))
 }
 
-async fn delete_session(State(api): State<Api>, Path(id): Path<Id>) -> Result<StatusCode, Failure> {
+async fn delete_session(
+    State(api): State<Api>,
+    Path(id): Path<SessionId>,
+) -> Result<StatusCode, Failure> {
     api.runner.interrupt(id);
     api.runner.store().delete_session(id)?;
     changed(&api);
@@ -563,7 +569,7 @@ struct After {
 
 async fn messages(
     State(api): State<Api>,
-    Path(id): Path<Id>,
+    Path(id): Path<SessionId>,
     Query(q): Query<After>,
 ) -> Reply<Vec<foreman_core::Message>> {
     api.runner.store().session(id)?;
@@ -572,7 +578,7 @@ async fn messages(
 
 async fn send(
     State(api): State<Api>,
-    Path(id): Path<Id>,
+    Path(id): Path<SessionId>,
     Json(msg): Json<SendMessage>,
 ) -> Result<StatusCode, Failure> {
     let session = api.runner.store().session(id)?;
@@ -585,7 +591,7 @@ async fn send(
 
 async fn answer(
     State(api): State<Api>,
-    Path(id): Path<Id>,
+    Path(id): Path<SessionId>,
     Json(a): Json<Answer>,
 ) -> Result<StatusCode, Failure> {
     api.runner.store().session(id)?;
@@ -600,7 +606,7 @@ async fn answer(
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn interrupt(State(api): State<Api>, Path(id): Path<Id>) -> Reply<serde_json::Value> {
+async fn interrupt(State(api): State<Api>, Path(id): Path<SessionId>) -> Reply<serde_json::Value> {
     api.runner.store().session(id)?;
     Ok(Json(json!({ "interrupted": api.runner.interrupt(id) })))
 }
@@ -706,7 +712,11 @@ mod tests {
         p["id"].as_i64().unwrap()
     }
 
-    async fn settle(api: &Api, sid: Id) {
+    fn sid(v: &serde_json::Value) -> SessionId {
+        v["id"].as_str().expect("a session id").parse().unwrap()
+    }
+
+    async fn settle(api: &Api, sid: SessionId) {
         for _ in 0..200 {
             if !api.runner.is_running(sid) {
                 return;
@@ -729,9 +739,9 @@ mod tests {
         let (_, named) = start(json!({"prompt": "fix the login loop", "title": "Mine"})).await;
         let (_, blank) = start(json!({})).await;
         let store = f.api.runner.store();
-        assert!(store.title_is_auto(cut["id"].as_i64().unwrap()).unwrap());
-        assert!(!store.title_is_auto(named["id"].as_i64().unwrap()).unwrap());
-        assert!(store.title_is_auto(blank["id"].as_i64().unwrap()).unwrap());
+        assert!(store.title_is_auto(sid(&cut)).unwrap());
+        assert!(!store.title_is_auto(sid(&named)).unwrap());
+        assert!(store.title_is_auto(sid(&blank)).unwrap());
     }
 
     #[tokio::test]
@@ -953,7 +963,7 @@ mod tests {
         assert_eq!(s, StatusCode::OK, "{session}");
         assert_eq!(session["title"], format!("#{id} Say hi"));
         assert!(session["cwd"].as_str().unwrap().ends_with(&format!("demo-issue-{id}-say-hi")));
-        let sid = session["id"].as_i64().unwrap();
+        let sid = sid(&session);
         settle(&f.api, sid).await;
         let (_, msgs) =
             call(&f.app, "GET", &format!("/api/sessions/{sid}/messages"), None, T).await;
@@ -1025,8 +1035,8 @@ mod tests {
             call(&app, "DELETE", &format!("/api/worktrees/{wid}"), None, T).await.0,
             StatusCode::CONFLICT
         );
-        call(&app, "POST", &format!("/api/sessions/{}/interrupt", sess["id"]), None, T).await;
-        settle(&api, sess["id"].as_i64().unwrap()).await;
+        call(&app, "POST", &format!("/api/sessions/{}/interrupt", sid(&sess)), None, T).await;
+        settle(&api, sid(&sess)).await;
         assert_eq!(
             call(&app, "DELETE", &format!("/api/worktrees/{wid}?force=true"), None, T).await.0,
             StatusCode::NO_CONTENT

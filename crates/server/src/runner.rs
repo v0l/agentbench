@@ -1,7 +1,7 @@
 use crate::agent::{Agent, Api, Context, Event, Io, Turn};
 use crate::store::{Store, StoreError};
 use crate::titles::Titles;
-use foreman_core::{Entry, Id, Question, Session, SessionStatus};
+use foreman_core::{Entry, Id, Question, Session, SessionId, SessionStatus};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +26,7 @@ struct Live {
 pub struct Runner {
     store: Store,
     agents: Arc<HashMap<String, Arc<dyn Agent>>>,
-    live: Arc<Mutex<HashMap<Id, Live>>>,
+    live: Arc<Mutex<HashMap<SessionId, Live>>>,
     api: Arc<dyn Api>,
     titles: Option<Titles>,
     pub base: Arc<Mutex<Base>>,
@@ -68,7 +68,7 @@ impl Runner {
     /// Replace a stand-in title with one the title model writes from the
     /// conversation so far. Runs in the background; a failure leaves the
     /// stand-in in place and is tried again after the next turn.
-    fn retitle(&self, session: Id, force: bool) {
+    fn retitle(&self, session: SessionId, force: bool) {
         let Some(titles) = self.titles.clone() else { return };
         if titles.target().is_none()
             || !(force || self.store.title_is_auto(session).unwrap_or(false))
@@ -108,15 +108,15 @@ impl Runner {
         all
     }
 
-    fn live(&self) -> std::sync::MutexGuard<'_, HashMap<Id, Live>> {
+    fn live(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, Live>> {
         self.live.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn is_running(&self, session: Id) -> bool {
+    pub fn is_running(&self, session: SessionId) -> bool {
         self.live().contains_key(&session)
     }
 
-    pub fn interrupt(&self, session: Id) -> bool {
+    pub fn interrupt(&self, session: SessionId) -> bool {
         let live = self.live();
         let Some(l) = live.get(&session) else {
             return false;
@@ -129,7 +129,7 @@ impl Runner {
 
     pub fn answer(
         &self,
-        session: Id,
+        session: SessionId,
         question: &str,
         answers: Vec<String>,
     ) -> Result<(), StoreError> {
@@ -422,7 +422,7 @@ struct SinkState {
 
 struct Sink {
     store: Store,
-    session: Id,
+    session: SessionId,
     changed: Arc<Notify>,
     state: Mutex<SinkState>,
     stop: Arc<AtomicBool>,
@@ -668,7 +668,7 @@ mod tests {
         })
     }
 
-    async fn wait_idle(runner: &Runner, id: Id) -> Session {
+    async fn wait_idle(runner: &Runner, id: SessionId) -> Session {
         for _ in 0..300 {
             if !runner.is_running(id) {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1098,7 +1098,7 @@ mod tests {
         (runner, s)
     }
 
-    async fn title_becomes(runner: &Runner, id: Id, want: &str) -> bool {
+    async fn title_becomes(runner: &Runner, id: SessionId, want: &str) -> bool {
         for _ in 0..100 {
             if runner.store().session(id).unwrap().title == want {
                 return true;

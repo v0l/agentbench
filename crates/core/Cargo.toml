@@ -9,3 +9,8 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+uuid = { version = "1", features = ["serde"] }
+rusqlite = { version = "0.40", optional = true }
+
+[features]
+rusqlite = ["dep:rusqlite"]

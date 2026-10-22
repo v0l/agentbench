@@ -3,6 +3,41 @@ use serde_json::Value;
 
 pub type Id = i64;
 
+/// A chat's id. Never reused, so nothing cached under one id can surface in another chat.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct SessionId(pub uuid::Uuid);
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for SessionId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        uuid::Uuid::parse_str(s.trim()).map(SessionId)
+    }
+}
+
+#[cfg(feature = "rusqlite")]
+impl rusqlite::ToSql for SessionId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::from(self.0.to_string()))
+    }
+}
+
+#[cfg(feature = "rusqlite")]
+impl rusqlite::types::FromSql for SessionId {
+    fn column_result(v: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let text = v.as_str()?;
+        text.parse().map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueState {
@@ -135,7 +170,7 @@ impl SessionStatus {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
-    pub id: Id,
+    pub id: SessionId,
     pub project_id: Id,
     pub worktree_id: Id,
     pub agent: String,
@@ -315,7 +350,7 @@ impl Entry {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub id: Id,
-    pub session_id: Id,
+    pub session_id: SessionId,
     pub entry: Entry,
     pub created_at: i64,
 }

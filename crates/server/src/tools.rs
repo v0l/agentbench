@@ -1,6 +1,6 @@
 use crate::agent::Api;
 use crate::store::Store;
-use foreman_core::{Entry, Id, IssuePatch, IssueState, NewComment, NewIssue};
+use foreman_core::{Entry, Id, IssuePatch, IssueState, NewComment, NewIssue, SessionId};
 use serde_json::{Value, json};
 
 pub struct StoreApi {
@@ -29,6 +29,11 @@ fn id(args: &Value) -> Result<Id, String> {
     args.get("id").and_then(Value::as_i64).ok_or_else(|| "missing `id`".to_string())
 }
 
+fn session_id(args: &Value) -> Result<SessionId, String> {
+    let raw = args.get("id").and_then(Value::as_str).ok_or("missing `id`")?;
+    raw.parse().map_err(|_| format!("{raw} is not a session id; list_sessions gives them"))
+}
+
 fn text(args: &Value, key: &str) -> Option<String> {
     args.get(key).and_then(Value::as_str).map(str::to_string)
 }
@@ -43,7 +48,7 @@ fn state(args: &Value) -> Result<Option<IssueState>, String> {
 }
 
 impl Api for StoreApi {
-    fn call(&self, tool: &str, args: &Value, session: Id) -> Result<Value, String> {
+    fn call(&self, tool: &str, args: &Value, session: SessionId) -> Result<Value, String> {
         let s = &self.store;
         let me = s.session(session).map_err(|e| e.0)?;
         let project = me.project_id;
@@ -124,7 +129,7 @@ impl Api for StoreApi {
                 json!(sessions)
             }
             "read_session" => {
-                let other = s.session(id(args)?).map_err(|e| e.0)?;
+                let other = s.session(session_id(args)?).map_err(|e| e.0)?;
                 if other.project_id != project {
                     return Err("that session belongs to another project".into());
                 }

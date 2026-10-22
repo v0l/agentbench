@@ -933,7 +933,7 @@ fn each_new_chat_from_the_tree_is_a_new_session() {
 }
 
 #[test]
-fn a_new_chat_that_reuses_a_deleted_chats_id_shows_none_of_its_messages() {
+fn a_new_chat_after_a_deleted_one_shows_none_of_its_messages() {
     let rig = rig();
     let main = rig.store.projects().unwrap()[0].id;
     let tree = rig.store.main_worktree(main).unwrap();
@@ -961,8 +961,8 @@ fn a_new_chat_that_reuses_a_deleted_chats_id_shows_none_of_its_messages() {
     h.key_press(egui::Key::Enter);
     until(&mut h, "a chat", |h| h.state().open().is_some());
     let id = h.state().open().unwrap();
-    until(&mut h, "its reply", |_| rig.store.messages(id, 0).unwrap().len() == 2);
+    assert_ne!(id, old.id, "a new chat never takes a deleted chat's id");
+    until(&mut h, "its reply", |h| h.state().transcript_len(id) >= 2);
     h.run_steps(5);
-    eprintln!("new id {id}, old id {}", old.id);
     assert_eq!(h.state().transcript_len(id), 2, "only this chat's own messages");
 }
