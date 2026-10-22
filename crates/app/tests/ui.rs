@@ -1055,4 +1055,12 @@ fn a_dropped_picture_is_sent_with_the_message_and_shown_in_the_chat() {
     );
     until(&mut h, "the thumbnail", |h| h.state().thumbnails_ready() == 1);
     shot(&mut h, "chat-attachment");
+
+    // A picture attached to an open chat must not push the composer off the window.
+    drop_file(&mut h, "again.png", png(64, 40));
+    until(&mut h, "the picture in the composer", |h| h.state().pending_files() == 1);
+    h.run_steps(3);
+    shot(&mut h, "composer-attachment-chat");
+    let bottom = h.get_by_label("attach").rect().bottom();
+    assert!(bottom <= 800.0, "the composer buttons end at {bottom}, below the 800 point window");
 }

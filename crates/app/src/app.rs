@@ -1956,7 +1956,8 @@ impl App {
         });
         ui.add_space(6.0);
 
-        let input_h = 100.0;
+        // The composer, and the row of attachments above it when there are any.
+        let input_h = 100.0 + if self.tray.files.is_empty() { 0.0 } else { 40.0 };
         let avail = ui.available_height() - input_h;
         let t = self.transcripts.entry(s.id).or_default();
         let messages = t.messages.clone();
