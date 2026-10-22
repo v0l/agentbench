@@ -1,4 +1,4 @@
-use super::{Agent, Decoder, Event, Launch, Turn, content_text, parse, str_at, u64_at};
+use super::{Cli, Decoder, Event, Launch, Turn, content_text, parse, str_at, u64_at};
 use foreman_core::Usage;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ impl Pi {
     }
 }
 
-impl Agent for Pi {
+impl Cli for Pi {
     fn name(&self) -> &str {
         "pi"
     }
@@ -31,11 +31,12 @@ impl Agent for Pi {
         true
     }
 
-    fn launch(&self, turn: &Turn) -> Launch {
+    fn launch(&self, turn: &Turn, brief: &str) -> Launch {
         let mut args = vec!["--mode".to_string(), "json".to_string()];
         let session =
             turn.resume.map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         args.extend(["--session-id".to_string(), session]);
+        args.extend(["--append-system-prompt".to_string(), brief.to_string()]);
         if let Some(model) = turn.model {
             args.extend(["--model".to_string(), model.to_string()]);
         }
@@ -280,21 +281,23 @@ mod tests {
     #[test]
     fn launch_reuses_the_session_to_resume() {
         let pi = Pi::new("pi");
-        let fresh = pi.launch(&Turn {
-            prompt: "hi",
+        let c = crate::agent::context();
+        let turn = |prompt, model, resume| Turn {
+            prompt,
             cwd: Path::new("/tmp"),
-            model: Some("m"),
-            resume: None,
-        });
+            model,
+            resume,
+            history: &[],
+            context: &c,
+        };
+        let fresh = pi.launch(&turn("hi", Some("m"), None), "BRIEF");
         assert_eq!(fresh.args[..3], ["--mode", "json", "--session-id"]);
-        assert_eq!(fresh.args[4..], ["--model", "m"]);
+        assert_eq!(fresh.args[4..], ["--append-system-prompt", "BRIEF", "--model", "m"]);
         assert_eq!(fresh.stdin.as_deref(), Some("hi"));
-        let again = pi.launch(&Turn {
-            prompt: "more",
-            cwd: Path::new("/tmp"),
-            model: None,
-            resume: Some("s-1"),
-        });
-        assert_eq!(again.args, ["--mode", "json", "--session-id", "s-1"]);
+        let again = pi.launch(&turn("more", None, Some("s-1")), "BRIEF");
+        assert_eq!(
+            again.args,
+            ["--mode", "json", "--session-id", "s-1", "--append-system-prompt", "BRIEF"]
+        );
     }
 }

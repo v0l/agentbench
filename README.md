@@ -5,8 +5,8 @@ tracker beside them, and a bench-style window onto it for desktop, web and
 Android.
 
 A **project** is a git repository's main checkout. Every **worktree** off it is
-a branch an agent can work in, and every **session** is one agent's
-conversation pinned to one worktree. Worktrees an agent makes on its own are
+a branch an agent can work in, and every **session** is a chat with one agent
+pinned to one worktree. Click a worktree to start a chat in it. Worktrees an agent makes on its own are
 picked up within 15 seconds. **Issues** belong to a project; starting an agent
 on one gives it a fresh worktree named after the issue and moves the issue to
 doing.
@@ -40,10 +40,28 @@ Data lives in `$FOREMAN_HOME` (default `~/.local/share/foreman`):
 
 ## Agents
 
-`pi`, `claude` and `codex` are built in. Each turn runs the agent's CLI once in
-the session's worktree with the prompt on stdin, and reads its JSON event
-stream. The agent keeps its own session files and is resumed by id on the next
-turn; foreman keeps the normalized transcript you read.
+`foreman` is the built in agent: it talks to any OpenAI compatible server, works
+in the session's worktree with file tools and bash, loads skills from
+`~/.agents/skills`, and has tools for the tracker (`list_issues`, `file_issue`,
+`update_issue`, `comment_on_issue`, `list_sessions`, `read_session`) and
+`ask_user`, which puts a question in the chat and waits for the answer. A
+message sent while it works steers it at the next step. Set its model in
+`foreman.toml`:
+
+```toml
+[model]
+url = "http://localhost:8001/v1"
+model = "qwen3.8-27b"
+key = "..."
+```
+
+`pi`, `claude` and `codex` are built in too. Each turn runs the CLI once in the
+worktree with the prompt on stdin and reads its JSON event stream; a message
+sent while one works runs as the next turn. They are told they run inside
+foreman and given the API address and token (`FOREMAN_URL`, `FOREMAN_TOKEN`,
+`FOREMAN_SESSION`, `FOREMAN_PROJECT`) so they can use the tracker over REST.
+Each keeps its own session files and is resumed by id; foreman keeps the
+normalized transcript you read.
 
 Any other CLI that prints JSON lines can be added without code:
 
@@ -98,6 +116,7 @@ cargo apk build -p foreman --lib --release
 | `POST /api/sessions` `{project_id, agent, place, prompt?}` | start an agent |
 | `GET /api/sessions/{id}/messages?after=N` | transcript |
 | `POST /api/sessions/{id}/messages` `{text}` | next turn |
+| `POST /api/sessions/{id}/answer` `{question, answer}` | answer an agent's question |
 | `POST /api/sessions/{id}/interrupt` | stop the turn |
 
 `place` is `{"kind": "main"}`, `{"kind": "existing", "worktree_id": 3}` or

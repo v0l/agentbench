@@ -201,6 +201,12 @@ impl Client {
         self.act(Method::POST, &format!("/api/sessions/{session}/messages"), Some(&body), "");
     }
 
+    pub fn answer(&mut self, session: Id, question: &str, answer: &str) {
+        let body =
+            foreman_core::Answer { question: question.to_string(), answer: answer.to_string() };
+        self.act(Method::POST, &format!("/api/sessions/{session}/answer"), Some(&body), "");
+    }
+
     pub fn interrupt(&mut self, session: Id) {
         self.act::<()>(
             Method::POST,

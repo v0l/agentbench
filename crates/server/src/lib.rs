@@ -6,6 +6,7 @@ pub mod local;
 pub mod projects;
 pub mod runner;
 pub mod store;
+pub mod tools;
 
 use agent::{Agent, JsonCommand};
 use serde::Deserialize;
@@ -24,11 +25,21 @@ pub struct Config {
     pub codex: Option<PathBuf>,
     #[serde(default)]
     pub web: Option<PathBuf>,
+    #[serde(default)]
+    pub model: agent::native::Model,
     #[serde(default, rename = "agent")]
     pub agents: Vec<JsonCommand>,
 }
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7420";
+
+pub fn local_url(listen: SocketAddr) -> String {
+    match listen {
+        SocketAddr::V4(a) if a.ip().is_unspecified() => format!("http://127.0.0.1:{}", a.port()),
+        SocketAddr::V6(a) if a.ip().is_unspecified() => format!("http://[::1]:{}", a.port()),
+        a => format!("http://{a}"),
+    }
+}
 
 pub fn home() -> PathBuf {
     std::env::var_os("FOREMAN_HOME")
@@ -47,6 +58,7 @@ impl Config {
 
     pub fn agents(&self) -> Vec<Box<dyn Agent>> {
         let mut all: Vec<Box<dyn Agent>> = vec![
+            Box::new(agent::Native::new(self.model.clone())),
             Box::new(agent::Pi::new(self.pi.clone().unwrap_or_else(|| "pi".into()))),
             Box::new(agent::Claude::new(self.claude.clone().unwrap_or_else(|| "claude".into()))),
             Box::new(agent::Codex::new(self.codex.clone().unwrap_or_else(|| "codex".into()))),
@@ -91,7 +103,10 @@ pub async fn serve_with(
         tracing::info!("{stale} sessions were running when foreman last stopped");
     }
     let token = token(&store).map_err(|e| e.0)?;
-    let api = api::Api { runner: runner::Runner::new(store, agents), token };
+    let runner = runner::Runner::new(store, agents);
+    *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
+        runner::Base { url: local_url(listen), token: token.clone() };
+    let api = api::Api { runner, token };
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     let listener =
         tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;
@@ -131,9 +146,7 @@ mod tests {
         assert_eq!(c.listen, Some("0.0.0.0:9000".parse().unwrap()));
         let agents = c.agents();
         let names: Vec<_> = agents.iter().map(|a| a.name()).collect();
-        assert_eq!(names, ["pi", "claude", "aider", "codex"]);
-        assert_eq!(agents[0].program(), Path::new("/opt/pi"));
-        assert_eq!(agents[3].program(), Path::new("/usr/local/bin/my-codex"));
+        assert_eq!(names, ["foreman", "pi", "claude", "aider", "codex"]);
     }
 
     #[test]

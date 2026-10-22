@@ -85,8 +85,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                 println!(
                     "{:<10} {:<14} {}",
                     info.name,
-                    if info.available { "installed" } else { "not installed" },
-                    a.program().display()
+                    if info.available { "ready" } else { "not ready" },
+                    a.about()
                 );
             }
             Ok(())

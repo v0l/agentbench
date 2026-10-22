@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use foreman_core::{
-    ApiError, Id, IssuePatch, IssueState, NewComment, NewIssue, NewProject, NewSession,
+    Answer, ApiError, Id, IssuePatch, IssueState, NewComment, NewIssue, NewProject, NewSession,
     NewWorktree, Overview, Place, SendMessage, branch_slug, issue_prompt,
 };
 use serde::Deserialize;
@@ -82,6 +82,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/sessions/{id}", get(session).delete(delete_session))
         .route("/api/sessions/{id}/messages", get(messages).post(send))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
+        .route("/api/sessions/{id}/answer", post(answer))
         .layer(middleware::from_fn_with_state(api.clone(), auth));
     Router::new()
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
@@ -290,7 +291,7 @@ async fn spawn(api: &Api, new: NewSession) -> Result<foreman_core::Session, Fail
     let agent =
         api.runner.agent(&new.agent).ok_or_else(|| bad(format!("no agent named {}", new.agent)))?;
     if !agent.available() {
-        return Err(bad(format!("{} is not installed on this machine", agent.program().display())));
+        return Err(bad(format!("{} is not ready: {}", agent.label(), agent.about())));
     }
     let project = store.project(new.project_id)?;
     let issue = new.issue_id.map(|id| store.issue(id)).transpose()?;
@@ -402,6 +403,21 @@ async fn send(
         return Err(bad(format!("{} no longer exists", session.cwd)));
     }
     api.runner.send(&session, &msg.text).map_err(|e| Failure(StatusCode::CONFLICT, e.0))?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn answer(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+    Json(a): Json<Answer>,
+) -> Result<StatusCode, Failure> {
+    api.runner.store().session(id)?;
+    if a.answer.trim().is_empty() {
+        return Err(bad("an answer is needed"));
+    }
+    api.runner
+        .answer(id, &a.question, a.answer.trim())
+        .map_err(|e| Failure(StatusCode::CONFLICT, e.0))?;
     Ok(StatusCode::ACCEPTED)
 }
 

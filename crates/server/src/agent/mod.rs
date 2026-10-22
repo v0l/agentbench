@@ -1,29 +1,44 @@
 mod claude;
 mod codex;
 mod command;
+pub mod native;
 mod pi;
+mod process;
 
 pub use claude::Claude;
 pub use codex::Codex;
 pub use command::JsonCommand;
+pub use native::Native;
 pub use pi::Pi;
+pub use process::{Cli, Launch};
 
-use foreman_core::{AgentInfo, Usage};
+use foreman_core::{AgentInfo, Entry, Id, Question, Usage};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Debug)]
+pub struct Context {
+    pub session: Id,
+    pub project_id: Id,
+    pub project: String,
+    pub project_path: String,
+    pub branch: Option<String>,
+    pub issue: Option<Id>,
+    pub api_url: String,
+    pub token: String,
+}
 
 pub struct Turn<'a> {
     pub prompt: &'a str,
     pub cwd: &'a Path,
     pub model: Option<&'a str>,
     pub resume: Option<&'a str>,
-}
-
-pub struct Launch {
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    pub stdin: Option<String>,
-    pub env: Vec<(String, String)>,
+    pub history: &'a [Entry],
+    pub context: &'a Context,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -33,6 +48,7 @@ pub enum Event {
     Thinking { text: String },
     ToolStart { call_id: String, name: String, input: Value },
     ToolEnd { call_id: String, name: String, output: String, error: bool },
+    Steered { text: String },
     Usage(Usage),
     Notice(String),
     Error(String),
@@ -43,17 +59,28 @@ pub trait Decoder: Send {
     fn line(&mut self, line: &str) -> Vec<Event>;
 }
 
+pub trait Io: Send + Sync {
+    fn emit(&self, event: Event);
+    fn stopped(&self) -> bool;
+    fn steer(&self) -> Option<String>;
+    fn ask(&self, question: Question) -> Result<String, String>;
+    fn api(&self) -> &dyn Api;
+}
+
+pub trait Api: Send + Sync {
+    fn call(&self, tool: &str, args: &Value, session: Id) -> Result<Value, String>;
+}
+
 pub trait Agent: Send + Sync {
     fn name(&self) -> &str;
     fn label(&self) -> &str;
-    fn program(&self) -> &Path;
+    fn available(&self) -> bool;
+    fn about(&self) -> String;
     fn resumable(&self) -> bool;
-    fn launch(&self, turn: &Turn) -> Launch;
-    fn decoder(&self) -> Box<dyn Decoder>;
-
-    fn available(&self) -> bool {
-        resolve(self.program()).is_some()
+    fn steerable(&self) -> bool {
+        false
     }
+    fn run(&self, turn: &Turn, io: &dyn Io) -> Result<(), String>;
 
     fn info(&self) -> AgentInfo {
         AgentInfo {
@@ -104,12 +131,131 @@ pub fn content_text(content: &Value) -> String {
     }
 }
 
+pub fn brief(c: &Context) -> String {
+    let mut out = format!(
+        "You are running inside foreman, a harness that runs coding agents in git worktrees and keeps an issue tracker beside them. \
+         This is session {} in the project {} ({}).",
+        c.session, c.project, c.project_path
+    );
+    if let Some(b) = &c.branch {
+        out.push_str(&format!(" You are working on the branch {b}."));
+    }
+    if let Some(i) = c.issue {
+        out.push_str(&format!(" You were started on issue #{i}."));
+    }
+    out.push_str(&format!(
+        "\n\nThe foreman REST API is at {url} and needs the header `Authorization: Bearer $FOREMAN_TOKEN` \
+         (also in the environment as FOREMAN_URL, FOREMAN_TOKEN, FOREMAN_SESSION and FOREMAN_PROJECT). \
+         Use it to keep the tracker true:\n\
+         - GET {url}/api/issues lists issues; filter by project_id {pid}.\n\
+         - POST {url}/api/issues with {{\"project_id\": {pid}, \"title\", \"body\"}} files one when you find work that is out of scope.\n\
+         - PATCH {url}/api/issues/ID with {{\"state\": \"review\"}} when you finish one, or \"done\" when it is merged.\n\
+         - POST {url}/api/issues/ID/comments with {{\"body\"}} to leave a note for the user.\n\
+         Other agents may be working in other worktrees of this project. Stay in your own worktree. \
+         When you need another worktree, create it with git worktree add beside the main checkout and foreman will pick it up.",
+        url = c.api_url.trim_end_matches('/'),
+        pid = c.project_id,
+    ));
+    out
+}
+
+impl Context {
+    pub fn env(&self) -> Vec<(String, String)> {
+        let mut env = vec![
+            ("FOREMAN_URL".to_string(), self.api_url.clone()),
+            ("FOREMAN_TOKEN".to_string(), self.token.clone()),
+            ("FOREMAN_SESSION".to_string(), self.session.to_string()),
+            ("FOREMAN_PROJECT".to_string(), self.project_id.to_string()),
+        ];
+        if let Some(i) = self.issue {
+            env.push(("FOREMAN_ISSUE".to_string(), i.to_string()));
+        }
+        env
+    }
+}
+
 pub fn defaults() -> Vec<Box<dyn Agent>> {
-    vec![Box::new(Pi::new("pi")), Box::new(Claude::new("claude")), Box::new(Codex::new("codex"))]
+    vec![
+        Box::new(Native::default()),
+        Box::new(Pi::new("pi")),
+        Box::new(Claude::new("claude")),
+        Box::new(Codex::new("codex")),
+    ]
 }
 
 #[cfg(test)]
-pub fn decode_all(agent: &dyn Agent, lines: &[&str]) -> Vec<Event> {
+pub struct TestIo {
+    pub events: Mutex<Vec<Event>>,
+    pub stop: AtomicBool,
+    pub inbox: Mutex<Vec<String>>,
+    pub answers: Mutex<Vec<String>>,
+    pub api: Arc<dyn Api>,
+}
+
+#[cfg(test)]
+impl TestIo {
+    pub fn new(api: Arc<dyn Api>) -> TestIo {
+        TestIo {
+            events: Mutex::new(Vec::new()),
+            stop: AtomicBool::new(false),
+            inbox: Mutex::new(Vec::new()),
+            answers: Mutex::new(Vec::new()),
+            api,
+        }
+    }
+
+    pub fn events(&self) -> Vec<Event> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+impl Io for TestIo {
+    fn emit(&self, event: Event) {
+        self.events.lock().unwrap().push(event);
+    }
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+    fn steer(&self) -> Option<String> {
+        let mut inbox = self.inbox.lock().unwrap();
+        (!inbox.is_empty()).then(|| inbox.remove(0))
+    }
+    fn ask(&self, _question: Question) -> Result<String, String> {
+        let mut a = self.answers.lock().unwrap();
+        if a.is_empty() { Err("no answer".into()) } else { Ok(a.remove(0)) }
+    }
+    fn api(&self) -> &dyn Api {
+        self.api.as_ref()
+    }
+}
+
+#[cfg(test)]
+pub struct NoApi;
+
+#[cfg(test)]
+impl Api for NoApi {
+    fn call(&self, tool: &str, _args: &Value, _session: Id) -> Result<Value, String> {
+        Err(format!("no api for {tool}"))
+    }
+}
+
+#[cfg(test)]
+pub fn context() -> Context {
+    Context {
+        session: 1,
+        project_id: 4,
+        project: "demo".into(),
+        project_path: "/tmp/demo".into(),
+        branch: Some("main".into()),
+        issue: None,
+        api_url: "http://127.0.0.1:7420".into(),
+        token: "t".into(),
+    }
+}
+
+#[cfg(test)]
+pub fn decode_all(agent: &dyn Cli, lines: &[&str]) -> Vec<Event> {
     let mut d = agent.decoder();
     lines.iter().flat_map(|l| d.line(l)).collect()
 }
@@ -151,5 +297,15 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), agents.len());
+    }
+
+    #[test]
+    fn the_brief_names_the_session_and_the_api() {
+        let b = brief(&context());
+        assert!(b.contains("inside foreman"));
+        assert!(b.contains("session 1 in the project demo"));
+        assert!(b.contains("http://127.0.0.1:7420/api/issues"));
+        assert!(b.contains("branch main"));
+        assert!(b.contains("\"project_id\": 4"));
     }
 }

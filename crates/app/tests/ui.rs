@@ -51,6 +51,10 @@ fn worktree(main: &Path, branch: &str) {
 }
 
 fn rig() -> Rig {
+    rig_with(Vec::new())
+}
+
+fn rig_with(extra: Vec<Box<dyn foreman_server::agent::Agent>>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("demo");
     repo(&main);
@@ -115,7 +119,9 @@ fn rig() -> Rig {
     drop(listener);
     let s = store.clone();
     rt.spawn(async move {
-        foreman_server::serve(s, vec![Box::new(echo)], addr, std::future::pending()).await.unwrap();
+        let mut agents: Vec<Box<dyn foreman_server::agent::Agent>> = vec![Box::new(echo)];
+        agents.extend(extra);
+        foreman_server::serve(s, agents, addr, std::future::pending()).await.unwrap();
     });
     std::thread::sleep(Duration::from_millis(200));
     Rig { url: addr.to_string(), store, _dir: dir, _rt: rt }
@@ -278,4 +284,90 @@ fn a_saved_remote_choice_is_kept() {
         App::with_local(&cc.egui_ctx, Some(&storage), None, Some(local))
     });
     assert!(!h.state().is_local());
+}
+
+struct Waiter;
+
+impl foreman_server::agent::Agent for Waiter {
+    fn name(&self) -> &str {
+        "waiter"
+    }
+    fn label(&self) -> &str {
+        "Waiter"
+    }
+    fn available(&self) -> bool {
+        true
+    }
+    fn about(&self) -> String {
+        "test".into()
+    }
+    fn resumable(&self) -> bool {
+        false
+    }
+    fn run(
+        &self,
+        _turn: &foreman_server::agent::Turn,
+        io: &dyn foreman_server::agent::Io,
+    ) -> Result<(), String> {
+        let q = foreman_core::Question {
+            text: "which licence?".into(),
+            options: vec!["MIT".into(), "Apache-2.0".into()],
+        };
+        let a = io.ask(q)?;
+        io.emit(foreman_server::agent::Event::Text { delta: format!("going with {a}") });
+        Ok(())
+    }
+}
+
+#[test]
+fn a_question_is_answered_by_clicking_an_option() {
+    let rig = rig_with(vec![Box::new(Waiter)]);
+    let project = rig.store.projects().unwrap()[0].id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let mut c = foreman::client::Client::new(
+        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    c.add_session(&foreman_core::NewSession {
+        project_id: project,
+        agent: "waiter".into(),
+        prompt: Some("pick".into()),
+        ..Default::default()
+    });
+    let mut sid = None;
+    until(&mut h, "the waiting session", |h| {
+        h.state().overview().is_some_and(|o| {
+            o.sessions
+                .iter()
+                .any(|s| s.agent == "waiter" && s.status == foreman_core::SessionStatus::Waiting)
+        })
+    });
+    let s = h
+        .state()
+        .overview()
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|s| s.agent == "waiter")
+        .unwrap()
+        .clone();
+    sid.get_or_insert(s.id);
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the question", |h| h.state().transcript_len(s.id) == 2);
+    shot(&mut h, "question");
+    click(&mut h, 451.0, 242.0);
+    until(&mut h, "the reply", |h| h.state().transcript_len(s.id) >= 3);
+    let msgs = rig.store.messages(s.id, 0).unwrap();
+    assert!(
+        msgs.iter().any(
+            |m| matches!(&m.entry, Entry::Question { answer: Some(a), .. } if a == "Apache-2.0")
+        ),
+        "{msgs:?}"
+    );
+    assert_eq!(
+        msgs.last().unwrap().entry,
+        Entry::Assistant { text: "going with Apache-2.0".into() }
+    );
+    shot(&mut h, "answered");
 }

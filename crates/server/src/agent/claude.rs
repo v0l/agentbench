@@ -1,4 +1,4 @@
-use super::{Agent, Decoder, Event, Launch, Turn, content_text, parse, str_at, u64_at};
+use super::{Cli, Decoder, Event, Launch, Turn, content_text, parse, str_at, u64_at};
 use foreman_core::Usage;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -14,7 +14,7 @@ impl Claude {
     }
 }
 
-impl Agent for Claude {
+impl Cli for Claude {
     fn name(&self) -> &str {
         "claude"
     }
@@ -31,7 +31,7 @@ impl Agent for Claude {
         true
     }
 
-    fn launch(&self, turn: &Turn) -> Launch {
+    fn launch(&self, turn: &Turn, brief: &str) -> Launch {
         let mut args: Vec<String> = [
             "-p",
             "--output-format",
@@ -42,6 +42,7 @@ impl Agent for Claude {
         ]
         .map(String::from)
         .into();
+        args.extend(["--append-system-prompt".to_string(), brief.to_string()]);
         if let Some(model) = turn.model {
             args.extend(["--model".to_string(), model.to_string()]);
         }
@@ -237,17 +238,24 @@ mod tests {
 
     #[test]
     fn launch_resumes_by_session_id() {
-        let l = Claude::new("claude").launch(&Turn {
-            prompt: "hi",
-            cwd: Path::new("/tmp"),
-            model: Some("sonnet"),
-            resume: Some("abc"),
-        });
+        let c = crate::agent::context();
+        let l = Claude::new("claude").launch(
+            &Turn {
+                prompt: "hi",
+                cwd: Path::new("/tmp"),
+                model: Some("sonnet"),
+                resume: Some("abc"),
+                history: &[],
+                context: &c,
+            },
+            "BRIEF",
+        );
         assert!(l.args.starts_with(&[
             "-p".to_string(),
             "--output-format".into(),
             "stream-json".into()
         ]));
+        assert!(l.args.windows(2).any(|w| w == ["--append-system-prompt", "BRIEF"]));
         assert!(l.args.ends_with(&[
             "--model".to_string(),
             "sonnet".into(),

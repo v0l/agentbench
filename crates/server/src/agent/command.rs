@@ -1,4 +1,4 @@
-use super::{Agent, Decoder, Event, Launch, Turn, content_text, parse};
+use super::{Cli, Decoder, Event, Launch, Turn, content_text, parse};
 use foreman_core::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -46,7 +46,7 @@ impl JsonCommand {
     }
 }
 
-impl Agent for JsonCommand {
+impl Cli for JsonCommand {
     fn name(&self) -> &str {
         &self.name
     }
@@ -63,7 +63,7 @@ impl Agent for JsonCommand {
         !self.resume_args.is_empty() && self.session.is_some()
     }
 
-    fn launch(&self, turn: &Turn) -> Launch {
+    fn launch(&self, turn: &Turn, _brief: &str) -> Launch {
         let mut args = fill(&self.args, "{prompt}", turn.prompt);
         if let Some(id) = turn.resume.filter(|_| self.resumable()) {
             args.extend(fill(&self.resume_args, "{session}", id));
@@ -194,15 +194,22 @@ mod tests {
 
     #[test]
     fn the_prompt_goes_on_stdin_unless_an_argument_takes_it() {
-        let turn =
-            Turn { prompt: "do it", cwd: Path::new("/tmp"), model: Some("m"), resume: Some("s9") };
-        let l = spec().launch(&turn);
+        let c = crate::agent::context();
+        let turn = Turn {
+            prompt: "do it",
+            cwd: Path::new("/tmp"),
+            model: Some("m"),
+            resume: Some("s9"),
+            history: &[],
+            context: &c,
+        };
+        let l = spec().launch(&turn, "");
         assert_eq!(l.args, ["--json", "--session", "s9", "--model", "m"]);
         assert_eq!(l.stdin.as_deref(), Some("do it"));
 
         let mut inline = spec();
         inline.args = vec!["--message".into(), "{prompt}".into()];
-        let l = inline.launch(&turn);
+        let l = inline.launch(&turn, "");
         assert_eq!(l.args[..2], ["--message", "do it"]);
         assert_eq!(l.stdin, None);
     }
@@ -212,8 +219,15 @@ mod tests {
         let mut s = spec();
         s.session = None;
         assert!(!s.resumable());
-        let l =
-            s.launch(&Turn { prompt: "x", cwd: Path::new("/"), model: None, resume: Some("s9") });
-        assert_eq!(l.args, ["--json"]);
+        let c = crate::agent::context();
+        let turn = Turn {
+            prompt: "x",
+            cwd: Path::new("/"),
+            model: None,
+            resume: Some("s9"),
+            history: &[],
+            context: &c,
+        };
+        assert_eq!(s.launch(&turn, "").args, ["--json"]);
     }
 }

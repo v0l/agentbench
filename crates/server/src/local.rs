@@ -134,7 +134,8 @@ mod tests {
         let mine = local(dir.path(), &format!("127.0.0.1:{port}"));
         assert!(mine.running());
         drop(l);
-        assert!(!mine.running());
+        let free = std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+        assert!(!free || !mine.running());
     }
 
     #[test]

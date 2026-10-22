@@ -1,4 +1,4 @@
-use super::{Agent, Decoder, Event, Launch, Turn, parse, str_at, u64_at};
+use super::{Cli, Decoder, Event, Launch, Turn, parse, str_at, u64_at};
 use foreman_core::Usage;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ impl Codex {
     }
 }
 
-impl Agent for Codex {
+impl Cli for Codex {
     fn name(&self) -> &str {
         "codex"
     }
@@ -30,7 +30,7 @@ impl Agent for Codex {
         true
     }
 
-    fn launch(&self, turn: &Turn) -> Launch {
+    fn launch(&self, turn: &Turn, brief: &str) -> Launch {
         let mut args = vec!["exec".to_string()];
         if let Some(id) = turn.resume {
             args.extend(["resume".to_string(), id.to_string()]);
@@ -40,12 +40,11 @@ impl Agent for Codex {
             args.extend(["--model".to_string(), model.to_string()]);
         }
         args.push("-".to_string());
-        Launch {
-            program: self.program.clone(),
-            args,
-            stdin: Some(turn.prompt.to_string()),
-            env: vec![],
-        }
+        let stdin = match turn.resume {
+            Some(_) => turn.prompt.to_string(),
+            None => format!("{brief}\n\n---\n\n{}", turn.prompt),
+        };
+        Launch { program: self.program.clone(), args, stdin: Some(stdin), env: vec![] }
     }
 
     fn decoder(&self) -> Box<dyn Decoder> {
@@ -269,14 +268,21 @@ mod tests {
     }
 
     #[test]
-    fn launch_resumes_a_thread() {
-        let l = Codex::new("codex").launch(&Turn {
+    fn launch_resumes_a_thread_and_briefs_only_a_new_one() {
+        let c = crate::agent::context();
+        let turn = |resume| Turn {
             prompt: "hi",
             cwd: Path::new("/tmp"),
             model: None,
-            resume: Some("th-1"),
-        });
+            resume,
+            history: &[],
+            context: &c,
+        };
+        let l = Codex::new("codex").launch(&turn(Some("th-1")), "BRIEF");
         assert_eq!(l.args[..3], ["exec", "resume", "th-1"]);
         assert_eq!(l.args.last().map(String::as_str), Some("-"));
+        assert_eq!(l.stdin.as_deref(), Some("hi"));
+        let fresh = Codex::new("codex").launch(&turn(None), "BRIEF");
+        assert!(fresh.stdin.unwrap().starts_with("BRIEF\n"));
     }
 }

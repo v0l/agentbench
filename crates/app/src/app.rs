@@ -5,7 +5,7 @@ use egui_bench::markdown;
 use egui_bench::prelude::*;
 use foreman_core::{
     Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue, NewProject,
-    NewSession, NewWorktree, Overview, Place, Session, SessionStatus, Worktree,
+    NewSession, NewWorktree, Overview, Place, Question, Session, SessionStatus, Worktree,
 };
 use std::collections::{HashMap, HashSet};
 use web_time::{Duration, Instant};
@@ -17,8 +17,16 @@ const TREE_X: f32 = 5.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Chat,
     Issues,
-    Session,
+}
+
+#[derive(Clone, PartialEq)]
+struct Fresh {
+    project: Id,
+    worktree: Option<Id>,
+    agent: String,
+    model: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,6 +105,8 @@ pub struct App {
     offline: Option<(String, Instant)>,
     notice: Option<(bool, String)>,
     tab: Tab,
+    fresh: Option<Fresh>,
+    answers: HashMap<String, String>,
     filter: Filter,
     project: Option<Id>,
     session: Option<Id>,
@@ -113,6 +123,7 @@ pub struct App {
     confirm: Option<Confirm>,
     markdown: markdown::Cache,
     follow: bool,
+    fresh_at: i64,
 }
 
 impl App {
@@ -146,7 +157,9 @@ impl App {
             watching: false,
             offline: None,
             notice: None,
-            tab: Tab::Issues,
+            tab: Tab::Chat,
+            fresh: None,
+            answers: HashMap::new(),
             filter: Filter::Open,
             project: None,
             session: None,
@@ -163,6 +176,7 @@ impl App {
             confirm: None,
             markdown: markdown::Cache::default(),
             follow: true,
+            fresh_at: 0,
         };
         if !app.remote {
             app.start_local(ctx);
@@ -244,6 +258,10 @@ impl App {
         out
     }
 
+    pub fn last_error(&self) -> Option<String> {
+        self.notice.as_ref().filter(|(ok, _)| !ok).map(|(_, t)| t.clone())
+    }
+
     pub fn transcript_len(&self, session: Id) -> usize {
         self.transcripts.get(&session).map_or(0, |t| t.messages.len())
     }
@@ -271,8 +289,22 @@ impl App {
                 }
                 if self.session.is_some_and(|s| !o.sessions.iter().any(|x| x.id == s)) {
                     self.session = None;
-                    if self.tab == Tab::Session {
-                        self.tab = Tab::Issues;
+                }
+                if let Some(f) = self.fresh.take() {
+                    let sid = o
+                        .sessions
+                        .iter()
+                        .filter(|x| x.project_id == f.project && x.agent == f.agent)
+                        .filter(|x| f.worktree.is_none_or(|w| x.worktree_id == w))
+                        .filter(|x| x.created_at >= self.fresh_at)
+                        .max_by_key(|x| x.created_at)
+                        .map(|x| x.id);
+                    match sid {
+                        Some(id) => {
+                            self.session = Some(id);
+                            self.follow = true;
+                        }
+                        None => self.fresh = Some(f),
                     }
                 }
                 self.overview = Some(o);
@@ -389,25 +421,26 @@ impl App {
                     .filter(|i| Some(i.project_id) == self.project && i.state.is_open())
                     .count()
             });
-            let session = self.current_session().map(|s| s.title.clone());
             let issues_label = format!("issues {open}");
-            let mut opts: Vec<(Tab, &str)> = vec![(Tab::Issues, issues_label.as_str())];
-            if let Some(title) = &session {
-                opts.push((Tab::Session, title.as_str()));
-            }
+            let chat_label = self
+                .current_session()
+                .map(|s| s.title.clone())
+                .unwrap_or_else(|| "new chat".to_string());
+            let opts: Vec<(Tab, &str)> =
+                vec![(Tab::Chat, chat_label.as_str()), (Tab::Issues, issues_label.as_str())];
             let w = (ui.available_width() - 360.0).clamp(200.0, 560.0);
             ui.allocate_ui(Vec2::new(w, 24.0), |ui| tabs(ui, &mut self.tab, &opts));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let ready = self.overview.is_some();
                 if ui
                     .add(
-                        Key::new("start agent")
+                        Key::new("new chat")
                             .solid(READOUT)
                             .enabled(ready && self.project.is_some()),
                     )
                     .clicked()
                 {
-                    self.open_start(None);
+                    self.new_chat(None);
                 }
                 if ui
                     .add(
@@ -438,6 +471,29 @@ impl App {
         });
     }
 
+    fn default_agent(&self) -> String {
+        let Some(o) = &self.overview else {
+            return String::new();
+        };
+        let last = o.sessions.iter().max_by_key(|s| s.updated_at).map(|s| s.agent.clone());
+        last.filter(|a| o.agents.iter().any(|x| &x.name == a && x.available))
+            .or_else(|| o.agents.iter().find(|a| a.available).map(|a| a.name.clone()))
+            .unwrap_or_default()
+    }
+
+    fn new_chat(&mut self, worktree: Option<&Worktree>) {
+        let Some(project) = worktree.map(|w| w.project_id).or(self.project) else {
+            return;
+        };
+        self.project = Some(project);
+        self.session = None;
+        self.tab = Tab::Chat;
+        self.draft.clear();
+        let agent = self.default_agent();
+        self.fresh =
+            Some(Fresh { project, worktree: worktree.map(|w| w.id), agent, model: String::new() });
+    }
+
     fn open_start(&mut self, issue: Option<&Issue>) {
         let Some(o) = &self.overview else {
             return;
@@ -455,7 +511,7 @@ impl App {
             .unwrap_or_default();
         let busy_main = o.sessions.iter().any(|s| {
             s.project_id == project
-                && s.status == SessionStatus::Running
+                && s.status.busy()
                 && o.worktrees.iter().any(|w| w.id == s.worktree_id && w.main)
         });
         self.start = Some(Start {
@@ -528,7 +584,6 @@ impl App {
             let r = head.response.interact(Sense::click());
             if pick || r.clicked() {
                 self.project = Some(p.id);
-                self.tab = Tab::Issues;
             }
             r.context_menu(|ui| {
                 if ui
@@ -572,7 +627,7 @@ impl App {
 
     fn worktree_row(&mut self, ui: &mut Ui, w: &Worktree, last: bool) {
         let sessions: Vec<Session> = self.sessions_of(w.id).into_iter().cloned().collect();
-        let running = sessions.iter().any(|s| s.status == SessionStatus::Running);
+        let running = sessions.iter().any(|s| s.status.busy());
         let tint = if w.missing {
             FAULT
         } else if running {
@@ -608,23 +663,24 @@ impl App {
         let elbow = row.center().y;
         p.vline(x, top..=if last { elbow } else { bottom + ui.spacing().item_spacing.y }, stroke);
         p.hline(x..=row.left() + TREE_INDENT - 4.0, elbow, stroke);
-        if resp.clicked() {
-            self.project = Some(w.project_id);
+        if resp.clicked() && !w.missing {
+            self.new_chat(Some(w));
         }
         resp.on_hover_text(&w.path).context_menu(|ui| {
             if ui
                 .add(
-                    Key::new("start agent here")
-                        .outline(READOUT)
-                        .min_width(170.0)
-                        .enabled(!w.missing),
+                    Key::new("new chat here").outline(READOUT).min_width(170.0).enabled(!w.missing),
                 )
                 .clicked()
+            {
+                self.new_chat(Some(w));
+                ui.close();
+            }
+            if ui.add(Key::new("start in a new worktree").outline(VALUE).min_width(170.0)).clicked()
             {
                 self.open_start(None);
                 if let Some(s) = &mut self.start {
                     s.project = w.project_id;
-                    s.place = if w.main { PlaceChoice::Main } else { PlaceChoice::Existing(w.id) };
                 }
                 ui.close();
             }
@@ -642,6 +698,7 @@ impl App {
         let on = self.session == Some(s.id);
         let (tint, word) = match s.status {
             SessionStatus::Running => (TRACE, "working"),
+            SessionStatus::Waiting => (READOUT, "needs you"),
             SessionStatus::Failed => (FAULT, "failed"),
             SessionStatus::Stopped => (LEGEND, "stopped"),
             SessionStatus::Idle => (OK, "idle"),
@@ -674,8 +731,7 @@ impl App {
             self.open_session(s.id, s.project_id);
         }
         resp.context_menu(|ui| {
-            if s.status == SessionStatus::Running
-                && ui.add(Key::new("stop").outline(FAULT).min_width(150.0)).clicked()
+            if s.status.busy() && ui.add(Key::new("stop").outline(FAULT).min_width(150.0)).clicked()
             {
                 if let Some(c) = &mut self.client {
                     c.interrupt(s.id);
@@ -692,7 +748,8 @@ impl App {
     pub fn open_session(&mut self, sid: Id, project: Id) {
         self.session = Some(sid);
         self.project = Some(project);
-        self.tab = Tab::Session;
+        self.tab = Tab::Chat;
+        self.fresh = None;
         self.follow = true;
         self.draft.clear();
         self.fetch_messages(sid);
@@ -746,7 +803,7 @@ impl App {
     fn issue_card(&mut self, ui: &mut Ui, issue: &Issue, sessions: &[Session]) {
         let mine: Vec<&Session> =
             sessions.iter().filter(|s| s.issue_id == Some(issue.id)).collect();
-        let working = mine.iter().any(|s| s.status == SessionStatus::Running);
+        let working = mine.iter().any(|s| s.status.busy());
         let rail = match issue.state {
             IssueState::Done => Some(OK),
             IssueState::Review => Some(READOUT),
@@ -785,8 +842,8 @@ impl App {
                         }
                     });
                     for s in &mine {
-                        let tint = if s.status == SessionStatus::Running { TRACE } else { LEGEND };
-                        if chip(ui, &s.agent, tint, s.status == SessionStatus::Running)
+                        let tint = if s.status.busy() { TRACE } else { LEGEND };
+                        if chip(ui, &s.agent, tint, s.status.busy())
                             .interact(Sense::click())
                             .clicked()
                         {
@@ -868,19 +925,182 @@ impl App {
         }
     }
 
-    fn session_view(&mut self, ui: &mut Ui) {
-        let Some(s) = self.current_session().cloned() else {
-            note(ui, "Pick a session on the left.", LEGEND);
+    fn chat(&mut self, ui: &mut Ui) {
+        match self.current_session().cloned() {
+            Some(s) => self.session_view(ui, s),
+            None => self.blank_chat(ui),
+        }
+    }
+
+    fn blank_chat(&mut self, ui: &mut Ui) {
+        let Some(o) = self.overview.clone() else {
             return;
         };
+        let Some(project) = self.project.or(o.projects.first().map(|p| p.id)) else {
+            section(ui, "no projects yet", "", |ui| {
+                note(
+                    ui,
+                    "Add a git repository on the left to start chatting with an agent in it.",
+                    LEGEND,
+                );
+            });
+            return;
+        };
+        let fresh = self.fresh.get_or_insert_with(|| Fresh {
+            project,
+            worktree: None,
+            agent: String::new(),
+            model: String::new(),
+        });
+        if fresh.project != project {
+            *fresh = Fresh { project, worktree: None, agent: String::new(), model: String::new() };
+        }
+        if fresh.agent.is_empty() {
+            fresh.agent = {
+                let last = o.sessions.iter().max_by_key(|s| s.updated_at).map(|s| s.agent.clone());
+                last.filter(|a| o.agents.iter().any(|x| &x.name == a && x.available))
+                    .or_else(|| o.agents.iter().find(|a| a.available).map(|a| a.name.clone()))
+                    .unwrap_or_default()
+            };
+        }
+        let trees: Vec<Worktree> =
+            o.worktrees.iter().filter(|w| w.project_id == project && !w.missing).cloned().collect();
+        let name =
+            o.projects.iter().find(|p| p.id == project).map(|p| p.name.clone()).unwrap_or_default();
+        let here = fresh
+            .worktree
+            .and_then(|id| trees.iter().find(|w| w.id == id))
+            .or_else(|| trees.iter().find(|w| w.main))
+            .map(|w| w.label())
+            .unwrap_or_default();
+        ui.add_space(ui.available_height() * 0.18);
+        ui.vertical_centered(|ui| {
+            ui.set_max_width(640.0);
+            ui.label(
+                egui::RichText::new(format!("{name} on {here}").to_uppercase())
+                    .font(legend_font(15.0))
+                    .color(VALUE)
+                    .extra_letter_spacing(2.0),
+            );
+            ui.add_space(4.0);
+            hint(
+                ui,
+                "Ask anything. The agent works in this worktree and can read and file issues.",
+            );
+            ui.add_space(14.0);
+            let fresh = self.fresh.as_mut().expect("fresh chat");
+            ui.horizontal(|ui| {
+                ui.allocate_ui(Vec2::new(180.0, KEY_H), |ui| {
+                    choice(
+                        ui,
+                        "fresh-agent",
+                        &mut fresh.agent,
+                        o.agents.iter().map(|a| {
+                            let label = if a.available {
+                                a.label.clone()
+                            } else {
+                                format!("{} (not ready)", a.label)
+                            };
+                            (a.name.clone(), label)
+                        }),
+                    );
+                });
+                let mut opts: Vec<(Option<Id>, String)> = Vec::new();
+                for w in &trees {
+                    let label = if w.main { format!("{} (main)", w.label()) } else { w.label() };
+                    opts.push((if w.main { None } else { Some(w.id) }, label));
+                }
+                ui.allocate_ui(Vec2::new(200.0, KEY_H), |ui| {
+                    choice(ui, "fresh-tree", &mut fresh.worktree, opts);
+                });
+                field_then(ui, &mut fresh.model, "model, default if empty", 0.0, |_| {});
+            });
+        });
+        ui.add_space(10.0);
+        let agent_ready = o
+            .agents
+            .iter()
+            .any(|a| self.fresh.as_ref().is_some_and(|f| f.agent == a.name) && a.available);
+        let sent = self.composer(
+            ui,
+            agent_ready,
+            false,
+            if agent_ready { "what should it do" } else { "that agent is not ready on the server" },
+        );
+        if let (Some(text), Some(f)) = (sent, self.fresh.clone()) {
+            let place = match f.worktree {
+                None => Place::Main,
+                Some(id) => Place::Existing { worktree_id: id },
+            };
+            let new = NewSession {
+                project_id: f.project,
+                agent: f.agent.clone(),
+                place,
+                title: None,
+                model: Some(f.model.trim().to_string()).filter(|m| !m.is_empty()),
+                issue_id: None,
+                prompt: Some(text),
+            };
+            if let Some(c) = &mut self.client {
+                c.add_session(&new);
+            }
+            self.fresh_at = now_ms() - 5_000;
+        }
+    }
+
+    fn composer(
+        &mut self,
+        ui: &mut Ui,
+        ready: bool,
+        busy: bool,
+        hint_text: &str,
+    ) -> Option<String> {
+        let edit = prose(ui, &mut self.draft, hint_text, 3);
+        let enter = edit.has_focus()
+            && ui.input(|i| {
+                i.key_pressed(egui::Key::Enter) && (i.modifiers.command || !i.modifiers.shift)
+            });
+        if enter && self.draft.ends_with('\n') && !ui.input(|i| i.modifiers.command) {
+            let trimmed = self.draft.trim_end_matches('\n').to_string();
+            self.draft = trimmed;
+        }
+        let mut out = None;
+        ui.horizontal(|ui| {
+            hint(
+                ui,
+                if busy {
+                    "enter steers the agent, shift+enter for a new line"
+                } else {
+                    "enter sends, shift+enter for a new line"
+                },
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let can = ready && !self.draft.trim().is_empty();
+                let label = if busy { "steer" } else { "send" };
+                if (ui.add(Key::new(label).solid(READOUT).enabled(can).min_width(100.0)).clicked()
+                    || (enter && can))
+                    && can
+                {
+                    out = Some(self.draft.trim().to_string());
+                    self.draft.clear();
+                    self.follow = true;
+                }
+            });
+        });
+        out
+    }
+
+    fn session_view(&mut self, ui: &mut Ui, s: Session) {
         let tree = self.worktree(s.worktree_id).cloned();
         ui.horizontal(|ui| {
             let (tint, word) = match s.status {
                 SessionStatus::Running => (TRACE, "working"),
+                SessionStatus::Waiting => (READOUT, "needs you"),
                 SessionStatus::Failed => (FAULT, "failed"),
                 SessionStatus::Stopped => (LEGEND, "stopped"),
                 SessionStatus::Idle => (OK, "idle"),
             };
+            let _ = tint;
             lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
             ui.add_space(6.0);
             let mut line = Line::new().legend("agent").gap(6.0).value(&s.agent).size(11.0);
@@ -890,10 +1110,18 @@ impl App {
             if let Some(w) = &tree {
                 line = line.gap(14.0).legend("worktree").gap(6.0).value(w.label()).size(11.0);
             }
+            if let Some(i) = s.issue_id {
+                line = line.gap(14.0).legend("issue").gap(6.0).value(format!("#{i}")).size(11.0);
+            }
             line.show(ui);
-            let _ = tint;
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                Line::new()
+                if s.status.busy()
+                    && ui.add(Key::new("stop").outline(FAULT)).clicked()
+                    && let Some(c) = &mut self.client
+                {
+                    c.interrupt(s.id);
+                }
+                let mut usage = Line::new()
                     .measured(format!(
                         "{} in",
                         tokens(s.usage.input_tokens + s.usage.cache_read_tokens)
@@ -901,20 +1129,16 @@ impl App {
                     .size(11.0)
                     .gap(8.0)
                     .measured(format!("{} out", tokens(s.usage.output_tokens)))
-                    .size(11.0)
-                    .gap(8.0)
-                    .measured(if s.usage.cost_usd > 0.0 {
-                        format!("${:.2}", s.usage.cost_usd)
-                    } else {
-                        String::new()
-                    })
-                    .size(11.0)
-                    .show(ui);
+                    .size(11.0);
+                if s.usage.cost_usd > 0.0 {
+                    usage = usage.gap(8.0).measured(format!("${:.2}", s.usage.cost_usd)).size(11.0);
+                }
+                usage.show(ui);
             });
         });
         ui.add_space(6.0);
 
-        let input_h = 96.0;
+        let input_h = 100.0;
         let avail = ui.available_height() - input_h;
         let t = self.transcripts.entry(s.id).or_default();
         let messages = t.messages.clone();
@@ -928,8 +1152,11 @@ impl App {
                     hint(ui, "no messages yet");
                 }
                 for m in &messages {
-                    self.entry(ui, m);
+                    self.entry(ui, m, s.id);
                     ui.add_space(6.0);
+                }
+                if s.status == SessionStatus::Running {
+                    hint(ui, "working");
                 }
             });
         let at_bottom =
@@ -937,43 +1164,66 @@ impl App {
         self.follow = at_bottom;
 
         ui.add_space(6.0);
-        let running = s.status == SessionStatus::Running;
         let missing = tree.as_ref().is_some_and(|w| w.missing);
         let hint_text = if missing {
             "this worktree is gone, the session can only be read"
-        } else if running {
-            "the agent is working"
+        } else if s.status == SessionStatus::Waiting {
+            "answer the question above, or say something else"
+        } else if s.status.busy() {
+            "steer the agent while it works"
         } else {
             "tell the agent what to do next"
         };
-        let edit = prose(ui, &mut self.draft, hint_text, 3);
-        let enter = edit.has_focus()
-            && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
-        ui.horizontal(|ui| {
-            hint(ui, "ctrl+enter sends");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let can_send = !running && !missing && !self.draft.trim().is_empty();
-                if (ui
-                    .add(Key::new("send").solid(READOUT).enabled(can_send).min_width(100.0))
-                    .clicked()
-                    || (enter && can_send))
-                    && let Some(c) = &mut self.client
-                {
-                    c.send_message(s.id, self.draft.trim());
-                    self.draft.clear();
-                    self.follow = true;
-                }
-                if running
-                    && ui.add(Key::new("stop").outline(FAULT).min_width(100.0)).clicked()
-                    && let Some(c) = &mut self.client
-                {
-                    c.interrupt(s.id);
-                }
-            });
-        });
+        if let Some(text) = self.composer(ui, !missing, s.status.busy(), hint_text)
+            && let Some(c) = &mut self.client
+        {
+            c.send_message(s.id, &text);
+        }
     }
 
-    fn entry(&mut self, ui: &mut Ui, m: &Message) {
+    fn question(&mut self, ui: &mut Ui, session: Id, id: &str, q: &Question, answer: Option<&str>) {
+        let rail = if answer.is_some() { ETCH } else { READOUT };
+        card(
+            ui,
+            Some(rail),
+            |ui| {
+                Line::new().legend("question").show(ui);
+            },
+            |ui| {
+                markdown::show(ui, &mut self.markdown, &q.text, id.len() * 7919 + session as usize);
+                if let Some(a) = answer {
+                    Line::new().legend("you said").gap(8.0).set(a).size(12.0).wrapped(ui);
+                    return;
+                }
+                let mut picked = None;
+                ui.horizontal_wrapped(|ui| {
+                    for (i, o) in q.options.iter().enumerate() {
+                        if ui.add(Key::new(o).outline(READOUT).id_salt((id, i))).clicked() {
+                            picked = Some(o.clone());
+                        }
+                    }
+                });
+                let typed = self.answers.entry(id.to_string()).or_default();
+                let mut send = false;
+                let ready = !typed.trim().is_empty();
+                let r = field_then(ui, typed, "or type an answer", 90.0, |ui| {
+                    send = ui.add(Key::new("answer").solid(READOUT).enabled(ready)).clicked();
+                });
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && ready {
+                    send = true;
+                }
+                if send {
+                    picked = Some(typed.trim().to_string());
+                }
+                if let (Some(a), Some(c)) = (picked, &mut self.client) {
+                    c.answer(session, id, &a);
+                    self.answers.remove(id);
+                }
+            },
+        );
+    }
+
+    fn entry(&mut self, ui: &mut Ui, m: &Message, session: Id) {
         match &m.entry {
             Entry::User { text } => {
                 card(
@@ -1041,6 +1291,9 @@ impl App {
                         }
                     },
                 );
+            }
+            Entry::Question { id, question, answer } => {
+                self.question(ui, session, id, question, answer.as_deref())
             }
             Entry::Error { text } => status(ui, false, text),
             Entry::Notice { text } => note(ui, text, LEGEND),
@@ -1298,7 +1551,7 @@ impl App {
                         PlaceChoice::Existing(id) => w.id == *id,
                         PlaceChoice::New => false,
                     };
-                    here && o.sessions.iter().any(|x| x.worktree_id == w.id && x.status == SessionStatus::Running)
+                    here && o.sessions.iter().any(|x| x.worktree_id == w.id && x.status.busy())
                 });
                 if busy {
                     note(ui, "Another agent is working in this worktree. Two agents in one checkout will trip over each other.", WARN);
@@ -1494,7 +1747,7 @@ impl App {
             ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, ETCH));
             egui::Frame::NONE.inner_margin(Margin::same(10)).show(ui, |ui| match self.tab {
                 Tab::Issues => self.issues(ui),
-                Tab::Session => self.session_view(ui),
+                Tab::Chat => self.chat(ui),
             });
         });
         self.modals(&ctx);
@@ -1504,10 +1757,17 @@ impl App {
                 RETRY.saturating_sub(at.elapsed()) + Duration::from_millis(50),
             );
         }
-        if self.current_session().is_some_and(|s| s.status == SessionStatus::Running) {
+        if self.current_session().is_some_and(|s| s.status.busy()) {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
     }
+}
+
+fn now_ms() -> i64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn short_path(path: &str) -> String {

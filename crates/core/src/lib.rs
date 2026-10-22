@@ -104,6 +104,7 @@ pub struct Comment {
 pub enum SessionStatus {
     Idle,
     Running,
+    Waiting,
     Failed,
     Stopped,
 }
@@ -113,15 +114,22 @@ impl SessionStatus {
         match self {
             SessionStatus::Idle => "idle",
             SessionStatus::Running => "running",
+            SessionStatus::Waiting => "waiting",
             SessionStatus::Failed => "failed",
             SessionStatus::Stopped => "stopped",
         }
     }
 
     pub fn parse(s: &str) -> Option<SessionStatus> {
-        [SessionStatus::Idle, SessionStatus::Running, SessionStatus::Failed, SessionStatus::Stopped]
-            .into_iter()
-            .find(|status| status.as_str() == s)
+        [
+            SessionStatus::Idle,
+            SessionStatus::Running,
+            SessionStatus::Waiting,
+            SessionStatus::Failed,
+            SessionStatus::Stopped,
+        ]
+        .into_iter()
+        .find(|status| status.as_str() == s)
     }
 }
 
@@ -161,10 +169,18 @@ impl Usage {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Question {
+    pub text: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Entry {
     User { text: String },
+    Question { id: String, question: Question, answer: Option<String> },
     Assistant { text: String },
     Thinking { text: String },
     Tool { call_id: String, name: String, input: Value, output: Option<String>, error: bool },
@@ -181,6 +197,7 @@ impl Entry {
             | Entry::Error { text }
             | Entry::Notice { text } => text,
             Entry::Tool { name, .. } => name,
+            Entry::Question { question, .. } => &question.text,
         }
     }
 }
@@ -282,6 +299,18 @@ pub struct NewWorktree {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SendMessage {
     pub text: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Answer {
+    pub question: String,
+    pub answer: String,
+}
+
+impl SessionStatus {
+    pub fn busy(self) -> bool {
+        matches!(self, SessionStatus::Running | SessionStatus::Waiting)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
