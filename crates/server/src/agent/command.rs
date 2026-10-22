@@ -46,6 +46,7 @@ impl JsonCommand {
     }
 }
 
+#[super::async_trait]
 impl Cli for JsonCommand {
     fn name(&self) -> &str {
         &self.name

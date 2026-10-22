@@ -33,6 +33,7 @@ fn codex_models(text: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+#[super::async_trait]
 impl Cli for Codex {
     fn name(&self) -> &str {
         "codex"
@@ -50,8 +51,8 @@ impl Cli for Codex {
         true
     }
 
-    fn models(&self) -> Result<Vec<String>, String> {
-        let text = super::process::listing(&self.program, &["debug", "models"])?;
+    async fn models(&self) -> Result<Vec<String>, String> {
+        let text = super::process::listing(&self.program, &["debug", "models"]).await?;
         codex_models(&text)
     }
 

@@ -8,18 +8,18 @@ mod pi;
 mod process;
 pub mod search;
 
+pub use async_trait::async_trait;
 pub use claude::Claude;
 pub use codex::Codex;
 pub use command::JsonCommand;
 pub use native::Native;
 pub use pi::Pi;
 pub use process::{Cli, Launch};
+pub use tokio_util::sync::CancellationToken;
 
 use foreman_core::{AgentInfo, Entry, Question, SessionId, Usage};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
@@ -62,13 +62,18 @@ pub trait Decoder: Send {
     fn line(&mut self, line: &str) -> Vec<Event>;
 }
 
+#[async_trait]
 pub trait Io: Send + Sync {
     fn emit(&self, event: Event);
-    fn stopped(&self) -> bool;
+    /// Cancelled when the user stops the turn; anything waiting should race it.
+    fn stop(&self) -> &CancellationToken;
+    fn stopped(&self) -> bool {
+        self.stop().is_cancelled()
+    }
     fn steer(&self) -> Option<String>;
-    fn ask(&self, question: Question) -> Result<String, String>;
+    async fn ask(&self, question: Question) -> Result<String, String>;
     /// Put several questions at once; one answer back for each, in order.
-    fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String>;
+    async fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String>;
     fn api(&self) -> &dyn Api;
 }
 
@@ -76,6 +81,7 @@ pub trait Api: Send + Sync {
     fn call(&self, tool: &str, args: &Value, session: SessionId) -> Result<Value, String>;
 }
 
+#[async_trait]
 pub trait Agent: Send + Sync {
     fn name(&self) -> &str;
     fn label(&self) -> &str;
@@ -85,11 +91,11 @@ pub trait Agent: Send + Sync {
     fn steerable(&self) -> bool {
         false
     }
-    fn run(&self, turn: &Turn, io: &dyn Io) -> Result<(), String>;
+    async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String>;
 
     /// The models this agent can be told to use. Empty when it cannot say, and then the
     /// window offers a plain text field instead of a dropdown.
-    fn models(&self) -> Result<Vec<String>, String> {
+    async fn models(&self) -> Result<Vec<String>, String> {
         Ok(Vec::new())
     }
 
@@ -198,7 +204,7 @@ pub fn defaults() -> Vec<Box<dyn Agent>> {
 #[cfg(test)]
 pub struct TestIo {
     pub events: Mutex<Vec<Event>>,
-    pub stop: AtomicBool,
+    pub stop: CancellationToken,
     pub inbox: Mutex<Vec<String>>,
     pub answers: Mutex<Vec<String>>,
     pub api: Arc<dyn Api>,
@@ -209,7 +215,7 @@ impl TestIo {
     pub fn new(api: Arc<dyn Api>) -> TestIo {
         TestIo {
             events: Mutex::new(Vec::new()),
-            stop: AtomicBool::new(false),
+            stop: CancellationToken::new(),
             inbox: Mutex::new(Vec::new()),
             answers: Mutex::new(Vec::new()),
             api,
@@ -222,22 +228,23 @@ impl TestIo {
 }
 
 #[cfg(test)]
+#[async_trait]
 impl Io for TestIo {
     fn emit(&self, event: Event) {
         self.events.lock().unwrap().push(event);
     }
-    fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
+    fn stop(&self) -> &CancellationToken {
+        &self.stop
     }
     fn steer(&self) -> Option<String> {
         let mut inbox = self.inbox.lock().unwrap();
         (!inbox.is_empty()).then(|| inbox.remove(0))
     }
-    fn ask(&self, _question: Question) -> Result<String, String> {
+    async fn ask(&self, _question: Question) -> Result<String, String> {
         let mut a = self.answers.lock().unwrap();
         if a.is_empty() { Err("no answer".into()) } else { Ok(a.remove(0)) }
     }
-    fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String> {
+    async fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String> {
         let mut a = self.answers.lock().unwrap();
         if a.len() < questions.len() {
             return Err("no answer".into());

@@ -14,6 +14,7 @@ impl Claude {
     }
 }
 
+#[super::async_trait]
 impl Cli for Claude {
     fn name(&self) -> &str {
         "claude"
@@ -33,7 +34,7 @@ impl Cli for Claude {
 
     /// Claude Code has no command that lists models, but takes these aliases for the
     /// newest of each family, and any full model name through "custom…".
-    fn models(&self) -> Result<Vec<String>, String> {
+    async fn models(&self) -> Result<Vec<String>, String> {
         Ok(["default", "opus", "sonnet", "haiku", "opusplan"].map(String::from).to_vec())
     }
 

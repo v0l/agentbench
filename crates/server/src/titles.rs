@@ -113,14 +113,14 @@ impl Titles {
         self.config().resolve(&self.main.get())
     }
 
-    /// A title for these messages, or why there is none. Blocks on the network.
-    pub fn title(&self, entries: &[Entry]) -> Result<String, String> {
+    /// A title for these messages, or why there is none.
+    pub async fn title(&self, entries: &[Entry]) -> Result<String, String> {
         let target = self.target().ok_or("no title model")?;
         let transcript = transcript(entries);
         if transcript.is_empty() {
             return Err("nothing said yet".into());
         }
-        let raw = ask(&target, INSTRUCTIONS, &transcript)?;
+        let raw = ask(&target, INSTRUCTIONS, &transcript).await?;
         clean(&raw).ok_or_else(|| format!("the model gave no usable title: {raw:?}"))
     }
 }
@@ -159,14 +159,7 @@ pub fn transcript(entries: &[Entry]) -> String {
     if replied { out.trim_end().to_string() } else { String::new() }
 }
 
-fn ask(target: &Target, system: &str, user: &str) -> Result<String, String> {
-    let http = ureq::Agent::config_builder()
-        .timeout_connect(Some(Duration::from_secs(5)))
-        .timeout_global(Some(PATIENCE))
-        .http_status_as_error(false)
-        .user_agent(format!("foreman/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .new_agent();
+async fn ask(target: &Target, system: &str, user: &str) -> Result<String, String> {
     let body = |thinking_off: bool| {
         let mut body = json!({
             "model": target.model.trim(),
@@ -185,19 +178,22 @@ fn ask(target: &Target, system: &str, user: &str) -> Result<String, String> {
         }
         body
     };
-    let send = |body: Value| -> Result<(u16, String), String> {
-        let mut req = http.post(target.endpoint()).header("content-type", "application/json");
+    let send = async |body: Value| -> Result<(u16, String), String> {
+        let mut req = crate::http::client().post(target.endpoint()).timeout(PATIENCE).json(&body);
         if !target.key.trim().is_empty() {
-            req = req.header("authorization", format!("Bearer {}", target.key.trim()));
+            req = req.bearer_auth(target.key.trim());
         }
-        let resp = req.send(body.to_string()).map_err(|e| format!("{}: {e}", target.url))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("{}: {}", target.url, crate::agent::native::describe(&e)))?;
         let status = resp.status().as_u16();
-        let text = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+        let text = resp.text().await.map_err(|e| e.to_string())?;
         Ok((status, text))
     };
-    let (mut status, mut text) = send(body(true))?;
+    let (mut status, mut text) = send(body(true)).await?;
     if status == 400 {
-        (status, text) = send(body(false))?;
+        (status, text) = send(body(false)).await?;
     }
     if !(200..300).contains(&status) {
         return Err(format!("{status}: {}", clip(&text, 300)));
@@ -391,14 +387,14 @@ mod tests {
         assert!(toml::from_str::<crate::Config>("").unwrap().title_model.enabled);
     }
 
-    #[test]
-    fn a_title_comes_from_the_model() {
+    #[tokio::test]
+    async fn a_title_comes_from_the_model() {
         let (url, seen) = fake_server(vec![(200, completion("\"Fix the login loop.\""))]);
         let titles = Titles::new(
             TitleModel { url, model: "tiny".into(), ..TitleModel::default() },
             model("http://unused/v1", "big", ""),
         );
-        let title = titles.title(&said("fix the login loop", "on it")).unwrap();
+        let title = titles.title(&said("fix the login loop", "on it")).await.unwrap();
         assert_eq!(title, "Fix the login loop");
         let sent = seen.lock().unwrap();
         assert_eq!(sent[0]["model"], "tiny");
@@ -406,8 +402,8 @@ mod tests {
         assert!(sent[0]["messages"][1]["content"].as_str().unwrap().contains("fix the login loop"));
     }
 
-    #[test]
-    fn a_server_that_rejects_the_thinking_switch_is_asked_again_without_it() {
+    #[tokio::test]
+    async fn a_server_that_rejects_the_thinking_switch_is_asked_again_without_it() {
         let (url, seen) = fake_server(vec![
             (400, r#"{"error":"unknown field chat_template_kwargs"}"#.into()),
             (200, completion("Plain answer")),
@@ -416,19 +412,19 @@ mod tests {
             TitleModel { url, model: "tiny".into(), ..TitleModel::default() },
             model("", "", ""),
         );
-        assert_eq!(titles.title(&said("hi", "hello")).unwrap(), "Plain answer");
+        assert_eq!(titles.title(&said("hi", "hello")).await.unwrap(), "Plain answer");
         let sent = seen.lock().unwrap();
         assert!(sent[0].get("chat_template_kwargs").is_some());
         assert!(sent[1].get("chat_template_kwargs").is_none());
     }
 
-    #[test]
-    fn a_failing_server_is_an_error_not_a_title() {
+    #[tokio::test]
+    async fn a_failing_server_is_an_error_not_a_title() {
         let (url, _) = fake_server(vec![(500, "boom".into()), (500, "boom".into())]);
         let titles = Titles::new(
             TitleModel { url, model: "tiny".into(), ..TitleModel::default() },
             model("", "", ""),
         );
-        assert!(titles.title(&said("hi", "hello")).unwrap_err().contains("500"));
+        assert!(titles.title(&said("hi", "hello")).await.unwrap_err().contains("500"));
     }
 }

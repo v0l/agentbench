@@ -1,23 +1,22 @@
-use crate::agent::{Agent, Api, Context, Event, Io, Turn};
+use crate::agent::{Agent, Api, CancellationToken, Context, Event, Io, Turn, async_trait};
 use crate::store::{Store, StoreError};
 use crate::titles::Titles;
 use foreman_core::{Entry, Id, Question, Session, SessionId, SessionStatus};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 
 const TEXT_FLUSH: Duration = Duration::from_millis(250);
 const ANSWER_PATIENCE: Duration = Duration::from_secs(24 * 3600);
 
 /// Questions put to the user, each waiting on the channel its answers arrive on.
-type Waiting = Arc<Mutex<HashMap<String, Sender<Vec<String>>>>>;
+type Waiting = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<String>>>>>;
 
+#[derive(Clone)]
 struct Live {
-    stop: Arc<AtomicBool>,
+    stop: CancellationToken,
     inbox: Arc<Mutex<Vec<String>>>,
     questions: Waiting,
 }
@@ -76,14 +75,14 @@ impl Runner {
             return;
         }
         let (store, changed) = (self.store.clone(), self.changed.clone());
-        std::thread::spawn(move || {
+        tokio::spawn(async move {
             let entries: Vec<Entry> = store
                 .messages(session, 0)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|m| m.entry)
                 .collect();
-            match titles.title(&entries) {
+            match titles.title(&entries).await {
                 Ok(title) => {
                     if matches!(store.set_title(session, &title, force), Ok(true)) {
                         changed.notify_waiters();
@@ -121,7 +120,7 @@ impl Runner {
         let Some(l) = live.get(&session) else {
             return false;
         };
-        l.stop.store(true, Ordering::Relaxed);
+        l.stop.cancel();
         l.questions.lock().unwrap_or_else(|e| e.into_inner()).clear();
         l.inbox.lock().unwrap_or_else(|e| e.into_inner()).clear();
         true
@@ -229,41 +228,31 @@ impl Runner {
             }
         }
         let live = Live {
-            stop: Arc::new(AtomicBool::new(false)),
+            stop: CancellationToken::new(),
             inbox: Arc::new(Mutex::new(Vec::new())),
             questions: Arc::new(Mutex::new(HashMap::new())),
         };
-        let (stop, inbox, questions) =
-            (live.stop.clone(), live.inbox.clone(), live.questions.clone());
-        self.live().insert(session.id, live);
+        self.live().insert(session.id, live.clone());
         let runner = self.clone();
         let session_id = session.id;
         let first = text.to_string();
-        let handle = tokio::runtime::Handle::current();
-        std::thread::spawn(move || {
-            let _guard = handle.enter();
+        tokio::spawn(async move {
+            let Live { stop, inbox, questions } = live;
             let mut next = Some(first);
             // The first prompt is not on screen yet. A steer that missed its step and runs as
             // the next turn was shown when it was sent, if the agent is steerable.
             let mut shown = false;
             while let Some(prompt) = next.take() {
-                if stop.load(Ordering::Relaxed) {
+                if stop.is_cancelled() {
                     break;
                 }
                 let session = match runner.store.session(session_id) {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                let status = runner.turn(
-                    agent.as_ref(),
-                    &session,
-                    &prompt,
-                    shown,
-                    &stop,
-                    &inbox,
-                    &questions,
-                    mode,
-                );
+                let status = runner
+                    .turn(agent.as_ref(), &session, &prompt, shown, &stop, &inbox, &questions, mode)
+                    .await;
                 let _ = runner.store.set_status(session_id, status);
                 runner.changed.notify_waiters();
                 if status == SessionStatus::Idle && mode == Mode::Chat {
@@ -301,13 +290,13 @@ impl Runner {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn turn(
+    async fn turn(
         &self,
         agent: &dyn Agent,
         session: &Session,
         prompt: &str,
         shown: bool,
-        stop: &Arc<AtomicBool>,
+        stop: &CancellationToken,
         inbox: &Arc<Mutex<Vec<String>>>,
         questions: &Waiting,
         mode: Mode,
@@ -366,10 +355,10 @@ impl Runner {
             steerable: agent.steerable(),
             api: self.api.clone(),
         };
-        let result = agent.run(&turn, &sink);
+        let result = agent.run(&turn, &sink).await;
         sink.flush();
         let errored = sink.state.lock().unwrap_or_else(|e| e.into_inner()).errored;
-        if stop.load(Ordering::Relaxed) {
+        if stop.is_cancelled() {
             sink.entry(Entry::Notice { text: "stopped".into() });
             return SessionStatus::Stopped;
         }
@@ -425,7 +414,7 @@ struct Sink {
     session: SessionId,
     changed: Arc<Notify>,
     state: Mutex<SinkState>,
-    stop: Arc<AtomicBool>,
+    stop: CancellationToken,
     inbox: Arc<Mutex<Vec<String>>>,
     questions: Waiting,
     steerable: bool,
@@ -511,33 +500,21 @@ impl Sink {
 }
 
 impl Sink {
-    fn wait(
+    async fn wait(
         &self,
         id: &str,
         open: Entry,
         answered: impl FnOnce(&[String]) -> Entry,
     ) -> Result<Vec<String>, String> {
-        let (tx, rx) = channel();
+        let (tx, rx) = oneshot::channel();
         self.questions.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), tx);
         let msg = self.entry(open);
         let _ = self.store.set_status(self.session, SessionStatus::Waiting);
         self.changed.notify_waiters();
-        let started = Instant::now();
-        let answer = loop {
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(a) => break Ok(a),
-                Err(RecvTimeoutError::Disconnected) => {
-                    break Err("the question was withdrawn".to_string());
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if self.stopped() {
-                        break Err("stopped".to_string());
-                    }
-                    if started.elapsed() > ANSWER_PATIENCE {
-                        break Err("nobody answered in a day".to_string());
-                    }
-                }
-            }
+        let answer = tokio::select! {
+            _ = self.stop.cancelled() => Err("stopped".to_string()),
+            _ = tokio::time::sleep(ANSWER_PATIENCE) => Err("nobody answered in a day".to_string()),
+            a = rx => a.map_err(|_| "the question was withdrawn".to_string()),
         };
         self.questions.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         if let (Some(m), Ok(a)) = (msg, &answer) {
@@ -549,6 +526,7 @@ impl Sink {
     }
 }
 
+#[async_trait]
 impl Io for Sink {
     fn emit(&self, event: Event) {
         match event {
@@ -604,8 +582,8 @@ impl Io for Sink {
         }
     }
 
-    fn stopped(&self) -> bool {
-        self.stop.load(Ordering::Relaxed)
+    fn stop(&self) -> &CancellationToken {
+        &self.stop
     }
 
     fn steer(&self) -> Option<String> {
@@ -616,26 +594,30 @@ impl Io for Sink {
         (!inbox.is_empty()).then(|| inbox.remove(0))
     }
 
-    fn ask(&self, question: Question) -> Result<String, String> {
+    async fn ask(&self, question: Question) -> Result<String, String> {
         let id = uuid::Uuid::new_v4().to_string();
         let open = Entry::Question { id: id.clone(), question: question.clone(), answer: None };
-        let answers = self.wait(&id, open, |a| Entry::Question {
-            id: id.clone(),
-            question: question.clone(),
-            answer: Some(a.join(", ")),
-        })?;
+        let answers = self
+            .wait(&id, open, |a| Entry::Question {
+                id: id.clone(),
+                question: question.clone(),
+                answer: Some(a.join(", ")),
+            })
+            .await?;
         Ok(answers.join(", "))
     }
 
-    fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String> {
+    async fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String> {
         let id = uuid::Uuid::new_v4().to_string();
         let open = Entry::Questions { id: id.clone(), questions: questions.clone(), answers: None };
         let n = questions.len();
-        let mut answers = self.wait(&id, open, |a| Entry::Questions {
-            id: id.clone(),
-            questions: questions.clone(),
-            answers: Some(a.to_vec()),
-        })?;
+        let mut answers = self
+            .wait(&id, open, |a| Entry::Questions {
+                id: id.clone(),
+                questions: questions.clone(),
+                answers: Some(a.to_vec()),
+            })
+            .await?;
         answers.resize(n, String::new());
         Ok(answers)
     }
@@ -773,6 +755,8 @@ mod tests {
 
     struct Steerable;
 
+    #[async_trait]
+
     impl Agent for Steerable {
         fn name(&self) -> &str {
             "steerable"
@@ -792,14 +776,14 @@ mod tests {
         fn steerable(&self) -> bool {
             true
         }
-        fn run(&self, _turn: &Turn, io: &dyn Io) -> Result<(), String> {
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
             for _ in 0..200 {
                 if let Some(text) = io.steer() {
                     io.emit(Event::Steered { text });
                     io.emit(Event::Done);
                     return Ok(());
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
             Err("never steered".into())
         }
@@ -830,6 +814,8 @@ mod tests {
 
     struct Asker;
 
+    #[async_trait]
+
     impl Agent for Asker {
         fn name(&self) -> &str {
             "asker"
@@ -846,12 +832,14 @@ mod tests {
         fn resumable(&self) -> bool {
             false
         }
-        fn run(&self, _turn: &Turn, io: &dyn Io) -> Result<(), String> {
-            let a = io.ask(Question {
-                text: "red or blue?".into(),
-                options: vec!["red".into(), "blue".into()],
-                ..Question::default()
-            })?;
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            let a = io
+                .ask(Question {
+                    text: "red or blue?".into(),
+                    options: vec!["red".into(), "blue".into()],
+                    ..Question::default()
+                })
+                .await?;
             io.emit(Event::Text { delta: format!("you picked {a}") });
             io.emit(Event::Done);
             Ok(())
@@ -894,6 +882,8 @@ mod tests {
 
     struct Pair;
 
+    #[async_trait]
+
     impl Agent for Pair {
         fn name(&self) -> &str {
             "pair"
@@ -910,13 +900,13 @@ mod tests {
         fn resumable(&self) -> bool {
             false
         }
-        fn run(&self, _turn: &Turn, io: &dyn Io) -> Result<(), String> {
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
             let q = |t: &str, multiple| Question {
                 text: t.into(),
                 options: vec!["a".into(), "b".into()],
                 multiple,
             };
-            let a = io.ask_many(vec![q("one?", false), q("two?", true)])?;
+            let a = io.ask_many(vec![q("one?", false), q("two?", true)]).await?;
             io.emit(Event::Text { delta: a.join("+") });
             io.emit(Event::Done);
             Ok(())
@@ -958,6 +948,8 @@ mod tests {
 
     struct Echo(Mutex<Vec<(String, Option<String>, usize)>>);
 
+    #[async_trait]
+
     impl Agent for Echo {
         fn name(&self) -> &str {
             "echo"
@@ -974,7 +966,7 @@ mod tests {
         fn resumable(&self) -> bool {
             true
         }
-        fn run(&self, turn: &Turn, io: &dyn Io) -> Result<(), String> {
+        async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
             self.0.lock().unwrap().push((
                 turn.prompt.to_string(),
                 turn.model.map(str::to_string),
@@ -994,6 +986,7 @@ mod tests {
         let s = store.add_session(main.id, "echo", "t", None, None).unwrap();
         let seen = std::sync::Arc::new(Echo(Mutex::new(Vec::new())));
         struct Shared(std::sync::Arc<Echo>);
+        #[async_trait]
         impl Agent for Shared {
             fn name(&self) -> &str {
                 self.0.name()
@@ -1010,8 +1003,8 @@ mod tests {
             fn resumable(&self) -> bool {
                 true
             }
-            fn run(&self, t: &Turn, io: &dyn Io) -> Result<(), String> {
-                self.0.run(t, io)
+            async fn run(&self, t: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+                self.0.run(t, io).await
             }
         }
         let runner = Runner::new(store.clone(), vec![Box::new(Shared(seen.clone()))]);

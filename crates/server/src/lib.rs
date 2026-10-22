@@ -2,6 +2,7 @@ pub mod agent;
 pub mod api;
 pub mod cli;
 pub mod git;
+pub mod http;
 pub mod local;
 pub mod projects;
 pub mod runner;

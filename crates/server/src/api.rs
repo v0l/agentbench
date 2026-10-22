@@ -271,24 +271,13 @@ async fn list_title_models(
     let ask = crate::titles::TitleModel { enabled: true, url: probe.url, model: "-".into(), key };
     let target = ask.resolve(&titles.main()).ok_or_else(|| bad("no server to ask"))?;
     let url = target.url.trim().trim_end_matches('/').to_string();
-    let list = tokio::task::spawn_blocking(move || crate::agent::native::models(&url, &target.key))
-        .await
-        .map_err(|e| bad(e.to_string()))?
-        .map_err(bad)?;
+    let list = crate::agent::native::models(&url, &target.key).await.map_err(bad)?;
     Ok(Json(list))
 }
 
 async fn agent_models(State(api): State<Api>, Path(name): Path<String>) -> Reply<Vec<String>> {
-    let runner = api.runner.clone();
-    let list = tokio::task::spawn_blocking(move || {
-        let agents = runner.agents();
-        let agent = agents.iter().find(|a| a.name() == name);
-        agent.ok_or_else(|| format!("no agent {name}")).and_then(|a| a.models())
-    })
-    .await
-    .map_err(|e| bad(e.to_string()))?
-    .map_err(bad)?;
-    Ok(Json(list))
+    let agent = api.runner.agent(&name).ok_or_else(|| bad(format!("no agent {name}")))?;
+    Ok(Json(agent.models().await.map_err(bad)?))
 }
 
 async fn list_models(
@@ -298,10 +287,7 @@ async fn list_models(
     let saved = api.model.as_ref().map(|m| m.get()).unwrap_or_default();
     let key = if probe.key.trim().is_empty() && probe.has_key { saved.key } else { probe.key };
     let url = probe.url.trim().trim_end_matches('/').to_string();
-    let list = tokio::task::spawn_blocking(move || crate::agent::native::models(&url, &key))
-        .await
-        .map_err(|e| bad(e.to_string()))?
-        .map_err(bad)?;
+    let list = crate::agent::native::models(&url, &key).await.map_err(bad)?;
     Ok(Json(list))
 }
 

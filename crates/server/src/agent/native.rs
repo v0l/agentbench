@@ -1,25 +1,27 @@
-use super::{Agent, Context, Event, Io, Turn, brief, files, media};
+use super::{Agent, Context, Event, Io, Turn, async_trait, brief, files, media};
 use egui_bench::agent::skillset;
 use egui_bench::agent::tools::{self, Spec, integer, object, string};
 use egui_bench::agent::workspace::Workspace;
 use foreman_core::{Entry, Question, Usage};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::BufRead;
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 
-/// How long a whole reply may take to stream once it has started.
-const PATIENCE: Duration = Duration::from_secs(600);
-/// How long the server may take to answer a request with headers. A healthy
-/// server sends them as soon as it starts generating, so a long silence means
-/// the connection is dead; it is then retried rather than waited on.
-const HEADERS: Duration = Duration::from_secs(10);
+/// How long the server may take to send the response headers. Servers that queue
+/// requests or read a long prompt first can take a while, but not minutes.
+const HEADERS: Duration = Duration::from_secs(90);
+/// How long the stream may go without sending a byte. A healthy server streams
+/// tokens, reasoning or keep-alive comments, so silence this long means the
+/// connection is dead and the request is sent again.
+const STALL: Duration = Duration::from_secs(45);
 const BASH_DEFAULT: u64 = 120;
 const BASH_MAX: u64 = 900;
 const OUTPUT_MAX: usize = 30_000;
-/// How many times a request that timed out or never connected is sent again.
+/// How many times a request that stalled, timed out or never connected is sent again.
 const RETRIES: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -150,15 +152,29 @@ impl Shared {
 #[derive(Default)]
 pub struct Native {
     pub model: Shared,
+    pub patience: Patience,
+}
+
+/// How long the model server may stay silent before a request is given up and sent again.
+#[derive(Clone, Copy, Debug)]
+pub struct Patience {
+    pub headers: Duration,
+    pub stall: Duration,
+}
+
+impl Default for Patience {
+    fn default() -> Self {
+        Patience { headers: HEADERS, stall: STALL }
+    }
 }
 
 impl Native {
     pub fn new(model: Model) -> Native {
-        Native { model: Shared::new(model) }
+        Native { model: Shared::new(model), patience: Patience::default() }
     }
 
     pub fn shared(model: Shared) -> Native {
-        Native { model }
+        Native { model, patience: Patience::default() }
     }
 }
 
@@ -520,6 +536,7 @@ struct Reply {
     usage: Option<Usage>,
 }
 
+#[async_trait]
 impl Agent for Native {
     fn name(&self) -> &str {
         "foreman"
@@ -545,30 +562,22 @@ impl Agent for Native {
         false
     }
 
-    fn models(&self) -> Result<Vec<String>, String> {
+    async fn models(&self) -> Result<Vec<String>, String> {
         let m = self.model.get();
-        models(&m.url, &m.key)
+        models(&m.url, &m.key).await
     }
 
     fn steerable(&self) -> bool {
         true
     }
 
-    fn run(&self, turn: &Turn, io: &dyn Io) -> Result<(), String> {
+    async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
         let base = self.model.get();
         let mut model = base.choose(turn.model.unwrap_or_default());
         if model.model.trim().is_empty() {
             return Err("pick a server and model for the foreman agent under settings".into());
         }
         let workspace = Workspace::open(turn.cwd)?;
-        let http = ureq::Agent::config_builder()
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(HEADERS))
-            .timeout_recv_body(Some(PATIENCE))
-            .http_status_as_error(false)
-            .user_agent(format!("foreman/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .new_agent();
         let mut messages = vec![json!({ "role": "system", "content": system(turn, &base) })];
         messages.extend(history(turn.history));
         messages.push(json!({ "role": "user", "content": turn.prompt }));
@@ -577,7 +586,7 @@ impl Agent for Native {
             if io.stopped() {
                 return Err("stopped".into());
             }
-            let reply = complete(&model, &http, &messages, &tools, io)?;
+            let reply = complete(&model, &messages, &tools, self.patience, io).await?;
             if let Some(u) = reply.usage {
                 io.emit(Event::Usage(u));
             }
@@ -604,17 +613,28 @@ impl Agent for Native {
                     input: input.clone(),
                 });
                 let name = files::canonical(&call.name);
-                let result = parsed.and_then(|args| match name {
-                    "switch_model" => switch(&base, &mut model, &args, turn.context, io),
-                    "read_file" => match media::read(&workspace, &args) {
-                        Some(found) => found.map(|m| {
-                            attached.extend(m.parts);
-                            m.note
-                        }),
-                        None => self.tool(name, &args, &workspace, turn.context, io),
+                let result = match parsed {
+                    Err(e) => Err(e),
+                    Ok(args) => match name {
+                        "switch_model" => switch(&base, &mut model, &args, turn.context, io),
+                        "read_file" => {
+                            let found = {
+                                let (ws, args) = (workspace.clone(), args.clone());
+                                tokio::task::spawn_blocking(move || media::read(&ws, &args))
+                                    .await
+                                    .map_err(|e| e.to_string())?
+                            };
+                            match found {
+                                Some(found) => found.map(|m| {
+                                    attached.extend(m.parts);
+                                    m.note
+                                }),
+                                None => self.tool(name, &args, &workspace, turn.context, io).await,
+                            }
+                        }
+                        _ => self.tool(name, &args, &workspace, turn.context, io).await,
                     },
-                    _ => self.tool(name, &args, &workspace, turn.context, io),
-                });
+                };
                 let (output, error) = match &result {
                     Ok(o) => (o.clone(), false),
                     Err(e) => (e.clone(), true),
@@ -697,23 +717,19 @@ fn switch(
     Ok(done)
 }
 
-pub fn models(url: &str, key: &str) -> Result<Vec<String>, String> {
+pub async fn models(url: &str, key: &str) -> Result<Vec<String>, String> {
     let base = url.trim().trim_end_matches('/').trim_end_matches("/chat/completions");
     if base.is_empty() {
         return Err("the server address is empty".into());
     }
-    let http = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .http_status_as_error(false)
-        .build()
-        .new_agent();
-    let mut req = http.get(format!("{base}/models"));
+    let mut req =
+        crate::http::client().get(format!("{base}/models")).timeout(Duration::from_secs(10));
     if !key.trim().is_empty() {
-        req = req.header("authorization", format!("Bearer {}", key.trim()));
+        req = req.bearer_auth(key.trim());
     }
-    let resp = req.call().map_err(|e| format!("{base}: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("{base}: {}", describe(&e)))?;
     let status = resp.status();
-    let text = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    let text = resp.text().await.map_err(|e| describe(&e))?;
     if !status.is_success() {
         return Err(format!("{status}: {}", text.trim()));
     }
@@ -734,11 +750,11 @@ pub fn models(url: &str, key: &str) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-fn complete(
+async fn complete(
     model: &Model,
-    http: &ureq::Agent,
     messages: &[Value],
     tools: &Value,
+    patience: Patience,
     io: &dyn Io,
 ) -> Result<Reply, String> {
     let body = json!({
@@ -749,48 +765,86 @@ fn complete(
         "stream_options": { "include_usage": true },
     });
     let mut attempt = 0;
-    let resp = loop {
-        let mut req = http.post(model.endpoint()).header("content-type", "application/json");
-        if !model.key.trim().is_empty() {
-            req = req.header("authorization", format!("Bearer {}", model.key.trim()));
+    loop {
+        let failure = match attempt_once(model, &body, patience, io).await {
+            Ok(reply) => return Ok(reply),
+            Err(Failure::Fatal(e)) => return Err(e),
+            Err(Failure::Transient(e)) => e,
+        };
+        if io.stopped() {
+            return Err("stopped".into());
         }
-        match req.send(body.to_string()) {
-            Ok(resp) => break resp,
-            Err(e) if transient(&e) && attempt < RETRIES && !io.stopped() => {
-                attempt += 1;
-                let wait = backoff(attempt);
-                io.emit(Event::Notice(format!(
-                    "{}: {e}; retrying in {}s ({attempt}/{RETRIES})",
-                    model.url,
-                    wait.as_secs_f32().ceil()
-                )));
-                pause(wait, io);
-                if io.stopped() {
-                    return Err("stopped".into());
-                }
+        if attempt >= RETRIES {
+            return Err(format!("{}: {failure}", model.url));
+        }
+        attempt += 1;
+        let wait = backoff(attempt);
+        io.emit(Event::Notice(format!(
+            "{}: {failure}; retrying in {}s ({attempt}/{RETRIES})",
+            model.url,
+            wait.as_secs_f32().ceil()
+        )));
+        tokio::select! {
+            _ = io.stop().cancelled() => return Err("stopped".into()),
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+enum Failure {
+    /// Worth sending again: the server never answered, went quiet or dropped the line.
+    Transient(String),
+    /// The server answered with a refusal, or the user stopped the turn.
+    Fatal(String),
+}
+
+async fn attempt_once(
+    model: &Model,
+    body: &Value,
+    patience: Patience,
+    io: &dyn Io,
+) -> Result<Reply, Failure> {
+    let mut req = crate::http::client().post(model.endpoint()).json(body);
+    if !model.key.trim().is_empty() {
+        req = req.bearer_auth(model.key.trim());
+    }
+    let resp = tokio::select! {
+        _ = io.stop().cancelled() => return Err(Failure::Fatal("stopped".into())),
+        r = tokio::time::timeout(patience.headers, req.send()) => match r {
+            Err(_) => {
+                let waited = patience.headers.as_secs_f32();
+                return Err(Failure::Transient(format!("no answer in {waited}s")));
             }
-            Err(e) => return Err(format!("{}: {e}", model.url)),
-        }
+            Ok(Err(e)) => return Err(Failure::Transient(describe(&e))),
+            Ok(Ok(resp)) => resp,
+        },
     };
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.into_body().read_to_string().unwrap_or_default();
-        return Err(format!("{status}: {}", text.trim()));
+        let text = resp.text().await.unwrap_or_default();
+        let e = format!("{status}: {}", text.trim());
+        return Err(if status.is_server_error() && status.as_u16() != 500 {
+            Failure::Transient(e)
+        } else {
+            Failure::Fatal(e)
+        });
     }
-    let reader = std::io::BufReader::new(resp.into_body().into_reader());
-    read_stream(reader, io)
+    read_stream(resp.bytes_stream(), patience.stall, io).await
 }
 
-/// Whether a failed request is worth sending again: the server did not answer
-/// in time or could not be reached, as opposed to answering with a refusal.
-fn transient(e: &ureq::Error) -> bool {
-    matches!(
-        e,
-        ureq::Error::Timeout(_)
-            | ureq::Error::ConnectionFailed
-            | ureq::Error::HostNotFound
-            | ureq::Error::Io(_)
-    )
+/// The cause chain of a request error, which reqwest keeps out of its own message.
+pub fn describe(e: &reqwest::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = cause.source();
+    }
+    out
 }
 
 /// How long to wait before retry number `attempt` (1-based): 2s, 4s, 8s.
@@ -801,20 +855,8 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_secs(1 << attempt.min(6))
 }
 
-/// Sleep for `wait`, giving up early if the turn is stopped.
-fn pause(wait: Duration, io: &dyn Io) {
-    let end = Instant::now() + wait;
-    while !io.stopped() {
-        let left = end.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return;
-        }
-        std::thread::sleep(left.min(Duration::from_millis(100)));
-    }
-}
-
 impl Native {
-    fn tool(
+    async fn tool(
         &self,
         name: &str,
         args: &Value,
@@ -822,35 +864,25 @@ impl Native {
         cx: &Context,
         io: &dyn Io,
     ) -> Result<String, String> {
-        let text = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
-        let path = || files::text(args, &files::PATH).map(str::to_string);
-        let need_path = || path().ok_or_else(|| "missing `path`".to_string());
         let number = |keys: &[&str]| files::number(args, keys);
         match name {
-            "list_files" => ws.list(path().as_deref(), number(&["depth"])),
-            "read_file" => {
-                let offset = number(&["offset", "start_line", "line"]);
-                let limit = number(&["limit", "lines", "max_lines"])
-                    .or_else(|| Some(number(&["end_line"])? + 1 - offset.unwrap_or(1)));
-                ws.read(&need_path()?, offset, limit)
+            "list_files" | "read_file" | "write_file" | "edit_file" | "search_files"
+            | "load_skill" => {
+                let (name, args, ws) = (name.to_string(), args.clone(), ws.clone());
+                tokio::task::spawn_blocking(move || file_tool(&name, &args, &ws))
+                    .await
+                    .map_err(|e| e.to_string())?
             }
-            "write_file" => ws.write(
-                &need_path()?,
-                files::text(args, &["content", "text", "contents"]).unwrap_or_default(),
-            ),
-            "edit_file" => files::edit(ws, args),
-            "search_files" => super::search::search(ws, args),
-            "load_skill" => {
-                let skills = skillset::discover(&skillset::roots(ws.root()), &[]);
-                skillset::load(&skills, text("name").as_deref(), text("file").as_deref())
+            "bash" => {
+                bash(
+                    ws.root(),
+                    files::text(args, &["command", "cmd"]).ok_or("missing `command`")?,
+                    number(&["timeout_s", "timeout"]).map(|n| n as u64),
+                    cx,
+                    io,
+                )
+                .await
             }
-            "bash" => bash(
-                ws.root(),
-                files::text(args, &["command", "cmd"]).ok_or("missing `command`")?,
-                number(&["timeout_s", "timeout"]).map(|n| n as u64),
-                cx,
-                io,
-            ),
             "ask_user" => {
                 let asked: Vec<Question> = args
                     .get("questions")
@@ -859,10 +891,10 @@ impl Native {
                     .unwrap_or_default();
                 if asked.is_empty() {
                     let one = question_of(args).ok_or("missing `question`")?;
-                    let answer = io.ask(one)?;
+                    let answer = io.ask(one).await?;
                     return Ok(format!("The user answered: {answer}"));
                 }
-                let answers = io.ask_many(asked.clone())?;
+                let answers = io.ask_many(asked.clone()).await?;
                 let lines: Vec<String> = asked
                     .iter()
                     .zip(&answers)
@@ -889,22 +921,91 @@ impl Native {
     }
 }
 
-fn read_stream(reader: impl BufRead, io: &dyn Io) -> Result<Reply, String> {
+/// The tools that touch only the worktree's files. They block on the disk, so they run off
+/// the async threads.
+fn file_tool(name: &str, args: &Value, ws: &Workspace) -> Result<String, String> {
+    let text = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
+    let path = || files::text(args, &files::PATH).map(str::to_string);
+    let need_path = || path().ok_or_else(|| "missing `path`".to_string());
+    let number = |keys: &[&str]| files::number(args, keys);
+    match name {
+        "list_files" => ws.list(path().as_deref(), number(&["depth"])),
+        "read_file" => {
+            let offset = number(&["offset", "start_line", "line"]);
+            let limit = number(&["limit", "lines", "max_lines"])
+                .or_else(|| Some(number(&["end_line"])? + 1 - offset.unwrap_or(1)));
+            ws.read(&need_path()?, offset, limit)
+        }
+        "write_file" => ws.write(
+            &need_path()?,
+            files::text(args, &["content", "text", "contents"]).unwrap_or_default(),
+        ),
+        "edit_file" => files::edit(ws, args),
+        "search_files" => super::search::search(ws, args),
+        "load_skill" => {
+            let skills = skillset::discover(&skillset::roots(ws.root()), &[]);
+            skillset::load(&skills, text("name").as_deref(), text("file").as_deref())
+        }
+        other => Err(format!("{other} is not a file tool")),
+    }
+}
+
+/// Read a server-sent event stream into a reply, giving up when no byte has come for `stall`.
+async fn read_stream<S, B, E>(stream: S, stall: Duration, io: &dyn Io) -> Result<Reply, Failure>
+where
+    S: futures_util::Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let mut stream = std::pin::pin!(stream);
     let mut reply = Reply::default();
-    for line in reader.lines() {
-        if io.stopped() {
-            return Err("stopped".into());
+    let mut pending: Vec<u8> = Vec::new();
+    let mut done = false;
+    while !done {
+        let chunk = tokio::select! {
+            _ = io.stop().cancelled() => return Err(Failure::Fatal("stopped".into())),
+            next = tokio::time::timeout(stall, stream.next()) => match next {
+                Err(_) => return Err(Failure::Transient(stalled(stall, &reply))),
+                Ok(None) => break,
+                Ok(Some(Err(e))) => return Err(Failure::Transient(format!("the stream broke: {e}"))),
+                Ok(Some(Ok(chunk))) => chunk,
+            },
+        };
+        pending.extend_from_slice(chunk.as_ref());
+        while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=end).collect();
+            let line = String::from_utf8_lossy(&line);
+            match sse_data(&line) {
+                Some("[DONE]") => done = true,
+                Some(data) => {
+                    if let Ok(v) = serde_json::from_str::<Value>(data) {
+                        take(&v, &mut reply, io);
+                    }
+                }
+                None => {}
+            }
         }
-        let line = line.map_err(|e| e.to_string())?;
-        let Some(data) = line.strip_prefix("data:") else { continue };
-        let data = data.trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+    }
+    if let Some(data) = sse_data(&String::from_utf8_lossy(&pending))
+        && let Ok(v) = serde_json::from_str::<Value>(data)
+    {
         take(&v, &mut reply, io);
     }
     Ok(reply)
+}
+
+fn sse_data(line: &str) -> Option<&str> {
+    let data = line.trim_end_matches(['\r', '\n']).strip_prefix("data:")?.trim();
+    (!data.is_empty()).then_some(data)
+}
+
+fn stalled(stall: Duration, reply: &Reply) -> String {
+    let got = if reply.text.is_empty() && reply.calls.is_empty() {
+        "before it sent anything".to_string()
+    } else {
+        "partway through its reply".to_string()
+    };
+    format!("the server went quiet for {}s {got}", stall.as_secs_f32())
 }
 
 fn take(v: &Value, reply: &mut Reply, io: &dyn Io) {
@@ -951,7 +1052,7 @@ fn take(v: &Value, reply: &mut Reply, io: &dyn Io) {
     }
 }
 
-fn bash(
+async fn bash(
     cwd: &Path,
     command: &str,
     timeout: Option<u64>,
@@ -972,42 +1073,37 @@ fn bash(
         .env("PAGER", "cat")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    cmd.process_group(0);
     let started = Instant::now();
     let mut child = cmd.spawn().map_err(|e| format!("bash: {e}"))?;
-    let out = child.stdout.take();
-    let err = child.stderr.take();
-    let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
-        std::thread::spawn(move || {
+    let read = |pipe: Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>| {
+        tokio::spawn(async move {
             let mut buf = Vec::new();
             if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut buf);
+                let _ = p.read_to_end(&mut buf).await;
             }
             buf
         })
     };
-    let out = read(out.map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
-    let err = read(err.map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
-    let status = loop {
-        if let Ok(Some(s)) = child.try_wait() {
-            break Some(s);
-        }
-        if io.stopped() || started.elapsed() >= limit {
-            #[cfg(unix)]
-            let _ = Command::new("kill").args(["-KILL", &format!("-{}", child.id())]).status();
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(30));
+    let out = read(child.stdout.take().map(|p| Box::new(p) as _));
+    let err = read(child.stderr.take().map(|p| Box::new(p) as _));
+    let status = tokio::select! {
+        s = child.wait() => s.ok(),
+        _ = tokio::time::sleep(limit) => None,
+        _ = io.stop().cancelled() => None,
     };
-    let mut text = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
+    if status.is_none() {
+        #[cfg(unix)]
+        if let Some(pid) = child.id() {
+            super::process::signal_group(pid, "-KILL").await;
+        }
+        let _ = child.kill().await;
+    }
+    let mut text = String::from_utf8_lossy(&out.await.unwrap_or_default()).into_owned();
+    let stderr = String::from_utf8_lossy(&err.await.unwrap_or_default()).into_owned();
     if !stderr.is_empty() {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
@@ -1104,14 +1200,14 @@ mod tests {
         json!({"choices":[{"delta":{"content":text}}]})
     }
 
-    fn run(native: &Native, dir: &Path, prompt: &str, io: &TestIo) -> Result<(), String> {
+    async fn run(native: &Native, dir: &Path, prompt: &str, io: &TestIo) -> Result<(), String> {
         let c = context();
         let turn = Turn { prompt, cwd: dir, model: None, resume: None, history: &[], context: &c };
-        native.run(&turn, io)
+        native.run(&turn, io).await
     }
 
-    #[test]
-    fn it_edits_files_and_reaches_the_tracker() {
+    #[tokio::test]
+    async fn it_edits_files_and_reaches_the_tracker() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
         let (url, asked) = stub(vec![
@@ -1129,7 +1225,7 @@ mod tests {
         ]);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
-        run(&native, dir.path(), "change world", &io).unwrap();
+        run(&native, dir.path(), "change world", &io).await.unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "hello foreman\n");
         let events = io.events();
         assert!(events.iter().any(
@@ -1162,15 +1258,15 @@ mod tests {
         assert!(!names.contains(&"request_access"));
     }
 
-    #[test]
-    fn a_steer_lands_between_steps() {
+    #[tokio::test]
+    async fn a_steer_lands_between_steps() {
         let dir = tempfile::tempdir().unwrap();
         let (url, asked) =
             stub(vec![vec![call("c1", "list_files", json!({}))], vec![say("ok, stopping")]]);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
         io.inbox.lock().unwrap().push("actually stop".into());
-        run(&native, dir.path(), "look around", &io).unwrap();
+        run(&native, dir.path(), "look around", &io).await.unwrap();
         assert!(io.events().contains(&Event::Steered { text: "actually stop".into() }));
         let _ = asked.recv().unwrap();
         let second = asked.recv().unwrap();
@@ -1178,8 +1274,8 @@ mod tests {
         assert_eq!(last, json!({"role": "user", "content": "actually stop"}));
     }
 
-    #[test]
-    fn ask_user_waits_for_the_answer() {
+    #[tokio::test]
+    async fn ask_user_waits_for_the_answer() {
         let dir = tempfile::tempdir().unwrap();
         let (url, asked) = stub(vec![
             vec![call(
@@ -1192,7 +1288,7 @@ mod tests {
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
         io.answers.lock().unwrap().push("blue".into());
-        run(&native, dir.path(), "pick", &io).unwrap();
+        run(&native, dir.path(), "pick", &io).await.unwrap();
         let _ = asked.recv().unwrap();
         let second = asked.recv().unwrap();
         let tool = second["messages"]
@@ -1205,8 +1301,8 @@ mod tests {
         assert_eq!(tool["content"], "The user answered: blue");
     }
 
-    #[test]
-    fn ask_user_puts_several_questions_at_once() {
+    #[tokio::test]
+    async fn ask_user_puts_several_questions_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let (url, asked) = stub(vec![
             vec![call(
@@ -1222,7 +1318,7 @@ mod tests {
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
         io.answers.lock().unwrap().extend(["MIT".to_string(), "linux, mac".to_string()]);
-        run(&native, dir.path(), "pick", &io).unwrap();
+        run(&native, dir.path(), "pick", &io).await.unwrap();
         let first = asked.recv().unwrap();
         let spec = first["tools"]
             .as_array()
@@ -1247,8 +1343,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn read_file_shows_a_picture_to_the_model() {
+    #[tokio::test]
+    async fn read_file_shows_a_picture_to_the_model() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shot.png"), b"PNGDATA").unwrap();
         std::fs::write(dir.path().join("a.txt"), "plain\n").unwrap();
@@ -1260,7 +1356,7 @@ mod tests {
         ]);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
-        run(&native, dir.path(), "look", &io).unwrap();
+        run(&native, dir.path(), "look", &io).await.unwrap();
         let _ = asked.recv().unwrap();
         let second = asked.recv().unwrap();
         let messages = second["messages"].as_array().unwrap();
@@ -1309,25 +1405,25 @@ mod tests {
         assert!(h[1]["content"].as_str().unwrap().contains("called bash"));
     }
 
-    #[test]
-    fn bash_runs_in_the_worktree_and_reports_failures() {
+    #[tokio::test]
+    async fn bash_runs_in_the_worktree_and_reports_failures() {
         let dir = tempfile::tempdir().unwrap();
         let io = TestIo::new(Arc::new(FakeApi));
         let c = context();
-        let ok = bash(dir.path(), "pwd; echo $FOREMAN_SESSION", None, &c, &io).unwrap();
+        let ok = bash(dir.path(), "pwd; echo $FOREMAN_SESSION", None, &c, &io).await.unwrap();
         assert!(
             ok.contains(&dir.path().canonicalize().unwrap().display().to_string())
                 || ok.contains(&dir.path().display().to_string())
         );
         assert!(ok.contains(&format!("\n{}\n", crate::agent::test_session())));
-        let bad = bash(dir.path(), "echo oops >&2; exit 3", None, &c, &io).unwrap_err();
+        let bad = bash(dir.path(), "echo oops >&2; exit 3", None, &c, &io).await.unwrap_err();
         assert!(bad.contains("oops") && bad.contains("exit 3"), "{bad}");
-        let slow = bash(dir.path(), "sleep 5", Some(1), &c, &io).unwrap_err();
+        let slow = bash(dir.path(), "sleep 5", Some(1), &c, &io).await.unwrap_err();
         assert!(slow.contains("killed after 1s"), "{slow}");
     }
 
-    #[test]
-    fn the_model_list_is_read_from_the_server() {
+    #[tokio::test]
+    async fn the_model_list_is_read_from_the_server() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         std::thread::spawn(move || {
@@ -1344,11 +1440,11 @@ mod tests {
                 );
             }
         });
-        assert_eq!(models(&url, "k").unwrap(), ["a", "b"]);
+        assert_eq!(models(&url, "k").await.unwrap(), ["a", "b"]);
     }
 
-    #[test]
-    fn pi_shaped_calls_and_bad_json_are_handled() {
+    #[tokio::test]
+    async fn pi_shaped_calls_and_bad_json_are_handled() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
         let (url, asked) = stub(vec![
@@ -1365,7 +1461,7 @@ mod tests {
         ]);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
-        run(&native, dir.path(), "go", &io).unwrap();
+        run(&native, dir.path(), "go", &io).await.unwrap();
         assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "hello foreman\n");
         let ends: Vec<(String, bool, String)> = io
             .events()
@@ -1402,13 +1498,13 @@ mod tests {
         url
     }
 
-    #[test]
-    fn a_dropped_connection_is_retried() {
+    #[tokio::test]
+    async fn a_dropped_connection_is_retried() {
         let dir = tempfile::tempdir().unwrap();
         let url = flaky(2, vec![say("hello")]);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
-        run(&native, dir.path(), "go", &io).unwrap();
+        run(&native, dir.path(), "go", &io).await.unwrap();
         let events = io.events();
         let notices = events
             .iter()
@@ -1418,8 +1514,8 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "hello")));
     }
 
-    #[test]
-    fn retries_give_up_and_report_the_error() {
+    #[tokio::test]
+    async fn retries_give_up_and_report_the_error() {
         let dir = tempfile::tempdir().unwrap();
         let url = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1427,7 +1523,7 @@ mod tests {
         };
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
-        let e = run(&native, dir.path(), "go", &io).unwrap_err();
+        let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
         assert!(!e.is_empty());
         let notices = io
             .events()
@@ -1437,19 +1533,130 @@ mod tests {
         assert_eq!(notices, RETRIES as usize);
     }
 
+    /// A server that, for its first `hangs` connections, sends the headers and the start
+    /// of a reply and then goes silent without closing, as a dropped network does. After
+    /// that it answers normally.
+    fn hangs_midway(hangs: usize, events: Vec<Value>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for _ in 0..hangs {
+                let Ok((mut s, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 65536];
+                let _ = s.read(&mut buf);
+                let first = format!("data: {}\n\n", say("thinking about it"));
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{first}\r\n",
+                    first.len()
+                );
+                let _ = s.flush();
+                held.push(s);
+            }
+            let _ = tx.send(listener);
+            std::thread::sleep(Duration::from_secs(600));
+            drop(held);
+        });
+        std::thread::spawn(move || {
+            if let Ok(listener) = rx.recv() {
+                stub_on(listener, vec![events]);
+            }
+        });
+        url
+    }
+
+    /// A server that accepts the connection and never answers at all.
+    fn never_answers() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for s in listener.incoming().flatten() {
+                held.push(s);
+            }
+        });
+        url
+    }
+
+    fn impatient(url: String) -> Native {
+        Native {
+            patience: Patience {
+                headers: Duration::from_millis(400),
+                stall: Duration::from_millis(400),
+            },
+            ..Native::new(Model { url, model: "m".into(), ..Model::default() })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_goes_silent_is_dropped_and_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = impatient(hangs_midway(1, vec![say("hello")]));
+        let io = TestIo::new(Arc::new(FakeApi));
+        let started = Instant::now();
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+        let events = io.events();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Notice(n) if n.contains("went quiet") && n.contains("retrying"))),
+            "{events:?}"
+        );
+        assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "hello")));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_answers_is_given_up_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = impatient(never_answers());
+        let io = TestIo::new(Arc::new(FakeApi));
+        let started = Instant::now();
+        let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+        assert!(e.contains("no answer"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn stop_ends_a_silent_stream_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let native = Native::new(Model {
+            url: hangs_midway(1, vec![]),
+            model: "m".into(),
+            ..Model::default()
+        });
+        let io = Arc::new(TestIo::new(Arc::new(FakeApi)));
+        let stop = io.stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            stop.cancel();
+        });
+        let started = Instant::now();
+        let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
+        assert_eq!(e, "stopped");
+        assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+    }
+
     #[test]
-    fn an_error_status_is_not_retried() {
+    fn the_default_patience_is_well_under_ten_minutes() {
+        let p = Patience::default();
+        assert!(p.stall <= Duration::from_secs(60), "{p:?}");
+        assert!(p.headers <= Duration::from_secs(120), "{p:?}");
+    }
+
+    #[tokio::test]
+    async fn an_error_status_is_not_retried() {
         let (url, seen) = crate::titles::fake::server(vec![(500, "{}".into())]);
         let dir = tempfile::tempdir().unwrap();
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
-        let e = run(&native, dir.path(), "go", &io).unwrap_err();
+        let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
         assert!(e.contains("500"), "{e}");
         assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
-    #[test]
-    fn hitting_the_step_limit_pauses_instead_of_failing() {
+    #[tokio::test]
+    async fn hitting_the_step_limit_pauses_instead_of_failing() {
         let dir = tempfile::tempdir().unwrap();
         let (url, _asked) = stub(vec![
             vec![call("c1", "list_files", json!({}))],
@@ -1457,7 +1664,7 @@ mod tests {
         ]);
         let native = Native::new(Model { url, model: "m".into(), steps: 2, ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
-        run(&native, dir.path(), "go", &io).unwrap();
+        run(&native, dir.path(), "go", &io).await.unwrap();
         let events = io.events();
         assert!(!events.iter().any(|e| matches!(e, Event::Error(_))));
         assert!(
@@ -1519,8 +1726,8 @@ mod tests {
         assert_eq!(m.choose("qwen-big").model, "qwen-big");
     }
 
-    #[test]
-    fn the_agent_can_switch_to_a_higher_model_on_another_server_mid_turn() {
+    #[tokio::test]
+    async fn the_agent_can_switch_to_a_higher_model_on_another_server_mid_turn() {
         let dir = tempfile::tempdir().unwrap();
         let (big_url, big_asked) = stub(vec![vec![say("solved")]]);
         let (url, asked) = stub(vec![vec![call(
@@ -1535,7 +1742,7 @@ mod tests {
             ..Model::default()
         });
         let io = TestIo::new(Arc::new(FakeApi));
-        run(&native, dir.path(), "fix it", &io).unwrap();
+        run(&native, dir.path(), "fix it", &io).await.unwrap();
         let first = asked.recv().unwrap();
         assert_eq!(first["model"], "m");
         let names: Vec<&str> = first["tools"]
@@ -1555,14 +1762,14 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "solved")));
     }
 
-    #[test]
-    fn without_levels_there_is_no_switch_tool_and_asking_for_one_fails() {
+    #[tokio::test]
+    async fn without_levels_there_is_no_switch_tool_and_asking_for_one_fails() {
         let dir = tempfile::tempdir().unwrap();
         let (url, asked) =
             stub(vec![vec![call("c1", "switch_model", json!({"level": "high"}))], vec![say("ok")]]);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
-        run(&native, dir.path(), "x", &io).unwrap();
+        run(&native, dir.path(), "x", &io).await.unwrap();
         let first = asked.recv().unwrap();
         assert!(
             first["tools"]
@@ -1576,8 +1783,8 @@ mod tests {
         assert!(last["content"].as_str().unwrap().contains("no model levels are set up"), "{last}");
     }
 
-    #[test]
-    fn a_chat_saved_on_a_level_starts_its_turn_on_that_model() {
+    #[tokio::test]
+    async fn a_chat_saved_on_a_level_starts_its_turn_on_that_model() {
         let dir = tempfile::tempdir().unwrap();
         let (url, asked) = stub(vec![vec![say("hi")]]);
         let native = Native::new(Model {
@@ -1596,15 +1803,15 @@ mod tests {
             history: &[],
             context: &c,
         };
-        native.run(&turn, &io).unwrap();
+        native.run(&turn, &io).await.unwrap();
         assert_eq!(asked.recv().unwrap()["model"], "tiny");
     }
 
-    #[test]
-    fn without_a_model_it_says_so() {
+    #[tokio::test]
+    async fn without_a_model_it_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let io = TestIo::new(Arc::new(FakeApi));
-        let e = run(&Native::default(), dir.path(), "x", &io).unwrap_err();
+        let e = run(&Native::default(), dir.path(), "x", &io).await.unwrap_err();
         assert!(e.contains("pick a server and model"), "{e}");
     }
 }

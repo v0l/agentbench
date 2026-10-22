@@ -340,6 +340,7 @@ fn a_saved_remote_choice_is_kept() {
 
 struct Lister;
 
+#[foreman_server::agent::async_trait]
 impl foreman_server::agent::Agent for Lister {
     fn name(&self) -> &str {
         "lister"
@@ -356,12 +357,12 @@ impl foreman_server::agent::Agent for Lister {
     fn resumable(&self) -> bool {
         false
     }
-    fn models(&self) -> Result<Vec<String>, String> {
+    async fn models(&self) -> Result<Vec<String>, String> {
         Ok(vec!["alpha".into(), "beta".into()])
     }
-    fn run(
+    async fn run(
         &self,
-        _turn: &foreman_server::agent::Turn,
+        _turn: &foreman_server::agent::Turn<'_>,
         _io: &dyn foreman_server::agent::Io,
     ) -> Result<(), String> {
         Ok(())
@@ -387,6 +388,7 @@ fn a_new_chat_offers_a_dropdown_for_any_agent_that_lists_models() {
 
 struct Waiter;
 
+#[foreman_server::agent::async_trait]
 impl foreman_server::agent::Agent for Waiter {
     fn name(&self) -> &str {
         "waiter"
@@ -403,9 +405,9 @@ impl foreman_server::agent::Agent for Waiter {
     fn resumable(&self) -> bool {
         false
     }
-    fn run(
+    async fn run(
         &self,
-        _turn: &foreman_server::agent::Turn,
+        _turn: &foreman_server::agent::Turn<'_>,
         io: &dyn foreman_server::agent::Io,
     ) -> Result<(), String> {
         let q = foreman_core::Question {
@@ -413,7 +415,7 @@ impl foreman_server::agent::Agent for Waiter {
             options: vec!["MIT".into(), "Apache-2.0".into()],
             ..Default::default()
         };
-        let a = io.ask(q)?;
+        let a = io.ask(q).await?;
         io.emit(foreman_server::agent::Event::Text { delta: format!("going with {a}") });
         Ok(())
     }
@@ -421,6 +423,7 @@ impl foreman_server::agent::Agent for Waiter {
 
 struct Planner;
 
+#[foreman_server::agent::async_trait]
 impl foreman_server::agent::Agent for Planner {
     fn name(&self) -> &str {
         "planner"
@@ -437,9 +440,9 @@ impl foreman_server::agent::Agent for Planner {
     fn resumable(&self) -> bool {
         false
     }
-    fn run(
+    async fn run(
         &self,
-        _turn: &foreman_server::agent::Turn,
+        _turn: &foreman_server::agent::Turn<'_>,
         io: &dyn foreman_server::agent::Io,
     ) -> Result<(), String> {
         let q = |text: &str, options: &[&str], multiple| foreman_core::Question {
@@ -447,11 +450,13 @@ impl foreman_server::agent::Agent for Planner {
             options: options.iter().map(|o| o.to_string()).collect(),
             multiple,
         };
-        let a = io.ask_many(vec![
-            q("which licence?", &["MIT", "Apache-2.0"], false),
-            q("which targets?", &["linux", "mac", "windows"], true),
-            q("anything else?", &[], false),
-        ])?;
+        let a = io
+            .ask_many(vec![
+                q("which licence?", &["MIT", "Apache-2.0"], false),
+                q("which targets?", &["linux", "mac", "windows"], true),
+                q("anything else?", &[], false),
+            ])
+            .await?;
         io.emit(foreman_server::agent::Event::Text { delta: format!("plan: {}", a.join(" | ")) });
         Ok(())
     }

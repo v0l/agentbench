@@ -14,6 +14,7 @@ impl Pi {
     }
 }
 
+#[super::async_trait]
 impl Cli for Pi {
     fn name(&self) -> &str {
         "pi"
@@ -31,8 +32,8 @@ impl Cli for Pi {
         true
     }
 
-    fn models(&self) -> Result<Vec<String>, String> {
-        let text = super::process::listing(&self.program, &["--list-models"])?;
+    async fn models(&self) -> Result<Vec<String>, String> {
+        let text = super::process::listing(&self.program, &["--list-models"]).await?;
         Ok(pi_models(&text))
     }
 
