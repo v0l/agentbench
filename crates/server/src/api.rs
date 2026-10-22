@@ -148,6 +148,7 @@ fn masked(m: &crate::agent::native::Model) -> foreman_core::ModelSettings {
         model: m.model.clone(),
         key: String::new(),
         has_key: !m.key.trim().is_empty(),
+        steps: m.steps,
     }
 }
 
@@ -168,6 +169,9 @@ async fn put_model(
         m.key = new.key.trim().to_string();
     } else if !new.has_key {
         m.key.clear();
+    }
+    if new.steps > 0 {
+        m.steps = new.steps.min(100_000);
     }
     if m.url.is_empty() {
         return Err(bad("the server address is empty"));

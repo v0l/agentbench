@@ -31,8 +31,11 @@ fn default_url() -> String {
     egui_bench::agent::config::DEFAULT_URL.to_string()
 }
 
+pub const DEFAULT_STEPS: usize = 1000;
+const OLD_DEFAULT_STEPS: usize = 60;
+
 fn default_steps() -> usize {
-    60
+    DEFAULT_STEPS
 }
 
 impl Default for Model {
@@ -66,7 +69,11 @@ impl Shared {
     }
 
     pub fn get(&self) -> Model {
-        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+        let mut m = self.0.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if m.steps == OLD_DEFAULT_STEPS || m.steps == 0 {
+            m.steps = DEFAULT_STEPS;
+        }
+        m
     }
 
     pub fn set(&self, model: Model) {
@@ -427,7 +434,12 @@ impl Agent for Native {
                 return Ok(());
             }
         }
-        Err(format!("stopped after {} steps; send a message to carry on", model.steps))
+        io.emit(Event::Notice(format!(
+            "paused after {} steps, the limit set under agent settings; say continue to carry on",
+            model.steps
+        )));
+        io.emit(Event::Done);
+        Ok(())
     }
 }
 
@@ -975,6 +987,33 @@ mod tests {
         assert!(ends[1].1 && ends[1].2.contains("not valid JSON"), "{}", ends[1].2);
         assert!(ends[2].1 && ends[2].2.contains("the tools are:"), "{}", ends[2].2);
         let _ = asked.recv();
+    }
+
+    #[test]
+    fn hitting_the_step_limit_pauses_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _asked) = stub(vec![
+            vec![call("c1", "list_files", json!({}))],
+            vec![call("c2", "list_files", json!({}))],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), steps: 2, ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).unwrap();
+        let events = io.events();
+        assert!(!events.iter().any(|e| matches!(e, Event::Error(_))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Notice(n) if n.contains("paused after 2 steps")))
+        );
+    }
+
+    #[test]
+    fn the_old_sixty_step_default_is_raised() {
+        let shared = Shared::new(Model { steps: 60, ..Model::default() });
+        assert_eq!(shared.get().steps, DEFAULT_STEPS);
+        let custom = Shared::new(Model { steps: 250, ..Model::default() });
+        assert_eq!(custom.get().steps, 250);
     }
 
     #[test]

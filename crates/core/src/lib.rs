@@ -230,6 +230,8 @@ pub struct ModelSettings {
     pub key: String,
     #[serde(default)]
     pub has_key: bool,
+    #[serde(default)]
+    pub steps: usize,
 }
 
 pub struct Slash {

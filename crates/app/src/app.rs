@@ -528,6 +528,7 @@ impl App {
                 model: String::new(),
                 key: String::new(),
                 has_key: false,
+                steps: 0,
             },
             loaded: false,
             models: None,
@@ -586,6 +587,14 @@ impl App {
                             }
                         }
                     });
+                    row_help(
+                        ui,
+                        "max steps",
+                        "Model calls in one turn before the agent pauses and waits for you to say continue.",
+                        |ui| {
+                            ui.add(egui::DragValue::new(&mut st.model.steps).range(1..=100_000).speed(10));
+                        },
+                    );
                     match &st.models {
                         Some(Err(e)) => status(ui, false, e),
                         Some(Ok(l)) => status(ui, true, &format!("{} models on the server", l.len())),
