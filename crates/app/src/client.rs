@@ -27,6 +27,7 @@ impl Server {
 
 pub enum Reply {
     Overview(Overview),
+    Started(foreman_core::Session),
     Model(foreman_core::ModelSettings),
     Models(Result<Vec<String>, String>),
     Changed(Id),
@@ -191,11 +192,14 @@ impl Client {
     }
 
     pub fn start_issue(&mut self, issue: Id, new: &NewSession) {
-        self.act(Method::POST, &format!("/api/issues/{issue}/start"), Some(new), "agent started");
+        let req =
+            self.request(Method::POST, &format!("/api/issues/{issue}/start"), Self::json(new));
+        self.send(req, Reply::Started);
     }
 
     pub fn add_session(&mut self, new: &NewSession) {
-        self.act(Method::POST, "/api/sessions", Some(new), "agent started");
+        let req = self.request(Method::POST, "/api/sessions", Self::json(new));
+        self.send(req, Reply::Started);
     }
 
     pub fn send_message(&mut self, session: Id, text: &str) {

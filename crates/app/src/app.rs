@@ -132,7 +132,7 @@ pub struct App {
     settings: Option<Settings>,
     markdown: markdown::Cache,
     follow: bool,
-    fresh_at: i64,
+    awaiting: Option<Id>,
     thinking: bool,
 }
 
@@ -187,7 +187,7 @@ impl App {
             settings: None,
             markdown: markdown::Cache::default(),
             follow: true,
-            fresh_at: 0,
+            awaiting: None,
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
         };
         if !app.remote {
@@ -315,23 +315,6 @@ impl App {
                 if self.session.is_some_and(|s| !o.sessions.iter().any(|x| x.id == s)) {
                     self.session = None;
                 }
-                if let Some(f) = self.fresh.take() {
-                    let sid = o
-                        .sessions
-                        .iter()
-                        .filter(|x| x.project_id == f.project && x.agent == f.agent)
-                        .filter(|x| f.worktree.is_none_or(|w| x.worktree_id == w))
-                        .filter(|x| x.created_at >= self.fresh_at)
-                        .max_by_key(|x| x.created_at)
-                        .map(|x| x.id);
-                    match sid {
-                        Some(id) => {
-                            self.session = Some(id);
-                            self.follow = true;
-                        }
-                        None => self.fresh = Some(f),
-                    }
-                }
                 self.overview = Some(o);
                 self.cursor = Some(cursor);
                 if let Some(sid) = self.session {
@@ -389,12 +372,22 @@ impl App {
                     st.models = Some(list);
                 }
             }
+            Reply::Started(session) => {
+                if self.awaiting == Some(session.project_id) {
+                    self.awaiting = None;
+                    self.open_session(session.id, session.project_id);
+                }
+                if let Some(c) = &mut self.client {
+                    c.overview();
+                }
+            }
             Reply::Done(said) => {
                 if !said.is_empty() {
                     self.notice = Some((true, said));
                 }
             }
             Reply::Failed(e) => {
+                self.awaiting = None;
                 if self.settings.as_ref().is_some_and(|s| !s.loaded) {
                     self.settings = None;
                 }
@@ -1234,7 +1227,7 @@ impl App {
             if let Some(c) = &mut self.client {
                 c.add_session(&new);
             }
-            self.fresh_at = now_ms() - 5_000;
+            self.awaiting = Some(f.project);
         }
     }
 
@@ -1947,7 +1940,10 @@ impl App {
             if let Some(c) = &mut self.client {
                 match s.issue {
                     Some(iid) => c.start_issue(iid, &new),
-                    None => c.add_session(&new),
+                    None => {
+                        c.add_session(&new);
+                        self.awaiting = Some(new.project_id);
+                    }
                 }
             }
             self.start = None;
@@ -2121,13 +2117,6 @@ fn short_about(about: &str) -> String {
         Some((model, _)) => format!("default {model}"),
         None => about.to_string(),
     }
-}
-
-fn now_ms() -> i64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 fn short_path(path: &str) -> String {

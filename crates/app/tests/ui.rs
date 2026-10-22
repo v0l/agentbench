@@ -548,3 +548,39 @@ fn slash_shows_the_commands_and_new_opens_a_fresh_chat() {
     assert_eq!(h.state().open(), None, "/new leaves the chat for a fresh one");
     assert!(rig.store.session(session.id).is_ok(), "the old chat is kept");
 }
+
+#[test]
+fn new_chat_stays_blank_while_other_agents_work() {
+    let rig = rig();
+    let project = rig.store.projects().unwrap()[0].id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    click(&mut h, 1220.0, 23.0);
+    h.run_steps(3);
+    assert_eq!(h.state().open(), None, "new chat starts blank");
+    let mut other = foreman::client::Client::new(
+        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    other.add_session(&foreman_core::NewSession {
+        project_id: project,
+        agent: "echo".into(),
+        prompt: Some("someone else".into()),
+        ..Default::default()
+    });
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(h.state().open(), None, "another chat starting does not take over the blank one");
+
+    click(&mut h, 800.0, 330.0);
+    h.event(egui::Event::Text("mine".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    until(&mut h, "my chat", |h| h.state().open().is_some());
+    let mine = rig.store.session(h.state().open().unwrap()).unwrap();
+    let first = rig.store.messages(mine.id, 0).unwrap();
+    assert!(matches!(&first[0].entry, Entry::User { text } if text == "mine"), "{first:?}");
+}
