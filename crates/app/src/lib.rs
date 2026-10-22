@@ -2,6 +2,7 @@ pub mod app;
 pub mod attach;
 pub mod client;
 pub mod fonts;
+mod form;
 mod picker;
 
 pub use app::{App, LocalServer, status_counts};

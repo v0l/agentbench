@@ -2,6 +2,7 @@
 //! dialog with a filter box and a long, scrolling, sorted list. The list is drawn by row so a
 //! server with thousands of models costs the same as one with ten.
 
+use crate::form::field;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
 use egui_bench::prelude::*;
@@ -236,7 +237,11 @@ fn entry(ui: &mut Ui, label: &str, dim: bool, active: bool, show_value: bool, va
 
 /// Text on one line inside `area`, cut with an ellipsis rather than overflowing.
 fn one_line(p: &egui::Painter, area: Rect, text: &str, colour: Color32, align: Align2) {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), figure(12.5), colour);
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text.to_string(),
+        egui::FontId::proportional(13.0),
+        colour,
+    );
     job.wrap = egui::text::TextWrapping {
         max_width: area.width().max(1.0),
         max_rows: 1,

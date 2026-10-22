@@ -1,5 +1,6 @@
 use crate::client::{Client, Reply, Server};
 use crate::fonts::{self, Installed, Typeface};
+use crate::form::{field, field_then, prose, secret};
 use crate::picker::ModelPicker;
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
