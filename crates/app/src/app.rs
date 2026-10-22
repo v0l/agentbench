@@ -267,7 +267,9 @@ impl App {
             .flat_map(|o| &o.sessions)
             .filter(|s| s.worktree_id == worktree)
             .collect();
-        out.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+        // Order by creation, not activity: `updated_at` moves on every message and
+        // status change, which made chats jump around the tree while agents worked.
+        out.sort_by_key(|s| std::cmp::Reverse((s.created_at, s.id)));
         out
     }
 
