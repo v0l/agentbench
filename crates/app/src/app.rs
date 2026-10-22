@@ -258,6 +258,14 @@ impl App {
         out
     }
 
+    pub fn issue_open(&self) -> Option<Id> {
+        self.issue
+    }
+
+    pub fn open(&self) -> Option<Id> {
+        self.session
+    }
+
     pub fn last_error(&self) -> Option<String> {
         self.notice.as_ref().filter(|(ok, _)| !ok).map(|(_, t)| t.clone())
     }
@@ -556,12 +564,16 @@ impl App {
                 o.issues.iter().filter(|i| i.project_id == p.id && i.state.is_open()).count()
             });
             let collapsed = self.collapsed.contains(&p.id);
+            let mut picked_head = false;
             let mut pick = false;
-            let head = card(
+            let mut menu = None;
+            card(
                 ui,
                 rail,
                 |ui| {
-                    Line::new().legend(&p.name).show(ui);
+                    let r = Line::new().legend(&p.name).show(ui).interact(Sense::click());
+                    picked_head = r.clicked();
+                    menu = Some(r);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         Line::new().note(format!("{open} open")).size(10.5).show(ui);
                     });
@@ -581,10 +593,12 @@ impl App {
                     }
                 },
             );
-            let r = head.response.interact(Sense::click());
-            if pick || r.clicked() {
+            if pick || picked_head {
                 self.project = Some(p.id);
             }
+            let Some(r) = menu else {
+                continue;
+            };
             r.context_menu(|ui| {
                 if ui
                     .add(

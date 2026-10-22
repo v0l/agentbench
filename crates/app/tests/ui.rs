@@ -371,3 +371,39 @@ fn a_question_is_answered_by_clicking_an_option() {
     );
     shot(&mut h, "answered");
 }
+
+#[test]
+fn clicking_a_session_in_the_tree_opens_it() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    click(&mut h, 100.0, 142.0);
+    h.run_steps(3);
+    let hello = rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    assert_eq!(h.state().open(), Some(hello.id), "the first session opens");
+    click(&mut h, 120.0, 208.0);
+    h.run_steps(3);
+    let fix = rig
+        .store
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.title == "#3 Fix the login loop")
+        .unwrap();
+    assert_eq!(h.state().open(), Some(fix.id), "switching to another session");
+}
+
+#[test]
+fn the_buttons_on_an_issue_card_work() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    click(&mut h, 236.0, 20.0);
+    h.run_steps(3);
+    shot(&mut h, "issues-tab");
+    click(&mut h, 1107.0, 170.0);
+    h.run_steps(3);
+    shot(&mut h, "more");
+    assert!(h.state().issue_open().is_some(), "more opens the issue");
+}
