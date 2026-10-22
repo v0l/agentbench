@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [lib]
 crate-type = ["lib", "cdylib"]
@@ -12,6 +13,24 @@ crate-type = ["lib", "cdylib"]
 [[bin]]
 name = "foreman"
 path = "src/main.rs"
+
+[package.metadata.deb]
+name = "foreman"
+maintainer = "v0l <kieran@harkin.me>"
+copyright = "v0l"
+license-file = ["../../LICENSE", "0"]
+section = "devel"
+priority = "optional"
+extended-description = """\
+Foreman runs coding agents in your git worktrees and keeps an issue tracker \
+beside them. Ships the foreman window and the foreman-server headless server."""
+assets = [
+    ["target/release/foreman", "usr/bin/", "755"],
+    ["target/release/foreman-server", "usr/bin/", "755"],
+    ["../../packaging/linux/foreman.desktop", "usr/share/applications/", "644"],
+    ["assets/icon-256.png", "usr/share/icons/hicolor/256x256/apps/foreman.png", "644"],
+    ["../../README.md", "usr/share/doc/foreman/README.md", "644"],
+]
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

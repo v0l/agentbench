@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Foreman"
+      Manufacturer="v0l"
+      Version="$(var.Version)"
+      UpgradeCode="fc7ca6c2-07c1-4285-ad8b-d28431f060de"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Foreman is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="packaging\windows\icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/v0l/foreman" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Foreman">
+        <Component Id="ForemanWindow" Guid="0a430e42-3a80-4c08-80bc-ff2074a277a5">
+          <File Id="ForemanExe" Source="$(var.BinDir)\foreman.exe" KeyPath="yes" />
+          <Environment Id="ForemanPath" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" System="yes" Permanent="no" />
+        </Component>
+        <Component Id="ForemanServer" Guid="167c3803-d282-4938-ad8d-53934dc15418">
+          <File Id="ForemanServerExe" Source="$(var.BinDir)\foreman-server.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="ForemanDocs" Guid="7a6cf544-3878-4d14-929b-f78e1b14f97b">
+          <File Id="ReadmeMd" Source="README.md" KeyPath="yes" />
+          <File Id="LicenseTxt" Source="LICENSE" Name="LICENSE.txt" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="ForemanShortcut" Guid="40b6b764-a0c2-46db-9f51-3904c77cbd4d">
+        <Shortcut Id="ForemanShortcutLink" Icon="AppIcon" Name="Foreman" Target="[#ForemanExe]" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKLM" Key="Software\v0l\Foreman" Name="shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Foreman" Level="1">
+      <ComponentRef Id="ForemanWindow" />
+      <ComponentRef Id="ForemanServer" />
+      <ComponentRef Id="ForemanDocs" />
+      <ComponentRef Id="ForemanShortcut" />
+    </Feature>
+  </Package>
+</Wix>

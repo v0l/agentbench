@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Foreman
+GenericName=Coding Agent Harness
+Comment=Projects, worktrees, agents and issues
+Exec=foreman
+Icon=foreman
+StartupWMClass=foreman
+Terminal=false
+Categories=Development;Utility;
+Keywords=agent;git;worktree;issues;

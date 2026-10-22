@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libgl1-mesa-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked -p foreman -p foreman-server --target ${{ matrix.target }}
+
+      - name: Install cargo-deb
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      - name: Install WiX
+        if: runner.os == 'Windows'
+        run: dotnet tool install --global wix --version 5.0.2
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.tag || github.ref_name }}"
+          name="foreman-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          bin_dir="target/${{ matrix.target }}/release"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "${bin_dir}/foreman.exe" "${bin_dir}/foreman-server.exe" "dist/${name}/"
+          else
+            cp "${bin_dir}/foreman" "${bin_dir}/foreman-server" "dist/${name}/"
+          fi
+          cp README.md LICENSE "dist/${name}/"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "${name}.zip" "${name}"
+          else
+            tar czf "${name}.tar.gz" "${name}"
+          fi
+          rm -rf "${name}"
+
+      - name: Build .deb
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.tag || github.ref_name }}"
+          cargo deb -p foreman \
+            --target ${{ matrix.target }} \
+            --no-build \
+            --deb-version "${version#v}" \
+            --output "dist/foreman-${version}-${{ matrix.target }}.deb"
+
+      - name: Build .dmg
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.tag || github.ref_name }}"
+          bin_dir="target/${{ matrix.target }}/release"
+          app="dmg/Foreman.app"
+          mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
+          sed "s/__VERSION__/${version#v}/g" packaging/macos/Info.plist > "${app}/Contents/Info.plist"
+          cp packaging/macos/icon.icns "${app}/Contents/Resources/"
+          cp "${bin_dir}/foreman" "${bin_dir}/foreman-server" "${app}/Contents/MacOS/"
+          codesign --force --sign - "${app}"
+          ln -s /Applications dmg/Applications
+          cp README.md LICENSE dmg/
+          hdiutil create \
+            -volname Foreman \
+            -srcfolder dmg \
+            -fs HFS+ \
+            -format UDZO \
+            -ov "dist/foreman-${version}-${{ matrix.target }}.dmg"
+
+      - name: Build .msi
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ github.event.inputs.tag || github.ref_name }}"
+          msi_version="$(printf '%s' "${version#v}" | sed -E 's/[-+].*$//')"
+          wix build \
+            -arch x64 \
+            -pdbtype none \
+            -d "Version=${msi_version}" \
+            -d "BinDir=target/${{ matrix.target }}/release" \
+            -o "dist/foreman-${version}-${{ matrix.target }}.msi" \
+            packaging/windows/foreman.wxs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release notes
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          awk -v v="${TAG#v}" '/^## \[/{p=index($0,"[" v "]")>0;next} /^\[[^]]*\]: /{p=0} p' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md || { echo "CHANGELOG.md has no entry for ${TAG#v}"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          body_path: notes.md
+          files: dist/*

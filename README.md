@@ -1,3 +1,5 @@
+<img src="assets/icon.svg" width="64" alt="">
+
 # foreman
 
 A small server that runs coding agents in your git projects and keeps an issue
@@ -13,6 +15,12 @@ doing.
 
 Everything lives in one SQLite file. The window talks to the server only over
 its REST API, so it can sit on another machine.
+
+## Install
+
+Download a `.deb`, `.msi`, `.dmg` or archive for your platform from the
+[releases](https://github.com/v0l/foreman/releases). Each release lists its
+changes in [CHANGELOG.md](CHANGELOG.md).
 
 ## Run
 
