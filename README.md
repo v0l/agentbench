@@ -44,7 +44,9 @@ Data lives in `$FOREMAN_HOME` (default `~/.local/share/foreman`):
 in the session's worktree with file tools and bash, loads skills from
 `~/.agents/skills`, and has tools for the tracker (`list_issues`, `file_issue`,
 `update_issue`, `comment_on_issue`, `list_sessions`, `read_session`) and
-`ask_user`, which puts a question in the chat and waits for the answer. A
+`ask_user`, which puts a question in the chat and waits for the answer. Options
+show one to a row, `multiple` lets the user tick several, and `questions` asks a
+whole set at once, answered together. A
 message sent while it works steers it at the next step. Set its model in
 `foreman.toml`:
 
@@ -85,6 +87,55 @@ output_tokens = "/usage/output"
 The pointers are JSON pointers into each line. `{prompt}` in `args` passes the
 prompt as an argument instead of stdin.
 
+## Chat titles
+
+A new chat is named from the start of your first message. Once the agent has
+answered, a small model reads the conversation and writes a proper title in its
+place. It only ever replaces a title cut from your message; a title you gave,
+or an issue's, is left alone. If the model is down the stand-in stays and the
+next turn tries again. `/title` asks for a fresh one, and `/title my words`
+sets it yourself.
+
+The model is any OpenAI compatible server, so a small one beside the big one
+works well (ollama, llama.cpp, vllm). Set it in the window: the **agent** key
+opens the foreman agent's settings, and the **chat titles** section below the
+model has its own address, key and model. Leave a field empty and it uses the
+foreman agent's, so with nothing set the agent's own model names the chats.
+Settings are saved on the server like the agent's model, and the key is never
+read back or sent anywhere but the address beside it.
+
+`foreman.toml` can supply a default for a server that has not been set from the
+window; what you save in the window wins.
+
+```toml
+[title_model]
+url = "http://localhost:11434/v1"
+model = "qwen2.5:1.5b"
+```
+
+## Switching models
+
+A chat can move to a stronger model when it needs one, and back again.
+
+Under **agent**, the **model levels** section sets up `low`, `medium` and `high`.
+Each is a model and, if you like, a server and key of its own, so `high` can be
+a hosted model while `low` is a local one. A level with no server uses the
+foreman agent's; a level with its own server never sends it the foreman key. A
+level with no model is left out.
+
+- **You:** `/model high` (or the **model** key above the chat) moves the chat to
+  that level. `/model some-id` names a model on the foreman agent's server, and
+  `/model` alone goes back to the default. It applies from the next turn.
+- **The agent:** once any level is set up, the foreman agent gets a
+  `switch_model` tool with `level` and `reason`. It can go up for a hard bug and
+  down for mechanical work, and the switch takes effect on its next step, in the
+  middle of a turn. The chat remembers it, and a notice in the transcript says
+  what changed and why.
+
+Other agents (pi, claude, codex) have their own model lists, so `/model` with a
+model id still works for them, but levels and `switch_model` are the foreman
+agent's.
+
 ## Web and Android
 
 ```sh
@@ -106,7 +157,7 @@ cargo apk build -p foreman --lib --release
 |---|---|
 | `GET /api/overview` | projects, worktrees, issues, sessions, agents and the change cursor |
 | `GET /api/changes?since=N&wait=20` | long poll, returns when something changed |
-| `POST /api/projects` `{path, name?}` | add a repository |
+| `POST /api/projects` `{path, name?, create?}` | add a repository; `create` makes the folder and runs `git init` when it is missing or not a repo |
 | `POST /api/projects/{id}/worktrees` `{branch}` | make a worktree |
 | `DELETE /api/worktrees/{id}?force=true` | remove one, the branch is kept |
 | `POST /api/issues` `{project_id, title, body}` | file an issue |

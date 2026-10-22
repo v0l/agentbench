@@ -13,6 +13,26 @@ impl Codex {
     }
 }
 
+/// `codex debug models` prints `{"models":[{"slug":..,"visibility":"list"},..]}`.
+fn codex_models(text: &str) -> Result<Vec<String>, String> {
+    let at = text.find('{').ok_or("codex printed no model list")?;
+    let v: Value =
+        serde_json::from_str(&text[at..]).map_err(|e| format!("not a model list: {e}"))?;
+    let mut out: Vec<String> = v
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter(|m| str_at(m, "visibility").is_none_or(|v| v == "list"))
+                .filter_map(|m| str_at(m, "slug").map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 impl Cli for Codex {
     fn name(&self) -> &str {
         "codex"
@@ -28,6 +48,11 @@ impl Cli for Codex {
 
     fn resumable(&self) -> bool {
         true
+    }
+
+    fn models(&self) -> Result<Vec<String>, String> {
+        let text = super::process::listing(&self.program, &["debug", "models"])?;
+        codex_models(&text)
     }
 
     fn launch(&self, turn: &Turn, brief: &str) -> Launch {
@@ -214,6 +239,13 @@ impl CodexDecoder {
 mod tests {
     use super::*;
     use crate::agent::decode_all;
+
+    #[test]
+    fn codex_models_skip_the_hidden_ones() {
+        let text = r#"{"models":[{"slug":"b","visibility":"list"},{"slug":"a","visibility":"list"},{"slug":"h","visibility":"hide"}]}"#;
+        assert_eq!(codex_models(text).unwrap(), ["a", "b"]);
+        assert!(codex_models("nope").is_err());
+    }
 
     #[test]
     fn a_tool_run_decodes_in_order() {

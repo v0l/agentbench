@@ -143,6 +143,12 @@ impl Api for StoreApi {
                     .collect();
                 json!({ "session": other.id, "title": other.title, "status": other.status, "messages": lines })
             }
+            "set_model" => {
+                let model = text(args, "model").filter(|m| !m.trim().is_empty());
+                s.set_model(session, model.as_deref().map(str::trim)).map_err(|e| e.0)?;
+                self.touched();
+                json!({ "model": model })
+            }
             other => return Err(format!("no foreman tool called {other}")),
         };
         if matches!(tool, "file_issue" | "update_issue" | "comment_on_issue") {
@@ -158,7 +164,7 @@ fn kind(e: &Entry) -> &'static str {
         Entry::Assistant { .. } => "assistant",
         Entry::Thinking { .. } => "thinking",
         Entry::Tool { .. } => "tool",
-        Entry::Question { .. } => "question",
+        Entry::Question { .. } | Entry::Questions { .. } => "question",
         Entry::Error { .. } => "error",
         Entry::Notice { .. } => "notice",
         Entry::Summary { .. } => "summary",

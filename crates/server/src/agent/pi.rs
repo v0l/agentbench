@@ -31,6 +31,11 @@ impl Cli for Pi {
         true
     }
 
+    fn models(&self) -> Result<Vec<String>, String> {
+        let text = super::process::listing(&self.program, &["--list-models"])?;
+        Ok(pi_models(&text))
+    }
+
     fn launch(&self, turn: &Turn, brief: &str) -> Launch {
         let mut args = vec!["--mode".to_string(), "json".to_string()];
         let session =
@@ -51,6 +56,22 @@ impl Cli for Pi {
     fn decoder(&self) -> Box<dyn Decoder> {
         Box::new(PiDecoder::default())
     }
+}
+
+/// `pi --list-models` prints a table of `provider model ...`; pi takes `provider/model`.
+fn pi_models(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = text
+        .lines()
+        .skip_while(|l| !l.trim_start().starts_with("provider"))
+        .skip(1)
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            Some(format!("{}/{}", w.next()?, w.next()?))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 #[derive(Default)]
@@ -196,6 +217,13 @@ impl PiDecoder {
 mod tests {
     use super::*;
     use crate::agent::decode_all;
+
+    #[test]
+    fn pi_models_are_provider_slash_model() {
+        let text = "provider   model   context\nanthropic  claude-a  1M\nopenai  gpt-x  200K\nanthropic  claude-a  1M\n";
+        assert_eq!(pi_models(text), ["anthropic/claude-a", "openai/gpt-x"]);
+        assert!(pi_models("no table here").is_empty());
+    }
 
     const RUN: &[&str] = &[
         r#"{"type":"session","version":3,"id":"s-1","cwd":"/tmp"}"#,

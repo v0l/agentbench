@@ -7,11 +7,15 @@ fn err(e: String) -> StoreError {
     StoreError(e)
 }
 
-fn canonical(path: &Path) -> Result<PathBuf, StoreError> {
-    let expanded = match path.strip_prefix("~") {
+fn expand(path: &Path) -> PathBuf {
+    match path.strip_prefix("~") {
         Ok(rest) => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(rest),
         Err(_) => path.to_path_buf(),
-    };
+    }
+}
+
+fn canonical(path: &Path) -> Result<PathBuf, StoreError> {
+    let expanded = expand(path);
     expanded.canonicalize().map_err(|e| StoreError(format!("{}: {e}", path.display())))
 }
 
@@ -28,7 +32,21 @@ fn seen(trees: &[git::Tree], main: &Path) -> Vec<SeenTree> {
         .collect()
 }
 
-pub fn add(store: &Store, path: &Path, name: Option<&str>) -> Result<Project, StoreError> {
+pub fn add(
+    store: &Store,
+    path: &Path,
+    name: Option<&str>,
+    create: bool,
+) -> Result<Project, StoreError> {
+    if create {
+        let dir = expand(path);
+        if dir.exists() && !dir.is_dir() {
+            return Err(StoreError(format!("{} is not a folder", dir.display())));
+        }
+        if git::main_worktree(&dir).is_err() {
+            git::init(&dir).map_err(err)?;
+        }
+    }
     let dir = canonical(path)?;
     let main = git::main_worktree(&dir)
         .map_err(|e| StoreError(format!("{} is not a git repo: {e}", dir.display())))?;
@@ -121,7 +139,7 @@ mod tests {
         let side = git::add_worktree(&main, "existing", None).unwrap();
 
         let s = Store::memory().unwrap();
-        let p = add(&s, &side, None).unwrap();
+        let p = add(&s, &side, None, false).unwrap();
         assert_eq!(p.name, "snort", "added from inside a worktree, still names the repo");
         assert_eq!(Path::new(&p.path), main.canonicalize().unwrap());
         assert_eq!(p.branch.as_deref(), Some("main"));
@@ -129,15 +147,34 @@ mod tests {
         assert_eq!(trees.len(), 2);
         assert!(trees[0].main);
         assert!(!trees[1].created_by_foreman, "an agent-made tree is adopted, not owned");
-        assert!(add(&s, &main, None).is_err(), "the same repo twice");
+        assert!(add(&s, &main, None, false).is_err(), "the same repo twice");
     }
 
     #[test]
     fn a_plain_folder_is_not_a_project() {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::memory().unwrap();
-        let e = add(&s, dir.path(), None).unwrap_err();
+        let e = add(&s, dir.path(), None, false).unwrap_err();
         assert!(e.0.contains("not a git repo"), "{e}");
+    }
+
+    #[test]
+    fn a_new_folder_can_be_made_into_a_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("deep").join("idea");
+        let s = Store::memory().unwrap();
+        assert!(add(&s, &fresh, None, false).is_err(), "missing folders are not made unasked");
+        assert!(!fresh.exists());
+
+        let p = add(&s, &fresh, None, true).unwrap();
+        assert_eq!(p.name, "idea");
+        assert!(fresh.join(".git").exists());
+        let w = add_worktree(&s, p.id, "first", None).unwrap();
+        assert!(Path::new(&w.path).is_dir(), "the empty commit lets worktrees branch off");
+
+        let again = dir.path().join("again");
+        repo(&again);
+        assert!(add(&s, &again, None, true).is_ok(), "an existing repo is left as it is");
     }
 
     #[test]
@@ -146,7 +183,7 @@ mod tests {
         let main = dir.path().join("r");
         repo(&main);
         let s = Store::memory().unwrap();
-        let p = add(&s, &main, Some("mine")).unwrap();
+        let p = add(&s, &main, Some("mine"), false).unwrap();
         assert_eq!(p.name, "mine");
 
         let w = add_worktree(&s, p.id, "fix-login", None).unwrap();
@@ -170,7 +207,7 @@ mod tests {
         let main = dir.path().join("r");
         repo(&main);
         let s = Store::memory().unwrap();
-        let p = add(&s, &main, None).unwrap();
+        let p = add(&s, &main, None, false).unwrap();
         git::add_worktree(&main, "agent-made", None).unwrap();
         assert!(sync_all(&s).unwrap());
         let names: Vec<_> = s.worktrees(Some(p.id)).unwrap().iter().map(|w| w.label()).collect();

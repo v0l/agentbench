@@ -2,9 +2,11 @@ mod claude;
 mod codex;
 mod command;
 pub mod files;
+pub mod media;
 pub mod native;
 mod pi;
 mod process;
+pub mod search;
 
 pub use claude::Claude;
 pub use codex::Codex;
@@ -65,6 +67,8 @@ pub trait Io: Send + Sync {
     fn stopped(&self) -> bool;
     fn steer(&self) -> Option<String>;
     fn ask(&self, question: Question) -> Result<String, String>;
+    /// Put several questions at once; one answer back for each, in order.
+    fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String>;
     fn api(&self) -> &dyn Api;
 }
 
@@ -82,6 +86,12 @@ pub trait Agent: Send + Sync {
         false
     }
     fn run(&self, turn: &Turn, io: &dyn Io) -> Result<(), String>;
+
+    /// The models this agent can be told to use. Empty when it cannot say, and then the
+    /// window offers a plain text field instead of a dropdown.
+    fn models(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
 
     fn info(&self) -> AgentInfo {
         AgentInfo {
@@ -226,6 +236,13 @@ impl Io for TestIo {
     fn ask(&self, _question: Question) -> Result<String, String> {
         let mut a = self.answers.lock().unwrap();
         if a.is_empty() { Err("no answer".into()) } else { Ok(a.remove(0)) }
+    }
+    fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String> {
+        let mut a = self.answers.lock().unwrap();
+        if a.len() < questions.len() {
+            return Err("no answer".into());
+        }
+        Ok(a.drain(..questions.len()).collect())
     }
     fn api(&self) -> &dyn Api {
         self.api.as_ref()

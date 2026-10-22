@@ -1,5 +1,6 @@
 use crate::agent::{Agent, Api, Context, Event, Io, Turn};
 use crate::store::{Store, StoreError};
+use crate::titles::Titles;
 use foreman_core::{Entry, Id, Question, Session, SessionStatus};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,10 +13,13 @@ use tokio::sync::Notify;
 const TEXT_FLUSH: Duration = Duration::from_millis(250);
 const ANSWER_PATIENCE: Duration = Duration::from_secs(24 * 3600);
 
+/// Questions put to the user, each waiting on the channel its answers arrive on.
+type Waiting = Arc<Mutex<HashMap<String, Sender<Vec<String>>>>>;
+
 struct Live {
     stop: Arc<AtomicBool>,
     inbox: Arc<Mutex<Vec<String>>>,
-    questions: Arc<Mutex<HashMap<String, Sender<String>>>>,
+    questions: Waiting,
 }
 
 #[derive(Clone)]
@@ -24,6 +28,7 @@ pub struct Runner {
     agents: Arc<HashMap<String, Arc<dyn Agent>>>,
     live: Arc<Mutex<HashMap<Id, Live>>>,
     api: Arc<dyn Api>,
+    titles: Option<Titles>,
     pub base: Arc<Mutex<Base>>,
     pub changed: Arc<Notify>,
 }
@@ -44,9 +49,49 @@ impl Runner {
             agents: Arc::new(agents),
             live: Arc::new(Mutex::new(HashMap::new())),
             api,
+            titles: None,
             base: Arc::new(Mutex::new(Base::default())),
             changed,
         }
+    }
+
+    /// Name chats with a small model once the agent has answered.
+    pub fn with_titles(mut self, titles: Titles) -> Runner {
+        self.titles = Some(titles);
+        self
+    }
+
+    pub fn titles(&self) -> Option<&Titles> {
+        self.titles.as_ref()
+    }
+
+    /// Replace a stand-in title with one the title model writes from the
+    /// conversation so far. Runs in the background; a failure leaves the
+    /// stand-in in place and is tried again after the next turn.
+    fn retitle(&self, session: Id, force: bool) {
+        let Some(titles) = self.titles.clone() else { return };
+        if titles.target().is_none()
+            || !(force || self.store.title_is_auto(session).unwrap_or(false))
+        {
+            return;
+        }
+        let (store, changed) = (self.store.clone(), self.changed.clone());
+        std::thread::spawn(move || {
+            let entries: Vec<Entry> = store
+                .messages(session, 0)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|m| m.entry)
+                .collect();
+            match titles.title(&entries) {
+                Ok(title) => {
+                    if matches!(store.set_title(session, &title, force), Ok(true)) {
+                        changed.notify_waiters();
+                    }
+                }
+                Err(e) => tracing::debug!("no title for session {session}: {e}"),
+            }
+        });
     }
 
     pub fn store(&self) -> &Store {
@@ -82,13 +127,18 @@ impl Runner {
         true
     }
 
-    pub fn answer(&self, session: Id, question: &str, answer: &str) -> Result<(), StoreError> {
+    pub fn answer(
+        &self,
+        session: Id,
+        question: &str,
+        answers: Vec<String>,
+    ) -> Result<(), StoreError> {
         let live = self.live();
         let tx = live
             .get(&session)
             .and_then(|l| l.questions.lock().unwrap_or_else(|e| e.into_inner()).remove(question))
             .ok_or_else(|| StoreError("that question is no longer waiting".into()))?;
-        tx.send(answer.to_string()).map_err(|_| StoreError("the agent stopped waiting".into()))
+        tx.send(answers).map_err(|_| StoreError("the agent stopped waiting".into()))
     }
 
     pub fn send(&self, session: &Session, text: &str) -> Result<(), StoreError> {
@@ -128,6 +178,20 @@ impl Runner {
                     None => "this chat now uses the agent's default model".into(),
                 })
             }
+            "title" => {
+                if !arg.is_empty() {
+                    self.store.set_title(session.id, &foreman_core::short_title(arg, 80), true)?;
+                    self.changed.notify_waiters();
+                    return Ok(());
+                }
+                if self.titles.as_ref().and_then(|t| t.target()).is_none() {
+                    return Err(StoreError(
+                        "no title model: set one under [title_model] in foreman.toml, or give a title: /title my title".into(),
+                    ));
+                }
+                self.retitle(session.id, true);
+                note("asking the title model for a new title".into())
+            }
             "compact" => {
                 if self.is_running(session.id) {
                     return Err(StoreError(
@@ -152,10 +216,14 @@ impl Runner {
             if let Some(l) = live.get(&session.id) {
                 l.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(text.to_string());
                 drop(live);
-                if !agent.steerable() {
-                    let note = format!("queued for when this turn ends: {text}");
-                    self.store.add_message(session.id, &Entry::Notice { text: note })?;
-                }
+                // Show it at once. A steerable agent only reads the inbox between steps, which
+                // can be a while, and the composer has already cleared by then.
+                let shown = if agent.steerable() {
+                    Entry::User { text: text.to_string() }
+                } else {
+                    Entry::Notice { text: format!("queued for when this turn ends: {text}") }
+                };
+                self.store.add_message(session.id, &shown)?;
                 self.changed.notify_waiters();
                 return Ok(());
             }
@@ -175,6 +243,9 @@ impl Runner {
         std::thread::spawn(move || {
             let _guard = handle.enter();
             let mut next = Some(first);
+            // The first prompt is not on screen yet. A steer that missed its step and runs as
+            // the next turn was shown when it was sent, if the agent is steerable.
+            let mut shown = false;
             while let Some(prompt) = next.take() {
                 if stop.load(Ordering::Relaxed) {
                     break;
@@ -183,16 +254,28 @@ impl Runner {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                let status =
-                    runner.turn(agent.as_ref(), &session, &prompt, &stop, &inbox, &questions, mode);
+                let status = runner.turn(
+                    agent.as_ref(),
+                    &session,
+                    &prompt,
+                    shown,
+                    &stop,
+                    &inbox,
+                    &questions,
+                    mode,
+                );
                 let _ = runner.store.set_status(session_id, status);
                 runner.changed.notify_waiters();
+                if status == SessionStatus::Idle && mode == Mode::Chat {
+                    runner.retitle(session_id, false);
+                }
                 if status != SessionStatus::Idle || mode == Mode::Compact {
                     break;
                 }
                 let mut queued = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 if !queued.is_empty() {
                     next = Some(queued.drain(..).collect::<Vec<_>>().join("\n\n"));
+                    shown = agent.steerable();
                 }
             }
             runner.live().remove(&session_id);
@@ -223,9 +306,10 @@ impl Runner {
         agent: &dyn Agent,
         session: &Session,
         prompt: &str,
+        shown: bool,
         stop: &Arc<AtomicBool>,
         inbox: &Arc<Mutex<Vec<String>>>,
-        questions: &Arc<Mutex<HashMap<String, Sender<String>>>>,
+        questions: &Waiting,
         mode: Mode,
     ) -> SessionStatus {
         let history: Vec<Entry> = self
@@ -235,11 +319,11 @@ impl Runner {
             .into_iter()
             .map(|m| m.entry)
             .collect();
-        let shown = match mode {
+        let entry = match mode {
             Mode::Chat => Entry::User { text: prompt.to_string() },
             Mode::Compact => Entry::Notice { text: "compacting the conversation".into() },
         };
-        if self.store.add_message(session.id, &shown).is_err() {
+        if !shown && self.store.add_message(session.id, &entry).is_err() {
             return SessionStatus::Failed;
         }
         let summary = history.iter().rev().find_map(|e| match e {
@@ -343,7 +427,7 @@ struct Sink {
     state: Mutex<SinkState>,
     stop: Arc<AtomicBool>,
     inbox: Arc<Mutex<Vec<String>>>,
-    questions: Arc<Mutex<HashMap<String, Sender<String>>>>,
+    questions: Waiting,
     steerable: bool,
     api: Arc<dyn Api>,
 }
@@ -426,6 +510,45 @@ impl Sink {
     }
 }
 
+impl Sink {
+    fn wait(
+        &self,
+        id: &str,
+        open: Entry,
+        answered: impl FnOnce(&[String]) -> Entry,
+    ) -> Result<Vec<String>, String> {
+        let (tx, rx) = channel();
+        self.questions.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), tx);
+        let msg = self.entry(open);
+        let _ = self.store.set_status(self.session, SessionStatus::Waiting);
+        self.changed.notify_waiters();
+        let started = Instant::now();
+        let answer = loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(a) => break Ok(a),
+                Err(RecvTimeoutError::Disconnected) => {
+                    break Err("the question was withdrawn".to_string());
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if self.stopped() {
+                        break Err("stopped".to_string());
+                    }
+                    if started.elapsed() > ANSWER_PATIENCE {
+                        break Err("nobody answered in a day".to_string());
+                    }
+                }
+            }
+        };
+        self.questions.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        if let (Some(m), Ok(a)) = (msg, &answer) {
+            let _ = self.store.update_message(m, &answered(a));
+        }
+        let _ = self.store.set_status(self.session, SessionStatus::Running);
+        self.changed.notify_waiters();
+        answer
+    }
+}
+
 impl Io for Sink {
     fn emit(&self, event: Event) {
         match event {
@@ -466,9 +589,8 @@ impl Io for Sink {
                     }
                 }
             }
-            Event::Steered { text } => {
-                self.entry(Entry::User { text });
-            }
+            // The message was already shown when it was sent, see send_text.
+            Event::Steered { .. } => {}
             Event::Usage(u) => {
                 let _ = self.store.add_usage(self.session, &u);
             }
@@ -496,37 +618,26 @@ impl Io for Sink {
 
     fn ask(&self, question: Question) -> Result<String, String> {
         let id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = channel();
-        self.questions.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), tx);
-        let entry = Entry::Question { id: id.clone(), question: question.clone(), answer: None };
-        let msg = self.entry(entry);
-        let _ = self.store.set_status(self.session, SessionStatus::Waiting);
-        self.changed.notify_waiters();
-        let started = Instant::now();
-        let answer = loop {
-            match rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(a) => break Ok(a),
-                Err(RecvTimeoutError::Disconnected) => {
-                    break Err("the question was withdrawn".to_string());
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if self.stopped() {
-                        break Err("stopped".to_string());
-                    }
-                    if started.elapsed() > ANSWER_PATIENCE {
-                        break Err("nobody answered in a day".to_string());
-                    }
-                }
-            }
-        };
-        self.questions.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-        if let (Some(m), Ok(a)) = (msg, &answer) {
-            let entry = Entry::Question { id, question, answer: Some(a.clone()) };
-            let _ = self.store.update_message(m, &entry);
-        }
-        let _ = self.store.set_status(self.session, SessionStatus::Running);
-        self.changed.notify_waiters();
-        answer
+        let open = Entry::Question { id: id.clone(), question: question.clone(), answer: None };
+        let answers = self.wait(&id, open, |a| Entry::Question {
+            id: id.clone(),
+            question: question.clone(),
+            answer: Some(a.join(", ")),
+        })?;
+        Ok(answers.join(", "))
+    }
+
+    fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let open = Entry::Questions { id: id.clone(), questions: questions.clone(), answers: None };
+        let n = questions.len();
+        let mut answers = self.wait(&id, open, |a| Entry::Questions {
+            id: id.clone(),
+            questions: questions.clone(),
+            answers: Some(a.to_vec()),
+        })?;
+        answers.resize(n, String::new());
+        Ok(answers)
     }
 
     fn api(&self) -> &dyn Api {
@@ -660,6 +771,63 @@ mod tests {
         assert!(out.stdout.is_empty(), "the backgrounded child survived");
     }
 
+    struct Steerable;
+
+    impl Agent for Steerable {
+        fn name(&self) -> &str {
+            "steerable"
+        }
+        fn label(&self) -> &str {
+            "Steerable"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn steerable(&self) -> bool {
+            true
+        }
+        fn run(&self, _turn: &Turn, io: &dyn Io) -> Result<(), String> {
+            for _ in 0..200 {
+                if let Some(text) = io.steer() {
+                    io.emit(Event::Steered { text });
+                    io.emit(Event::Done);
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err("never steered".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_steer_shows_as_soon_as_it_is_sent_and_only_once() {
+        let (runner, s) = setup(Box::new(Steerable));
+        runner.send(&s, "go").unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        runner.send(&s, "left instead").unwrap();
+        let users = |runner: &Runner| -> Vec<String> {
+            runner
+                .store()
+                .messages(s.id, 0)
+                .unwrap()
+                .into_iter()
+                .filter_map(|m| match m.entry {
+                    Entry::User { text } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(users(&runner), ["go", "left instead"]);
+        wait_idle(&runner, s.id).await;
+        assert_eq!(users(&runner), ["go", "left instead"]);
+    }
+
     struct Asker;
 
     impl Agent for Asker {
@@ -682,6 +850,7 @@ mod tests {
             let a = io.ask(Question {
                 text: "red or blue?".into(),
                 options: vec!["red".into(), "blue".into()],
+                ..Question::default()
             })?;
             io.emit(Event::Text { delta: format!("you picked {a}") });
             io.emit(Event::Done);
@@ -710,8 +879,8 @@ mod tests {
         }
         let qid = qid.expect("a question");
         assert_eq!(runner.store().session(s.id).unwrap().status, SessionStatus::Waiting);
-        assert!(runner.answer(s.id, "nope", "x").is_err());
-        runner.answer(s.id, &qid, "blue").unwrap();
+        assert!(runner.answer(s.id, "nope", vec!["x".into()]).is_err());
+        runner.answer(s.id, &qid, vec!["blue".into()]).unwrap();
         let done = wait_idle(&runner, s.id).await;
         assert_eq!(done.status, SessionStatus::Idle);
         let msgs: Vec<Entry> =
@@ -721,6 +890,70 @@ mod tests {
                 .any(|e| matches!(e, Entry::Question { answer: Some(a), .. } if a == "blue"))
         );
         assert_eq!(msgs.last().unwrap().text(), "you picked blue");
+    }
+
+    struct Pair;
+
+    impl Agent for Pair {
+        fn name(&self) -> &str {
+            "pair"
+        }
+        fn label(&self) -> &str {
+            "Pair"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn run(&self, _turn: &Turn, io: &dyn Io) -> Result<(), String> {
+            let q = |t: &str, multiple| Question {
+                text: t.into(),
+                options: vec!["a".into(), "b".into()],
+                multiple,
+            };
+            let a = io.ask_many(vec![q("one?", false), q("two?", true)])?;
+            io.emit(Event::Text { delta: a.join("+") });
+            io.emit(Event::Done);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn several_questions_wait_for_all_their_answers() {
+        let (runner, s) = setup(Box::new(Pair));
+        runner.send(&s, "go").unwrap();
+        let mut qid = None;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if let Some(Entry::Questions { id, .. }) = runner
+                .store()
+                .messages(s.id, 0)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.entry)
+                .find(|e| matches!(e, Entry::Questions { .. }))
+            {
+                qid = Some(id);
+                break;
+            }
+        }
+        let qid = qid.expect("a set of questions");
+        assert_eq!(runner.store().session(s.id).unwrap().status, SessionStatus::Waiting);
+        runner.answer(s.id, &qid, vec!["a".into(), "a, b".into()]).unwrap();
+        let done = wait_idle(&runner, s.id).await;
+        assert_eq!(done.status, SessionStatus::Idle);
+        let msgs: Vec<Entry> =
+            runner.store().messages(s.id, 0).unwrap().into_iter().map(|m| m.entry).collect();
+        assert!(msgs.iter().any(|e| matches!(
+            e,
+            Entry::Questions { answers: Some(a), .. } if a == &["a", "a, b"]
+        )));
+        assert_eq!(msgs.last().unwrap().text(), "a+a, b");
     }
 
     struct Echo(Mutex<Vec<(String, Option<String>, usize)>>);
@@ -790,6 +1023,9 @@ mod tests {
 
         runner.send(&fresh(&runner), "/model qwen-big").unwrap();
         assert_eq!(fresh(&runner).model.as_deref(), Some("qwen-big"));
+        runner.send(&fresh(&runner), "/model high").unwrap();
+        assert_eq!(fresh(&runner).model.as_deref(), Some("high"));
+        runner.send(&fresh(&runner), "/model qwen-big").unwrap();
 
         runner.send(&fresh(&runner), "/compact").unwrap();
         wait_idle(&runner, s.id).await;
@@ -849,6 +1085,95 @@ mod tests {
             })
             .collect();
         assert!(notes.iter().any(|n| n == "nothing to stop"));
+    }
+
+    fn titled(url: String, agent: Box<dyn Agent>, auto: bool) -> (Runner, Session) {
+        use crate::agent::native::{Model, Shared};
+        use crate::titles::{TitleModel, Titles};
+        let (runner, s) = setup(agent);
+        let main = Shared::new(Model::default());
+        let config = TitleModel { url, model: "tiny".into(), ..TitleModel::default() };
+        let runner = runner.with_titles(Titles::new(config, main));
+        runner.store().set_title_auto(s.id, auto).unwrap();
+        (runner, s)
+    }
+
+    async fn title_becomes(runner: &Runner, id: Id, want: &str) -> bool {
+        for _ in 0..100 {
+            if runner.store().session(id).unwrap().title == want {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_stand_in_title_is_replaced_once_the_agent_has_answered() {
+        let (url, seen) = crate::titles::fake::server(vec![(
+            200,
+            crate::titles::fake::completion("Say hello to the agent"),
+        )]);
+        let script = r#"read p; echo "{\"text\":\"hi\"}""#;
+        let (runner, s) = titled(url, script_agent("echo", script), true);
+        runner.send(&s, "hello there").unwrap();
+        wait_idle(&runner, s.id).await;
+        assert!(title_becomes(&runner, s.id, "Say hello to the agent").await);
+        assert!(!runner.store().title_is_auto(s.id).unwrap(), "named once, not again");
+        let sent = seen.lock().unwrap();
+        let prompt = sent[0]["messages"][1]["content"].as_str().unwrap();
+        assert!(prompt.contains("Person: hello there") && prompt.contains("Agent: hi"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn a_title_someone_chose_is_left_alone() {
+        let (url, seen) =
+            crate::titles::fake::server(vec![(200, crate::titles::fake::completion("Not this"))]);
+        let script = r#"read p; echo "{\"text\":\"hi\"}""#;
+        let (runner, s) = titled(url, script_agent("echo", script), false);
+        runner.send(&s, "hello").unwrap();
+        wait_idle(&runner, s.id).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(runner.store().session(s.id).unwrap().title, "t");
+        assert!(seen.lock().unwrap().is_empty(), "the model is not even asked");
+    }
+
+    #[tokio::test]
+    async fn a_failed_title_leaves_the_stand_in_for_the_next_turn() {
+        let (url, _) = crate::titles::fake::server(vec![
+            (500, "down".into()),
+            (200, crate::titles::fake::completion("Second try")),
+        ]);
+        let script = r#"read p; echo "{\"text\":\"hi\"}""#;
+        let (runner, s) = titled(url, script_agent("echo", script), true);
+        runner.send(&s, "one").unwrap();
+        wait_idle(&runner, s.id).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(runner.store().session(s.id).unwrap().title, "t");
+        assert!(runner.store().title_is_auto(s.id).unwrap());
+        runner.send(&runner.store().session(s.id).unwrap(), "two").unwrap();
+        wait_idle(&runner, s.id).await;
+        assert!(title_becomes(&runner, s.id, "Second try").await);
+    }
+
+    #[tokio::test]
+    async fn the_title_command_renames_or_asks_the_model() {
+        let (url, _) = crate::titles::fake::server(vec![(
+            200,
+            crate::titles::fake::completion("From the model"),
+        )]);
+        let script = r#"read p; echo "{\"text\":\"hi\"}""#;
+        let (runner, s) = titled(url, script_agent("echo", script), false);
+        runner.send(&s, "/title My own name").unwrap();
+        assert_eq!(runner.store().session(s.id).unwrap().title, "My own name");
+        runner.send(&s, "hello").unwrap();
+        wait_idle(&runner, s.id).await;
+        runner.send(&runner.store().session(s.id).unwrap(), "/title").unwrap();
+        assert!(title_becomes(&runner, s.id, "From the model").await, "a bare /title asks again");
+
+        let (bare, s2) = setup(script_agent("echo", script));
+        let err = bare.send(&s2, "/title").unwrap_err();
+        assert!(err.0.contains("no title model"), "{err}");
     }
 
     #[tokio::test]

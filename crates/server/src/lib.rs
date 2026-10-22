@@ -6,6 +6,7 @@ pub mod local;
 pub mod projects;
 pub mod runner;
 pub mod store;
+pub mod titles;
 pub mod tools;
 
 use agent::{Agent, JsonCommand};
@@ -27,6 +28,8 @@ pub struct Config {
     pub web: Option<PathBuf>,
     #[serde(default)]
     pub model: agent::native::Model,
+    #[serde(default)]
+    pub title_model: titles::TitleModel,
     #[serde(default, rename = "agent")]
     pub agents: Vec<JsonCommand>,
 }
@@ -104,6 +107,19 @@ pub fn saved_model(store: &store::Store, fallback: &agent::native::Model) -> age
         .unwrap_or_else(|| fallback.clone())
 }
 
+/// The title model last saved from the window, else the one in `foreman.toml`.
+pub fn saved_title_model(
+    store: &store::Store,
+    fallback: &titles::TitleModel,
+) -> titles::TitleModel {
+    store
+        .setting("title_model")
+        .ok()
+        .flatten()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| fallback.clone())
+}
+
 pub async fn serve_config(
     store: store::Store,
     config: &Config,
@@ -113,7 +129,8 @@ pub async fn serve_config(
 ) -> Result<(), String> {
     let model = agent::native::Shared::new(saved_model(&store, &config.model));
     let agents = config.agents_with(model.clone());
-    serve_inner(store, agents, Some(model), listen, web, shutdown).await
+    let titles = titles::Titles::new(saved_title_model(&store, &config.title_model), model.clone());
+    serve_inner(store, agents, Some(model), Some(titles), listen, web, shutdown).await
 }
 
 pub async fn serve_with(
@@ -123,7 +140,7 @@ pub async fn serve_with(
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    serve_inner(store, agents, None, listen, web, shutdown).await
+    serve_inner(store, agents, None, None, listen, web, shutdown).await
 }
 
 pub async fn serve_agents(
@@ -133,13 +150,14 @@ pub async fn serve_agents(
     listen: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    serve_inner(store, agents, model, listen, None, shutdown).await
+    serve_inner(store, agents, model, None, listen, None, shutdown).await
 }
 
 async fn serve_inner(
     store: store::Store,
     agents: Vec<Box<dyn Agent>>,
     model: Option<agent::native::Shared>,
+    titles: Option<titles::Titles>,
     listen: SocketAddr,
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -149,7 +167,15 @@ async fn serve_inner(
         tracing::info!("{stale} sessions were running when foreman last stopped");
     }
     let token = token(&store).map_err(|e| e.0)?;
-    let runner = runner::Runner::new(store, agents);
+    let mut runner = runner::Runner::new(store, agents);
+    let titles = titles.or_else(|| {
+        model
+            .clone()
+            .map(|m| titles::Titles::new(saved_title_model(runner.store(), &Default::default()), m))
+    });
+    if let Some(titles) = titles {
+        runner = runner.with_titles(titles);
+    }
     *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
         runner::Base { url: local_url(listen), token: token.clone() };
     let api = api::Api { runner, token, model };

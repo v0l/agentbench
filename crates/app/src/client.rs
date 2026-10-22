@@ -29,7 +29,10 @@ pub enum Reply {
     Overview(Overview),
     Started(foreman_core::Session),
     Model(foreman_core::ModelSettings),
+    Title(foreman_core::TitleSettings),
+    TitleModels(Result<Vec<String>, String>),
     Models(Result<Vec<String>, String>),
+    AgentModels(String, Result<Vec<String>, String>),
     Changed(Id),
     Messages(Id, Vec<Message>),
     Comments(Id, Vec<Comment>),
@@ -203,13 +206,16 @@ impl Client {
     }
 
     pub fn send_message(&mut self, session: Id, text: &str) {
-        let body = SendMessage { text: text.to_string() };
+        let body = SendMessage { text: text.to_string(), attachments: Vec::new() };
         self.act(Method::POST, &format!("/api/sessions/{session}/messages"), Some(&body), "");
     }
 
-    pub fn answer(&mut self, session: Id, question: &str, answer: &str) {
-        let body =
-            foreman_core::Answer { question: question.to_string(), answer: answer.to_string() };
+    pub fn answer(&mut self, session: Id, question: &str, answers: &[String]) {
+        let body = foreman_core::Answer {
+            question: question.to_string(),
+            answer: answers.join(", "),
+            answers: answers.to_vec(),
+        };
         self.act(Method::POST, &format!("/api/sessions/{session}/answer"), Some(&body), "");
     }
 
@@ -223,18 +229,47 @@ impl Client {
         self.send(req, Reply::Model);
     }
 
+    pub fn title(&mut self) {
+        let req = self.request(Method::GET, "/api/settings/title", None);
+        self.send(req, Reply::Title);
+    }
+
+    pub fn set_title(&mut self, t: &foreman_core::TitleSettings) {
+        let req = self.request(Method::PUT, "/api/settings/title", Self::json(t));
+        self.send(req, Reply::Title);
+    }
+
+    pub fn title_models(&mut self, t: &foreman_core::TitleSettings) {
+        let req = self.request(Method::POST, "/api/settings/title/models", Self::json(t));
+        self.fetch_models(req, Reply::TitleModels);
+    }
+
     pub fn models(&mut self, m: &foreman_core::ModelSettings) {
+        let req = self.request(Method::POST, "/api/settings/models", Self::json(m));
+        self.fetch_models(req, Reply::Models);
+    }
+
+    pub fn agent_models(&mut self, agent: &str) {
+        let req = self.request(Method::GET, &format!("/api/agents/{agent}/models"), None);
+        let name = agent.to_string();
+        self.fetch_models(req, move |list| Reply::AgentModels(name.clone(), list));
+    }
+
+    fn fetch_models(
+        &mut self,
+        req: ehttp::Request,
+        reply: impl Fn(Result<Vec<String>, String>) -> Reply + Send + 'static,
+    ) {
         let tx = self.tx.clone();
         let wake = self.wake.clone();
-        let req = self.request(Method::POST, "/api/settings/models", Self::json(m));
         self.pending += 1;
         ehttp::fetch(req, move |res| {
-            let reply = match res {
-                Err(e) => Reply::Models(Err(e)),
-                Ok(r) if !r.ok => Reply::Models(Err(describe(&r))),
-                Ok(r) => Reply::Models(r.json::<Vec<String>>().map_err(|e| e.to_string())),
+            let list = match res {
+                Err(e) => Err(e),
+                Ok(r) if !r.ok => Err(describe(&r)),
+                Ok(r) => r.json::<Vec<String>>().map_err(|e| e.to_string()),
             };
-            let _ = tx.send(reply);
+            let _ = tx.send(reply(list));
             wake();
         });
     }

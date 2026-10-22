@@ -75,7 +75,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Command::Add { path, name } => {
-            let p = crate::projects::add(&store, &path, name.as_deref()).map_err(|e| e.0)?;
+            let p = crate::projects::add(&store, &path, name.as_deref(), false).map_err(|e| e.0)?;
             println!("{} {}", p.name, p.path);
             Ok(())
         }

@@ -1,4 +1,5 @@
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use foreman::App;
 use foreman_core::{Entry, NewIssue};
 use foreman_server::agent::JsonCommand;
@@ -55,6 +56,34 @@ fn rig() -> Rig {
 }
 
 fn rig_with(extra: Vec<Box<dyn foreman_server::agent::Agent>>) -> Rig {
+    rig_on("http://127.0.0.1:9/v1", extra)
+}
+
+/// A model server that lists `n` models, for as many requests as come.
+fn model_server(n: usize) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let data: Vec<String> = (0..n)
+            .map(|i| format!(r#"{{"id":"vendor-{}/model-{i:05}-instruct"}}"#, i % 40))
+            .collect();
+        let body = format!(r#"{{"data":[{}]}}"#, data.join(","));
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://{addr}/v1")
+}
+
+fn rig_on(model_url: &str, extra: Vec<Box<dyn foreman_server::agent::Agent>>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("demo");
     repo(&main);
@@ -62,7 +91,7 @@ fn rig_with(extra: Vec<Box<dyn foreman_server::agent::Agent>>) -> Rig {
     store.set_setting("token", TOKEN).unwrap();
     worktree(&main, "request-log");
     worktree(&main, "fix-login");
-    let project = foreman_server::projects::add(&store, &main, None).unwrap();
+    let project = foreman_server::projects::add(&store, &main, None, false).unwrap();
     store
         .add_issue(&NewIssue {
             project_id: project.id,
@@ -113,6 +142,7 @@ fn rig_with(extra: Vec<Box<dyn foreman_server::agent::Agent>>) -> Rig {
         output_tokens: None,
         plain: false,
     };
+    let model_url = model_url.to_string();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -121,7 +151,7 @@ fn rig_with(extra: Vec<Box<dyn foreman_server::agent::Agent>>) -> Rig {
     rt.spawn(async move {
         let config = foreman_server::Config {
             model: foreman_server::agent::native::Model {
-                url: "http://127.0.0.1:9/v1".into(),
+                url: model_url.clone(),
                 model: "test-model".into(),
                 ..Default::default()
             },
@@ -298,6 +328,53 @@ fn a_saved_remote_choice_is_kept() {
     assert!(!h.state().is_local());
 }
 
+struct Lister;
+
+impl foreman_server::agent::Agent for Lister {
+    fn name(&self) -> &str {
+        "lister"
+    }
+    fn label(&self) -> &str {
+        "Lister"
+    }
+    fn available(&self) -> bool {
+        true
+    }
+    fn about(&self) -> String {
+        "test".into()
+    }
+    fn resumable(&self) -> bool {
+        false
+    }
+    fn models(&self) -> Result<Vec<String>, String> {
+        Ok(vec!["alpha".into(), "beta".into()])
+    }
+    fn run(
+        &self,
+        _turn: &foreman_server::agent::Turn,
+        _io: &dyn foreman_server::agent::Io,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_new_chat_offers_a_dropdown_for_any_agent_that_lists_models() {
+    let rig = rig_with(vec![Box::new(Lister)]);
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    click(&mut h, 1220.0, 23.0);
+    h.run_steps(3);
+    h.state_mut().pick_fresh_agent("lister");
+    until(&mut h, "its models", |h| h.state().models_for("lister") == Some(2));
+    h.run_steps(3);
+    h.get_by_label("choose model").click();
+    h.run_steps(4);
+    h.get_by_label("SELECT MODEL");
+    h.get_by_label("2 MODELS");
+    shot(&mut h, "agent-model-picker");
+}
+
 struct Waiter;
 
 impl foreman_server::agent::Agent for Waiter {
@@ -324,11 +401,123 @@ impl foreman_server::agent::Agent for Waiter {
         let q = foreman_core::Question {
             text: "which licence?".into(),
             options: vec!["MIT".into(), "Apache-2.0".into()],
+            ..Default::default()
         };
         let a = io.ask(q)?;
         io.emit(foreman_server::agent::Event::Text { delta: format!("going with {a}") });
         Ok(())
     }
+}
+
+struct Planner;
+
+impl foreman_server::agent::Agent for Planner {
+    fn name(&self) -> &str {
+        "planner"
+    }
+    fn label(&self) -> &str {
+        "Planner"
+    }
+    fn available(&self) -> bool {
+        true
+    }
+    fn about(&self) -> String {
+        "test".into()
+    }
+    fn resumable(&self) -> bool {
+        false
+    }
+    fn run(
+        &self,
+        _turn: &foreman_server::agent::Turn,
+        io: &dyn foreman_server::agent::Io,
+    ) -> Result<(), String> {
+        let q = |text: &str, options: &[&str], multiple| foreman_core::Question {
+            text: text.into(),
+            options: options.iter().map(|o| o.to_string()).collect(),
+            multiple,
+        };
+        let a = io.ask_many(vec![
+            q("which licence?", &["MIT", "Apache-2.0"], false),
+            q("which targets?", &["linux", "mac", "windows"], true),
+            q("anything else?", &[], false),
+        ])?;
+        io.emit(foreman_server::agent::Event::Text { delta: format!("plan: {}", a.join(" | ")) });
+        Ok(())
+    }
+}
+
+#[test]
+fn several_questions_are_answered_together_with_multiple_choice() {
+    let rig = rig_with(vec![Box::new(Planner)]);
+    let project = rig.store.projects().unwrap()[0].id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let mut c = foreman::client::Client::new(
+        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    c.add_session(&foreman_core::NewSession {
+        project_id: project,
+        agent: "planner".into(),
+        prompt: Some("plan".into()),
+        ..Default::default()
+    });
+    until(&mut h, "the waiting session", |h| {
+        h.state().overview().is_some_and(|o| {
+            o.sessions
+                .iter()
+                .any(|s| s.agent == "planner" && s.status == foreman_core::SessionStatus::Waiting)
+        })
+    });
+    let s = h
+        .state()
+        .overview()
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|s| s.agent == "planner")
+        .unwrap()
+        .clone();
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the questions", |h| h.state().transcript_len(s.id) == 2);
+    shot(&mut h, "questions");
+    // Nothing is sent until every question has an answer.
+    h.get_by_label("Apache-2.0").click();
+    h.get_by_label("linux").click();
+    h.get_by_label("windows").click();
+    h.run_steps(3);
+    shot(&mut h, "questions-picked");
+    assert!(
+        !rig.store
+            .messages(s.id, 0)
+            .unwrap()
+            .iter()
+            .any(|m| matches!(&m.entry, Entry::Questions { answers: Some(_), .. }))
+    );
+    let fields = h.query_all_by_role(egui::accesskit::Role::TextInput).count();
+    assert!(fields >= 3, "{fields} text fields");
+    h.query_all_by_role(egui::accesskit::Role::TextInput).nth(2).unwrap().click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("no".into()));
+    h.run_steps(2);
+    h.get_by_label("send answers").click();
+    h.run_steps(5);
+    until(&mut h, "the reply", |h| h.state().transcript_len(s.id) >= 3);
+    let msgs = rig.store.messages(s.id, 0).unwrap();
+    assert!(
+        msgs.iter().any(|m| matches!(
+            &m.entry,
+            Entry::Questions { answers: Some(a), .. }
+                if a == &["Apache-2.0", "linux, windows", "no"]
+        )),
+        "{msgs:?}"
+    );
+    assert_eq!(
+        msgs.last().unwrap().entry,
+        Entry::Assistant { text: "plan: Apache-2.0 | linux, windows | no".into() }
+    );
+    shot(&mut h, "questions-answered");
 }
 
 #[test]
@@ -368,7 +557,7 @@ fn a_question_is_answered_by_clicking_an_option() {
     h.state_mut().open_session(s.id, s.project_id);
     until(&mut h, "the question", |h| h.state().transcript_len(s.id) == 2);
     shot(&mut h, "question");
-    click(&mut h, 451.0, 242.0);
+    h.get_by_label("Apache-2.0").click();
     until(&mut h, "the reply", |h| h.state().transcript_len(s.id) >= 3);
     let msgs = rig.store.messages(s.id, 0).unwrap();
     assert!(
@@ -382,6 +571,19 @@ fn a_question_is_answered_by_clicking_an_option() {
         Entry::Assistant { text: "going with Apache-2.0".into() }
     );
     shot(&mut h, "answered");
+}
+
+#[test]
+fn the_header_counts_agents_by_status() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    shot(&mut h, "badge");
+    let counts = foreman::status_counts(&h.state().overview().unwrap().sessions);
+    assert_eq!(
+        counts,
+        vec![(foreman_core::SessionStatus::Idle, 2), (foreman_core::SessionStatus::Stopped, 1)]
+    );
 }
 
 #[test]
@@ -504,6 +706,82 @@ fn the_agent_key_opens_the_model_settings() {
 }
 
 #[test]
+fn the_title_model_is_set_in_the_settings_and_saved_on_the_server() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    click(&mut h, 988.0, 23.0);
+    until(&mut h, "the title settings", |h| h.state().settings_title_loaded());
+    h.run_steps(3);
+    shot(&mut h, "title-settings");
+    h.get_by_label("name chats with a model");
+    h.state_mut().settings_set_title("http://127.0.0.1:1/v1", "tiny");
+    h.run_steps(2);
+    h.state_mut().settings_save();
+    until(&mut h, "the save", |h| h.state().settings_loaded().is_none());
+    let saved: serde_json::Value =
+        serde_json::from_str(&rig.store.setting("title_model").unwrap().unwrap()).unwrap();
+    assert_eq!(saved["model"], "tiny");
+    assert_eq!(saved["url"], "http://127.0.0.1:1/v1");
+    assert_eq!(saved["enabled"], true);
+}
+
+#[test]
+fn the_model_levels_are_set_in_the_settings_and_saved_on_the_server() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    click(&mut h, 988.0, 23.0);
+    until(&mut h, "the title settings", |h| h.state().settings_title_loaded());
+    h.run_steps(3);
+    shot(&mut h, "model-levels");
+    h.state_mut().settings_set_level("low", "", "tiny");
+    h.state_mut().settings_set_level("high", "http://127.0.0.1:1/v1", "huge");
+    h.run_steps(2);
+    shot(&mut h, "model-levels-set");
+    h.state_mut().settings_save();
+    until(&mut h, "the save", |h| h.state().settings_loaded().is_none());
+    let saved: serde_json::Value =
+        serde_json::from_str(&rig.store.setting("model").unwrap().unwrap()).unwrap();
+    assert_eq!(saved["low"]["model"], "tiny");
+    assert_eq!(saved["high"]["model"], "huge");
+    assert_eq!(saved["high"]["url"], "http://127.0.0.1:1/v1");
+    assert_eq!(saved["medium"]["model"], "");
+}
+
+#[test]
+fn a_long_model_list_is_a_filterable_dropdown() {
+    let rig = rig_on(&model_server(5000), Vec::new());
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    click(&mut h, 988.0, 23.0);
+    until(&mut h, "the model list", |h| h.state().settings_models() == Some(5000));
+    // The dialog grows as the title settings arrive and re-centres, so let it settle first.
+    until(&mut h, "the title settings", |h| h.state().settings_title_loaded());
+    h.run_steps(8);
+    shot(&mut h, "model-settings");
+    h.get_by_label("choose model").click();
+    h.run_steps(4);
+    shot(&mut h, "model-picker");
+    h.get_by_label("SELECT MODEL");
+    h.get_by_label("5000 MODELS");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.query_by_label("SELECT MODEL").is_none());
+
+    h.get_by_label("choose model").click();
+    h.run_steps(3);
+    h.event(egui::Event::Text("model-04321".into()));
+    h.run_steps(3);
+    h.get_by_label("1 OF 5000 MODELS");
+    shot(&mut h, "model-filtered");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert!(h.query_by_label("SELECT MODEL").is_none());
+    assert_eq!(h.state().settings_model().as_deref(), Some("vendor-1/model-04321-instruct"));
+}
+
+#[test]
 fn close_stops_and_deletes_the_chat() {
     let rig = rig();
     let session =
@@ -583,4 +861,74 @@ fn new_chat_stays_blank_while_other_agents_work() {
     let mine = rig.store.session(h.state().open().unwrap()).unwrap();
     let first = rig.store.messages(mine.id, 0).unwrap();
     assert!(matches!(&first[0].entry, Entry::User { text } if text == "mine"), "{first:?}");
+}
+
+#[test]
+fn each_new_chat_from_the_tree_is_a_new_session() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    let mut seen = Vec::new();
+    for word in ["first", "second"] {
+        // The main worktree row in the tree starts a blank chat.
+        click(&mut h, 80.0, 110.0);
+        h.run_steps(3);
+        assert_eq!(h.state().open(), None, "{word}: the row opens a blank chat");
+        // Let the overview refresh; a blank chat must not attach itself to an old session.
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(800) {
+            h.step();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        assert_eq!(h.state().open(), None, "{word}: still blank");
+        click(&mut h, 800.0, 330.0);
+        h.event(egui::Event::Text(word.into()));
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        until(&mut h, "a chat", |h| h.state().open().is_some());
+        let id = h.state().open().unwrap();
+        assert!(!seen.contains(&id), "{word}: reopened chat {id}");
+        let first = rig.store.messages(id, 0).unwrap();
+        assert!(
+            matches!(&first[0].entry, Entry::User { text } if text == word),
+            "{word}: {first:?}"
+        );
+        seen.push(id);
+    }
+}
+
+#[test]
+fn a_new_chat_that_reuses_a_deleted_chats_id_shows_none_of_its_messages() {
+    let rig = rig();
+    let main = rig.store.projects().unwrap()[0].id;
+    let tree = rig.store.main_worktree(main).unwrap();
+    let old = rig.store.add_session(tree.id, "echo", "old talk", None, None).unwrap();
+    for text in ["one", "two", "three"] {
+        rig.store.add_message(old.id, &Entry::User { text: text.into() }).unwrap();
+    }
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(old.id, old.project_id);
+    until(&mut h, "its transcript", |h| h.state().transcript_len(old.id) == 3);
+
+    let mut other = foreman::client::Client::new(
+        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    other.delete_session(old.id);
+    until(&mut h, "the chat to go", |h| h.state().open().is_none());
+
+    click(&mut h, 80.0, 110.0);
+    h.run_steps(3);
+    click(&mut h, 800.0, 330.0);
+    h.event(egui::Event::Text("fresh start".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    until(&mut h, "a chat", |h| h.state().open().is_some());
+    let id = h.state().open().unwrap();
+    until(&mut h, "its reply", |h| rig.store.messages(id, 0).unwrap().len() == 2);
+    h.run_steps(5);
+    eprintln!("new id {id}, old id {}", old.id);
+    assert_eq!(h.state().transcript_len(id), 2, "only this chat's own messages");
 }

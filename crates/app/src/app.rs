@@ -1,4 +1,5 @@
 use crate::client::{Client, Reply, Server};
+use crate::picker::ModelPicker;
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
 use egui_bench::markdown;
@@ -25,9 +26,16 @@ enum Tab {
 #[derive(Clone, PartialEq)]
 struct Fresh {
     project: Id,
-    worktree: Option<Id>,
+    place: PlaceChoice,
+    branch: String,
     agent: String,
     model: String,
+}
+
+impl Fresh {
+    fn new(project: Id, place: PlaceChoice, agent: String) -> Self {
+        Fresh { project, place, branch: String::new(), agent, model: String::new() }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -55,12 +63,32 @@ pub struct LocalServer {
 struct AddProject {
     path: String,
     name: String,
+    create: bool,
 }
 
 struct FileIssue {
     project: Id,
     title: String,
     body: String,
+}
+
+/// What has been picked and typed so far for one question.
+#[derive(Clone, Default)]
+struct Slot {
+    picked: Vec<usize>,
+    typed: String,
+}
+
+impl Slot {
+    fn reply(&self, q: &Question) -> String {
+        let mut parts: Vec<&str> =
+            self.picked.iter().filter_map(|&i| q.options.get(i)).map(String::as_str).collect();
+        let typed = self.typed.trim();
+        if !typed.is_empty() {
+            parts.push(typed);
+        }
+        parts.join(", ")
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -85,6 +113,10 @@ struct Settings {
     loaded: bool,
     models: Option<Result<Vec<String>, String>>,
     asking: bool,
+    title: foreman_core::TitleSettings,
+    title_loaded: bool,
+    title_models: Option<Result<Vec<String>, String>>,
+    title_asking: bool,
 }
 
 enum Confirm {
@@ -114,7 +146,7 @@ pub struct App {
     notice: Option<(bool, String)>,
     tab: Tab,
     fresh: Option<Fresh>,
-    answers: HashMap<String, String>,
+    drafts: HashMap<String, Vec<Slot>>,
     filter: Filter,
     project: Option<Id>,
     session: Option<Id>,
@@ -130,6 +162,9 @@ pub struct App {
     new_worktree: Option<(Id, String)>,
     confirm: Option<Confirm>,
     settings: Option<Settings>,
+    /// Models on the server the foreman agent is saved to use. None until asked.
+    agent_models: HashMap<String, Result<Vec<String>, String>>,
+    asking_models: HashSet<String>,
     markdown: markdown::Cache,
     follow: bool,
     awaiting: Option<Id>,
@@ -169,7 +204,7 @@ impl App {
             notice: None,
             tab: Tab::Chat,
             fresh: None,
-            answers: HashMap::new(),
+            drafts: HashMap::new(),
             filter: Filter::Open,
             project: None,
             session: None,
@@ -185,6 +220,8 @@ impl App {
             new_worktree: None,
             confirm: None,
             settings: None,
+            agent_models: HashMap::new(),
+            asking_models: HashSet::new(),
             markdown: markdown::Cache::default(),
             follow: true,
             awaiting: None,
@@ -252,6 +289,8 @@ impl App {
         let mut client = Client::new(server, move || ctx.request_repaint());
         client.overview();
         self.client = Some(client);
+        self.agent_models.clear();
+        self.asking_models.clear();
         self.overview = None;
         self.cursor = None;
         self.watching = false;
@@ -275,6 +314,62 @@ impl App {
 
     pub fn settings_loaded(&self) -> Option<bool> {
         self.settings.as_ref().map(|s| s.loaded)
+    }
+
+    pub fn pick_fresh_agent(&mut self, agent: &str) {
+        if let Some(f) = &mut self.fresh {
+            f.agent = agent.into();
+        }
+    }
+
+    pub fn models_for(&self, agent: &str) -> Option<usize> {
+        match self.agent_models.get(agent)? {
+            Ok(l) => Some(l.len()),
+            Err(_) => Some(0),
+        }
+    }
+
+    pub fn settings_title_loaded(&self) -> bool {
+        self.settings.as_ref().is_some_and(|s| s.title_loaded)
+    }
+
+    /// Fill in one model level (low, medium or high) as the settings dialog would.
+    pub fn settings_set_level(&mut self, level: &str, url: &str, model: &str) {
+        if let Some(st) = &mut self.settings {
+            let l = match level {
+                "low" => &mut st.model.low,
+                "medium" => &mut st.model.medium,
+                _ => &mut st.model.high,
+            };
+            l.url = url.into();
+            l.model = model.into();
+        }
+    }
+
+    pub fn settings_set_title(&mut self, url: &str, model: &str) {
+        if let Some(st) = &mut self.settings {
+            st.title.url = url.into();
+            st.title.model = model.into();
+        }
+    }
+
+    /// What the save button does, for tests that cannot click a painted key.
+    pub fn settings_save(&mut self) {
+        if let (Some(st), Some(c)) = (&self.settings, &mut self.client) {
+            c.set_title(&st.title);
+            c.set_model(&st.model);
+        }
+    }
+
+    pub fn settings_model(&self) -> Option<String> {
+        self.settings.as_ref().map(|s| s.model.model.clone())
+    }
+
+    pub fn settings_models(&self) -> Option<usize> {
+        match &self.settings.as_ref()?.models {
+            Some(Ok(l)) => Some(l.len()),
+            _ => None,
+        }
     }
 
     pub fn issue_open(&self) -> Option<Id> {
@@ -317,6 +412,9 @@ impl App {
                 if self.session.is_some_and(|s| !o.sessions.iter().any(|x| x.id == s)) {
                     self.session = None;
                 }
+                // Ids can be reused once a chat is deleted, so a cached transcript must not
+                // outlive its session or the next chat to take the id would show it.
+                self.transcripts.retain(|id, _| o.sessions.iter().any(|x| x.id == *id));
                 self.overview = Some(o);
                 self.cursor = Some(cursor);
                 if let Some(sid) = self.session {
@@ -359,8 +457,18 @@ impl App {
                     } else {
                         st.model = m;
                         st.loaded = true;
+                        if let Some(c) = &mut self.client {
+                            c.title();
+                        }
+                        if !st.model.url.trim().is_empty()
+                            && let Some(c) = &mut self.client
+                        {
+                            st.asking = true;
+                            c.models(&st.model);
+                        }
                     }
                 }
+                self.agent_models.remove("foreman");
                 if let Some(c) = &mut self.client {
                     c.overview();
                 }
@@ -374,7 +482,30 @@ impl App {
                     st.models = Some(list);
                 }
             }
+            Reply::Title(t) => {
+                if let Some(st) = self.settings.as_mut().filter(|s| !s.title_loaded) {
+                    st.title = t;
+                    st.title_loaded = true;
+                    if !st.title.url.trim().is_empty()
+                        && let Some(c) = &mut self.client
+                    {
+                        st.title_asking = true;
+                        c.title_models(&st.title);
+                    }
+                }
+            }
+            Reply::TitleModels(list) => {
+                if let Some(st) = &mut self.settings {
+                    st.title_asking = false;
+                    st.title_models = Some(list);
+                }
+            }
+            Reply::AgentModels(agent, list) => {
+                self.asking_models.remove(&agent);
+                self.agent_models.insert(agent, list);
+            }
             Reply::Started(session) => {
+                self.transcripts.remove(&session.id);
                 if self.awaiting == Some(session.project_id) {
                     self.awaiting = None;
                     self.open_session(session.id, session.project_id);
@@ -417,6 +548,23 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         self.poll_starting(ctx);
+        let wants = self
+            .start
+            .as_ref()
+            .map(|s| s.agent.clone())
+            .or_else(|| {
+                let fresh = self.fresh.as_ref()?;
+                (self.session.is_none() && self.tab == Tab::Chat).then(|| fresh.agent.clone())
+            })
+            .filter(|a| !a.is_empty());
+        if let Some(agent) = wants
+            && !self.agent_models.contains_key(&agent)
+            && !self.asking_models.contains(&agent)
+            && let Some(c) = &mut self.client
+        {
+            self.asking_models.insert(agent.clone());
+            c.agent_models(&agent);
+        }
         if self.client.is_none() {
             if let (false, Some((_, at)), None) = (self.remote, &self.offline, &self.starting)
                 && at.elapsed() >= RETRY
@@ -477,7 +625,7 @@ impl App {
                 .unwrap_or_else(|| "new chat".to_string());
             let opts: Vec<(Tab, &str)> =
                 vec![(Tab::Chat, chat_label.as_str()), (Tab::Issues, issues_label.as_str())];
-            let w = (ui.available_width() - 360.0).clamp(200.0, 560.0);
+            let w = (ui.available_width() - 640.0).clamp(200.0, 560.0);
             ui.allocate_ui(Vec2::new(w, 24.0), |ui| tabs(ui, &mut self.tab, &opts));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let ready = self.overview.is_some();
@@ -519,6 +667,9 @@ impl App {
                 if !self.remote {
                     chip(ui, "this machine", OK, self.overview.is_some());
                 }
+                if let Some(o) = &self.overview {
+                    status_badge(ui, &o.sessions);
+                }
             });
         });
     }
@@ -531,10 +682,23 @@ impl App {
                 key: String::new(),
                 has_key: false,
                 steps: 0,
+                low: Default::default(),
+                medium: Default::default(),
+                high: Default::default(),
             },
             loaded: false,
             models: None,
             asking: false,
+            title: foreman_core::TitleSettings {
+                enabled: true,
+                url: String::new(),
+                model: String::new(),
+                key: String::new(),
+                has_key: false,
+            },
+            title_loaded: false,
+            title_models: None,
+            title_asking: false,
         });
         if let Some(c) = &mut self.client {
             c.model();
@@ -545,7 +709,7 @@ impl App {
         let Some(st) = &mut self.settings else {
             return;
         };
-        let (mut save, mut close, mut probe) = (false, false, false);
+        let (mut save, mut close, mut probe, mut probe_title) = (false, false, false, false);
         let m = egui::Modal::new(egui::Id::new("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -558,10 +722,16 @@ impl App {
                     });
                     return;
                 }
+                let body_h = (ctx.content_rect().height() - 220.0).max(240.0);
+                egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
                 section(ui, "model server", "any OpenAI compatible endpoint", |ui| {
                     row_help(ui, "address", "The base URL, ending in /v1 for most servers.", |ui| {
-                        if field(ui, &mut st.model.url, "http://localhost:11434/v1").changed() {
+                        let r = field(ui, &mut st.model.url, "http://localhost:11434/v1");
+                        if r.changed() {
                             st.models = None;
+                        }
+                        if r.lost_focus() && st.models.is_none() && !st.asking && !st.model.url.trim().is_empty() {
+                            probe = true;
                         }
                     });
                     let explain = if st.model.has_key {
@@ -570,23 +740,30 @@ impl App {
                         "Sent as a bearer token. Leave empty if the server needs none."
                     };
                     row_help(ui, "key", explain, |ui| {
-                        if secret(ui, &mut st.model.key).changed() {
+                        let r = secret(ui, &mut st.model.key);
+                        if r.changed() {
                             st.models = None;
                         }
+                        if r.lost_focus() && st.models.is_none() && !st.asking && !st.model.url.trim().is_empty() {
+                            probe = true;
+                        }
                     });
-                    row(ui, "model", |ui| {
-                        match &st.models {
-                            Some(Ok(list)) if !list.is_empty() => {
-                                let list = list.clone();
-                                choice(ui, "model-pick", &mut st.model.model, list.into_iter().map(|m| (m.clone(), m)));
-                            }
-                            _ => {
-                                field_then(ui, &mut st.model.model, "model name", 110.0, |ui| {
-                                    probe = ui
-                                        .add(Key::new(if st.asking { "asking" } else { "list models" }).outline(VALUE).enabled(!st.asking && !st.model.url.trim().is_empty()))
-                                        .clicked();
-                                });
-                            }
+                    row(ui, "model", |ui| match &st.models {
+                        Some(Ok(list)) if !list.is_empty() => {
+                            let w = (ui.available_width() - 96.0).max(120.0);
+                            ui.allocate_ui(Vec2::new(w, KEY_H), |ui| {
+                                ModelPicker::new("settings", list).show(ui, &mut st.model.model);
+                            });
+                            probe = ui
+                                .add(Key::new("refresh").outline(VALUE).enabled(!st.asking))
+                                .clicked();
+                        }
+                        _ => {
+                            field_then(ui, &mut st.model.model, "model name", 110.0, |ui| {
+                                probe = ui
+                                    .add(Key::new(if st.asking { "asking" } else { "list models" }).outline(VALUE).enabled(!st.asking && !st.model.url.trim().is_empty()))
+                                    .clicked();
+                            });
                         }
                     });
                     row_help(
@@ -605,6 +782,111 @@ impl App {
                 });
                 ui.add_space(8.0);
                 hint(ui, "Saved on the server and used by every new turn of the foreman agent. Other agents keep their own settings.");
+                ui.add_space(14.0);
+                section(
+                    ui,
+                    "model levels",
+                    "what switch_model and /model low|medium|high move a chat to",
+                    |ui| {
+                        let own = st.model.url.trim().to_string();
+                        let main_list = self.agent_models.get("foreman");
+                        let levels = [
+                            ("low", &mut st.model.low, "cheap and quick, for mechanical work"),
+                            ("medium", &mut st.model.medium, "the usual"),
+                            ("high", &mut st.model.high, "slow and strong, for the hard parts"),
+                        ];
+                        for (name, level, about) in levels {
+                            row_help(ui, name, about, |ui| {
+                                let list = level.url.trim().is_empty().then_some(main_list).flatten();
+                                model_input(ui, &format!("level-{name}"), &mut level.model, "not set", list);
+                            });
+                            row_help(
+                                ui,
+                                "  server",
+                                "Empty uses the foreman agent's server and key. A server of its own never gets the foreman key.",
+                                |ui| {
+                                    field(ui, &mut level.url, &own);
+                                },
+                            );
+                            if !level.url.trim().is_empty() {
+                                let explain = if level.has_key {
+                                    "A key is saved; leave this empty to keep it."
+                                } else {
+                                    "Only sent to this server. Leave empty if it needs none."
+                                };
+                                row_help(ui, "  key", explain, |ui| {
+                                    secret(ui, &mut level.key);
+                                });
+                            }
+                        }
+                    },
+                );
+                ui.add_space(8.0);
+                hint(ui, "The agent can call switch_model to go up a level for hard work and down for easy work. A level with no model is left out. In a chat, /model high does the same by hand, and /model with nothing goes back to the default.");
+                if st.title_loaded {
+                    ui.add_space(14.0);
+                    section(
+                        ui,
+                        "chat titles",
+                        "a small model names each chat once the agent has answered",
+                        |ui| {
+                            row_help(ui, "titles", "Turn this off to keep the first words of each chat as its title.", |ui| {
+                                ui.checkbox(&mut st.title.enabled, "name chats with a model");
+                            });
+                            row_help(
+                                ui,
+                                "address",
+                                "Empty uses the foreman agent's server above. Any OpenAI compatible endpoint works, so a small one beside the big one is ideal.",
+                                |ui| {
+                                    let r = field(ui, &mut st.title.url, "same as the foreman agent");
+                                    if r.changed() {
+                                        st.title_models = None;
+                                    }
+                                    if r.lost_focus() && st.title_models.is_none() && !st.title_asking {
+                                        probe_title = true;
+                                    }
+                                },
+                            );
+                            let explain = if st.title.has_key {
+                                "Sent as a bearer token. A key is saved; leave this empty to keep it."
+                            } else {
+                                "Only sent to the address above. Empty uses the foreman agent's key when the address is empty too."
+                            };
+                            row_help(ui, "key", explain, |ui| {
+                                let r = secret(ui, &mut st.title.key);
+                                if r.changed() {
+                                    st.title_models = None;
+                                }
+                            });
+                            row(ui, "model", |ui| match &st.title_models {
+                                Some(Ok(list)) if !list.is_empty() => {
+                                    let w = (ui.available_width() - 96.0).max(120.0);
+                                    ui.allocate_ui(Vec2::new(w, KEY_H), |ui| {
+                                        ModelPicker::new("settings-title", list).show(ui, &mut st.title.model);
+                                    });
+                                    probe_title = ui
+                                        .add(Key::new("refresh").outline(VALUE).enabled(!st.title_asking))
+                                        .clicked();
+                                }
+                                _ => {
+                                    field_then(ui, &mut st.title.model, "same as the foreman agent", 110.0, |ui| {
+                                        probe_title = ui
+                                            .add(Key::new(if st.title_asking { "asking" } else { "list models" }).outline(VALUE).enabled(!st.title_asking))
+                                            .clicked();
+                                    });
+                                }
+                            });
+                            match &st.title_models {
+                                Some(Err(e)) => status(ui, false, e),
+                                Some(Ok(l)) => status(ui, true, &format!("{} models on the server", l.len())),
+                                None => {}
+                            }
+                        },
+                    );
+                    ui.add_space(8.0);
+                    hint(ui, "/title in a chat asks for a new title, and /title with words sets it yourself.");
+                }
+                });
                 footer(ui, |ui| {
                     let ready = !st.model.url.trim().is_empty() && !st.model.model.trim().is_empty();
                     save = ui.add(Key::new("save").solid(READOUT).enabled(ready).min_width(100.0)).clicked();
@@ -620,8 +902,17 @@ impl App {
                 c.models(&st.model);
             }
         }
+        if probe_title {
+            st.title_asking = true;
+            if let Some(c) = &mut self.client {
+                c.title_models(&st.title);
+            }
+        }
         if save {
             if let Some(c) = &mut self.client {
+                if st.title_loaded {
+                    c.set_title(&st.title);
+                }
                 c.set_model(&st.model);
             }
         } else if close {
@@ -648,8 +939,11 @@ impl App {
         self.tab = Tab::Chat;
         self.draft.clear();
         let agent = self.default_agent();
-        self.fresh =
-            Some(Fresh { project, worktree: worktree.map(|w| w.id), agent, model: String::new() });
+        let place = match worktree {
+            Some(w) if !w.main => PlaceChoice::Existing(w.id),
+            _ => PlaceChoice::Main,
+        };
+        self.fresh = Some(Fresh::new(project, place, agent));
     }
 
     fn open_start(&mut self, issue: Option<&Issue>) {
@@ -785,7 +1079,8 @@ impl App {
         ui.add(Key::new("add project").outline(VALUE).min_width(ui.available_width()))
             .clicked()
             .then(|| {
-                self.add_project = Some(AddProject { path: String::new(), name: String::new() });
+                self.add_project =
+                    Some(AddProject { path: String::new(), name: String::new(), create: false });
             });
     }
 
@@ -860,20 +1155,18 @@ impl App {
 
     fn session_row(&mut self, ui: &mut Ui, s: &Session, last: bool) {
         let on = self.session == Some(s.id);
-        let (tint, word) = match s.status {
-            SessionStatus::Running => (TRACE, "working"),
-            SessionStatus::Waiting => (READOUT, "needs you"),
-            SessionStatus::Failed => (FAULT, "failed"),
-            SessionStatus::Stopped => (LEGEND, "stopped"),
-            SessionStatus::Idle => (OK, "idle"),
-        };
+        let (tint, word) = status_look(s.status);
         let top = ui.cursor().top();
         let mut close = false;
         let resp = ui
             .horizontal(|ui| {
                 ui.add_space(TREE_INDENT * 2.0);
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 16.0), Sense::hover());
-                ui.painter().circle_filled(rect.center(), 3.0, tint);
+                if s.status == SessionStatus::Running {
+                    spinner(ui, rect.center(), 4.5, tint);
+                } else {
+                    ui.painter().circle_filled(rect.center(), 3.0, tint);
+                }
                 let hovered = ui.rect_contains_pointer(ui.max_rect());
                 let reserve = if hovered { 18.0 } else { 0.0 };
                 ui.allocate_ui(Vec2::new(ui.available_width() - reserve, 16.0), |ui| {
@@ -1130,14 +1423,10 @@ impl App {
             });
             return;
         };
-        let fresh = self.fresh.get_or_insert_with(|| Fresh {
-            project,
-            worktree: None,
-            agent: String::new(),
-            model: String::new(),
-        });
+        let fresh =
+            self.fresh.get_or_insert_with(|| Fresh::new(project, PlaceChoice::Main, String::new()));
         if fresh.project != project {
-            *fresh = Fresh { project, worktree: None, agent: String::new(), model: String::new() };
+            *fresh = Fresh::new(project, PlaceChoice::Main, String::new());
         }
         if fresh.agent.is_empty() {
             fresh.agent = {
@@ -1151,12 +1440,16 @@ impl App {
             o.worktrees.iter().filter(|w| w.project_id == project && !w.missing).cloned().collect();
         let name =
             o.projects.iter().find(|p| p.id == project).map(|p| p.name.clone()).unwrap_or_default();
-        let here = fresh
-            .worktree
-            .and_then(|id| trees.iter().find(|w| w.id == id))
-            .or_else(|| trees.iter().find(|w| w.main))
-            .map(|w| w.label())
-            .unwrap_or_default();
+        if matches!(fresh.place, PlaceChoice::Existing(id) if !trees.iter().any(|w| w.id == id)) {
+            fresh.place = PlaceChoice::Main;
+        }
+        let here = match fresh.place {
+            PlaceChoice::New => None,
+            PlaceChoice::Existing(id) => trees.iter().find(|w| w.id == id),
+            PlaceChoice::Main => trees.iter().find(|w| w.main),
+        }
+        .map(|w| w.label())
+        .unwrap_or_else(|| "a new worktree".to_string());
         ui.add_space(ui.available_height() * 0.18);
         ui.vertical_centered(|ui| {
             ui.set_max_width(640.0);
@@ -1175,7 +1468,7 @@ impl App {
             let fresh = self.fresh.as_mut().expect("fresh chat");
             ui.horizontal(|ui| {
                 ui.allocate_ui(Vec2::new(180.0, KEY_H), |ui| {
-                    choice(
+                    if choice(
                         ui,
                         "fresh-agent",
                         &mut fresh.agent,
@@ -1187,16 +1480,27 @@ impl App {
                             };
                             (a.name.clone(), label)
                         }),
-                    );
+                    ) {
+                        fresh.model.clear();
+                    }
                 });
-                let mut opts: Vec<(Option<Id>, String)> = Vec::new();
+                let mut opts: Vec<(PlaceChoice, String)> = Vec::new();
                 for w in &trees {
                     let label = if w.main { format!("{} (main)", w.label()) } else { w.label() };
-                    opts.push((if w.main { None } else { Some(w.id) }, label));
+                    opts.push((
+                        if w.main { PlaceChoice::Main } else { PlaceChoice::Existing(w.id) },
+                        label,
+                    ));
                 }
+                opts.push((PlaceChoice::New, "+ new worktree".into()));
                 ui.allocate_ui(Vec2::new(200.0, KEY_H), |ui| {
-                    choice(ui, "fresh-tree", &mut fresh.worktree, opts);
+                    choice(ui, "fresh-tree", &mut fresh.place, opts);
                 });
+                if fresh.place == PlaceChoice::New {
+                    ui.allocate_ui(Vec2::new(160.0, KEY_H), |ui| {
+                        field(ui, &mut fresh.branch, "branch, e.g. fix-login");
+                    });
+                }
                 let default = o
                     .agents
                     .iter()
@@ -1207,7 +1511,8 @@ impl App {
                     "foreman" => format!("model, {}", short_about(&default)),
                     _ => "model, the agent's default if empty".to_string(),
                 };
-                field_then(ui, &mut fresh.model, &hint_text, 0.0, |_| {});
+                let list = self.agent_models.get(&fresh.agent);
+                model_input(ui, "fresh-model", &mut fresh.model, &hint_text, list);
             });
         });
         ui.add_space(10.0);
@@ -1215,16 +1520,23 @@ impl App {
             .agents
             .iter()
             .any(|a| self.fresh.as_ref().is_some_and(|f| f.agent == a.name) && a.available);
-        let sent = self.composer(
-            ui,
-            agent_ready,
-            false,
-            if agent_ready { "what should it do" } else { "that agent is not ready on the server" },
-        );
+        let needs_branch = self
+            .fresh
+            .as_ref()
+            .is_some_and(|f| f.place == PlaceChoice::New && f.branch.trim().is_empty());
+        let hint_text = if !agent_ready {
+            "that agent is not ready on the server"
+        } else if needs_branch {
+            "name the new worktree's branch first"
+        } else {
+            "what should it do"
+        };
+        let sent = self.composer(ui, agent_ready && !needs_branch, false, hint_text);
         if let (Some(text), Some(f)) = (sent, self.fresh.clone()) {
-            let place = match f.worktree {
-                None => Place::Main,
-                Some(id) => Place::Existing { worktree_id: id },
+            let place = match f.place {
+                PlaceChoice::Main => Place::Main,
+                PlaceChoice::Existing(id) => Place::Existing { worktree_id: id },
+                PlaceChoice::New => Place::New { branch: f.branch.trim().to_string() },
             };
             let new = NewSession {
                 project_id: f.project,
@@ -1234,6 +1546,7 @@ impl App {
                 model: Some(f.model.trim().to_string()).filter(|m| !m.is_empty()),
                 issue_id: None,
                 prompt: Some(text),
+                attachments: Vec::new(),
             };
             if let Some(c) = &mut self.client {
                 c.add_session(&new);
@@ -1345,13 +1658,7 @@ impl App {
     fn session_view(&mut self, ui: &mut Ui, s: Session) {
         let tree = self.worktree(s.worktree_id).cloned();
         ui.horizontal(|ui| {
-            let (tint, word) = match s.status {
-                SessionStatus::Running => (TRACE, "working"),
-                SessionStatus::Waiting => (READOUT, "needs you"),
-                SessionStatus::Failed => (FAULT, "failed"),
-                SessionStatus::Stopped => (LEGEND, "stopped"),
-                SessionStatus::Idle => (OK, "idle"),
-            };
+            let (tint, word) = status_look(s.status);
             let _ = tint;
             lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
             ui.add_space(6.0);
@@ -1373,6 +1680,13 @@ impl App {
                     .clicked()
                 {
                     self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
+                }
+                if ui
+                    .add(Key::new("model").outline(VALUE))
+                    .on_hover_text("switch this chat to another model: low, medium, high or an id")
+                    .clicked()
+                {
+                    self.draft = "/model ".into();
                 }
                 if toggle(ui, "thinking", self.thinking).clicked() {
                     self.thinking = !self.thinking;
@@ -1455,43 +1769,112 @@ impl App {
         }
     }
 
-    fn question(&mut self, ui: &mut Ui, session: Id, id: &str, q: &Question, answer: Option<&str>) {
-        let rail = if answer.is_some() { ETCH } else { READOUT };
+    /// A card of one or more questions. A lone single-choice question is answered by
+    /// clicking its option; anything else is filled in and sent with one button.
+    fn questions(
+        &mut self,
+        ui: &mut Ui,
+        session: Id,
+        id: &str,
+        qs: &[Question],
+        done: Option<&[String]>,
+    ) {
+        let rail = if done.is_some() { ETCH } else { READOUT };
+        let quick = qs.len() == 1 && !qs[0].multiple && !qs[0].options.is_empty();
+        let legend = if qs.len() == 1 { "question" } else { "questions" };
         card(
             ui,
             Some(rail),
             |ui| {
-                Line::new().legend("question").show(ui);
+                Line::new().legend(legend).show(ui);
             },
             |ui| {
-                markdown::show(ui, &mut self.markdown, &q.text, id.len() * 7919 + session as usize);
-                if let Some(a) = answer {
-                    Line::new().legend("you said").gap(8.0).set(a).size(12.0).wrapped(ui);
-                    return;
-                }
-                let mut picked = None;
-                ui.horizontal_wrapped(|ui| {
+                let mut slots = self.drafts.remove(id).unwrap_or_default();
+                slots.resize(qs.len(), Slot::default());
+                let mut sent: Option<Vec<String>> = None;
+                let mut enter = false;
+                for (n, q) in qs.iter().enumerate() {
+                    if n > 0 {
+                        ui.add_space(10.0);
+                    }
+                    if qs.len() > 1 {
+                        Line::new()
+                            .legend(&format!("{} of {}", n + 1, qs.len()))
+                            .size(10.0)
+                            .show(ui);
+                    }
+                    let salt = id.len() * 7919 + session as usize + n * 104_729;
+                    markdown::show(ui, &mut self.markdown, &q.text, salt);
+                    if let Some(a) = done {
+                        let said = a.get(n).map(String::as_str).unwrap_or_default();
+                        Line::new().legend("you said").gap(8.0).set(said).size(12.0).wrapped(ui);
+                        continue;
+                    }
+                    let slot = &mut slots[n];
                     for (i, o) in q.options.iter().enumerate() {
-                        if ui.add(Key::new(o).outline(READOUT).id_salt((id, i))).clicked() {
-                            picked = Some(o.clone());
+                        let on = slot.picked.contains(&i);
+                        if !option_row(ui, o, q.multiple, on, (id, n, i)).clicked() {
+                            continue;
+                        }
+                        if quick {
+                            sent = Some(vec![o.clone()]);
+                        } else if q.multiple {
+                            if on {
+                                slot.picked.retain(|p| *p != i);
+                            } else {
+                                slot.picked.push(i);
+                                slot.picked.sort_unstable();
+                            }
+                        } else {
+                            slot.picked = if on { vec![] } else { vec![i] };
+                            slot.typed.clear();
                         }
                     }
-                });
-                let typed = self.answers.entry(id.to_string()).or_default();
-                let mut send = false;
-                let ready = !typed.trim().is_empty();
-                let r = field_then(ui, typed, "or type an answer", 90.0, |ui| {
-                    send = ui.add(Key::new("answer").solid(READOUT).enabled(ready)).clicked();
-                });
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && ready {
-                    send = true;
+                    let hint =
+                        if q.options.is_empty() { "type an answer" } else { "or type an answer" };
+                    let r = if quick {
+                        let ready = !slot.typed.trim().is_empty();
+                        let mut go = false;
+                        let r = field_then(ui, &mut slot.typed, hint, 90.0, |ui| {
+                            go = ui.add(Key::new("answer").solid(READOUT).enabled(ready)).clicked();
+                        });
+                        if go && ready {
+                            sent = Some(vec![slot.typed.trim().to_string()]);
+                        }
+                        r
+                    } else {
+                        field(ui, &mut slot.typed, hint)
+                    };
+                    if r.changed() && !q.multiple && !slot.typed.trim().is_empty() {
+                        slot.picked.clear();
+                    }
+                    enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 }
-                if send {
-                    picked = Some(typed.trim().to_string());
+                if done.is_none() && !quick {
+                    let replies: Vec<String> =
+                        qs.iter().zip(&slots).map(|(q, s)| s.reply(q)).collect();
+                    let ready = replies.iter().all(|r| !r.is_empty());
+                    ui.add_space(8.0);
+                    let label = if qs.len() > 1 { "send answers" } else { "answer" };
+                    let key = ui.add(Key::new(label).solid(READOUT).enabled(ready));
+                    key.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, ready, label)
+                    });
+                    let go = key.clicked();
+                    if (go || enter) && ready {
+                        sent = Some(replies);
+                    }
+                } else if enter && quick {
+                    let t = slots[0].typed.trim();
+                    if !t.is_empty() {
+                        sent = Some(vec![t.to_string()]);
+                    }
                 }
-                if let (Some(a), Some(c)) = (picked, &mut self.client) {
-                    c.answer(session, id, &a);
-                    self.answers.remove(id);
+                match (sent, &mut self.client) {
+                    (Some(a), Some(c)) => c.answer(session, id, &a),
+                    _ => {
+                        self.drafts.insert(id.to_string(), slots);
+                    }
                 }
             },
         );
@@ -1539,7 +1922,17 @@ impl App {
                 self.tool_row(ui, m.id, name, input, output.as_deref(), *error)
             }
             Entry::Question { id, question, answer } => {
-                self.question(ui, session, id, question, answer.as_deref())
+                let done = answer.as_ref().map(|a| [a.clone()]);
+                self.questions(
+                    ui,
+                    session,
+                    id,
+                    std::slice::from_ref(question),
+                    done.as_ref().map(|d| &d[..]),
+                )
+            }
+            Entry::Questions { id, questions, answers } => {
+                self.questions(ui, session, id, questions, answers.as_deref())
             }
             Entry::Error { text } => {
                 rail_block(ui, FAULT, FAULT.gamma_multiply(0.08), |ui| {
@@ -1757,9 +2150,12 @@ impl App {
                 row_help(ui, "name", "Taken from the origin remote when left empty.", |ui| {
                     field(ui, &mut a.name, "optional");
                 });
+                row_help(ui, "new folder", "Make the folder if it is missing and run git init in it, so a brand new project can start here.", |ui| {
+                    ui.checkbox(&mut a.create, "create it");
+                });
             });
             footer(ui, |ui| {
-                if ui.add(Key::new("add").solid(READOUT).enabled(!a.path.trim().is_empty()).min_width(100.0)).clicked() {
+                if ui.add(Key::new(if a.create { "create" } else { "add" }).solid(READOUT).enabled(!a.path.trim().is_empty()).min_width(100.0)).clicked() {
                     go = true;
                 }
                 if ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked() {
@@ -1774,6 +2170,7 @@ impl App {
             let new = NewProject {
                 path: a.path.trim().to_string(),
                 name: Some(a.name.trim().to_string()).filter(|n| !n.is_empty()),
+                create: a.create,
             };
             if let Some(c) = &mut self.client {
                 c.add_project(&new);
@@ -1850,6 +2247,7 @@ impl App {
             return;
         };
         let agents = o.agents.clone();
+        let agent_models = self.agent_models.clone();
         let trees: Vec<Worktree> = o
             .worktrees
             .iter()
@@ -1872,13 +2270,16 @@ impl App {
             });
             section(ui, "agent", "who does the work", |ui| {
                 row(ui, "agent", |ui| {
-                    choice(ui, "agent", &mut s.agent, agents.iter().map(|a| {
+                    if choice(ui, "agent", &mut s.agent, agents.iter().map(|a| {
                         let label = if a.available { a.label.clone() } else { format!("{} (not installed)", a.label) };
                         (a.name.clone(), label)
-                    }));
+                    })) {
+                        s.model.clear();
+                    }
                 });
                 row_help(ui, "model", "Passed to the agent as is. Empty uses its default.", |ui| {
-                    field(ui, &mut s.model, "default");
+                    let list = agent_models.get(&s.agent);
+                    model_input(ui, "start-model", &mut s.model, "default", list);
                 });
             });
             ui.add_space(8.0);
@@ -1947,6 +2348,7 @@ impl App {
                 model: Some(s.model.trim().to_string()).filter(|m| !m.is_empty()),
                 issue_id: s.issue,
                 prompt: Some(s.prompt.trim().to_string()).filter(|p| !p.is_empty()),
+                attachments: Vec::new(),
             };
             if let Some(c) = &mut self.client {
                 match s.issue {
@@ -2044,6 +2446,7 @@ impl App {
                                 Confirm::Worktree(id, _, _) => client.remove_worktree(*id, true),
                                 Confirm::Session(id, _) => {
                                     client.delete_session(*id);
+                                    self.transcripts.remove(id);
                                     if self.session == Some(*id) {
                                         self.session = None;
                                     }
@@ -2123,6 +2526,87 @@ impl App {
     }
 }
 
+/// A small spinning arc, for something that is working. Keeps the frame loop going while visible.
+/// The colour and word a session status is shown with.
+fn status_look(status: SessionStatus) -> (egui::Color32, &'static str) {
+    match status {
+        SessionStatus::Running => (TRACE, "working"),
+        SessionStatus::Waiting => (READOUT, "needs you"),
+        SessionStatus::Failed => (FAULT, "failed"),
+        SessionStatus::Stopped => (LEGEND, "stopped"),
+        SessionStatus::Idle => (OK, "idle"),
+    }
+}
+
+/// How many sessions are in each status, the ones that want attention first.
+/// Statuses nobody is in are left out.
+pub fn status_counts(sessions: &[Session]) -> Vec<(SessionStatus, usize)> {
+    [
+        SessionStatus::Waiting,
+        SessionStatus::Failed,
+        SessionStatus::Running,
+        SessionStatus::Idle,
+        SessionStatus::Stopped,
+    ]
+    .into_iter()
+    .map(|st| (st, sessions.iter().filter(|s| s.status == st).count()))
+    .filter(|(_, n)| *n > 0)
+    .collect()
+}
+
+/// A chip per status across every project, so the whole fleet reads at a glance.
+fn status_badge(ui: &mut Ui, sessions: &[Session]) {
+    let counts = status_counts(sessions);
+    if counts.is_empty() {
+        chip(ui, "no agents", LEGEND, false);
+        return;
+    }
+    // Right to left, so add them reversed to read left to right.
+    for (status, n) in counts.into_iter().rev() {
+        let (tint, word) = status_look(status);
+        chip(ui, &format!("{n} {word}"), tint, status != SessionStatus::Stopped)
+            .on_hover_text(format!("{n} agent chat{} {word}", if n == 1 { "" } else { "s" }));
+    }
+}
+
+fn spinner(ui: &Ui, center: egui::Pos2, radius: f32, tint: egui::Color32) {
+    let t = ui.input(|i| i.time) as f32;
+    let start = t * std::f32::consts::TAU * 1.2;
+    let sweep = std::f32::consts::TAU * 0.7;
+    let steps = 14;
+    let points: Vec<egui::Pos2> = (0..=steps)
+        .map(|i| {
+            let a = start + sweep * i as f32 / steps as f32;
+            center + Vec2::new(a.cos(), a.sin()) * radius
+        })
+        .collect();
+    let p = ui.painter();
+    p.circle_stroke(center, radius, Stroke::new(1.0, tint.gamma_multiply(0.2)));
+    p.add(egui::Shape::line(points, Stroke::new(1.6, tint)));
+    ui.ctx().request_repaint_after(Duration::from_millis(33));
+}
+
+/// The model input: a dropdown over the server's list when there is one, else a plain field.
+fn model_input(
+    ui: &mut Ui,
+    id: &str,
+    value: &mut String,
+    hint_text: &str,
+    list: Option<&Result<Vec<String>, String>>,
+) {
+    match list {
+        Some(Ok(l)) if !l.is_empty() => {
+            let w = ui.available_width();
+            ui.allocate_ui(Vec2::new(w, KEY_H), |ui| {
+                ModelPicker::new(id, l).allow_empty(hint_text).show(ui, value);
+            });
+        }
+        _ => {
+            field(ui, value, hint_text);
+        }
+    }
+}
+
 fn short_about(about: &str) -> String {
     match about.split_once(" at ") {
         Some((model, _)) => format!("default {model}"),
@@ -2155,6 +2639,65 @@ fn ago(ms: i64) -> String {
         s if s < 86_400 => format!("{}h ago", s / 3600),
         s => format!("{}d ago", s / 86_400),
     }
+}
+
+/// One choice on its own row, with a tick box for several picks or a dot for one.
+fn option_row(
+    ui: &mut Ui,
+    label: &str,
+    multiple: bool,
+    on: bool,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+) -> egui::Response {
+    let (pad, mark) = (8.0, 22.0);
+    let tint = if on { READOUT } else { VALUE };
+    let width = ui.available_width();
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui.painter().layout(label.to_string(), font, tint, width - pad * 2.0 - mark);
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(width, galley.size().y + 10.0), Sense::hover());
+    let resp = ui.interact(rect, ui.id().with(salt), Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, label.to_string())
+    });
+    if ui.is_rect_visible(rect) {
+        let lit = on || resp.hovered();
+        let fill = if on {
+            READOUT.gamma_multiply(0.18)
+        } else if resp.hovered() {
+            ETCH.gamma_multiply(0.6)
+        } else {
+            WELL
+        };
+        let p = ui.painter();
+        p.rect_filled(rect, 2.0, fill);
+        p.rect_stroke(
+            rect,
+            2.0,
+            Stroke::new(1.0, if lit { tint } else { ETCH }),
+            egui::StrokeKind::Inside,
+        );
+        let edge = Stroke::new(1.0, if lit { tint } else { LEGEND });
+        let at = egui::pos2(rect.left() + pad + 4.0, rect.center().y);
+        if multiple {
+            let tick = egui::Rect::from_center_size(at, Vec2::splat(9.0));
+            p.rect_stroke(tick, 1.0, edge, egui::StrokeKind::Inside);
+            if on {
+                p.rect_filled(tick.shrink(2.0), 0.0, tint);
+            }
+        } else {
+            p.circle_stroke(at, 4.5, edge);
+            if on {
+                p.circle_filled(at, 2.5, tint);
+            }
+        }
+        let top = egui::pos2(rect.left() + pad + mark, rect.top() + 5.0);
+        p.galley(top, galley, tint);
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
 }
 
 fn rail_block(ui: &mut Ui, rail: egui::Color32, fill: egui::Color32, body: impl FnOnce(&mut Ui)) {
@@ -2254,6 +2797,40 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_counts_skip_empty_statuses_and_lead_with_attention() {
+        let s = |status| Session {
+            id: 0,
+            project_id: 1,
+            worktree_id: 1,
+            agent: "a".into(),
+            title: String::new(),
+            cwd: String::new(),
+            model: None,
+            issue_id: None,
+            status,
+            agent_session: None,
+            usage: Default::default(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let all = [
+            s(SessionStatus::Idle),
+            s(SessionStatus::Running),
+            s(SessionStatus::Running),
+            s(SessionStatus::Waiting),
+        ];
+        assert_eq!(
+            status_counts(&all),
+            vec![
+                (SessionStatus::Waiting, 1),
+                (SessionStatus::Running, 2),
+                (SessionStatus::Idle, 1)
+            ]
+        );
+        assert!(status_counts(&[]).is_empty());
+    }
 
     #[test]
     fn token_counts_shorten() {

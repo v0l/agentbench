@@ -73,6 +73,9 @@ pub fn router(api: Api) -> Router {
         .route("/api/agents", get(agents))
         .route("/api/settings/model", get(get_model).put(put_model))
         .route("/api/settings/models", post(list_models))
+        .route("/api/settings/title", get(get_title).put(put_title))
+        .route("/api/settings/title/models", post(list_title_models))
+        .route("/api/agents/{name}/models", get(agent_models))
         .route("/api/projects", get(list_projects).post(add_project))
         .route("/api/projects/{id}", delete(delete_project))
         .route("/api/projects/{id}/sync", post(sync_project))
@@ -142,6 +145,15 @@ async fn agents(State(api): State<Api>) -> Reply<Vec<foreman_core::AgentInfo>> {
     Ok(Json(api.runner.agents().iter().map(|a| a.info()).collect()))
 }
 
+fn level_masked(l: &crate::agent::native::Level) -> foreman_core::LevelSettings {
+    foreman_core::LevelSettings {
+        url: l.url.clone(),
+        model: l.model.clone(),
+        key: String::new(),
+        has_key: !l.key.trim().is_empty(),
+    }
+}
+
 fn masked(m: &crate::agent::native::Model) -> foreman_core::ModelSettings {
     foreman_core::ModelSettings {
         url: m.url.clone(),
@@ -149,7 +161,30 @@ fn masked(m: &crate::agent::native::Model) -> foreman_core::ModelSettings {
         key: String::new(),
         has_key: !m.key.trim().is_empty(),
         steps: m.steps,
+        low: level_masked(&m.low),
+        medium: level_masked(&m.medium),
+        high: level_masked(&m.high),
     }
+}
+
+/// Apply what the window sent for one level. A blank key keeps the saved one
+/// unless the window says none is kept, and a level with no server of its own
+/// has no key to keep.
+fn level_merged(
+    old: &crate::agent::native::Level,
+    new: &foreman_core::LevelSettings,
+) -> crate::agent::native::Level {
+    let url = new.url.trim().to_string();
+    let key = if url.is_empty() {
+        String::new()
+    } else if !new.key.trim().is_empty() {
+        new.key.trim().to_string()
+    } else if new.has_key {
+        old.key.clone()
+    } else {
+        String::new()
+    };
+    crate::agent::native::Level { url, model: new.model.trim().to_string(), key }
 }
 
 async fn get_model(State(api): State<Api>) -> Reply<foreman_core::ModelSettings> {
@@ -173,6 +208,9 @@ async fn put_model(
     if new.steps > 0 {
         m.steps = new.steps.min(100_000);
     }
+    m.low = level_merged(&m.low, &new.low);
+    m.medium = level_merged(&m.medium, &new.medium);
+    m.high = level_merged(&m.high, &new.high);
     if m.url.is_empty() {
         return Err(bad("the server address is empty"));
     }
@@ -181,6 +219,76 @@ async fn put_model(
     shared.set(m.clone());
     changed(&api);
     Ok(Json(masked(&m)))
+}
+
+fn title_masked(t: &crate::titles::TitleModel) -> foreman_core::TitleSettings {
+    foreman_core::TitleSettings {
+        enabled: t.enabled,
+        url: t.url.clone(),
+        model: t.model.clone(),
+        key: String::new(),
+        has_key: !t.key.trim().is_empty(),
+    }
+}
+
+fn titles_of(api: &Api) -> Result<&crate::titles::Titles, Failure> {
+    api.runner.titles().ok_or_else(|| bad("this server has no title model"))
+}
+
+async fn get_title(State(api): State<Api>) -> Reply<foreman_core::TitleSettings> {
+    Ok(Json(title_masked(&titles_of(&api)?.config())))
+}
+
+async fn put_title(
+    State(api): State<Api>,
+    Json(new): Json<foreman_core::TitleSettings>,
+) -> Reply<foreman_core::TitleSettings> {
+    let titles = titles_of(&api)?;
+    let mut t = titles.config();
+    t.enabled = new.enabled;
+    t.url = new.url.trim().to_string();
+    t.model = new.model.trim().to_string();
+    if !new.key.trim().is_empty() {
+        t.key = new.key.trim().to_string();
+    } else if !new.has_key || t.url.is_empty() {
+        t.key.clear();
+    }
+    let text = serde_json::to_string(&t).map_err(|e| bad(e.to_string()))?;
+    api.runner.store().set_setting("title_model", &text)?;
+    titles.set_config(t.clone());
+    changed(&api);
+    Ok(Json(title_masked(&t)))
+}
+
+async fn list_title_models(
+    State(api): State<Api>,
+    Json(probe): Json<foreman_core::TitleSettings>,
+) -> Reply<Vec<String>> {
+    let titles = titles_of(&api)?;
+    let saved = titles.config();
+    let key = if probe.key.trim().is_empty() && probe.has_key { saved.key } else { probe.key };
+    // Ask whichever server the title model would use: its own, else the foreman agent's.
+    let ask = crate::titles::TitleModel { enabled: true, url: probe.url, model: "-".into(), key };
+    let target = ask.resolve(&titles.main()).ok_or_else(|| bad("no server to ask"))?;
+    let url = target.url.trim().trim_end_matches('/').to_string();
+    let list = tokio::task::spawn_blocking(move || crate::agent::native::models(&url, &target.key))
+        .await
+        .map_err(|e| bad(e.to_string()))?
+        .map_err(bad)?;
+    Ok(Json(list))
+}
+
+async fn agent_models(State(api): State<Api>, Path(name): Path<String>) -> Reply<Vec<String>> {
+    let runner = api.runner.clone();
+    let list = tokio::task::spawn_blocking(move || {
+        let agents = runner.agents();
+        let agent = agents.iter().find(|a| a.name() == name);
+        agent.ok_or_else(|| format!("no agent {name}")).and_then(|a| a.models())
+    })
+    .await
+    .map_err(|e| bad(e.to_string()))?
+    .map_err(bad)?;
+    Ok(Json(list))
 }
 
 async fn list_models(
@@ -207,7 +315,12 @@ async fn add_project(
 ) -> Reply<foreman_core::Project> {
     let store = api.runner.store().clone();
     let project = tokio::task::spawn_blocking(move || {
-        projects::add(&store, std::path::Path::new(new.path.trim()), new.name.as_deref())
+        projects::add(
+            &store,
+            std::path::Path::new(new.path.trim()),
+            new.name.as_deref(),
+            new.create,
+        )
     })
     .await
     .map_err(|e| bad(e.to_string()))??;
@@ -384,16 +497,21 @@ async fn spawn(api: &Api, new: NewSession) -> Result<foreman_core::Session, Fail
     if worktree.missing || !std::path::Path::new(&worktree.path).is_dir() {
         return Err(bad(format!("{} no longer exists", worktree.path)));
     }
-    let title = new
+    let chosen = new
         .title
         .clone()
         .filter(|t| !t.trim().is_empty())
-        .or_else(|| issue.as_ref().map(|i| format!("#{} {}", i.id, i.title)))
+        .or_else(|| issue.as_ref().map(|i| format!("#{} {}", i.id, i.title)));
+    let stand_in = chosen.is_none();
+    let title = chosen
         .or_else(|| new.prompt.as_deref().map(|p| foreman_core::short_title(p, TITLE_MAX)))
         .unwrap_or_else(|| format!("{} on {}", agent.label(), worktree.label()));
     let model = new.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
     let session =
         store.add_session(worktree.id, agent.name(), title.trim(), model, new.issue_id)?;
+    if stand_in {
+        store.set_title_auto(session.id, true)?;
+    }
     let prompt = new.prompt.clone().filter(|p| !p.trim().is_empty()).or_else(|| {
         issue.as_ref().map(|i| issue_prompt(i, &store.comments(i.id).unwrap_or_default()))
     });
@@ -471,12 +589,14 @@ async fn answer(
     Json(a): Json<Answer>,
 ) -> Result<StatusCode, Failure> {
     api.runner.store().session(id)?;
-    if a.answer.trim().is_empty() {
+    let mut answers: Vec<String> = a.answers.iter().map(|s| s.trim().to_string()).collect();
+    if answers.is_empty() {
+        answers.push(a.answer.trim().to_string());
+    }
+    if answers.iter().all(|s| s.is_empty()) {
         return Err(bad("an answer is needed"));
     }
-    api.runner
-        .answer(id, &a.question, a.answer.trim())
-        .map_err(|e| Failure(StatusCode::CONFLICT, e.0))?;
+    api.runner.answer(id, &a.question, answers).map_err(|e| Failure(StatusCode::CONFLICT, e.0))?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -597,6 +717,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_a_title_cut_from_the_prompt_may_be_replaced_later() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let start = |extra: serde_json::Value| {
+            let mut body = json!({"project_id": pid, "agent": "echo", "place": {"kind": "main"}});
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            call(&f.app, "POST", "/api/sessions", Some(body), T)
+        };
+        let (_, cut) = start(json!({"prompt": "fix the login loop"})).await;
+        let (_, named) = start(json!({"prompt": "fix the login loop", "title": "Mine"})).await;
+        let (_, blank) = start(json!({})).await;
+        let store = f.api.runner.store();
+        assert!(store.title_is_auto(cut["id"].as_i64().unwrap()).unwrap());
+        assert!(!store.title_is_auto(named["id"].as_i64().unwrap()).unwrap());
+        assert!(store.title_is_auto(blank["id"].as_i64().unwrap()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_title_model_is_set_live_and_its_key_never_read_back() {
+        use crate::agent::native::{Model, Shared};
+        use crate::titles::{TitleModel, Titles};
+        let f = fixture();
+        let titles = Titles::new(TitleModel::default(), Shared::new(Model::default()));
+        let runner = f.api.runner.clone().with_titles(titles.clone());
+        let app = router(Api { runner, ..f.api.clone() });
+        let url = "http://10.0.0.5:11434/v1";
+
+        let (s, got) = call(&app, "GET", "/api/settings/title", None, T).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!((got["enabled"].clone(), got["has_key"].clone()), (json!(true), json!(false)));
+
+        let put = json!({"enabled": true, "url": format!(" {url} "), "model": "tiny", "key": "sk-2", "has_key": false});
+        let (s, got) = call(&app, "PUT", "/api/settings/title", Some(put), T).await;
+        assert_eq!(s, StatusCode::OK, "{got}");
+        assert_eq!((got["key"].clone(), got["has_key"].clone()), (json!(""), json!(true)));
+        assert_eq!((titles.config().url.as_str(), titles.config().key.as_str()), (url, "sk-2"));
+        assert!(f.api.runner.store().setting("title_model").unwrap().is_some());
+
+        let keep =
+            json!({"enabled": false, "url": url, "model": "tiny", "key": "", "has_key": true});
+        let (_, got) = call(&app, "PUT", "/api/settings/title", Some(keep), T).await;
+        assert_eq!(got["enabled"], false);
+        assert_eq!(titles.config().key, "sk-2", "an empty key with has_key keeps the saved one");
+        assert!(titles.target().is_none(), "disabled means no title model");
+
+        let drop =
+            json!({"enabled": true, "url": url, "model": "tiny", "key": "", "has_key": false});
+        call(&app, "PUT", "/api/settings/title", Some(drop), T).await;
+        assert_eq!(titles.config().key, "");
+    }
+
+    #[tokio::test]
     async fn the_foreman_model_is_set_live_and_its_key_never_read_back() {
         let f = fixture();
         let shared = crate::agent::native::Shared::new(crate::agent::native::Model::default());
@@ -630,6 +802,48 @@ mod tests {
         assert_eq!(shared.get().model, "other");
         let saved = f.api.runner.store().setting("model").unwrap().unwrap();
         assert!(saved.contains("\"other\""));
+    }
+
+    #[tokio::test]
+    async fn the_model_levels_are_saved_and_a_level_key_is_never_read_back_or_borrowed() {
+        let f = fixture();
+        let shared = crate::agent::native::Shared::new(crate::agent::native::Model::default());
+        let api = Api { model: Some(shared.clone()), ..f.api.clone() };
+        let app = router(api);
+        let put = |body: serde_json::Value| {
+            let app = app.clone();
+            async move { call(&app, "PUT", "/api/settings/model", Some(body), T).await }
+        };
+        let base =
+            json!({"url": "http://main/v1", "model": "mid", "key": "main-key", "has_key": false});
+        let mut body = base.clone();
+        body["low"] = json!({"model": "tiny"});
+        body["high"] =
+            json!({"url": "http://big/v1", "model": "huge", "key": "big-key", "has_key": false});
+        let (s, m) = put(body).await;
+        assert_eq!(s, StatusCode::OK, "{m}");
+        assert_eq!(m["low"]["model"], "tiny");
+        assert_eq!(m["high"]["key"], "");
+        assert_eq!(m["high"]["has_key"], true);
+        assert_eq!(m["medium"]["model"], "");
+        let saved = shared.get();
+        assert_eq!(saved.level("low").unwrap().key, "main-key");
+        assert_eq!(saved.level("high").unwrap().key, "big-key");
+        // Saving again with a blank key keeps the level's key.
+        let mut again = base.clone();
+        again["high"] =
+            json!({"url": "http://big/v1", "model": "huger", "key": "", "has_key": true});
+        put(again).await;
+        assert_eq!(shared.get().high.key, "big-key");
+        assert_eq!(shared.get().high.model, "huger");
+        assert_eq!(shared.get().low.model, "", "a level left out is cleared");
+        // A level that lost its own server must not keep that server's key.
+        let mut bare = base.clone();
+        bare["high"] = json!({"model": "huger", "key": "", "has_key": true});
+        put(bare).await;
+        assert_eq!(shared.get().high.key, "");
+        let saved = f.api.runner.store().setting("model").unwrap().unwrap();
+        assert!(saved.contains("huger"));
     }
 
     #[tokio::test]

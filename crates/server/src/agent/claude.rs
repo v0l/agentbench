@@ -31,6 +31,12 @@ impl Cli for Claude {
         true
     }
 
+    /// Claude Code has no command that lists models, but takes these aliases for the
+    /// newest of each family, and any full model name through "custom…".
+    fn models(&self) -> Result<Vec<String>, String> {
+        Ok(["default", "opus", "sonnet", "haiku", "opusplan"].map(String::from).to_vec())
+    }
+
     fn launch(&self, turn: &Turn, brief: &str) -> Launch {
         let mut args: Vec<String> = [
             "-p",

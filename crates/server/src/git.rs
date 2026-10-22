@@ -76,6 +76,20 @@ pub fn main_worktree(dir: &Path) -> Result<Tree, String> {
         .ok_or_else(|| format!("{} has no checked out worktree", dir.display()))
 }
 
+/// Make `dir` a repository with one empty commit, so worktrees can branch off it.
+pub fn init(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    git(dir, &["init", "-q", "-b", "main"])?;
+    let commit = ["commit", "-q", "--allow-empty", "-m", "Initial commit"];
+    if git(dir, &commit).is_err() {
+        // No git identity configured on this machine.
+        let mut args = vec!["-c", "user.name=foreman", "-c", "user.email=foreman@localhost"];
+        args.extend(commit);
+        git(dir, &args)?;
+    }
+    Ok(())
+}
+
 pub fn remote_url(dir: &Path) -> Option<String> {
     git(dir, &["remote", "get-url", "origin"]).ok().filter(|u| !u.is_empty())
 }

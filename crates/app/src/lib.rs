@@ -1,7 +1,9 @@
 pub mod app;
 pub mod client;
+pub mod fonts;
+mod picker;
 
-pub use app::{App, LocalServer};
+pub use app::{App, LocalServer, status_counts};
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn local_server(home: Option<std::path::PathBuf>) -> LocalServer {

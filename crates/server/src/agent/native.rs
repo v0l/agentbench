@@ -1,6 +1,6 @@
-use super::{Agent, Context, Event, Io, Turn, brief, files};
+use super::{Agent, Context, Event, Io, Turn, brief, files, media};
 use egui_bench::agent::skillset;
-use egui_bench::agent::tools::{self, Spec, object, string};
+use egui_bench::agent::tools::{self, Spec, integer, object, string};
 use egui_bench::agent::workspace::Workspace;
 use foreman_core::{Entry, Question, Usage};
 use serde::{Deserialize, Serialize};
@@ -10,10 +10,17 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// How long a whole reply may take to stream once it has started.
 const PATIENCE: Duration = Duration::from_secs(600);
+/// How long the server may take to answer a request with headers. A healthy
+/// server sends them as soon as it starts generating, so a long silence means
+/// the connection is dead; it is then retried rather than waited on.
+const HEADERS: Duration = Duration::from_secs(10);
 const BASH_DEFAULT: u64 = 120;
 const BASH_MAX: u64 = 900;
 const OUTPUT_MAX: usize = 30_000;
+/// How many times a request that timed out or never connected is sent again.
+const RETRIES: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Model {
@@ -25,6 +32,26 @@ pub struct Model {
     pub key: String,
     #[serde(default = "default_steps")]
     pub steps: usize,
+    /// The models a chat can be switched to, by the agent or by the user.
+    #[serde(default)]
+    pub low: Level,
+    #[serde(default)]
+    pub medium: Level,
+    #[serde(default)]
+    pub high: Level,
+}
+
+/// One rung of the ladder. A level with no model is not set up. One with no
+/// server uses the foreman agent's, key and all; one with its own server never
+/// sends it the foreman key.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Level {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub key: String,
 }
 
 fn default_url() -> String {
@@ -45,11 +72,50 @@ impl Default for Model {
             model: String::new(),
             key: String::new(),
             steps: default_steps(),
+            low: Level::default(),
+            medium: Level::default(),
+            high: Level::default(),
         }
     }
 }
 
 impl Model {
+    /// The model a level names, or None when `name` is not a level or the
+    /// level has no model set.
+    pub fn level(&self, name: &str) -> Option<Model> {
+        let level = match name.trim().to_lowercase().as_str() {
+            "low" => &self.low,
+            "medium" => &self.medium,
+            "high" => &self.high,
+            _ => return None,
+        };
+        let own = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+        let model = own(&level.model)?;
+        let mut out = self.clone();
+        out.model = model;
+        if let Some(url) = own(&level.url) {
+            out.url = url;
+            out.key = level.key.trim().to_string();
+        }
+        Some(out)
+    }
+
+    /// The model for what a chat has saved: a level, else a model id on the
+    /// foreman agent's own server. An unset level is the agent's default.
+    pub fn choose(&self, choice: &str) -> Model {
+        let choice = choice.trim();
+        if choice.is_empty() {
+            return self.clone();
+        }
+        if let Some(m) = self.level(choice) {
+            return m;
+        }
+        if foreman_core::LEVELS.contains(&choice.to_lowercase().as_str()) {
+            return self.clone();
+        }
+        Model { model: choice.to_string(), ..self.clone() }
+    }
+
     fn endpoint(&self) -> String {
         let base = self.url.trim().trim_end_matches('/');
         if base.ends_with("/chat/completions") {
@@ -157,18 +223,58 @@ fn foreman_specs() -> Vec<Spec> {
             ),
         ),
         Spec::new(
+            "switch_model",
+            "Change which model you run on, from the next step on, and for the rest of this chat. Use `high` for hard \
+             reasoning, a tricky bug or a design you keep getting wrong; `low` for mechanical work like renames, \
+             formatting and reading files; `medium` for the usual. Only levels the user has set up work.",
+            object(
+                json!({
+                    "level": { "type": "string", "enum": foreman_core::LEVELS, "description": "low, medium or high" },
+                    "reason": string("Why, in a few words"),
+                }),
+                &["level"],
+            ),
+        ),
+        Spec::new(
             "ask_user",
-            "Ask the user a question and wait for the answer. Give options when the answer is one of a few choices. \
+            "Ask the user a question and wait for the answer. Give options when the answer is one of a few choices, \
+             and set multiple when they may pick more than one. To ask several things at once, pass questions, a list of \
+             {question, options, multiple}; the user answers them together. \
              Use it when you cannot go on without a decision, not for things you can find out yourself.",
             object(
                 json!({
                     "question": string("The question, one or two sentences"),
                     "options": { "type": "array", "items": { "type": "string" }, "description": "Choices to pick from" },
+                    "multiple": { "type": "boolean", "description": "The user may pick more than one option" },
+                    "questions": {
+                        "type": "array",
+                        "description": "Several questions to ask together instead of question",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": string("The question, one or two sentences"),
+                                "options": { "type": "array", "items": { "type": "string" }, "description": "Choices to pick from" },
+                                "multiple": { "type": "boolean", "description": "The user may pick more than one option" },
+                            },
+                            "required": ["question"],
+                        },
+                    },
                 }),
-                &["question"],
+                &[],
             ),
         ),
     ]
+}
+
+fn question_of(v: &Value) -> Option<Question> {
+    let text = v.get("question").and_then(Value::as_str)?.to_string();
+    let options = v
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|o| o.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .unwrap_or_default();
+    let multiple = v.get("multiple").and_then(Value::as_bool).unwrap_or(false);
+    Some(Question { text, options, multiple })
 }
 
 fn bash_spec() -> Spec {
@@ -190,9 +296,67 @@ fn file_specs() -> Vec<Spec> {
     let mut specs: Vec<Spec> = tools::builtin()
         .into_iter()
         .filter(|s| {
-            !matches!(s.name.as_str(), "bash" | "request_access" | "workspace" | "edit_file")
+            !matches!(
+                s.name.as_str(),
+                "bash"
+                    | "request_access"
+                    | "workspace"
+                    | "edit_file"
+                    | "search_files"
+                    | "read_file"
+            )
         })
         .collect();
+    specs.push(Spec::new(
+        "read_file",
+        "Read a file in the workspace. A text file is read with a line budget, in pages: the answer says \
+         which offset to ask for next. A picture (png, jpg, gif, webp, bmp, tiff and more) is shown to you. \
+         A sound file (wav, mp3, flac, ogg, m4a and more) is played to you. A video is shown as frames \
+         sampled evenly through it; `frames` sets how many, 8 by default.",
+        object(
+            json!({
+                "path": string("A path inside the workspace, relative to it"),
+                "offset": integer("The line to start at, from 1 (text files)"),
+                "limit": integer("How many lines (text files)"),
+                "frames": integer("How many frames to take from a video, 1 to 16"),
+            }),
+            &["path"],
+        ),
+    ));
+    specs.push(Spec::new(
+        "search_files",
+        "Search the text files in the worktree for a regular expression, like grep -rn. Case insensitive unless \
+         case_sensitive is true. Narrow it with `include` globs such as \"*.rs\" or \"src/**/*.{ts,tsx}\" (a pattern \
+         with no slash matches the file name at any depth) and `exclude` globs. .gitignore rules are honoured. Each \
+         hit is path:line: text; context lines use a dash instead of a colon. Use output=files to list just the \
+         files that match, or output=count for matches per file.",
+        object(
+            json!({
+                "pattern": string("A regular expression, such as \"fn \\\\w+_test\" or \"TODO|FIXME\""),
+                "path": string("A folder or file to search in, default the whole worktree"),
+                "include": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Only search files matching one of these globs, e.g. [\"*.rs\", \"crates/**/*.toml\"]",
+                },
+                "exclude": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Skip files matching these globs, e.g. [\"*.lock\", \"tests/**\"]",
+                },
+                "literal": { "type": "boolean", "description": "Match pattern as plain text, not a regex" },
+                "case_sensitive": { "type": "boolean", "description": "Match case exactly (default false)" },
+                "context": { "type": "integer", "description": "Lines of context to show round each hit (max 10)" },
+                "output": {
+                    "type": "string",
+                    "enum": ["content", "files", "count"],
+                    "description": "content (default) shows matching lines; files lists file names; count gives matches per file",
+                },
+                "limit": { "type": "integer", "description": "Most matches (or files) to return, default 100" },
+            }),
+            &["pattern"],
+        ),
+    ));
     specs.push(Spec::new(
         "edit_file",
         "Replace exact text in a file in the worktree. Each edits[].oldText must match the file and appear once; \
@@ -226,10 +390,17 @@ pub fn specs() -> Vec<Spec> {
     all
 }
 
-fn tool_list() -> Value {
+/// The levels that have a model, lowest first.
+fn levels(base: &Model) -> Vec<&'static str> {
+    foreman_core::LEVELS.into_iter().filter(|l| base.level(l).is_some()).collect()
+}
+
+fn tool_list(base: &Model) -> Value {
+    let any = !levels(base).is_empty();
     Value::Array(
         specs()
             .into_iter()
+            .filter(|t| any || t.name != "switch_model")
             .map(|t| {
                 json!({
                     "type": "function",
@@ -240,7 +411,7 @@ fn tool_list() -> Value {
     )
 }
 
-fn system(turn: &Turn) -> String {
+fn system(turn: &Turn, base: &Model) -> String {
     let skills = skillset::discover(&skillset::roots(turn.cwd), &[]);
     let mut out = format!(
         "You are a coding agent working in {}. Read before you change, change what was asked, and check your work by building and testing.\n\n",
@@ -251,9 +422,19 @@ fn system(turn: &Turn) -> String {
         "\n\nYour own tools reach the tracker directly: list_issues, file_issue, update_issue, comment_on_issue, \
          list_sessions, read_session. Prefer them to the REST API. ask_user waits for the user's answer.\n\n",
     );
+    let levels = levels(base);
+    if !levels.is_empty() {
+        out.push_str(&format!(
+            "switch_model moves you to another model for the rest of this chat ({} are set up). Go up when you are stuck \
+             or the problem is hard, and down for mechanical work.\n\n",
+            levels.join(", ")
+        ));
+    }
     out.push_str(
         "- Work in the worktree with list_files, read_file, search_files, write_file and edit_file. Paths are relative to it. \
          Read a file before you edit it.\n\
+         - read_file also shows you pictures, plays sound files and shows video as frames, so use it to look at screenshots, \
+         images, recordings and clips instead of saying you cannot.\n\
          - bash runs commands in the worktree as the user.\n\
          - Before writing a file format you were not taught, load its skill with load_skill.\n\
          - Write markdown, and put code in fenced blocks.\n",
@@ -295,6 +476,21 @@ fn history(entries: &[Entry]) -> Vec<Value> {
                     answer.as_deref().unwrap_or("nothing")
                 ),
             })),
+            Entry::Questions { questions, answers, .. } => {
+                let said = questions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| {
+                        let a = answers.as_ref().and_then(|a| a.get(i)).map(String::as_str);
+                        format!("{} {}", q.text, a.unwrap_or("nothing"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                out.push(json!({
+                    "role": "assistant",
+                    "content": format!("asked the user several questions and they answered: {said}"),
+                }));
+            }
             Entry::Thinking { .. } | Entry::Error { .. } | Entry::Notice { .. } => {}
         }
     }
@@ -349,31 +545,34 @@ impl Agent for Native {
         false
     }
 
+    fn models(&self) -> Result<Vec<String>, String> {
+        let m = self.model.get();
+        models(&m.url, &m.key)
+    }
+
     fn steerable(&self) -> bool {
         true
     }
 
     fn run(&self, turn: &Turn, io: &dyn Io) -> Result<(), String> {
-        let mut model = self.model.get();
-        if let Some(m) = turn.model.map(str::trim).filter(|m| !m.is_empty()) {
-            model.model = m.to_string();
-        }
+        let base = self.model.get();
+        let mut model = base.choose(turn.model.unwrap_or_default());
         if model.model.trim().is_empty() {
             return Err("pick a server and model for the foreman agent under settings".into());
         }
         let workspace = Workspace::open(turn.cwd)?;
         let http = ureq::Agent::config_builder()
             .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(PATIENCE))
+            .timeout_recv_response(Some(HEADERS))
             .timeout_recv_body(Some(PATIENCE))
             .http_status_as_error(false)
             .user_agent(format!("foreman/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .new_agent();
-        let mut messages = vec![json!({ "role": "system", "content": system(turn) })];
+        let mut messages = vec![json!({ "role": "system", "content": system(turn, &base) })];
         messages.extend(history(turn.history));
         messages.push(json!({ "role": "user", "content": turn.prompt }));
-        let tools = tool_list();
+        let tools = tool_list(&base);
         for _ in 0..model.steps.max(1) {
             if io.stopped() {
                 return Err("stopped".into());
@@ -395,6 +594,7 @@ impl Agent for Native {
                 );
             }
             messages.push(message);
+            let mut attached: Vec<Value> = Vec::new();
             for call in &reply.calls {
                 let parsed = files::args(&call.args);
                 let input = parsed.clone().unwrap_or(Value::String(call.args.clone()));
@@ -404,8 +604,17 @@ impl Agent for Native {
                     input: input.clone(),
                 });
                 let name = files::canonical(&call.name);
-                let result =
-                    parsed.and_then(|args| self.tool(name, &args, &workspace, turn.context, io));
+                let result = parsed.and_then(|args| match name {
+                    "switch_model" => switch(&base, &mut model, &args, turn.context, io),
+                    "read_file" => match media::read(&workspace, &args) {
+                        Some(found) => found.map(|m| {
+                            attached.extend(m.parts);
+                            m.note
+                        }),
+                        None => self.tool(name, &args, &workspace, turn.context, io),
+                    },
+                    _ => self.tool(name, &args, &workspace, turn.context, io),
+                });
                 let (output, error) = match &result {
                     Ok(o) => (o.clone(), false),
                     Err(e) => (e.clone(), true),
@@ -422,6 +631,15 @@ impl Agent for Native {
                 if io.stopped() {
                     return Err("stopped".into());
                 }
+            }
+            // A tool result is text only, so what read_file saw goes in the next user message.
+            if !attached.is_empty() {
+                let mut content = vec![json!({
+                    "type": "text",
+                    "text": "The media from read_file, as the tool results above described:",
+                })];
+                content.extend(attached);
+                messages.push(json!({ "role": "user", "content": content }));
             }
             let mut steered = false;
             while let Some(text) = io.steer() {
@@ -441,6 +659,42 @@ impl Agent for Native {
         io.emit(Event::Done);
         Ok(())
     }
+}
+
+/// Move the rest of this turn, and the chat after it, to another level.
+fn switch(
+    base: &Model,
+    model: &mut Model,
+    args: &Value,
+    cx: &Context,
+    io: &dyn Io,
+) -> Result<String, String> {
+    let name = args.get("level").and_then(Value::as_str).ok_or("missing `level`")?.trim();
+    let set = levels(base);
+    if set.is_empty() {
+        return Err("no model levels are set up; the user can add them under agent settings".into());
+    }
+    let Some(next) = base.level(name) else {
+        return Err(format!(
+            "{name:?} is not available; the levels set up are: {}",
+            set.join(", ")
+        ));
+    };
+    let name = name.to_lowercase();
+    if next.model == model.model && next.url == model.url {
+        return Ok(format!("already on {name} ({})", next.model));
+    }
+    io.api().call("set_model", &json!({ "model": name }), cx.session)?;
+    let reason = args.get("reason").and_then(Value::as_str).map(str::trim).unwrap_or_default();
+    io.emit(Event::Notice(format!(
+        "switched to {name}: {}{}{}",
+        next.model,
+        if reason.is_empty() { "" } else { ", " },
+        reason
+    )));
+    let done = format!("now on {name} ({}); the next step runs on it", next.model);
+    *model = next;
+    Ok(done)
 }
 
 pub fn models(url: &str, key: &str) -> Result<Vec<String>, String> {
@@ -494,11 +748,30 @@ fn complete(
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    let mut req = http.post(model.endpoint()).header("content-type", "application/json");
-    if !model.key.trim().is_empty() {
-        req = req.header("authorization", format!("Bearer {}", model.key.trim()));
-    }
-    let resp = req.send(body.to_string()).map_err(|e| format!("{}: {e}", model.url))?;
+    let mut attempt = 0;
+    let resp = loop {
+        let mut req = http.post(model.endpoint()).header("content-type", "application/json");
+        if !model.key.trim().is_empty() {
+            req = req.header("authorization", format!("Bearer {}", model.key.trim()));
+        }
+        match req.send(body.to_string()) {
+            Ok(resp) => break resp,
+            Err(e) if transient(&e) && attempt < RETRIES && !io.stopped() => {
+                attempt += 1;
+                let wait = backoff(attempt);
+                io.emit(Event::Notice(format!(
+                    "{}: {e}; retrying in {}s ({attempt}/{RETRIES})",
+                    model.url,
+                    wait.as_secs_f32().ceil()
+                )));
+                pause(wait, io);
+                if io.stopped() {
+                    return Err("stopped".into());
+                }
+            }
+            Err(e) => return Err(format!("{}: {e}", model.url)),
+        }
+    };
     let status = resp.status();
     if !status.is_success() {
         let text = resp.into_body().read_to_string().unwrap_or_default();
@@ -506,6 +779,38 @@ fn complete(
     }
     let reader = std::io::BufReader::new(resp.into_body().into_reader());
     read_stream(reader, io)
+}
+
+/// Whether a failed request is worth sending again: the server did not answer
+/// in time or could not be reached, as opposed to answering with a refusal.
+fn transient(e: &ureq::Error) -> bool {
+    matches!(
+        e,
+        ureq::Error::Timeout(_)
+            | ureq::Error::ConnectionFailed
+            | ureq::Error::HostNotFound
+            | ureq::Error::Io(_)
+    )
+}
+
+/// How long to wait before retry number `attempt` (1-based): 2s, 4s, 8s.
+fn backoff(attempt: u32) -> Duration {
+    if cfg!(test) {
+        return Duration::from_millis(5);
+    }
+    Duration::from_secs(1 << attempt.min(6))
+}
+
+/// Sleep for `wait`, giving up early if the turn is stopped.
+fn pause(wait: Duration, io: &dyn Io) {
+    let end = Instant::now() + wait;
+    while !io.stopped() {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(100)));
+    }
 }
 
 impl Native {
@@ -518,7 +823,6 @@ impl Native {
         io: &dyn Io,
     ) -> Result<String, String> {
         let text = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
-        let need = |k: &str| text(k).ok_or_else(|| format!("missing `{k}`"));
         let path = || files::text(args, &files::PATH).map(str::to_string);
         let need_path = || path().ok_or_else(|| "missing `path`".to_string());
         let number = |keys: &[&str]| files::number(args, keys);
@@ -535,10 +839,7 @@ impl Native {
                 files::text(args, &["content", "text", "contents"]).unwrap_or_default(),
             ),
             "edit_file" => files::edit(ws, args),
-            "search_files" => ws.search(
-                files::text(args, &["pattern", "query", "regex"]).ok_or("missing `pattern`")?,
-                path().as_deref(),
-            ),
+            "search_files" => super::search::search(ws, args),
             "load_skill" => {
                 let skills = skillset::discover(&skillset::roots(ws.root()), &[]);
                 skillset::load(&skills, text("name").as_deref(), text("file").as_deref())
@@ -551,13 +852,27 @@ impl Native {
                 io,
             ),
             "ask_user" => {
-                let options = args
-                    .get("options")
+                let asked: Vec<Question> = args
+                    .get("questions")
                     .and_then(Value::as_array)
-                    .map(|o| o.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .map(|l| l.iter().filter_map(question_of).collect())
                     .unwrap_or_default();
-                let answer = io.ask(Question { text: need("question")?, options })?;
-                Ok(format!("The user answered: {answer}"))
+                if asked.is_empty() {
+                    let one = question_of(args).ok_or("missing `question`")?;
+                    let answer = io.ask(one)?;
+                    return Ok(format!("The user answered: {answer}"));
+                }
+                let answers = io.ask_many(asked.clone())?;
+                let lines: Vec<String> = asked
+                    .iter()
+                    .zip(&answers)
+                    .enumerate()
+                    .map(|(i, (q, a))| {
+                        let a = if a.is_empty() { "(no answer)" } else { a };
+                        format!("{}. {} {a}", i + 1, q.text)
+                    })
+                    .collect();
+                Ok(format!("The user answered:\n{}", lines.join("\n")))
             }
             n if FOREMAN_TOOLS.contains(&n) => io
                 .api()
@@ -733,6 +1048,13 @@ mod tests {
 
     fn stub(replies: Vec<Vec<Value>>) -> (String, std::sync::mpsc::Receiver<Value>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        stub_on(listener, replies)
+    }
+
+    fn stub_on(
+        listener: std::net::TcpListener,
+        replies: Vec<Vec<Value>>,
+    ) -> (String, std::sync::mpsc::Receiver<Value>) {
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let (seen, asked) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -884,6 +1206,77 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_puts_several_questions_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![
+            vec![call(
+                "c1",
+                "ask_user",
+                json!({"questions": [
+                    {"question": "which licence?", "options": ["MIT", "Apache-2.0"]},
+                    {"question": "which targets?", "options": ["linux", "mac"], "multiple": true},
+                ]}),
+            )],
+            vec![say("noted")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        io.answers.lock().unwrap().extend(["MIT".to_string(), "linux, mac".to_string()]);
+        run(&native, dir.path(), "pick", &io).unwrap();
+        let first = asked.recv().unwrap();
+        let spec = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["function"]["name"] == "ask_user")
+            .unwrap()
+            .clone();
+        assert!(spec["function"]["parameters"]["properties"]["multiple"].is_object());
+        assert!(spec["function"]["parameters"]["properties"]["questions"].is_object());
+        let second = asked.recv().unwrap();
+        let tool = second["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            tool["content"],
+            "The user answered:\n1. which licence? MIT\n2. which targets? linux, mac"
+        );
+    }
+
+    #[test]
+    fn read_file_shows_a_picture_to_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shot.png"), b"PNGDATA").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "plain\n").unwrap();
+        let mut second_call = call("c2", "read_file", json!({"path": "a.txt"}));
+        second_call["choices"][0]["delta"]["tool_calls"][0]["index"] = json!(1);
+        let (url, asked) = stub(vec![
+            vec![call("c1", "read_file", json!({"path": "shot.png"})), second_call],
+            vec![say("a red box")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "look", &io).unwrap();
+        let _ = asked.recv().unwrap();
+        let second = asked.recv().unwrap();
+        let messages = second["messages"].as_array().unwrap();
+        let tools: Vec<&Value> = messages.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(tools.len(), 2);
+        assert!(tools[0]["content"].as_str().unwrap().contains("shot.png: image"));
+        assert!(tools[1]["content"].as_str().unwrap().contains("plain"));
+        let last = messages.last().unwrap();
+        assert_eq!(last["role"], "user");
+        let url = last["content"][2]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+        let tool_at = messages.iter().rposition(|m| m["role"] == "tool").unwrap();
+        assert!(tool_at < messages.len() - 1, "media must follow every tool result");
+    }
+
+    #[test]
     fn a_summary_replaces_what_came_before_it() {
         let entries = vec![
             Entry::User { text: "old".into() },
@@ -989,6 +1382,72 @@ mod tests {
         let _ = asked.recv();
     }
 
+    /// A server that hangs up on its first `drops` connections, then answers.
+    fn flaky(drops: usize, events: Vec<Value>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..drops {
+                let Ok((s, _)) = listener.accept() else { return };
+                drop(s);
+            }
+            let _ = tx.send(listener);
+        });
+        std::thread::spawn(move || {
+            if let Ok(listener) = rx.recv() {
+                stub_on(listener, vec![events]);
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_dropped_connection_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = flaky(2, vec![say("hello")]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).unwrap();
+        let events = io.events();
+        let notices = events
+            .iter()
+            .filter(|e| matches!(e, Event::Notice(n) if n.contains("retrying")))
+            .count();
+        assert_eq!(notices, 2);
+        assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "hello")));
+    }
+
+    #[test]
+    fn retries_give_up_and_report_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}/v1", l.local_addr().unwrap())
+        };
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let e = run(&native, dir.path(), "go", &io).unwrap_err();
+        assert!(!e.is_empty());
+        let notices = io
+            .events()
+            .iter()
+            .filter(|e| matches!(e, Event::Notice(n) if n.contains("retrying")))
+            .count();
+        assert_eq!(notices, RETRIES as usize);
+    }
+
+    #[test]
+    fn an_error_status_is_not_retried() {
+        let (url, seen) = crate::titles::fake::server(vec![(500, "{}".into())]);
+        let dir = tempfile::tempdir().unwrap();
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let e = run(&native, dir.path(), "go", &io).unwrap_err();
+        assert!(e.contains("500"), "{e}");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
     #[test]
     fn hitting_the_step_limit_pauses_instead_of_failing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1014,6 +1473,131 @@ mod tests {
         assert_eq!(shared.get().steps, DEFAULT_STEPS);
         let custom = Shared::new(Model { steps: 250, ..Model::default() });
         assert_eq!(custom.get().steps, 250);
+    }
+
+    #[test]
+    fn a_level_names_a_model_and_borrows_the_server_and_key_only_when_it_has_none() {
+        let m = Model {
+            url: "http://main/v1".into(),
+            model: "mid".into(),
+            key: "secret".into(),
+            low: Level { model: "tiny".into(), ..Level::default() },
+            high: Level { url: "http://big/v1".into(), model: "huge".into(), key: "other".into() },
+            ..Model::default()
+        };
+        let low = m.level("LOW").unwrap();
+        assert_eq!(
+            (low.model.as_str(), low.url.as_str(), low.key.as_str()),
+            ("tiny", "http://main/v1", "secret")
+        );
+        let high = m.level("high").unwrap();
+        assert_eq!(
+            (high.model.as_str(), high.url.as_str(), high.key.as_str()),
+            ("huge", "http://big/v1", "other")
+        );
+        assert!(m.level("medium").is_none());
+        assert!(m.level("tiny").is_none());
+        // A server of its own without a key does not get the foreman key.
+        let bare = Model {
+            high: Level { url: "http://big/v1".into(), model: "x".into(), key: String::new() },
+            ..m.clone()
+        };
+        assert_eq!(bare.level("high").unwrap().key, "");
+        assert_eq!(levels(&m), ["low", "high"]);
+    }
+
+    #[test]
+    fn a_chats_saved_model_is_a_level_or_an_id_and_an_unset_level_is_the_default() {
+        let m = Model {
+            model: "mid".into(),
+            low: Level { model: "tiny".into(), ..Level::default() },
+            ..Model::default()
+        };
+        assert_eq!(m.choose("").model, "mid");
+        assert_eq!(m.choose("low").model, "tiny");
+        assert_eq!(m.choose("medium").model, "mid");
+        assert_eq!(m.choose("qwen-big").model, "qwen-big");
+    }
+
+    #[test]
+    fn the_agent_can_switch_to_a_higher_model_on_another_server_mid_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (big_url, big_asked) = stub(vec![vec![say("solved")]]);
+        let (url, asked) = stub(vec![vec![call(
+            "c1",
+            "switch_model",
+            json!({"level": "high", "reason": "tricky bug"}),
+        )]]);
+        let native = Native::new(Model {
+            url,
+            model: "m".into(),
+            high: Level { url: big_url, model: "big".into(), key: String::new() },
+            ..Model::default()
+        });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "fix it", &io).unwrap();
+        let first = asked.recv().unwrap();
+        assert_eq!(first["model"], "m");
+        let names: Vec<&str> = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"switch_model"));
+        assert!(first["messages"][0]["content"].as_str().unwrap().contains("switch_model"));
+        let second = big_asked.recv().unwrap();
+        assert_eq!(second["model"], "big");
+        let events = io.events();
+        assert!(events.iter().any(
+            |e| matches!(e, Event::Notice(n) if n.contains("switched to high: big, tricky bug"))
+        ));
+        assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "solved")));
+    }
+
+    #[test]
+    fn without_levels_there_is_no_switch_tool_and_asking_for_one_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) =
+            stub(vec![vec![call("c1", "switch_model", json!({"level": "high"}))], vec![say("ok")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "x", &io).unwrap();
+        let first = asked.recv().unwrap();
+        assert!(
+            first["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t["function"]["name"] != "switch_model")
+        );
+        let second = asked.recv().unwrap();
+        let last = second["messages"].as_array().unwrap().last().unwrap();
+        assert!(last["content"].as_str().unwrap().contains("no model levels are set up"), "{last}");
+    }
+
+    #[test]
+    fn a_chat_saved_on_a_level_starts_its_turn_on_that_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("hi")]]);
+        let native = Native::new(Model {
+            url,
+            model: "m".into(),
+            low: Level { model: "tiny".into(), ..Level::default() },
+            ..Model::default()
+        });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let c = context();
+        let turn = Turn {
+            prompt: "x",
+            cwd: dir.path(),
+            model: Some("low"),
+            resume: None,
+            history: &[],
+            context: &c,
+        };
+        native.run(&turn, &io).unwrap();
+        assert_eq!(asked.recv().unwrap()["model"], "tiny");
     }
 
     #[test]

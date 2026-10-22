@@ -7,6 +7,45 @@ use std::time::Duration;
 
 const STDERR_KEPT: usize = 4000;
 
+/// Run `program args` for a short listing and return its stdout and stderr together.
+pub(super) fn listing(program: &Path, args: &[&str]) -> Result<String, String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not start {}: {e}", program.display()))?;
+    let read = |from: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut r) = from {
+                let _ = r.read_to_string(&mut text);
+            }
+            text
+        })
+    };
+    let out = read(child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let err = read(child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>));
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{} took too long to list models", program.display()));
+            }
+        }
+    }
+    let mut text = out.join().unwrap_or_default();
+    text.push_str(&err.join().unwrap_or_default());
+    Ok(text)
+}
+
 pub struct Launch {
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -20,6 +59,9 @@ pub trait Cli: Send + Sync {
     fn program(&self) -> &Path;
     fn resumable(&self) -> bool;
     fn launch(&self, turn: &Turn, brief: &str) -> Launch;
+    fn models(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
     fn decoder(&self) -> Box<dyn Decoder>;
 }
 
@@ -42,6 +84,10 @@ impl<T: Cli> Agent for T {
 
     fn resumable(&self) -> bool {
         Cli::resumable(self)
+    }
+
+    fn models(&self) -> Result<Vec<String>, String> {
+        Cli::models(self)
     }
 
     fn run(&self, turn: &Turn, io: &dyn Io) -> Result<(), String> {

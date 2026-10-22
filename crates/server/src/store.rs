@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA: &[&str] = &[r#"
+const SCHEMA: &[&str] = &[
+    r#"
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE projects (
     id INTEGER PRIMARY KEY,
@@ -73,7 +74,20 @@ CREATE TABLE changes (
     ref_id INTEGER NOT NULL,
     created_at INTEGER NOT NULL
 );
-"#];
+"#,
+    "ALTER TABLE sessions ADD COLUMN title_auto INTEGER NOT NULL DEFAULT 0;",
+    r#"
+CREATE TABLE attachments (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    data BLOB NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX attachments_session ON attachments(session_id);
+"#,
+];
 
 #[derive(Debug)]
 pub struct StoreError(pub String);
@@ -603,6 +617,40 @@ impl Store {
         Store::changed(&db, "session", id)
     }
 
+    /// Mark a session's title as a stand-in (cut from the first message) that a
+    /// model may replace once there is a conversation to name.
+    pub fn set_title_auto(&self, id: Id, auto: bool) -> Result<()> {
+        self.db()
+            .execute("UPDATE sessions SET title_auto = ?1 WHERE id = ?2", params![auto, id])?;
+        Ok(())
+    }
+
+    pub fn title_is_auto(&self, id: Id) -> Result<bool> {
+        self.db()
+            .query_row("SELECT title_auto FROM sessions WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?
+            .ok_or_else(|| not_found("session", id))
+    }
+
+    /// Give a session its real title. Unless `force`, only a stand-in title is
+    /// replaced, so a name someone chose is never overwritten.
+    pub fn set_title(&self, id: Id, title: &str, force: bool) -> Result<bool> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(StoreError("a title needs some text".into()));
+        }
+        let db = self.db();
+        let n = db.execute(
+            "UPDATE sessions SET title = ?1, title_auto = 0, updated_at = ?2
+             WHERE id = ?3 AND (title_auto = 1 OR ?4)",
+            params![title, now(), id, force],
+        )?;
+        if n > 0 {
+            Store::changed(&db, "session", id)?;
+        }
+        Ok(n > 0)
+    }
+
     pub fn set_model(&self, id: Id, model: Option<&str>) -> Result<()> {
         let db = self.db();
         db.execute(
@@ -656,6 +704,46 @@ impl Store {
         db.execute("UPDATE sessions SET updated_at = ?1 WHERE id = ?2", params![t, session_id])?;
         Store::changed(&db, "message", session_id)?;
         Ok(Message { id, session_id, entry: entry.clone(), created_at: t })
+    }
+
+    /// Keep a file sent with a message. It goes when the session does.
+    pub fn add_attachment(
+        &self,
+        session_id: Id,
+        name: &str,
+        mime: &str,
+        data: &[u8],
+    ) -> Result<foreman_core::Attachment> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO attachments (session_id, name, mime, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, name, mime, data, now()],
+        )?;
+        Ok(foreman_core::Attachment {
+            id: db.last_insert_rowid(),
+            name: name.to_string(),
+            mime: mime.to_string(),
+            size: data.len() as u64,
+        })
+    }
+
+    /// An attachment and its bytes.
+    pub fn attachment(&self, id: Id) -> Result<(foreman_core::Attachment, Vec<u8>)> {
+        self.db()
+            .query_row("SELECT name, mime, data FROM attachments WHERE id = ?1", [id], |r| {
+                let data: Vec<u8> = r.get("data")?;
+                Ok((
+                    foreman_core::Attachment {
+                        id,
+                        name: r.get("name")?,
+                        mime: r.get("mime")?,
+                        size: data.len() as u64,
+                    },
+                    data,
+                ))
+            })
+            .optional()?
+            .ok_or_else(|| not_found("attachment", id))
     }
 
     pub fn update_message(&self, id: Id, entry: &Entry) -> Result<()> {
@@ -918,5 +1006,21 @@ mod tests {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.projects().unwrap()[0].path, "/r");
         assert_eq!(s.setting("token").unwrap().as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn only_a_stand_in_title_is_replaced() {
+        let s = Store::memory().unwrap();
+        let (_, main) = testing::project(&s, "/tmp");
+        let a = s.add_session(main.id, "x", "first words", None, None).unwrap();
+        assert!(!s.title_is_auto(a.id).unwrap(), "a title is chosen unless marked otherwise");
+        assert!(!s.set_title(a.id, "Model title", false).unwrap());
+        assert_eq!(s.session(a.id).unwrap().title, "first words");
+        s.set_title_auto(a.id, true).unwrap();
+        assert!(s.set_title(a.id, "  Model title ", false).unwrap());
+        assert_eq!(s.session(a.id).unwrap().title, "Model title");
+        assert!(!s.title_is_auto(a.id).unwrap());
+        assert!(s.set_title(a.id, "Forced", true).unwrap());
+        assert!(s.set_title(a.id, " ", true).is_err());
     }
 }
