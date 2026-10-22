@@ -325,13 +325,13 @@ fn file_specs() -> Vec<Spec> {
         .collect();
     specs.push(Spec::new(
         "read_file",
-        "Read a file in the workspace. A text file is read with a line budget, in pages: the answer says \
+        "Read a file on this machine. Relative paths start in the worktree, absolute paths reach anywhere. A text file is read with a line budget, in pages: the answer says \
          which offset to ask for next. A picture (png, jpg, gif, webp, bmp, tiff and more) is shown to you. \
          A sound file (wav, mp3, flac, ogg, m4a and more) is played to you. A video is shown as frames \
          sampled evenly through it; `frames` sets how many, 8 by default.",
         object(
             json!({
-                "path": string("A path inside the workspace, relative to it"),
+                "path": string("A path, relative to the worktree or absolute"),
                 "offset": integer("The line to start at, from 1 (text files)"),
                 "limit": integer("How many lines (text files)"),
                 "frames": integer("How many frames to take from a video, 1 to 16"),
@@ -341,7 +341,7 @@ fn file_specs() -> Vec<Spec> {
     ));
     specs.push(Spec::new(
         "search_files",
-        "Search the text files in the worktree for a regular expression, like grep -rn. Case insensitive unless \
+        "Search the text files in the worktree (or any folder on this machine) for a regular expression, like grep -rn. Case insensitive unless \
          case_sensitive is true. Narrow it with `include` globs such as \"*.rs\" or \"src/**/*.{ts,tsx}\" (a pattern \
          with no slash matches the file name at any depth) and `exclude` globs. .gitignore rules are honoured. Each \
          hit is path:line: text; context lines use a dash instead of a colon. Use output=files to list just the \
@@ -349,7 +349,7 @@ fn file_specs() -> Vec<Spec> {
         object(
             json!({
                 "pattern": string("A regular expression, such as \"fn \\\\w+_test\" or \"TODO|FIXME\""),
-                "path": string("A folder or file to search in, default the whole worktree"),
+                "path": string("A folder or file to search in (relative or absolute), default the whole worktree"),
                 "include": {
                     "type": "array",
                     "items": { "type": "string" },
@@ -375,12 +375,12 @@ fn file_specs() -> Vec<Spec> {
     ));
     specs.push(Spec::new(
         "edit_file",
-        "Replace exact text in a file in the worktree. Each edits[].oldText must match the file and appear once; \
+        "Replace exact text in a file, in the worktree or anywhere else on this machine. Each edits[].oldText must match the file and appear once; \
          every edit is matched against the file as it was before this call, so do not overlap them. Put several \
          changes to one file in one call. Read the file first. The answer shows the diff.",
         object(
             json!({
-                "path": string("A path in the worktree, relative to it"),
+                "path": string("A path, relative to the worktree or absolute"),
                 "edits": {
                     "type": "array",
                     "items": object(
@@ -447,7 +447,8 @@ fn system(turn: &Turn, base: &Model) -> String {
         ));
     }
     out.push_str(
-        "- Work in the worktree with list_files, read_file, search_files, write_file and edit_file. Paths are relative to it. \
+        "- Work in the worktree with list_files, read_file, search_files, write_file and edit_file. Paths are relative to it, and \
+         absolute paths reach any file on this machine, so you may work on other apps and files when asked. \
          Read a file before you edit it.\n\
          - read_file also shows you pictures, plays sound files and shows video as frames, so use it to look at screenshots, \
          images, recordings and clips instead of saying you cannot.\n\
@@ -584,7 +585,7 @@ impl Agent for Native {
         if model.model.trim().is_empty() {
             return Err("pick a server and model for the foreman agent under settings".into());
         }
-        let workspace = Workspace::open(turn.cwd)?;
+        let workspace = open_workspace(turn.cwd)?;
         let mut messages = vec![json!({ "role": "system", "content": system(turn, &base) })];
         messages.extend(history(turn.history));
         messages.push(user_message(turn.prompt, turn.files).await);
@@ -954,7 +955,15 @@ impl Native {
     }
 }
 
-/// The tools that touch only the worktree's files. They block on the disk, so they run off
+/// The worktree is only where an agent starts: the user often asks one to work on another app or
+/// on files elsewhere on the machine, so the whole filesystem is granted up front.
+fn open_workspace(cwd: &Path) -> Result<Workspace, String> {
+    let workspace = Workspace::open(cwd)?;
+    workspace.grants().grant(std::path::PathBuf::from(std::path::MAIN_SEPARATOR_STR), true);
+    Ok(workspace)
+}
+
+/// The tools that read and write files. Relative paths start in the worktree. They block on the disk, so they run off
 /// the async threads.
 fn file_tool(name: &str, args: &Value, ws: &Workspace) -> Result<String, String> {
     let text = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string);
@@ -1297,6 +1306,21 @@ mod tests {
             assert!(names.contains(&n), "{n} missing from {names:?}");
         }
         assert!(!names.contains(&"request_access"));
+    }
+
+    #[test]
+    fn files_outside_the_worktree_can_be_read_and_written() {
+        let (work, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let target = other.path().join("note.txt");
+        let ws = open_workspace(work.path()).unwrap();
+        file_tool("write_file", &json!({"path": target.to_str().unwrap(), "content": "hi\n"}), &ws)
+            .unwrap();
+        let back = file_tool("read_file", &json!({"path": target.to_str().unwrap()}), &ws).unwrap();
+        assert!(back.contains("hi"), "{back}");
+        let up = format!("../{}/note.txt", other.path().file_name().unwrap().to_str().unwrap());
+        if other.path().parent() == work.path().parent() {
+            assert!(file_tool("read_file", &json!({"path": up}), &ws).is_ok());
+        }
     }
 
     #[tokio::test]
