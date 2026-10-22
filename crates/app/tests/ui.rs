@@ -1064,3 +1064,62 @@ fn a_dropped_picture_is_sent_with_the_message_and_shown_in_the_chat() {
     let bottom = h.get_by_label("attach").rect().bottom();
     assert!(bottom <= 800.0, "the composer buttons end at {bottom}, below the 800 point window");
 }
+
+#[test]
+fn escape_stops_the_agent_working_in_the_open_chat() {
+    let slow = JsonCommand {
+        name: "slow".into(),
+        label: None,
+        program: PathBuf::from("sh"),
+        args: vec!["-c".into(), "read p; sleep 60".into()],
+        resume_args: vec![],
+        model_args: vec![],
+        prompt_on_stdin: true,
+        session: None,
+        text: Some("/text".into()),
+        error: None,
+        input_tokens: None,
+        output_tokens: None,
+        plain: false,
+    };
+    let rig = rig_with(vec![Box::new(slow)]);
+    let project = rig.store.projects().unwrap()[0].id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let mut other = foreman::client::Client::new(
+        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    other.add_session(&foreman_core::NewSession {
+        project_id: project,
+        agent: "slow".into(),
+        prompt: Some("take your time".into()),
+        ..Default::default()
+    });
+    let running = |rig: &Rig| {
+        rig.store
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.agent == "slow")
+            .filter(|s| s.status == foreman_core::SessionStatus::Running)
+    };
+    let start = Instant::now();
+    let session = loop {
+        if let Some(s) = running(&rig) {
+            break s;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "the agent never started");
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    };
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the chat to show it working", |h| h.state().open() == Some(session.id));
+    h.key_press(egui::Key::Escape);
+    let start = Instant::now();
+    while running(&rig).is_some() {
+        assert!(start.elapsed() < Duration::from_secs(10), "escape did not stop the agent");
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}

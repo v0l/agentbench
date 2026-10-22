@@ -2675,6 +2675,22 @@ impl App {
         }
     }
 
+    /// Escape stops the agent working in the open chat. Dialogs, pickers and menus take the
+    /// key first to close themselves, so this only sees an Escape nothing else wanted.
+    fn escape_stops_agent(&mut self, ctx: &egui::Context) {
+        if egui::Popup::is_any_open(ctx) {
+            return;
+        }
+        let Some(s) = self.current_session().filter(|s| s.status.busy()).map(|s| s.id) else {
+            return;
+        };
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            && let Some(c) = &mut self.client
+        {
+            c.interrupt(s);
+        }
+    }
+
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         self.tick(&ctx);
@@ -2723,6 +2739,7 @@ impl App {
             });
         });
         self.modals(&ctx);
+        self.escape_stops_agent(&ctx);
         self.markdown.sweep();
         if let Some((_, at)) = &self.offline {
             ctx.request_repaint_after(
