@@ -36,12 +36,28 @@ fn repo(dir: &Path) {
     }
 }
 
+fn worktree(main: &Path, branch: &str) {
+    let path = main.parent().unwrap().join(format!("demo-{branch}"));
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(main)
+            .args(["worktree", "add", "-q", "-b", branch])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
 fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("demo");
     repo(&main);
     let store = Store::open(&dir.path().join("f.db")).unwrap();
     store.set_setting("token", TOKEN).unwrap();
+    worktree(&main, "request-log");
+    worktree(&main, "fix-login");
     let project = foreman_server::projects::add(&store, &main, None).unwrap();
     store
         .add_issue(&NewIssue {
@@ -56,6 +72,15 @@ fn rig() -> Rig {
     store
         .add_message(session.id, &Entry::Assistant { text: "Hello from **the agent**.".into() })
         .unwrap();
+    let side = store
+        .worktrees(Some(project.id))
+        .unwrap()
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some("fix-login"))
+        .unwrap();
+    store.add_session(side.id, "echo", "#3 Fix the login loop", None, None).unwrap();
+    let second = store.add_session(side.id, "echo", "review the fix", None, None).unwrap();
+    store.set_status(second.id, foreman_core::SessionStatus::Running).unwrap();
     store
         .add_message(
             session.id,
@@ -146,9 +171,10 @@ fn the_tree_issues_and_a_transcript() {
     shot(&mut h, "issues");
     let o = h.state().overview().unwrap();
     assert_eq!(o.issues[0].title, "Write a README");
-    assert_eq!(o.worktrees.len(), 1);
+    assert_eq!(o.worktrees.len(), 3);
 
-    let session = rig.store.sessions().unwrap()[0].clone();
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     h.state_mut().open_session(session.id, session.project_id);
     until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
     shot(&mut h, "session");
@@ -179,7 +205,8 @@ fn sending_from_the_window_runs_the_agent() {
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    let session = rig.store.sessions().unwrap()[0].clone();
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     h.state_mut().open_session(session.id, session.project_id);
     until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
 
@@ -198,7 +225,8 @@ fn sending_from_the_window_runs_the_agent() {
 #[test]
 fn the_client_reaches_the_server() {
     let rig = rig();
-    let session = rig.store.sessions().unwrap()[0].clone();
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let mut c = foreman::client::Client::new(
         foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },

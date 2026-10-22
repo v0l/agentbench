@@ -12,6 +12,8 @@ use web_time::{Duration, Instant};
 
 const SIDE_W: f32 = 320.0;
 const RETRY: Duration = Duration::from_secs(3);
+const TREE_INDENT: f32 = 16.0;
+const TREE_X: f32 = 5.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -509,21 +511,17 @@ impl App {
                     });
                 },
                 |ui| {
-                    let r = Line::new()
-                        .value(p.branch.clone().unwrap_or("detached".into()))
-                        .size(11.0)
-                        .gap(8.0)
-                        .note(short_path(&p.path))
-                        .elided(ui);
+                    let r = Line::new().note(short_path(&p.path)).size(10.5).elided(ui);
                     if r.interact(Sense::click()).clicked() {
                         pick = true;
                     }
                     if collapsed {
                         return;
                     }
-                    for w in &trees {
-                        ui.add_space(2.0);
-                        self.worktree_row(ui, w);
+                    ui.add_space(2.0);
+                    let last = trees.len().saturating_sub(1);
+                    for (i, w) in trees.iter().enumerate() {
+                        self.worktree_row(ui, w, i == last);
                     }
                 },
             );
@@ -572,32 +570,44 @@ impl App {
             });
     }
 
-    fn worktree_row(&mut self, ui: &mut Ui, w: &Worktree) {
+    fn worktree_row(&mut self, ui: &mut Ui, w: &Worktree, last: bool) {
         let sessions: Vec<Session> = self.sessions_of(w.id).into_iter().cloned().collect();
         let running = sessions.iter().any(|s| s.status == SessionStatus::Running);
         let tint = if w.missing {
             FAULT
         } else if running {
             TRACE
-        } else if w.main {
+        } else if w.main || !sessions.is_empty() {
             VALUE
         } else {
             LEGEND
         };
-        let label = if w.main { format!("{} (main)", w.label()) } else { w.label() };
+        let top = ui.cursor().top();
         let resp = ui
             .horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 16.0), Sense::hover());
-                ui.painter().line_segment(
-                    [rect.center_top(), rect.center_bottom()],
-                    Stroke::new(1.0, ETCH),
-                );
-                ui.painter()
-                    .line_segment([rect.center(), rect.right_center()], Stroke::new(1.0, ETCH));
-                Line::new().value(label).tint(tint).size(11.5).elided(ui)
+                ui.add_space(TREE_INDENT);
+                let r = Line::new().value(w.label()).tint(tint).size(11.5).show(ui);
+                if w.main {
+                    chip(ui, "main", LEGEND, false);
+                }
+                if w.missing {
+                    chip(ui, "gone", FAULT, true);
+                }
+                r
             })
-            .inner
+            .response
             .interact(Sense::click());
+        let row = resp.rect;
+        for (i, s) in sessions.iter().enumerate() {
+            self.session_row(ui, s, i + 1 == sessions.len());
+        }
+        let bottom = ui.min_rect().bottom();
+        let x = row.left() + TREE_X;
+        let p = ui.painter();
+        let stroke = Stroke::new(1.0, ETCH);
+        let elbow = row.center().y;
+        p.vline(x, top..=if last { elbow } else { bottom + ui.spacing().item_spacing.y }, stroke);
+        p.hline(x..=row.left() + TREE_INDENT - 4.0, elbow, stroke);
         if resp.clicked() {
             self.project = Some(w.project_id);
         }
@@ -626,12 +636,9 @@ impl App {
                 }
             }
         });
-        for s in &sessions {
-            self.session_row(ui, s);
-        }
     }
 
-    fn session_row(&mut self, ui: &mut Ui, s: &Session) {
+    fn session_row(&mut self, ui: &mut Ui, s: &Session, last: bool) {
         let on = self.session == Some(s.id);
         let (tint, word) = match s.status {
             SessionStatus::Running => (TRACE, "working"),
@@ -639,12 +646,12 @@ impl App {
             SessionStatus::Stopped => (LEGEND, "stopped"),
             SessionStatus::Idle => (OK, "idle"),
         };
+        let top = ui.cursor().top();
         let resp = ui
             .horizontal(|ui| {
-                ui.add_space(14.0);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 16.0), Sense::hover());
+                ui.add_space(TREE_INDENT * 2.0);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 16.0), Sense::hover());
                 ui.painter().circle_filled(rect.center(), 3.0, tint);
-
                 Line::new()
                     .value(&s.title)
                     .tint(if on { READOUT } else { VALUE })
@@ -654,8 +661,15 @@ impl App {
                     .size(10.5)
                     .elided(ui)
             })
-            .inner
+            .response
             .interact(Sense::click());
+        let row = resp.rect;
+        let x = row.left() + TREE_INDENT + TREE_X;
+        let stroke = Stroke::new(1.0, ETCH);
+        let elbow = row.center().y;
+        let reach = if last { elbow } else { row.bottom() + ui.spacing().item_spacing.y };
+        ui.painter().vline(x, top - ui.spacing().item_spacing.y..=reach, stroke);
+        ui.painter().hline(x..=row.left() + TREE_INDENT * 2.0 - 2.0, elbow, stroke);
         if resp.clicked() {
             self.open_session(s.id, s.project_id);
         }
