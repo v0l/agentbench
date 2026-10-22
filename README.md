@@ -23,7 +23,11 @@ cargo run --release -p foreman
 The window starts the server in the background if it is not already running,
 and connects to it. The server keeps running after the window closes so agents
 carry on, and a later window reuses it. To use a server on another machine
-instead, pick remote under the `...` key.
+instead, pick remote under **settings**.
+
+The **settings** key holds everything: which server, the window's font, code
+font and text size (any font installed on the machine, kept on this device),
+and the foreman agent's model, levels and chat titles (kept on the server).
 
 The same binary is the server: `foreman serve`, `foreman add ~/git/snort`,
 `foreman token`, `foreman agents`. `foreman-server` is the same commands
@@ -97,9 +101,8 @@ next turn tries again. `/title` asks for a fresh one, and `/title my words`
 sets it yourself.
 
 The model is any OpenAI compatible server, so a small one beside the big one
-works well (ollama, llama.cpp, vllm). Set it in the window: the **agent** key
-opens the foreman agent's settings, and the **chat titles** section below the
-model has its own address, key and model. Leave a field empty and it uses the
+works well (ollama, llama.cpp, vllm). Set it in the window: under **settings**, the
+**chat titles** section below the model has its own address, key and model. Leave a field empty and it uses the
 foreman agent's, so with nothing set the agent's own model names the chats.
 Settings are saved on the server like the agent's model, and the key is never
 read back or sent anywhere but the address beside it.
@@ -117,7 +120,7 @@ model = "qwen2.5:1.5b"
 
 A chat can move to a stronger model when it needs one, and back again.
 
-Under **agent**, the **model levels** section sets up `low`, `medium` and `high`.
+Under **settings**, the **model levels** section sets up `low`, `medium` and `high`.
 Each is a model and, if you like, a server and key of its own, so `high` can be
 a hosted model while `low` is a local one. A level with no server uses the
 foreman agent's; a level with its own server never sends it the foreman key. A

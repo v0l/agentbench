@@ -5,6 +5,38 @@ mod picker;
 
 pub use app::{App, LocalServer, status_counts};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("foreman-bg")
+            .build()
+            .expect("tokio runtime")
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn spawn(task: impl std::future::Future<Output = ()> + Send + 'static) {
+    runtime().spawn(task);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn spawn(task: impl std::future::Future<Output = ()> + 'static) {
+    wasm_bindgen_futures::spawn_local(task);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn spawn_blocking(work: impl FnOnce() + Send + 'static) {
+    runtime().spawn_blocking(work);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn spawn_blocking(work: impl FnOnce() + 'static) {
+    work();
+}
+
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn local_server(home: Option<std::path::PathBuf>) -> LocalServer {
     LocalServer {

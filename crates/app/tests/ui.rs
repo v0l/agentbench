@@ -294,10 +294,20 @@ fn the_client_reaches_the_server() {
 
 #[test]
 fn without_a_local_server_the_window_asks_where_to_connect() {
-    let h = Harness::builder()
+    let rig = rig();
+    let mut h = Harness::builder()
         .with_size([900.0, 600.0])
         .build_eframe(|cc| App::new(&cc.egui_ctx, None, None));
     assert!(!h.state().is_local());
+    h.run_steps(2);
+    assert_eq!(h.state().settings_loaded(), Some(false), "the settings open by themselves");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().settings_loaded().is_some(), "and cannot be closed with nowhere to go");
+    h.state_mut().settings_set_server(&rig.url, TOKEN);
+    h.state_mut().settings_save();
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    assert!(h.state().settings_loaded().is_none());
 }
 
 #[test]
@@ -695,14 +705,35 @@ fn a_busy_transcript_reads_cleanly() {
 }
 
 #[test]
-fn the_agent_key_opens_the_model_settings() {
+fn the_settings_key_opens_one_dialog_for_server_look_and_agent() {
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    click(&mut h, 988.0, 23.0);
+    h.get_by_label("settings").click();
+    h.run_steps(2);
     until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
     h.run_steps(3);
     shot(&mut h, "settings");
+    until(&mut h, "the installed fonts", |h| h.query_all_by_label("choose font").count() == 2);
+    h.get_by_label("name chats with a model");
+    assert!(h.query_by_label("agent").is_none(), "one settings key, not three");
+}
+
+#[test]
+fn a_new_text_size_applies_on_save_and_is_kept() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("settings").click();
+    h.run_steps(2);
+    until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
+    h.state_mut().settings_set_text_size(16.0);
+    h.state_mut().settings_save();
+    until(&mut h, "the save", |h| h.state().settings_loaded().is_none());
+    assert_eq!(h.state().text_size(), 16.0);
+    let mut kept = Mem::default();
+    h.state().store(&mut kept);
+    assert_eq!(kept.0.get("font_size").map(String::as_str), Some("16"));
 }
 
 #[test]
@@ -710,7 +741,8 @@ fn the_title_model_is_set_in_the_settings_and_saved_on_the_server() {
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    click(&mut h, 988.0, 23.0);
+    h.get_by_label("settings").click();
+    h.run_steps(2);
     until(&mut h, "the title settings", |h| h.state().settings_title_loaded());
     h.run_steps(3);
     shot(&mut h, "title-settings");
@@ -731,7 +763,8 @@ fn the_model_levels_are_set_in_the_settings_and_saved_on_the_server() {
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    click(&mut h, 988.0, 23.0);
+    h.get_by_label("settings").click();
+    h.run_steps(2);
     until(&mut h, "the title settings", |h| h.state().settings_title_loaded());
     h.run_steps(3);
     shot(&mut h, "model-levels");
@@ -754,7 +787,8 @@ fn a_long_model_list_is_a_filterable_dropdown() {
     let rig = rig_on(&model_server(5000), Vec::new());
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    click(&mut h, 988.0, 23.0);
+    h.get_by_label("settings").click();
+    h.run_steps(2);
     until(&mut h, "the model list", |h| h.state().settings_models() == Some(5000));
     // The dialog grows as the title settings arrive and re-centres, so let it settle first.
     until(&mut h, "the title settings", |h| h.state().settings_title_loaded());
@@ -927,7 +961,7 @@ fn a_new_chat_that_reuses_a_deleted_chats_id_shows_none_of_its_messages() {
     h.key_press(egui::Key::Enter);
     until(&mut h, "a chat", |h| h.state().open().is_some());
     let id = h.state().open().unwrap();
-    until(&mut h, "its reply", |h| rig.store.messages(id, 0).unwrap().len() == 2);
+    until(&mut h, "its reply", |_| rig.store.messages(id, 0).unwrap().len() == 2);
     h.run_steps(5);
     eprintln!("new id {id}, old id {}", old.id);
     assert_eq!(h.state().transcript_len(id), 2, "only this chat's own messages");

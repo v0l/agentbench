@@ -1,4 +1,5 @@
 use crate::client::{Client, Reply, Server};
+use crate::fonts::{self, Installed, Typeface};
 use crate::picker::ModelPicker;
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
@@ -48,12 +49,6 @@ enum Filter {
 enum Where {
     Local,
     Remote,
-}
-
-struct Connect {
-    place: Where,
-    url: String,
-    token: String,
 }
 
 pub struct LocalServer {
@@ -109,6 +104,12 @@ struct Start {
 }
 
 struct Settings {
+    place: Where,
+    url: String,
+    token: String,
+    face: Typeface,
+    agent_error: Option<String>,
+    asking_agent: bool,
     model: foreman_core::ModelSettings,
     loaded: bool,
     models: Option<Result<Vec<String>, String>>,
@@ -135,7 +136,9 @@ struct Transcript {
 
 pub struct App {
     client: Option<Client>,
-    connect: Option<Connect>,
+    face: Typeface,
+    installed: std::sync::Arc<Installed>,
+    font_scan: Option<std::sync::mpsc::Receiver<Installed>>,
     local: Option<std::sync::Arc<LocalServer>>,
     remote: bool,
     starting: Option<std::sync::mpsc::Receiver<Result<Server, String>>>,
@@ -162,6 +165,7 @@ pub struct App {
     new_worktree: Option<(Id, String)>,
     confirm: Option<Confirm>,
     settings: Option<Settings>,
+    save_requested: bool,
     /// Models on the server the foreman agent is saved to use. None until asked.
     agent_models: HashMap<String, Result<Vec<String>, String>>,
     asking_models: HashSet<String>,
@@ -191,9 +195,14 @@ impl App {
         let token = storage.and_then(|s| s.get_string("token")).unwrap_or_default();
         let remote = local.is_none()
             || storage.and_then(|s| s.get_string("remote")).as_deref() == Some("true");
+        let face = Typeface::load(storage);
+        let installed = std::sync::Arc::new(Installed::none());
+        fonts::apply(ctx, &face, &installed);
         let mut app = App {
             client: None,
-            connect: None,
+            face,
+            installed,
+            font_scan: scan_fonts(ctx),
             local: local.map(std::sync::Arc::new),
             remote,
             starting: None,
@@ -220,6 +229,7 @@ impl App {
             new_worktree: None,
             confirm: None,
             settings: None,
+            save_requested: false,
             agent_models: HashMap::new(),
             asking_models: HashSet::new(),
             markdown: markdown::Cache::default(),
@@ -230,7 +240,10 @@ impl App {
         if !app.remote {
             app.start_local(ctx);
         } else if url.is_empty() || token.is_empty() {
-            app.connect = Some(Connect { place: Where::Remote, url, token });
+            app.open_settings();
+            if let Some(st) = &mut app.settings {
+                (st.url, st.token) = (url, token);
+            }
         } else {
             app.connect_to(ctx, Server { url, token });
         }
@@ -238,6 +251,7 @@ impl App {
     }
 
     pub fn store(&self, storage: &mut dyn eframe::Storage) {
+        self.face.save(storage);
         storage.set_string("remote", self.remote.to_string());
         storage.set_string("thinking", self.thinking.to_string());
         if let Some(c) = self.client.as_ref().filter(|_| self.remote) {
@@ -353,12 +367,27 @@ impl App {
         }
     }
 
+    pub fn settings_set_server(&mut self, url: &str, token: &str) {
+        if let Some(st) = &mut self.settings {
+            st.place = Where::Remote;
+            st.url = url.into();
+            st.token = token.into();
+        }
+    }
+
+    pub fn settings_set_text_size(&mut self, size: f32) {
+        if let Some(st) = &mut self.settings {
+            st.face.size = size;
+        }
+    }
+
+    pub fn text_size(&self) -> f32 {
+        self.face.size
+    }
+
     /// What the save button does, for tests that cannot click a painted key.
     pub fn settings_save(&mut self) {
-        if let (Some(st), Some(c)) = (&self.settings, &mut self.client) {
-            c.set_title(&st.title);
-            c.set_model(&st.model);
-        }
+        self.save_requested = true;
     }
 
     pub fn settings_model(&self) -> Option<String> {
@@ -521,8 +550,9 @@ impl App {
             }
             Reply::Failed(e) => {
                 self.awaiting = None;
-                if self.settings.as_ref().is_some_and(|s| !s.loaded) {
-                    self.settings = None;
+                if let Some(st) = self.settings.as_mut().filter(|s| s.asking_agent && !s.loaded) {
+                    st.asking_agent = false;
+                    st.agent_error = Some(e.clone());
                 }
                 self.notice = Some((false, e));
             }
@@ -548,6 +578,11 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         self.poll_starting(ctx);
+        if let Some(found) = self.font_scan.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.font_scan = None;
+            self.installed = std::sync::Arc::new(found);
+            fonts::apply(ctx, &self.face, &self.installed);
+        }
         let wants = self
             .start
             .as_ref()
@@ -651,17 +686,11 @@ impl App {
                     self.file_issue =
                         Some(FileIssue { project: p, title: String::new(), body: String::new() });
                 }
-                if ui.add(Key::more()).clicked() {
-                    let (url, token) = self
-                        .client
-                        .as_ref()
-                        .filter(|_| self.remote)
-                        .map(|c| (c.server.url.clone(), c.server.token.clone()))
-                        .unwrap_or_default();
-                    let place = if self.remote { Where::Remote } else { Where::Local };
-                    self.connect = Some(Connect { place, url, token });
-                }
-                if ui.add(Key::new("agent").outline(VALUE)).clicked() {
+                let key = ui.add(Key::new("settings").outline(VALUE));
+                key.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "settings")
+                });
+                if key.clicked() {
                     self.open_settings();
                 }
                 if !self.remote {
@@ -675,7 +704,20 @@ impl App {
     }
 
     fn open_settings(&mut self) {
+        let (url, token) = self
+            .client
+            .as_ref()
+            .filter(|_| self.remote)
+            .map(|c| (c.server.url.clone(), c.server.token.clone()))
+            .unwrap_or_default();
+        let asking_agent = self.client.is_some();
         self.settings = Some(Settings {
+            place: if self.remote || self.local.is_none() { Where::Remote } else { Where::Local },
+            url,
+            token,
+            face: self.face.clone(),
+            agent_error: None,
+            asking_agent,
             model: foreman_core::ModelSettings {
                 url: String::new(),
                 model: String::new(),
@@ -705,25 +747,52 @@ impl App {
         }
     }
 
+    /// Whether the server fields in the dialog name a different server from the one in use.
+    fn server_changed(&self, st: &Settings) -> bool {
+        match st.place {
+            Where::Local => self.remote || (self.client.is_none() && self.starting.is_none()),
+            Where::Remote => {
+                !self.remote
+                    || self.client.as_ref().is_none_or(|c| {
+                        c.server.url.trim() != st.url.trim()
+                            || c.server.token.trim() != st.token.trim()
+                    })
+            }
+        }
+    }
+
     fn settings_modal(&mut self, ctx: &egui::Context) {
-        let Some(st) = &mut self.settings else {
+        let Some(mut st) = self.settings.take() else {
             return;
         };
         let (mut save, mut close, mut probe, mut probe_title) = (false, false, false, false);
+        let can_close = self.client.is_some() || self.starting.is_some();
+        let has_local = self.local.is_some();
+        let installed = self.installed.clone();
+        let scanning = self.font_scan.is_some();
+        let main_list = self.agent_models.get("foreman").cloned();
         let m = egui::Modal::new(egui::Id::new("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
-                ui.set_width(520.0);
-                modal_title(ui, "Foreman agent");
-                if !st.loaded {
-                    hint(ui, "asking the server");
-                    footer(ui, |ui| {
-                        close = ui.add(Key::new("close").outline(VALUE).min_width(100.0)).clicked();
-                    });
-                    return;
-                }
+                ui.set_width(540.0);
+                modal_title(ui, "Settings");
                 let body_h = (ctx.content_rect().height() - 220.0).max(240.0);
                 egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
+                ui.set_width(ui.available_width() - 12.0);
+                server_section(ui, &mut st, has_local);
+                ui.add_space(14.0);
+                appearance_section(ui, &mut st.face, &installed, scanning);
+                ui.add_space(14.0);
+                if !can_close && st.place == Where::Remote {
+                    hint(ui, "Connect to a server to set up its agents.");
+                } else if let Some(e) = &st.agent_error {
+                    section(ui, "foreman agent", "set on the server", |ui| status(ui, false, e));
+                } else if !st.loaded {
+                    section(ui, "foreman agent", "set on the server", |ui| {
+                        hint(ui, if st.asking_agent { "asking the server" } else { "connect to a server to set up its agents" });
+                    });
+                } else {
+                let main_list = main_list.as_ref();
                 section(ui, "model server", "any OpenAI compatible endpoint", |ui| {
                     row_help(ui, "address", "The base URL, ending in /v1 for most servers.", |ui| {
                         let r = field(ui, &mut st.model.url, "http://localhost:11434/v1");
@@ -759,7 +828,7 @@ impl App {
                                 .clicked();
                         }
                         _ => {
-                            field_then(ui, &mut st.model.model, "model name", 110.0, |ui| {
+                            field_then(ui, &mut st.model.model, "model name", 130.0, |ui| {
                                 probe = ui
                                     .add(Key::new(if st.asking { "asking" } else { "list models" }).outline(VALUE).enabled(!st.asking && !st.model.url.trim().is_empty()))
                                     .clicked();
@@ -789,7 +858,6 @@ impl App {
                     "what switch_model and /model low|medium|high move a chat to",
                     |ui| {
                         let own = st.model.url.trim().to_string();
-                        let main_list = self.agent_models.get("foreman");
                         let levels = [
                             ("low", &mut st.model.low, "cheap and quick, for mechanical work"),
                             ("medium", &mut st.model.medium, "the usual"),
@@ -869,7 +937,7 @@ impl App {
                                         .clicked();
                                 }
                                 _ => {
-                                    field_then(ui, &mut st.title.model, "same as the foreman agent", 110.0, |ui| {
+                                    field_then(ui, &mut st.title.model, "same as the foreman agent", 130.0, |ui| {
                                         probe_title = ui
                                             .add(Key::new(if st.title_asking { "asking" } else { "list models" }).outline(VALUE).enabled(!st.title_asking))
                                             .clicked();
@@ -886,16 +954,25 @@ impl App {
                     ui.add_space(8.0);
                     hint(ui, "/title in a chat asks for a new title, and /title with words sets it yourself.");
                 }
+                }
                 });
                 footer(ui, |ui| {
-                    let ready = !st.model.url.trim().is_empty() && !st.model.model.trim().is_empty();
-                    save = ui.add(Key::new("save").solid(READOUT).enabled(ready).min_width(100.0)).clicked();
-                    close = ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked();
+                    let server_ok = st.place == Where::Local
+                        || (!st.url.trim().is_empty() && !st.token.trim().is_empty());
+                    let agent_ok = !st.loaded
+                        || (!st.model.url.trim().is_empty() && !st.model.model.trim().is_empty());
+                    save = ui
+                        .add(Key::new("save").solid(READOUT).enabled(server_ok && agent_ok).min_width(100.0))
+                        .clicked();
+                    if can_close {
+                        close = ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked();
+                    }
                 });
             });
-        if m.should_close() {
+        if m.should_close() && can_close {
             close = true;
         }
+        save |= std::mem::take(&mut self.save_requested);
         if probe {
             st.asking = true;
             if let Some(c) = &mut self.client {
@@ -909,14 +986,40 @@ impl App {
             }
         }
         if save {
-            if let Some(c) = &mut self.client {
+            if st.face != self.face {
+                self.face = st.face.clone();
+                fonts::apply(ctx, &self.face, &self.installed);
+            }
+            if st.loaded
+                && let Some(c) = &mut self.client
+            {
                 if st.title_loaded {
                     c.set_title(&st.title);
                 }
                 c.set_model(&st.model);
             }
-        } else if close {
-            self.settings = None;
+            if self.server_changed(&st) {
+                let server =
+                    Server { url: st.url.trim().to_string(), token: st.token.trim().to_string() };
+                match st.place {
+                    Where::Local => {
+                        self.remote = false;
+                        self.start_local(ctx);
+                    }
+                    Where::Remote => {
+                        self.remote = true;
+                        self.connect_to(ctx, server);
+                    }
+                }
+                return;
+            }
+            if st.loaded {
+                self.settings = Some(st);
+            }
+            return;
+        }
+        if !close {
+            self.settings = Some(st);
         }
     }
 
@@ -2045,94 +2148,12 @@ impl App {
     }
 
     fn modals(&mut self, ctx: &egui::Context) {
-        self.connect_modal(ctx);
         self.add_project_modal(ctx);
         self.file_issue_modal(ctx);
         self.start_modal(ctx);
         self.worktree_modal(ctx);
         self.confirm_modal(ctx);
         self.settings_modal(ctx);
-    }
-
-    fn connect_modal(&mut self, ctx: &egui::Context) {
-        let Some(c) = &mut self.connect else {
-            return;
-        };
-        let (mut go, mut close) = (false, false);
-        let can_close = self.client.is_some() || self.starting.is_some();
-        let has_local = self.local.is_some();
-        let m = egui::Modal::new(egui::Id::new("connect"))
-            .backdrop_color(egui::Color32::from_black_alpha(150))
-            .show(ctx, |ui| {
-                ui.set_width(480.0);
-                modal_title(ui, "Which foreman server");
-                if has_local {
-                    segments(
-                        ui,
-                        &mut c.place,
-                        &[(Where::Local, "this machine", None), (Where::Remote, "remote", None)],
-                    );
-                    ui.add_space(8.0);
-                }
-                match c.place {
-                    Where::Local => section(ui, "this machine", "runs beside the window", |ui| {
-                        note(
-                            ui,
-                            "Foreman starts its server in the background on this machine and keeps it running after the window closes, so agents carry on working.",
-                            LEGEND,
-                        );
-                    }),
-                    Where::Remote => section(ui, "remote", "a foreman server elsewhere", |ui| {
-                        row_help(
-                            ui,
-                            "address",
-                            "Where the server listens, through whatever tunnel or DNAT you put in front of it.",
-                            |ui| {
-                                field(ui, &mut c.url, "https://foreman.example.com");
-                            },
-                        );
-                        row_help(ui, "token", "Printed by `foreman token` on that machine.", |ui| {
-                            secret(ui, &mut c.token);
-                        });
-                    }),
-                };
-                footer(ui, |ui| {
-                    let ready = c.place == Where::Local
-                        || (!c.url.trim().is_empty() && !c.token.trim().is_empty());
-                    if ui
-                        .add(Key::new("connect").solid(READOUT).enabled(ready).min_width(100.0))
-                        .clicked()
-                    {
-                        go = true;
-                    }
-                    if can_close
-                        && ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked()
-                    {
-                        close = true;
-                    }
-                });
-            });
-        if m.should_close() && can_close {
-            close = true;
-        }
-        if go {
-            let place = c.place;
-            let server =
-                Server { url: c.url.trim().to_string(), token: c.token.trim().to_string() };
-            self.connect = None;
-            match place {
-                Where::Local => {
-                    self.remote = false;
-                    self.start_local(ctx);
-                }
-                Where::Remote => {
-                    self.remote = true;
-                    self.connect_to(ctx, server);
-                }
-            }
-        } else if close {
-            self.connect = None;
-        }
     }
 
     fn add_project_modal(&mut self, ctx: &egui::Context) {
@@ -2584,6 +2605,96 @@ fn spinner(ui: &Ui, center: egui::Pos2, radius: f32, tint: egui::Color32) {
     p.circle_stroke(center, radius, Stroke::new(1.0, tint.gamma_multiply(0.2)));
     p.add(egui::Shape::line(points, Stroke::new(1.6, tint)));
     ui.ctx().request_repaint_after(Duration::from_millis(33));
+}
+
+/// Scan the installed fonts off the UI thread; the window draws with egui's own until it is done.
+fn scan_fonts(ctx: &egui::Context) -> Option<std::sync::mpsc::Receiver<Installed>> {
+    if cfg!(any(target_arch = "wasm32", target_os = "android")) {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    crate::spawn_blocking(move || {
+        let _ = tx.send(Installed::load());
+        ctx.request_repaint();
+    });
+    Some(rx)
+}
+
+fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
+    section(ui, "server", "where foreman runs its agents", |ui| {
+        if has_local {
+            segments(
+                ui,
+                &mut st.place,
+                &[(Where::Local, "this machine", None), (Where::Remote, "remote", None)],
+            );
+            ui.add_space(8.0);
+        }
+        match st.place {
+            Where::Local => note(
+                ui,
+                "Foreman starts its server in the background on this machine and keeps it running after the window closes, so agents carry on working.",
+                LEGEND,
+            ),
+            Where::Remote => {
+                row_help(
+                    ui,
+                    "address",
+                    "Where the server listens, through whatever tunnel or DNAT you put in front of it.",
+                    |ui| {
+                        field(ui, &mut st.url, "https://foreman.example.com");
+                    },
+                );
+                row_help(ui, "token", "Printed by `foreman token` on that machine.", |ui| {
+                    secret(ui, &mut st.token);
+                });
+            }
+        }
+    });
+}
+
+fn appearance_section(ui: &mut Ui, face: &mut Typeface, installed: &Installed, scanning: bool) {
+    section(ui, "appearance", "kept on this device", |ui| {
+        if installed.can_choose() {
+            row_help(
+                ui,
+                "font",
+                "Any font installed here. Empty uses the system's sans-serif.",
+                |ui| {
+                    font_input(ui, "font-family", &mut face.family, &installed.all);
+                },
+            );
+            row_help(
+                ui,
+                "code font",
+                "Used for code, tool output and figures. Empty uses the system's monospace.",
+                |ui| {
+                    font_input(ui, "font-mono", &mut face.mono, &installed.mono);
+                },
+            );
+        } else if scanning {
+            hint(ui, "looking for installed fonts");
+        } else {
+            hint(ui, "This platform does not list its fonts, so the text keeps the built in ones.");
+        }
+        row_help(ui, "text size", "Scales every piece of text in the window.", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut face.size)
+                    .range(fonts::MIN..=fonts::MAX)
+                    .speed(0.1)
+                    .fixed_decimals(1)
+                    .suffix(" pt"),
+            );
+        });
+    });
+}
+
+fn font_input(ui: &mut Ui, id: &str, value: &mut String, list: &[String]) {
+    let w = ui.available_width();
+    ui.allocate_ui(Vec2::new(w, KEY_H), |ui| {
+        ModelPicker::new(id, list).noun("font").allow_empty("system default").show(ui, value);
+    });
 }
 
 /// The model input: a dropdown over the server's list when there is one, else a plain field.

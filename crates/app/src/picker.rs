@@ -72,7 +72,7 @@ impl<'a> ModelPicker<'a> {
         let p = ui.painter();
         p.rect(rect, theme::RADIUS, WELL, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
         let (text, colour) = if value.is_empty() {
-            (format!("select {}", self.noun), LEGEND)
+            (self.empty.map_or_else(|| format!("select {}", self.noun), str::to_string), LEGEND)
         } else {
             (value.to_string(), VALUE)
         };
