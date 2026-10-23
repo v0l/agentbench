@@ -33,6 +33,8 @@ pub struct Context {
     pub project: String,
     pub project_path: String,
     pub branch: Option<String>,
+    /// A chat in the user's home folder, which belongs to no git repository.
+    pub home: bool,
     pub issue: Option<foreman_core::Id>,
     pub api_url: String,
     pub token: String,
@@ -195,6 +197,9 @@ pub fn content_text(content: &Value) -> String {
 }
 
 pub fn brief(c: &Context) -> String {
+    if c.home {
+        return home_brief(c);
+    }
     let mut out = format!(
         "You are running inside foreman, a harness that runs coding agents in git worktrees and keeps an issue tracker beside them. \
          This is session {} in the project {} ({}).",
@@ -220,6 +225,23 @@ pub fn brief(c: &Context) -> String {
         pid = c.project_id,
     ));
     out
+}
+
+/// The brief for a chat in the home folder: no repository, branch or worktrees, just a place to
+/// do whatever the user asks.
+fn home_brief(c: &Context) -> String {
+    format!(
+        "You are running inside foreman, a harness that runs agents and keeps an issue tracker beside them. \
+         This is session {session}, a general chat in the user's home folder ({path}). It is not tied to a git repository: \
+         expect odd jobs such as parsing or converting files, running skills, looking things up or small scripts. \
+         Work wherever the task is, and keep files you make out of the way unless the user wants them.\n\n\
+         The foreman REST API is at {url} and needs the header `Authorization: Bearer $FOREMAN_TOKEN` \
+         (also in the environment as FOREMAN_URL, FOREMAN_TOKEN and FOREMAN_SESSION). \
+         It holds the user's projects and issues; use it only if asked to.",
+        session = c.session,
+        path = c.project_path,
+        url = c.api_url.trim_end_matches('/'),
+    )
 }
 
 impl Context {
@@ -319,6 +341,7 @@ pub fn context() -> Context {
         project: "demo".into(),
         project_path: "/tmp/demo".into(),
         branch: Some("main".into()),
+        home: false,
         issue: None,
         api_url: "http://127.0.0.1:7420".into(),
         token: "t".into(),
@@ -384,6 +407,14 @@ mod tests {
         assert!(b.contains("http://127.0.0.1:7420/api/issues"));
         assert!(b.contains("branch main"));
         assert!(b.contains("\"project_id\": 4"));
+    }
+
+    #[test]
+    fn the_brief_for_the_home_folder_has_no_repository_in_it() {
+        let b = brief(&Context { home: true, project_path: "/home/me".into(), ..context() });
+        assert!(b.contains("general chat in the user's home folder (/home/me)"), "{b}");
+        assert!(b.contains(&test_session().to_string()));
+        assert!(!b.contains("worktree") && !b.contains("branch"), "{b}");
     }
 
     #[test]

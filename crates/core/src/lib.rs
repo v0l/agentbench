@@ -87,6 +87,10 @@ pub struct Project {
     pub branch: Option<String>,
     pub remote: Option<String>,
     pub created_at: i64,
+    /// The built-in "home" project: the user's home folder, for chats that belong to no git
+    /// repository. It has one fixed checkout and is never scanned for worktrees.
+    #[serde(default)]
+    pub home: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -110,7 +114,7 @@ impl Worktree {
                 .head
                 .as_deref()
                 .map(|h| h.chars().take(8).collect())
-                .unwrap_or("detached".into()),
+                .unwrap_or("folder".into()),
         }
     }
 }

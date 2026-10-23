@@ -6,6 +6,8 @@ All notable changes to Foreman are listed here. The format follows
 
 ## [Unreleased]
 
+- A built-in **home** project for chats that belong to no git repository: parse files, run skills, odd jobs. It sits last in the project list with a "new chat in ~" row, and its chats start in your home folder with a shorter brief (no branches or worktrees). It is made by the server at startup, cannot be removed, is never scanned for worktrees, and issues cannot be filed against it.
+
 - A bash command is always shown whole and wrapped under the tool's name, whether the row is open or not, since it is the riskiest thing an agent does. It used to be cut to one line.
 
 - Releases include a signed Android APK (`foreman-<tag>-android-arm64.apk`), built by the release workflow with `packaging/android/build.sh`. A phone that has a debug build installed has to uninstall it first, because Android will not change an app's signing key.

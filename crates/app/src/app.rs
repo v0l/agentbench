@@ -607,6 +607,11 @@ impl App {
         self.comments.clear();
     }
 
+    /// Whether a project is the built-in home folder, which has no git repo behind it.
+    fn is_home(&self, project: Id) -> bool {
+        self.overview.as_ref().is_some_and(|o| o.projects.iter().any(|p| p.id == project && p.home))
+    }
+
     fn sessions_of(&self, worktree: Id) -> Vec<&Session> {
         let mut out: Vec<&Session> = self
             .overview

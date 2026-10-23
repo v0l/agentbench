@@ -224,7 +224,7 @@ fn the_tree_issues_and_a_transcript() {
     shot(&mut h, "issues");
     let o = h.state().overview().unwrap();
     assert_eq!(o.issues[0].title, "Write a README");
-    assert_eq!(o.worktrees.len(), 3);
+    assert_eq!(o.worktrees.len(), 4, "the repo's three and the home folder");
 
     let session =
         rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
@@ -1041,6 +1041,69 @@ fn slash_shows_the_commands_and_new_opens_a_fresh_chat() {
     h.run_steps(3);
     assert_eq!(h.state().open(), None, "/new leaves the chat for a fresh one");
     assert!(rig.store.session(session.id).is_ok(), "the old chat is kept");
+}
+
+#[test]
+fn a_chat_can_start_in_the_home_folder_with_no_repo() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let home = rig.store.home_project().unwrap().expect("the server makes the home project");
+    h.run_steps(3);
+    shot(&mut h, "home");
+    let o = h.state().overview().unwrap();
+    assert!(o.projects.iter().any(|p| p.home && p.id == home.id), "the tree lists it");
+
+    let mut c = foreman::client::Client::new(
+        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    c.add_session(&foreman_core::NewSession {
+        project_id: home.id,
+        agent: "echo".into(),
+        prompt: Some("parse this".into()),
+        ..Default::default()
+    });
+    let start = Instant::now();
+    while rig.store.sessions().unwrap().iter().all(|s| s.project_id != home.id) {
+        assert!(start.elapsed() < Duration::from_secs(5), "no chat in the home folder");
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let s = rig.store.sessions().unwrap().into_iter().find(|s| s.project_id == home.id).unwrap();
+    assert_eq!(s.cwd, home.path, "the agent starts in the home folder");
+    c.add_session(&foreman_core::NewSession {
+        project_id: home.id,
+        agent: "echo".into(),
+        place: foreman_core::Place::New { branch: "x".into() },
+        ..Default::default()
+    });
+    h.run_steps(3);
+    assert!(
+        rig.store.sessions().unwrap().iter().filter(|s| s.project_id == home.id).count() == 1,
+        "no worktrees in the home folder"
+    );
+}
+
+#[test]
+fn the_home_row_opens_a_blank_chat_that_starts_in_the_home_folder() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    click(&mut h, 80.0, 327.0);
+    h.run_steps(3);
+    shot(&mut h, "home-blank");
+    assert_eq!(h.state().open(), None, "the row opens a blank chat");
+    click(&mut h, 800.0, 310.0);
+    h.event(egui::Event::Text("parse my file".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Enter);
+    until(&mut h, "a chat", |h| h.state().open().is_some());
+    let s = rig.store.session(h.state().open().unwrap()).unwrap();
+    let home = rig.store.home_project().unwrap().unwrap();
+    assert_eq!(s.project_id, home.id);
+    assert_eq!(s.cwd, home.path);
 }
 
 #[test]

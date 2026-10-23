@@ -179,6 +179,10 @@ async fn serve_inner(
     if stale > 0 {
         tracing::info!("{stale} sessions were running when foreman last stopped");
     }
+    if let Some(dir) = dirs::home_dir() {
+        // A home folder that is a project itself is left alone.
+        let _ = projects::ensure_home(&store, &dir);
+    }
     let token = token(&store).map_err(|e| e.0)?;
     // The model a speech request gets when it names none of ours: set it with FOREMAN_SPEECH_MODEL.
     let speech_model = std::env::var("FOREMAN_SPEECH_MODEL")

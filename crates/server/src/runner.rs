@@ -162,6 +162,9 @@ impl Runner {
                 }
                 w
             }
+            Place::New { .. } if project.home => {
+                return Err(bad("the home folder is not a git repo, so it has no worktrees".into()));
+            }
             Place::New { branch } => {
                 let branch = match branch.trim() {
                     "" => issue
@@ -184,7 +187,13 @@ impl Runner {
         let stand_in = chosen.is_none();
         let title = chosen
             .or_else(|| new.prompt.as_deref().map(|p| foreman_core::short_title(p, TITLE_MAX)))
-            .unwrap_or_else(|| format!("{} on {}", agent.label(), worktree.label()));
+            .unwrap_or_else(|| {
+                if project.home {
+                    format!("{} in {}", agent.label(), project.name)
+                } else {
+                    format!("{} on {}", agent.label(), worktree.label())
+                }
+            });
         let model = new.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
         let session =
             store.add_session(worktree.id, agent.name(), title.trim(), model, new.issue_id)?;
@@ -517,12 +526,14 @@ impl Runner {
         let project = self.store.project(session.project_id).ok();
         let branch = self.store.worktree(session.worktree_id).ok().and_then(|w| w.branch);
         let base = self.base.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let home = project.as_ref().is_some_and(|p| p.home);
         Context {
             session: session.id,
             project_id: session.project_id,
             project: project.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
             project_path: project.map(|p| p.path).unwrap_or_default(),
             branch,
+            home,
             issue: session.issue_id,
             api_url: base.url,
             token: base.token,

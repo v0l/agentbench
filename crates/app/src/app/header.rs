@@ -116,7 +116,9 @@ impl App {
     pub(super) fn key_file_issue(&mut self, ui: &mut Ui) {
         let ready = self.overview.is_some();
         if ui
-            .add(Key::new("file issue").outline(VALUE).enabled(ready && self.project.is_some()))
+            .add(Key::new("file issue").outline(VALUE).enabled(
+                ready && self.project.is_some_and(|p| !self.is_home(p)),
+            ))
             .clicked()
             && let Some(p) = self.project
         {

@@ -160,6 +160,7 @@ CREATE TABLE notes (
     PRIMARY KEY (project_id, topic)
 );
 "#,
+    "ALTER TABLE projects ADD COLUMN home INTEGER NOT NULL DEFAULT 0;",
 ];
 
 #[derive(Debug)]
@@ -257,6 +258,7 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
         branch: row.get("branch")?,
         remote: row.get("remote")?,
         created_at: row.get("created_at")?,
+        home: row.get("home")?,
     })
 }
 
@@ -359,7 +361,7 @@ impl Store {
 
     pub fn projects(&self) -> Result<Vec<Project>> {
         let db = self.db();
-        let mut stmt = db.prepare("SELECT * FROM projects ORDER BY name")?;
+        let mut stmt = db.prepare("SELECT * FROM projects ORDER BY home, name")?;
         let rows = stmt.query_map([], project_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -404,7 +406,42 @@ impl Store {
         self.project(id)
     }
 
+    /// The built-in home project, if it has been made.
+    pub fn home_project(&self) -> Result<Option<Project>> {
+        Ok(self
+            .db()
+            .query_row("SELECT * FROM projects WHERE home = 1", [], project_row)
+            .optional()?)
+    }
+
+    /// Make the home project: `path` as a project and its one, fixed checkout.
+    pub fn add_home(&self, name: &str, path: &str) -> Result<Project> {
+        if self.project_by_path(path)?.is_some() {
+            return Err(StoreError(format!("{path} is already a project")));
+        }
+        let id = {
+            let db = self.db();
+            let t = now();
+            db.execute(
+                "INSERT INTO projects (name, path, branch, remote, created_at, home) VALUES (?1, ?2, NULL, NULL, ?3, 1)",
+                params![name, path, t],
+            )?;
+            let id = db.last_insert_rowid();
+            db.execute(
+                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, created_by_foreman, created_at)
+                 VALUES (?1, ?2, NULL, NULL, 1, 0, 0, ?3)",
+                params![id, path, t],
+            )?;
+            Store::changed(&db, "project", id)?;
+            id
+        };
+        self.project(id)
+    }
+
     pub fn delete_project(&self, id: Id) -> Result<()> {
+        if self.project(id)?.home {
+            return Err(StoreError("the home project is built in and cannot be removed".into()));
+        }
         let db = self.db();
         db.execute("DELETE FROM sessions WHERE project_id = ?1", [id])?;
         if db.execute("DELETE FROM projects WHERE id = ?1", [id])? == 0 {

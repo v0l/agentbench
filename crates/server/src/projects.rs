@@ -66,8 +66,20 @@ pub fn add(
     store.project(project.id)
 }
 
+/// Make sure the home project exists, pointing at the user's home folder. A folder that is
+/// already a project in its own right is left as it is and gets no home project.
+pub fn ensure_home(store: &Store, dir: &Path) -> Result<Project, StoreError> {
+    if let Some(p) = store.home_project()? {
+        return Ok(p);
+    }
+    store.add_home("home", &dir.to_string_lossy())
+}
+
 pub fn sync(store: &Store, project_id: Id, created: Option<&Path>) -> Result<bool, StoreError> {
     let project = store.project(project_id)?;
+    if project.home {
+        return Ok(false);
+    }
     let main = PathBuf::from(&project.path);
     let trees = git::worktrees(&main).map_err(err)?;
     let created = created.map(|p| p.to_string_lossy().into_owned());
@@ -92,6 +104,9 @@ pub fn add_worktree(
     base: Option<&str>,
 ) -> Result<Worktree, StoreError> {
     let project = store.project(project_id)?;
+    if project.home {
+        return Err(StoreError("the home folder is not a git repo, so it has no worktrees".into()));
+    }
     let main = PathBuf::from(&project.path);
     let branch = branch.trim();
     if !git::valid_branch(&main, branch) {
@@ -148,6 +163,38 @@ mod tests {
         assert!(trees[0].main);
         assert!(!trees[1].created_by_foreman, "an agent-made tree is adopted, not owned");
         assert!(add(&s, &main, None, false).is_err(), "the same repo twice");
+    }
+
+    #[test]
+    fn the_home_project_is_made_once_and_is_not_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::memory().unwrap();
+        let home = ensure_home(&s, dir.path()).unwrap();
+        assert!(home.home);
+        assert_eq!(home.name, "home");
+        assert_eq!(ensure_home(&s, dir.path()).unwrap().id, home.id, "made once");
+        let tree = s.main_worktree(home.id).unwrap();
+        assert_eq!(Path::new(&tree.path), dir.path());
+
+        assert!(!sync(&s, home.id, None).unwrap(), "never scanned for worktrees");
+        assert_eq!(s.worktrees(Some(home.id)).unwrap().len(), 1);
+        assert!(add_worktree(&s, home.id, "x", None).is_err());
+        assert!(s.delete_project(home.id).is_err(), "built in");
+
+        let repo_dir = dir.path().join("r");
+        repo(&repo_dir);
+        add(&s, &repo_dir, None, false).unwrap();
+        let names: Vec<_> = s.projects().unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, ["r", "home"], "home is listed last");
+    }
+
+    #[test]
+    fn a_home_folder_that_is_a_project_already_gets_no_home_project() {
+        let dir = tempfile::tempdir().unwrap();
+        repo(dir.path());
+        let s = Store::memory().unwrap();
+        add(&s, dir.path(), None, false).unwrap();
+        assert!(ensure_home(&s, dir.path()).is_err());
     }
 
     #[test]

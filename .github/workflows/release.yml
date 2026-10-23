@@ -17,7 +17,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # A manual run takes the tag to build. A branch name is not a version, and the .deb and .msi
+  # steps fail on it with errors that do not say so, so stop here with one that does.
+  check:
+    name: check the tag
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::'$TAG' is not a version tag like v0.1.2. Give the tag to build and publish."
+            exit 1
+          fi
+
   build:
+    needs: check
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -154,6 +169,7 @@ jobs:
 
   android:
     name: android-apk
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

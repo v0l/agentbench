@@ -30,6 +30,7 @@ impl App {
             let selected = self.project == Some(p.id);
             let rail = if selected { Some(READOUT) } else { None };
             let trees: Vec<&Worktree> = worktrees.iter().filter(|w| w.project_id == p.id).collect();
+            let home = p.home;
             let open = self.overview.as_ref().map_or(0, |o| {
                 o.issues.iter().filter(|i| i.project_id == p.id && i.state.is_open()).count()
             });
@@ -45,11 +46,13 @@ impl App {
                     picked_head = r.clicked();
                     menu = Some(r);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        Line::new().note(format!("{open} open")).size(10.5).show(ui);
+                        let count = if home { "no repo".to_string() } else { format!("{open} open") };
+                        Line::new().note(count).size(10.5).show(ui);
                     });
                 },
                 |ui| {
-                    let r = Line::new().note(short_path(&p.path)).size(10.5).elided(ui);
+                    let shown = if home { "~ chats anywhere".to_string() } else { short_path(&p.path) };
+                    let r = Line::new().note(shown).size(10.5).elided(ui);
                     if r.interact(Sense::click()).clicked() {
                         pick = true;
                     }
@@ -85,6 +88,9 @@ impl App {
                     }
                     ui.close();
                 }
+                if home {
+                    return;
+                }
                 if ui.add(Key::new("new worktree").outline(VALUE).min_width(160.0)).clicked() {
                     self.new_worktree = Some((p.id, String::new()));
                     ui.close();
@@ -111,6 +117,7 @@ impl App {
     }
 
     pub(super) fn worktree_row(&mut self, ui: &mut Ui, w: &Worktree, last: bool) {
+        let home = self.is_home(w.project_id);
         let sessions: Vec<Session> = self.sessions_of(w.id).into_iter().cloned().collect();
         let running = sessions.iter().any(|s| s.status.busy());
         let tint = if w.missing {
@@ -126,8 +133,9 @@ impl App {
         let resp = ui
             .horizontal(|ui| {
                 ui.add_space(TREE_INDENT);
-                let r = Line::new().value(w.label()).tint(tint).size(11.5).show(ui);
-                if w.main {
+                let label = if home { "new chat in ~".to_string() } else { w.label() };
+                let r = Line::new().value(label).tint(tint).size(11.5).show(ui);
+                if w.main && !home {
                     chip(ui, "main", LEGEND, false);
                 }
                 if w.missing {
@@ -161,7 +169,10 @@ impl App {
                 self.new_chat(Some(w));
                 ui.close();
             }
-            if ui.add(Key::new("start in a new worktree").outline(VALUE).min_width(170.0)).clicked()
+            if !home
+                && ui
+                    .add(Key::new("start in a new worktree").outline(VALUE).min_width(170.0))
+                    .clicked()
             {
                 self.open_start(None);
                 if let Some(s) = &mut self.start {

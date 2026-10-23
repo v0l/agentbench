@@ -129,6 +129,7 @@ impl App {
         if matches!(fresh.place, PlaceChoice::Existing(id) if !trees.iter().any(|w| w.id == id)) {
             fresh.place = PlaceChoice::Main;
         }
+        let home = o.projects.iter().any(|p| p.id == project && p.home);
         let here = match fresh.place {
             PlaceChoice::New => None,
             PlaceChoice::Existing(id) => trees.iter().find(|w| w.id == id),
@@ -140,7 +141,10 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.set_max_width(ui.available_width().min(640.0));
             ui.label(
-                egui::RichText::new(format!("{name} on {here}").to_uppercase())
+                egui::RichText::new(
+                    if home { "home folder".to_string() } else { format!("{name} on {here}") }
+                        .to_uppercase(),
+                )
                     .font(legend_font(15.0))
                     .color(VALUE)
                     .extra_letter_spacing(2.0),
@@ -148,7 +152,11 @@ impl App {
             ui.add_space(4.0);
             hint(
                 ui,
-                "Ask anything. The agent works in this worktree and can read and file issues.",
+                if home {
+                    "Not tied to a repository. The agent starts in your home folder: parse files, run skills, odd jobs."
+                } else {
+                    "Ask anything. The agent works in this worktree and can read and file issues."
+                },
             );
             ui.add_space(14.0);
             let fresh = self.fresh.as_mut().expect("fresh chat");
@@ -171,17 +179,19 @@ impl App {
                     }
                 });
                 let mut opts: Vec<(PlaceChoice, String)> = Vec::new();
-                for w in &trees {
+                for w in trees.iter().filter(|_| !home) {
                     let label = if w.main { format!("{} (main)", w.label()) } else { w.label() };
                     opts.push((
                         if w.main { PlaceChoice::Main } else { PlaceChoice::Existing(w.id) },
                         label,
                     ));
                 }
-                opts.push((PlaceChoice::New, "+ new worktree".into()));
-                ui.allocate_ui(Vec2::new(200.0, KEY_H), |ui| {
-                    choice(ui, "fresh-tree", &mut fresh.place, opts);
-                });
+                if !home {
+                    opts.push((PlaceChoice::New, "+ new worktree".into()));
+                    ui.allocate_ui(Vec2::new(200.0, KEY_H), |ui| {
+                        choice(ui, "fresh-tree", &mut fresh.place, opts);
+                    });
+                }
                 if fresh.place == PlaceChoice::New {
                     ui.allocate_ui(Vec2::new(160.0, KEY_H), |ui| {
                         field(ui, &mut fresh.branch, "branch, e.g. fix-login");
@@ -260,6 +270,7 @@ impl App {
     /// tokens are on hover and in the status line.
     pub(super) fn chat_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
         let project = self.project_name(s.project_id);
+        let home = self.is_home(s.project_id);
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
@@ -289,7 +300,7 @@ impl App {
                         tokens(s.usage.output_tokens)
                     );
                     chip(ui, &project, READOUT, true).on_hover_text(&about);
-                    if let Some(w) = tree {
+                    if let Some(w) = tree.filter(|_| !home) {
                         chip(ui, &w.label(), VALUE, false).on_hover_text(&about);
                     }
                 });
