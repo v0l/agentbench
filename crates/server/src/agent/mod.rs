@@ -2,10 +2,12 @@ mod claude;
 mod codex;
 mod command;
 pub mod files;
+mod jobs;
 pub mod media;
 pub mod native;
 mod pi;
 mod process;
+pub mod screenshot;
 pub mod search;
 pub mod web;
 
@@ -34,6 +36,8 @@ pub struct Context {
     pub issue: Option<foreman_core::Id>,
     pub api_url: String,
     pub token: String,
+    /// What was remembered about the project with `remember`: topic and note.
+    pub notes: Vec<(String, String)>,
 }
 
 /// A file the user sent with a message, written out where an agent can read it.
@@ -318,6 +322,7 @@ pub fn context() -> Context {
         issue: None,
         api_url: "http://127.0.0.1:7420".into(),
         token: "t".into(),
+        notes: Vec::new(),
     }
 }
 

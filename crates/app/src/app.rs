@@ -3939,6 +3939,22 @@ fn tool_body(name: &str, input: &serde_json::Value) -> Option<String> {
         return (c.lines().count() > 1 || c.len() > 120).then(|| format!("$ {c}"));
     }
     match name {
+        "todo_write" => {
+            let items = input.get("items")?.as_array()?;
+            let lines: Vec<String> = items
+                .iter()
+                .filter_map(|i| {
+                    let text = i.get("text").or_else(|| i.get("content"))?.as_str()?;
+                    let mark = match i.get("status").and_then(|s| s.as_str()) {
+                        Some("done" | "completed") => "[x]",
+                        Some("in_progress" | "doing") => "[~]",
+                        _ => "[ ]",
+                    };
+                    Some(format!("{mark} {text}"))
+                })
+                .collect();
+            (!lines.is_empty()).then(|| lines.join("\n"))
+        }
         "edit_file" | "edit" => {
             let old = pick("old").or(pick("oldText"))?;
             let new = pick("new").or(pick("newText")).unwrap_or_default();
@@ -3963,12 +3979,26 @@ fn tool_body(name: &str, input: &serde_json::Value) -> Option<String> {
 
 fn tool_summary(name: &str, input: &serde_json::Value) -> String {
     let pick = |k: &str| input.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    if name == "todo_write"
+        && let Some(items) = input.get("items").and_then(|i| i.as_array())
+    {
+        let done = items
+            .iter()
+            .filter(|i| {
+                matches!(i.get("status").and_then(|s| s.as_str()), Some("done" | "completed"))
+            })
+            .count();
+        return format!("{done} of {} done", items.len());
+    }
     let text = pick("command")
         .or_else(|| pick("path"))
         .or_else(|| pick("file_path"))
         .or_else(|| pick("pattern"))
         .or_else(|| pick("query"))
         .or_else(|| pick("url"))
+        .or_else(|| pick("handle"))
+        .or_else(|| pick("message"))
+        .or_else(|| pick("topic"))
         .unwrap_or_else(|| if input.is_null() { String::new() } else { input.to_string() });
     let line = text.lines().next().unwrap_or_default().to_string();
     let _ = name;
@@ -3992,6 +4022,17 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_checklist_is_drawn_as_a_list_with_its_progress() {
+        let input = serde_json::json!({"items": [
+            {"text": "read", "status": "done"},
+            {"text": "write", "status": "in_progress"},
+            {"text": "test"},
+        ]});
+        assert_eq!(tool_body("todo_write", &input).unwrap(), "[x] read\n[~] write\n[ ] test");
+        assert_eq!(tool_summary("todo_write", &input), "1 of 3 done");
+    }
 
     #[test]
     fn status_counts_skip_empty_statuses_and_lead_with_attention() {

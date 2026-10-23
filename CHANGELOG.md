@@ -17,6 +17,12 @@ All notable changes to Foreman are listed here. The format follows
   turns HTML into markdown, reads long pages in pieces, and downloads any file with `save_to`.
   Pass `prompt` to get the title model's answer to a request about the page, such as a summary or
   one fact, instead of the page.
+- More tools for the `foreman` agent:
+  - `bash` takes `background`, with `bash_output` and `bash_kill`, to run a dev server, watcher or long build while it carries on.
+  - `start_session`, `send_message` and `wait_for_session` let one agent hand an issue or prompt to another session, steer it and wait for the result. `session_status` is the cheap check.
+  - `start_session` can start in another project (`list_projects`) after the user allows it in the chat: once, always for that project, or always for any project. `DELETE /api/settings/cross-project` takes the standing permissions back.
+  - `get_issue` reads an issue with its comments, and `file_issue` and `update_issue` take labels, priority and state.
+  - `list_worktrees` and `create_worktree`, `todo_write` (drawn as a checklist in the chat), `screenshot` (headless Chrome, Chromium or Edge), `notify_user`, and `remember` / `recall` for per-project notes that open every later session.
 
 - A status line under each chat's header: the server and model the agent is using, how full its
   context is against the model's window (amber from 60%, red from 80%), and how much of the input

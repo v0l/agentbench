@@ -175,6 +175,8 @@ pub struct Native {
     pub patience: Patience,
     /// The small model that answers `prompt` about a page for `web_fetch`.
     pub titles: Option<crate::titles::Titles>,
+    /// Commands the agents left running with `bash` and `background`.
+    pub jobs: super::jobs::Jobs,
 }
 
 /// How long the model server may stay silent before a request is given up and sent again.
@@ -192,11 +194,11 @@ impl Default for Patience {
 
 impl Native {
     pub fn new(model: Model) -> Native {
-        Native { model: Shared::new(model), patience: Patience::default(), titles: None }
+        Native { model: Shared::new(model), ..Native::default() }
     }
 
     pub fn shared(model: Shared) -> Native {
-        Native { model, patience: Patience::default(), titles: None }
+        Native { model, ..Native::default() }
     }
 
     /// Answer `web_fetch` prompts with the title model.
@@ -206,15 +208,32 @@ impl Native {
     }
 }
 
-pub const FOREMAN_TOOLS: [&str; 7] = [
+/// The tools the tracker answers, through `Api`.
+pub const FOREMAN_TOOLS: [&str; 16] = [
     "list_issues",
+    "get_issue",
     "file_issue",
     "update_issue",
     "comment_on_issue",
     "list_sessions",
     "read_session",
-    "ask_user",
+    "session_status",
+    "start_session",
+    "send_message",
+    "list_projects",
+    "list_worktrees",
+    "create_worktree",
+    "remember",
+    "recall",
+    "notify_user",
 ];
+
+/// How long `wait_for_session` waits when not told, and the longest it may.
+const WAIT_DEFAULT: u64 = 300;
+const WAIT_MAX: u64 = 3600;
+/// How long `bash_output` waits for something new when not told, and the longest it may.
+const OUTPUT_WAIT: u64 = 0;
+const OUTPUT_WAIT_MAX: u64 = 60;
 
 fn foreman_specs() -> Vec<Spec> {
     let id = |about: &str| json!({ "type": "integer", "description": about });
@@ -225,10 +244,21 @@ fn foreman_specs() -> Vec<Spec> {
             object(json!({ "state": string("Only issues in this state") }), &[]),
         ),
         Spec::new(
+            "get_issue",
+            "Read one issue in full: its description, labels and every comment. Read it before working on an issue you were given.",
+            object(json!({ "id": id("The issue number") }), &["id"]),
+        ),
+        Spec::new(
             "file_issue",
             "File a new issue in this project, for work you found that is outside what you were asked to do.",
             object(
-                json!({ "title": string("One line"), "body": string("Details, steps, what done looks like") }),
+                json!({
+                    "title": string("One line"),
+                    "body": string("Details, steps, what done looks like"),
+                    "labels": labels_schema(),
+                    "state": string("backlog (default), todo, doing, review or done"),
+                    "priority": id("Higher is more urgent"),
+                }),
                 &["title"],
             ),
         ),
@@ -241,6 +271,8 @@ fn foreman_specs() -> Vec<Spec> {
                     "state": string("backlog, todo, doing, review or done"),
                     "title": string("A new title"),
                     "body": string("A new description"),
+                    "labels": labels_schema_replacing(),
+                    "priority": id("Higher is more urgent"),
                 }),
                 &["id"],
             ),
@@ -264,6 +296,111 @@ fn foreman_specs() -> Vec<Spec> {
             object(
                 json!({ "id": string("The session id, as list_sessions gives it"), "last": id("How many messages, default 20") }),
                 &["id"],
+            ),
+        ),
+        Spec::new(
+            "session_status",
+            "Say whether a session in this project is busy, and what it last replied. Cheap to call; wait_for_session is better than calling it in a loop.",
+            object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
+        ),
+        Spec::new(
+            "start_session",
+            "Start another agent session in this project and give it work. Give an `issue` to hand it that issue (it gets its own worktree and the issue moves to doing), or a `prompt` for anything else. \
+             It runs on its own while you carry on; use wait_for_session to wait for it and read_session to see what it did. \
+             Defaults to your own agent and project. Give each session a job that does not overlap another's files.",
+            object(
+                json!({
+                    "prompt": string("What to do. Optional when an issue is given, then the issue is the brief"),
+                    "project": string("Another project to start it in, by name or id from list_projects. The user is asked to allow it"),
+                    "issue": id("An issue of the project it starts in to work on"),
+                    "agent": string("Which agent runs it; defaults to your own"),
+                    "branch": string("Make a new worktree on this branch for it. Default with an issue; without one it works in the main checkout"),
+                    "worktree": id("Work in this existing worktree instead, as list_worktrees gives its id"),
+                    "model": string("A model or level for it"),
+                    "title": string("A title for the chat"),
+                }),
+                &[],
+            ),
+        ),
+        Spec::new(
+            "send_message",
+            "Send a message to another session in this project, to steer it, answer it or give it more work. It is delivered as from you.",
+            object(
+                json!({ "id": string("The session id, as list_sessions gives it"), "text": string("The message") }),
+                &["id", "text"],
+            ),
+        ),
+        Spec::new(
+            "wait_for_session",
+            "Wait until a session in this project stops being busy, then answer with how it ended and its last reply. Use it after start_session instead of polling. It gives up after timeout_s and says the session is still busy.",
+            object(
+                json!({
+                    "id": string("The session id"),
+                    "timeout_s": id("Seconds to wait, default 300, at most 3600"),
+                }),
+                &["id"],
+            ),
+        ),
+        Spec::new(
+            "list_projects",
+            "List the projects foreman knows: id, name and path. start_session can start work in another one.",
+            object(json!({}), &[]),
+        ),
+        Spec::new(
+            "list_worktrees",
+            "List this project's worktrees: id, branch and path. Use the id with start_session.",
+            object(json!({}), &[]),
+        ),
+        Spec::new(
+            "create_worktree",
+            "Make a new git worktree for a branch of this project, so work can go on in parallel without disturbing other checkouts. Foreman keeps track of it.",
+            object(
+                json!({
+                    "branch": string("The branch; made if it does not exist"),
+                    "base": string("What to branch from; defaults to the current HEAD"),
+                }),
+                &["branch"],
+            ),
+        ),
+        Spec::new(
+            "remember",
+            "Keep a note about this project that survives across sessions: how to run the tests, a convention, a gotcha. \
+             One note per topic; saving a topic again replaces it, and an empty note forgets it. Notes are shown to every session at its start, so keep them short and true.",
+            object(
+                json!({ "topic": string("A short name, like `tests` or `style`"), "note": string("The note; empty to forget the topic") }),
+                &["topic"],
+            ),
+        ),
+        Spec::new(
+            "recall",
+            "Read the notes kept for this project with remember, optionally only those matching a word.",
+            object(json!({ "topic": string("Only notes whose topic or text has this word") }), &[]),
+        ),
+        Spec::new(
+            "notify_user",
+            "Tell the user something now, outside the chat: a desktop notification as well as a notice in this chat. Use it when work is done or you are blocked and they may not be watching. ask_user is for questions.",
+            object(json!({ "message": string("One short sentence") }), &["message"]),
+        ),
+        Spec::new(
+            "todo_write",
+            "Keep a checklist of the steps of a long task, shown to the user in the chat. Send the whole list each time: \
+             each item has `text` and a `status` of pending, in_progress or done. Keep one item in progress. Use it for work of three or more steps.",
+            object(
+                json!({
+                    "items": {
+                        "type": "array",
+                        "description": "The whole checklist, in order",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": string("The step"),
+                                "status": { "type": "string", "enum": ["pending", "in_progress", "done"] },
+                            },
+                            "required": ["text"],
+                        },
+                    },
+                }),
+                &["items"],
             ),
         ),
         Spec::new(
@@ -330,8 +467,58 @@ fn bash_spec() -> Spec {
             json!({
                 "command": string("The command line, run by bash -c"),
                 "timeout_s": { "type": "integer", "description": "Seconds before it is killed, default 120, at most 900" },
+                "background": { "type": "boolean", "description": "Start it and answer at once with a handle, for a dev server, a watcher or a long build. Read it with bash_output and stop it with bash_kill. Needs no timeout" },
             }),
             &["command"],
+        ),
+    )
+}
+
+fn job_specs() -> Vec<Spec> {
+    let handle = || string("The handle bash gave, like job-1");
+    vec![
+        Spec::new(
+            "bash_output",
+            "Read what a background command has printed since you last read it, and whether it is still running or how it exited. \
+             With no handle it lists your background commands.",
+            object(
+                json!({
+                    "handle": handle(),
+                    "wait_s": json!({ "type": "integer", "description": "Wait up to this many seconds for new output when there is none, default 0, at most 60" }),
+                }),
+                &[],
+            ),
+        ),
+        Spec::new(
+            "bash_kill",
+            "Stop a background command and everything it started.",
+            object(json!({ "handle": handle() }), &["handle"]),
+        ),
+    ]
+}
+
+fn labels_schema() -> Value {
+    json!({ "type": "array", "items": { "type": "string" }, "description": "Labels like bug or ui" })
+}
+
+fn labels_schema_replacing() -> Value {
+    json!({ "type": "array", "items": { "type": "string" }, "description": "Replaces all the labels; send the full list" })
+}
+
+fn screenshot_spec() -> Spec {
+    Spec::new(
+        "screenshot",
+        "Take a picture of a web page or a local HTML file with a headless browser, and look at it. Use it to check UI you built: \
+         start a dev server with bash background, then screenshot its address. Needs Chrome, Chromium or Edge installed.",
+        object(
+            json!({
+                "url": string("An http(s) address, localhost:PORT, or an HTML file in the worktree"),
+                "width": integer("Window width in pixels, default 1280"),
+                "height": integer("Window height in pixels, default 800"),
+                "wait_ms": integer("Milliseconds of page script to let run before the picture, default 2000"),
+                "save_to": string("Also keep the picture at this path"),
+            }),
+            &["url"],
         ),
     )
 }
@@ -473,6 +660,8 @@ fn web_specs() -> Vec<Spec> {
 pub fn specs() -> Vec<Spec> {
     let mut all = file_specs();
     all.push(bash_spec());
+    all.extend(job_specs());
+    all.push(screenshot_spec());
     all.extend(web_specs());
     all.extend(foreman_specs());
     all
@@ -507,9 +696,21 @@ fn system(turn: &Turn, base: &Model) -> String {
     );
     out.push_str(&brief(turn.context));
     out.push_str(
-        "\n\nYour own tools reach the tracker directly: list_issues, file_issue, update_issue, comment_on_issue, \
-         list_sessions, read_session. Prefer them to the REST API. ask_user waits for the user's answer.\n\n",
+        "\n\nYour own tools reach the tracker directly: list_issues, get_issue, file_issue, update_issue, comment_on_issue, \
+         list_sessions, read_session, session_status, list_worktrees, create_worktree. Prefer them to the REST API. \
+         ask_user waits for the user's answer, and notify_user tells them something when they may not be watching.\n\n\
+         To hand work to another agent, start_session gives it an issue or a prompt, and it runs on its own; \
+         wait_for_session waits for it, read_session shows what it did and send_message steers it. \
+         remember keeps a note about the project for every later session, and recall reads the notes. \
+         For work of three or more steps keep a checklist with todo_write.\n\n",
     );
+    if !turn.context.notes.is_empty() {
+        out.push_str("What was remembered about this project:\n");
+        for (topic, note) in &turn.context.notes {
+            out.push_str(&format!("- {topic}: {}\n", note.trim().replace('\n', "\n  ")));
+        }
+        out.push('\n');
+    }
     let levels = levels(base);
     if !levels.is_empty() {
         out.push_str(&format!(
@@ -524,7 +725,9 @@ fn system(turn: &Turn, base: &Model) -> String {
          Read a file before you edit it.\n\
          - read_file also shows you pictures, plays sound files and shows video as frames, so use it to look at screenshots, \
          images, recordings and clips instead of saying you cannot.\n\
-         - bash runs commands in the worktree as the user.\n\
+         - bash runs commands in the worktree as the user. With background it starts a dev server, watcher or long build and \
+         answers at once; bash_output reads its output and bash_kill stops it.\n\
+         - screenshot takes a picture of a web page or HTML file so you can look at the UI you built.\n\
          - web_search finds pages and web_fetch reads one as markdown, or downloads a file with save_to, or with prompt gives you just the answer to a question about a long page. Fetch before you \
          answer from memory about anything recent, and say where a fact came from.\n\
          - Before writing a file format you were not taught, load its skill with load_skill.\n\
@@ -721,6 +924,12 @@ impl Agent for Native {
                                 None => self.tool(name, &args, &workspace, turn.context, io).await,
                             }
                         }
+                        "screenshot" => {
+                            super::screenshot::take(&workspace, &args, io.stop()).await.map(|m| {
+                                attached.extend(m.parts);
+                                m.note
+                            })
+                        }
                         _ => self.tool(name, &args, &workspace, turn.context, io).await,
                     },
                 };
@@ -745,7 +954,7 @@ impl Agent for Native {
             if !attached.is_empty() {
                 let mut content = vec![json!({
                     "type": "text",
-                    "text": "The media from read_file, as the tool results above described:",
+                    "text": "The media from read_file or screenshot, as the tool results above described:",
                 })];
                 content.extend(attached);
                 messages.push(json!({ "role": "user", "content": content }));
@@ -994,6 +1203,30 @@ impl Native {
                     .await
                     .map_err(|e| e.to_string())?
             }
+            "bash" if args.get("background").and_then(Value::as_bool).unwrap_or(false) => {
+                let command = files::text(args, &["command", "cmd"]).ok_or("missing `command`")?;
+                let handle = self.jobs.start(cx.session, ws.root(), command, cx.env())?;
+                Ok(format!(
+                    "started in the background as {handle}. bash_output {handle} reads what it prints; bash_kill {handle} stops it."
+                ))
+            }
+            "bash_output" => match files::text(args, &["handle", "id"]) {
+                None => Ok(self.jobs.list(cx.session)),
+                Some(h) => {
+                    let wait = number(&["wait_s", "wait"]).map_or(OUTPUT_WAIT, |n| n as u64);
+                    let wait = Duration::from_secs(wait.min(OUTPUT_WAIT_MAX));
+                    self.jobs.output(cx.session, h, wait, io.stop()).await
+                }
+            },
+            "bash_kill" => {
+                let h = files::text(args, &["handle", "id"]).ok_or("missing `handle`")?;
+                self.jobs.kill(cx.session, h).await
+            }
+            "wait_for_session" => {
+                let wait = number(&["timeout_s", "timeout"]).map_or(WAIT_DEFAULT, |n| n as u64);
+                wait_for_session(args, Duration::from_secs(wait.clamp(1, WAIT_MAX)), cx, io).await
+            }
+            "todo_write" => todo_write(args),
             "bash" => {
                 bash(
                     ws.root(),
@@ -1006,6 +1239,12 @@ impl Native {
             }
             "web_search" => super::web::search(args, io.stop()).await,
             "web_fetch" => super::web::fetch(args, ws, self.titles.as_ref(), io.stop()).await,
+            "start_session" if args.get("project").is_some_and(|p| !p.is_null()) => {
+                confirm_project(args, cx, io).await?;
+                io.api()
+                    .call("start_session", args, cx.session)
+                    .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+            }
             "ask_user" => {
                 let asked: Vec<Question> = args
                     .get("questions")
@@ -1040,6 +1279,119 @@ impl Native {
                     names.join(", ")
                 ))
             }
+        }
+    }
+}
+
+const ALLOW_ONCE: &str = "Allow once";
+const ALLOW_ALWAYS_ANY: &str = "Always allow, any project";
+const DENY: &str = "Deny";
+
+/// Before a session is started in another project, ask the user, unless they have said always.
+/// Only the user's answer records a permission; the model cannot.
+async fn confirm_project(args: &Value, cx: &Context, io: &dyn Io) -> Result<(), String> {
+    let api = io.api();
+    let target = args.get("project").cloned().unwrap_or(Value::Null);
+    let found = api.call("check_project", &json!({ "project": target }), cx.session)?;
+    if found["allowed"].as_bool().unwrap_or(false) {
+        return Ok(());
+    }
+    let name = found["name"].as_str().unwrap_or("that project").to_string();
+    let always = format!("Always allow in {name}");
+    let what = args
+        .get("prompt")
+        .and_then(Value::as_str)
+        .map(|p| clip(p.trim(), 300))
+        .or_else(|| args.get("issue").map(|i| format!("work on issue #{i}")))
+        .unwrap_or_default();
+    let agent = args.get("agent").and_then(Value::as_str).unwrap_or("its own agent");
+    let question = Question {
+        text: format!(
+            "{} wants to start a session in another project, {name} ({}), using {agent}:\n\n{what}\n\nThat session works there with the same access you gave this one.",
+            cx.project,
+            found["path"].as_str().unwrap_or_default(),
+        ),
+        options: vec![ALLOW_ONCE.into(), always.clone(), ALLOW_ALWAYS_ANY.into(), DENY.into()],
+        multiple: false,
+    };
+    let answer = io.ask(question).await?;
+    let scope = match answer.trim() {
+        a if a == ALLOW_ONCE => "once",
+        a if a == always => "project",
+        a if a == ALLOW_ALWAYS_ANY => "all",
+        _ => return Err(format!("the user did not allow starting a session in {name}")),
+    };
+    api.call("grant_project", &json!({ "project": target, "scope": scope }), cx.session)?;
+    Ok(())
+}
+
+/// The checklist the model sent, answered back as text so it stays in the conversation. The
+/// window draws the same list from the call's input.
+fn todo_write(args: &Value) -> Result<String, String> {
+    let items = args.get("items").and_then(Value::as_array).ok_or("missing `items`, a list")?;
+    let mut lines = Vec::new();
+    let (mut doing, mut left) = (0, 0);
+    for (i, item) in items.iter().enumerate() {
+        let text = item
+            .get("text")
+            .or_else(|| item.get("content"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| format!("items[{i}] has no `text`"))?;
+        let mark = match item.get("status").and_then(Value::as_str).unwrap_or("pending") {
+            "done" | "completed" => "[x]",
+            "in_progress" | "doing" => {
+                doing += 1;
+                left += 1;
+                "[~]"
+            }
+            "pending" | "todo" => {
+                left += 1;
+                "[ ]"
+            }
+            other => {
+                return Err(format!("{other:?} is not a status: pending, in_progress or done"));
+            }
+        };
+        lines.push(format!("{mark} {text}"));
+    }
+    let note = match (doing, left) {
+        (_, 0) if !lines.is_empty() => "\nAll done.".to_string(),
+        (0, _) => "\nNothing is marked in_progress.".to_string(),
+        (1, _) => String::new(),
+        _ => "\nMore than one item is in progress; keep to one.".to_string(),
+    };
+    Ok(format!("{}{note}", lines.join("\n")))
+}
+
+/// Wait for a session of this project to stop being busy.
+async fn wait_for_session(
+    args: &Value,
+    limit: Duration,
+    cx: &Context,
+    io: &dyn Io,
+) -> Result<String, String> {
+    let id = args.get("id").cloned().ok_or("missing `id`")?;
+    let started = Instant::now();
+    let poll = if cfg!(test) { Duration::from_millis(20) } else { Duration::from_secs(2) };
+    loop {
+        let status = io.api().call("session_status", &json!({ "id": id }), cx.session)?;
+        let busy = status["busy"].as_bool().unwrap_or(false);
+        let waited = started.elapsed().as_secs();
+        if !busy || started.elapsed() >= limit {
+            let mut status = status;
+            status["waited_s"] = json!(waited);
+            if busy {
+                status["note"] = json!(
+                    "still busy when the wait ran out; call wait_for_session again to keep waiting"
+                );
+            }
+            return Ok(serde_json::to_string_pretty(&status).unwrap_or_default());
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(poll) => {}
+            _ = io.stop().cancelled() => return Err("stopped".into()),
         }
     }
 }
@@ -1496,6 +1848,189 @@ mod tests {
             tool["content"],
             "The user answered:\n1. which licence? MIT\n2. which targets? linux, mac"
         );
+    }
+
+    fn tool_results(sent: &Value) -> Vec<String> {
+        sent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_can_run_in_the_background_and_be_read_and_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![
+            vec![call(
+                "c1",
+                "bash",
+                json!({"command": "echo serving; sleep 60", "background": true}),
+            )],
+            vec![call("c2", "bash_output", json!({"handle": "job-1", "wait_s": 5}))],
+            vec![call("c3", "bash_kill", json!({"handle": "job-1"}))],
+            vec![call("c4", "bash_output", json!({}))],
+            vec![say("done")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "serve", &io).await.unwrap();
+        let first = asked.recv().unwrap();
+        for n in [
+            "bash_output",
+            "bash_kill",
+            "screenshot",
+            "todo_write",
+            "start_session",
+            "wait_for_session",
+            "remember",
+        ] {
+            assert!(first["tools"].to_string().contains(&format!("\"{n}\"")), "{n} not offered");
+        }
+        let _ = asked.recv().unwrap();
+        // Each request carries every tool result so far.
+        let after_output = tool_results(&asked.recv().unwrap());
+        assert!(after_output[0].contains("started in the background as job-1"), "{after_output:?}");
+        assert!(
+            after_output[1].contains("serving") && after_output[1].contains("still running"),
+            "{after_output:?}"
+        );
+        let after_kill = tool_results(&asked.recv().unwrap());
+        assert!(after_kill[2].contains("job-1 stopped"), "{after_kill:?}");
+        let after_list = tool_results(&asked.recv().unwrap());
+        assert!(after_list[3].contains("job-1:"), "{after_list:?}");
+        assert!(!io.events().iter().any(|e| matches!(e, Event::ToolEnd { error: true, .. })));
+    }
+
+    #[tokio::test]
+    async fn a_checklist_is_answered_back_with_its_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![
+            vec![call(
+                "c1",
+                "todo_write",
+                json!({"items": [
+                    {"text": "read", "status": "done"},
+                    {"text": "write", "status": "in_progress"},
+                    {"text": "test"},
+                ]}),
+            )],
+            vec![call("c2", "todo_write", json!({"items": [{"text": "x", "status": "weird"}]}))],
+            vec![say("ok")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "plan", &io).await.unwrap();
+        let _ = asked.recv().unwrap();
+        assert_eq!(tool_results(&asked.recv().unwrap())[0], "[x] read\n[~] write\n[ ] test");
+        let _ = asked.recv().unwrap();
+        assert!(io.events().iter().any(|e| matches!(e, Event::ToolEnd { error: true, output, .. } if output.contains("not a status"))));
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_session_returns_when_it_stops_being_busy() {
+        struct Busy(std::sync::atomic::AtomicUsize);
+        impl Api for Busy {
+            fn call(
+                &self,
+                tool: &str,
+                _: &Value,
+                _: foreman_core::SessionId,
+            ) -> Result<Value, String> {
+                assert_eq!(tool, "session_status");
+                let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(
+                    json!({"busy": n < 2, "status": if n < 2 { "running" } else { "idle" }, "last_reply": "built it"}),
+                )
+            }
+        }
+        let io = TestIo::new(Arc::new(Busy(Default::default())));
+        let out = wait_for_session(&json!({"id": "x"}), Duration::from_secs(30), &context(), &io)
+            .await
+            .unwrap();
+        assert!(
+            out.contains("built it") && out.contains("idle") && !out.contains("still busy"),
+            "{out}"
+        );
+
+        let io = TestIo::new(Arc::new(Busy(std::sync::atomic::AtomicUsize::new(0))));
+        let out =
+            wait_for_session(&json!({"id": "x"}), Duration::ZERO, &context(), &io).await.unwrap();
+        assert!(out.contains("still busy"), "{out}");
+        assert!(wait_for_session(&json!({}), Duration::ZERO, &context(), &io).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn another_project_is_entered_only_after_the_user_says_so() {
+        let s = crate::store::Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/a");
+        let other = s.add_project("other", "/b", Some("main"), None).unwrap();
+        let me = s.add_session(main.id, "foreman", "me", None, None).unwrap();
+        let mut c = context();
+        c.session = me.id;
+        let api = Arc::new(crate::tools::StoreApi::new(s.clone()));
+        let args = json!({"project": other.id, "prompt": "go"});
+        let ask = |answer: &str| {
+            let io = TestIo::new(api.clone());
+            io.answers.lock().unwrap().push(answer.to_string());
+            io
+        };
+
+        assert!(confirm_project(&args, &c, &ask("Deny")).await.is_err());
+        assert!(confirm_project(&args, &c, &ask("anything else")).await.is_err());
+        assert!(confirm_project(&args, &c, &TestIo::new(api.clone())).await.is_err(), "no answer");
+
+        confirm_project(&args, &c, &ask("Allow once")).await.unwrap();
+        assert!(s.setting("start_session_projects").unwrap().is_none());
+
+        confirm_project(&args, &c, &ask("Always allow in other")).await.unwrap();
+        assert_eq!(
+            s.setting("start_session_projects").unwrap().unwrap(),
+            format!("[{}]", other.id)
+        );
+        // Now it does not ask: with no answer queued it still passes.
+        confirm_project(&args, &c, &TestIo::new(api.clone())).await.unwrap();
+
+        let s2 = crate::store::Store::memory().unwrap();
+        let (_, main2) = crate::store::testing::project(&s2, "/a");
+        let other2 = s2.add_project("other", "/b", Some("main"), None).unwrap();
+        let me2 = s2.add_session(main2.id, "foreman", "me", None, None).unwrap();
+        c.session = me2.id;
+        let api2 = Arc::new(crate::tools::StoreApi::new(s2.clone()));
+        let io = TestIo::new(api2.clone());
+        io.answers.lock().unwrap().push("Always allow, any project".into());
+        confirm_project(&json!({"project": "other"}), &c, &io).await.unwrap();
+        assert_eq!(s2.setting("start_session_any_project").unwrap().as_deref(), Some("1"));
+        let _ = other2;
+        // Naming the session's own project never asks.
+        confirm_project(&json!({"project": main2.project_id}), &c, &TestIo::new(api2))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_notes_kept_for_a_project_open_every_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("hi")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let mut c = context();
+        c.notes = vec![("tests".into(), "run cargo test".into())];
+        let turn = Turn {
+            prompt: "x",
+            files: &[],
+            cwd: dir.path(),
+            model: None,
+            resume: None,
+            history: &[],
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        let system = asked.recv().unwrap()["messages"][0]["content"].as_str().unwrap().to_string();
+        assert!(system.contains("- tests: run cargo test"), "{system}");
     }
 
     #[tokio::test]

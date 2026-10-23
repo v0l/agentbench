@@ -3,7 +3,10 @@ use crate::agent::{
 };
 use crate::store::{Store, StoreError};
 use crate::titles::Titles;
-use foreman_core::{Attachment, Entry, Id, Question, Session, SessionId, SessionStatus, Upload};
+use foreman_core::{
+    Attachment, Entry, Id, NewSession, Place, Question, Session, SessionId, SessionStatus, Upload,
+    branch_slug, issue_prompt,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -11,6 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, oneshot};
 
 const TEXT_FLUSH: Duration = Duration::from_millis(250);
+const TITLE_MAX: usize = 40;
 const ANSWER_PATIENCE: Duration = Duration::from_secs(24 * 3600);
 
 /// Questions put to the user, each waiting on the channel its answers arrive on.
@@ -58,6 +62,8 @@ pub struct Runner {
     titles: Option<Titles>,
     pub base: Arc<Mutex<Base>>,
     pub changed: Arc<Notify>,
+    /// This runner, as the tracker tools see it, for starting and messaging sessions.
+    me: crate::tools::Handle,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -69,9 +75,11 @@ pub struct Base {
 impl Runner {
     pub fn new(store: Store, agents: Vec<Box<dyn Agent>>) -> Runner {
         let changed = Arc::new(Notify::new());
-        let api = Arc::new(crate::tools::StoreApi::notifying(store.clone(), changed.clone()));
+        let me = crate::tools::Handle::default();
+        let api =
+            Arc::new(crate::tools::StoreApi::notifying(store.clone(), changed.clone(), me.clone()));
         let agents = agents.into_iter().map(|a| (a.name().to_string(), Arc::from(a))).collect();
-        Runner {
+        let runner = Runner {
             store,
             agents: Arc::new(agents),
             live: Arc::new(Mutex::new(HashMap::new())),
@@ -79,12 +87,16 @@ impl Runner {
             titles: None,
             base: Arc::new(Mutex::new(Base::default())),
             changed,
-        }
+            me,
+        };
+        runner.me.set(runner.clone());
+        runner
     }
 
     /// Name chats with a small model once the agent has answered.
     pub fn with_titles(mut self, titles: Titles) -> Runner {
         self.titles = Some(titles);
+        self.me.set(self.clone());
         self
     }
 
@@ -123,6 +135,70 @@ impl Runner {
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Make a session, and a worktree for it when asked, and send it its first prompt. A prompt
+    /// is taken from the issue when none is given. Must run inside the tokio runtime, because the
+    /// first turn is spawned.
+    pub fn start_session(&self, new: NewSession) -> Result<Session, StoreError> {
+        let bad = |t: String| StoreError(t);
+        let store = &self.store;
+        let agent =
+            self.agent(&new.agent).ok_or_else(|| bad(format!("no agent named {}", new.agent)))?;
+        if !agent.available() {
+            return Err(bad(format!("{} is not ready: {}", agent.label(), agent.about())));
+        }
+        let project = store.project(new.project_id)?;
+        let issue = new.issue_id.map(|id| store.issue(id)).transpose()?;
+        if let Some(i) = issue.as_ref().filter(|i| i.project_id != project.id) {
+            return Err(bad(format!("issue #{} belongs to another project", i.id)));
+        }
+        let worktree = match new.place.clone() {
+            Place::Main => store.main_worktree(project.id)?,
+            Place::Existing { worktree_id } => {
+                let w = store.worktree(worktree_id)?;
+                if w.project_id != project.id {
+                    return Err(bad("that worktree belongs to another project".into()));
+                }
+                w
+            }
+            Place::New { branch } => {
+                let branch = match branch.trim() {
+                    "" => issue
+                        .as_ref()
+                        .map(|i| format!("issue-{}-{}", i.id, branch_slug(&i.title)))
+                        .ok_or_else(|| bad("name the branch for the new worktree".into()))?,
+                    b => b.to_string(),
+                };
+                crate::projects::add_worktree(store, project.id, &branch, None)?
+            }
+        };
+        if worktree.missing || !std::path::Path::new(&worktree.path).is_dir() {
+            return Err(bad(format!("{} no longer exists", worktree.path)));
+        }
+        let chosen = new
+            .title
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| issue.as_ref().map(|i| format!("#{} {}", i.id, i.title)));
+        let stand_in = chosen.is_none();
+        let title = chosen
+            .or_else(|| new.prompt.as_deref().map(|p| foreman_core::short_title(p, TITLE_MAX)))
+            .unwrap_or_else(|| format!("{} on {}", agent.label(), worktree.label()));
+        let model = new.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+        let session =
+            store.add_session(worktree.id, agent.name(), title.trim(), model, new.issue_id)?;
+        if stand_in {
+            store.set_title_auto(session.id, true)?;
+        }
+        let prompt = new.prompt.clone().filter(|p| !p.trim().is_empty()).or_else(|| {
+            issue.as_ref().map(|i| issue_prompt(i, &store.comments(i.id).unwrap_or_default()))
+        });
+        if prompt.is_some() || !new.attachments.is_empty() {
+            self.send_with(&session, prompt.as_deref().unwrap_or_default(), &new.attachments)?;
+        }
+        self.changed.notify_waiters();
+        store.session(session.id)
     }
 
     pub fn agent(&self, name: &str) -> Option<Arc<dyn Agent>> {
@@ -450,6 +526,7 @@ impl Runner {
             issue: session.issue_id,
             api_url: base.url,
             token: base.token,
+            notes: self.store.notes(session.project_id).unwrap_or_default(),
         }
     }
 
@@ -1544,5 +1621,125 @@ mod tests {
         assert_eq!(done.status, SessionStatus::Failed);
         let last = runner.store().messages(s.id, 0).unwrap().pop().unwrap();
         assert!(matches!(&last.entry, Entry::Error { text } if text.contains("could not start")));
+    }
+
+    #[tokio::test]
+    async fn one_session_can_start_another_and_wait_for_it() {
+        use crate::agent::Api;
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let store = Store::memory().unwrap();
+        let p = crate::projects::add(&store, &main, None, false).unwrap();
+        let tree = store.main_worktree(p.id).unwrap();
+        let lead = store.add_session(tree.id, "echo", "lead", None, None).unwrap();
+        let issue = store
+            .add_issue(&foreman_core::NewIssue {
+                project_id: p.id,
+                title: "Fix the thing".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let script = r#"read p; echo "{\"text\":\"did: $p\"}""#;
+        let runner = Runner::new(store.clone(), vec![script_agent("echo", script)]);
+        let api = crate::tools::StoreApi::new(store.clone());
+        // The test api has no runner; the real one is wired through the runner's own handle.
+        let e =
+            api.call("start_session", &serde_json::json!({"prompt": "x"}), lead.id).unwrap_err();
+        assert!(e.contains("cannot be started"));
+
+        let wired = runner.api.clone();
+        let out =
+            wired.call("start_session", &serde_json::json!({"issue": issue.id}), lead.id).unwrap();
+        let child: SessionId = out["session"].as_str().unwrap().parse().unwrap();
+        assert!(out["worktree"].as_str().unwrap().starts_with("issue-"), "{out}");
+        assert_eq!(store.issue(issue.id).unwrap().state, foreman_core::IssueState::Doing);
+        wait_idle(&runner, child).await;
+        let status = wired
+            .call("session_status", &serde_json::json!({"id": child.to_string()}), lead.id)
+            .unwrap();
+        assert_eq!(status["busy"], false);
+        assert!(status["last_reply"].as_str().unwrap().contains("Fix the thing"), "{status}");
+
+        wired
+            .call(
+                "send_message",
+                &serde_json::json!({"id": child.to_string(), "text": "more"}),
+                lead.id,
+            )
+            .unwrap();
+        wait_idle(&runner, child).await;
+        let said = store.messages(child, 0).unwrap();
+        assert!(
+            said.iter()
+                .any(|m| m.entry.text().contains(&format!("Message from session {}", lead.id)))
+        );
+
+        let none = wired.call("start_session", &serde_json::json!({}), lead.id).unwrap_err();
+        assert!(none.contains("`prompt`"), "{none}");
+        let missing = wired
+            .call("start_session", &serde_json::json!({"prompt": "x", "agent": "nope"}), lead.id)
+            .unwrap_err();
+        assert!(missing.contains("no agent named nope"), "{missing}");
+    }
+
+    #[tokio::test]
+    async fn a_session_starts_in_another_project_only_with_the_users_permission() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        crate::git::testing::repo(&a);
+        crate::git::testing::repo(&b);
+        let store = Store::memory().unwrap();
+        let pa = crate::projects::add(&store, &a, Some("alpha"), false).unwrap();
+        let pb = crate::projects::add(&store, &b, Some("beta"), false).unwrap();
+        let lead = store
+            .add_session(store.main_worktree(pa.id).unwrap().id, "echo", "lead", None, None)
+            .unwrap();
+        let script = r#"read p; echo "{\"text\":\"did: $p\"}""#;
+        let runner = Runner::new(store.clone(), vec![script_agent("echo", script)]);
+        let api = runner.api.clone();
+        let go = json!({"project": "beta", "prompt": "hello"});
+
+        let listed = api.call("list_projects", &json!({}), lead.id).unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 2);
+        let e = api.call("start_session", &go, lead.id).unwrap_err();
+        assert!(e.contains("needs the user's permission"), "{e}");
+        assert!(
+            !api.call("check_project", &json!({"project": "beta"}), lead.id).unwrap()["allowed"]
+                .as_bool()
+                .unwrap()
+        );
+
+        // Once: one session, then it asks again.
+        api.call("grant_project", &json!({"project": pb.id, "scope": "once"}), lead.id).unwrap();
+        let out = api.call("start_session", &go, lead.id).unwrap();
+        assert_eq!(out["project"], "beta");
+        let child: SessionId = out["session"].as_str().unwrap().parse().unwrap();
+        assert_eq!(store.session(child).unwrap().project_id, pb.id);
+        assert!(api.call("start_session", &go, lead.id).is_err());
+        // The parent can follow the child in the other project; a stranger cannot.
+        wait_idle(&runner, child).await;
+        let st = api.call("session_status", &json!({"id": child.to_string()}), lead.id).unwrap();
+        assert!(st["last_reply"].as_str().unwrap().contains("hello"));
+        let stranger = store
+            .add_session(store.main_worktree(pa.id).unwrap().id, "echo", "s", None, None)
+            .unwrap();
+        assert!(
+            api.call("session_status", &json!({"id": child.to_string()}), stranger.id).is_err()
+        );
+
+        // Always for that project: no more asking, and it is remembered in the store.
+        api.call("grant_project", &json!({"project": "beta", "scope": "project"}), lead.id)
+            .unwrap();
+        assert!(api.call("start_session", &go, stranger.id).is_ok());
+        assert!(
+            api.call("check_project", &json!({"project": pb.id}), lead.id).unwrap()["allowed"]
+                .as_bool()
+                .unwrap()
+        );
+        assert!(
+            api.call("start_session", &json!({"project": 999, "prompt": "x"}), lead.id).is_err()
+        );
     }
 }
