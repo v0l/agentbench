@@ -7,6 +7,9 @@ All notable changes to Foreman are listed here. The format follows
 ## [Unreleased]
 
 ### Changed
+- Voice input offers the larger Whisper models: small, medium and distil medium in English, the
+  multilingual tiny to medium, and large v3, large v3 turbo and distil large v3. They run on an
+  NVIDIA card when foreman is built with `--features cuda`, which the default build is not.
 - Foreman is licensed under the GPL-3.0 instead of the MIT license.
 
 ### Added

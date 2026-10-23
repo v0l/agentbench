@@ -77,7 +77,9 @@ impl Whisper {
             .map_err(|e| format!("whisper tokenizer: {e}"))?;
 
         let mel_bytes: &[u8] = match config.num_mel_bins {
-            80 => include_bytes!("melfilters.bytes"),
+            80 => include_bytes!("melfilters.bytes").as_slice(),
+            // large v3 and the distilled large v3 listen with 128 bins instead of 80.
+            128 => include_bytes!("melfilters128.bytes").as_slice(),
             n => return Err(format!("unsupported whisper model: {n} mel bins")),
         };
         let mut mel_filters = vec![0f32; mel_bytes.len() / 4];
