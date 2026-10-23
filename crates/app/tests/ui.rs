@@ -1572,7 +1572,21 @@ fn time_frames(size: [f32; 2], turns: usize) {
     let mut h = harness_at(rig.url.clone(), size);
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().open_session(s.id, s.project_id);
-    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == total);
+    // The frame that first has the whole transcript lays every entry out once.
+    let mut slowest = 0.0f64;
+    let start = Instant::now();
+    while h.state().transcript_len(s.id) < total {
+        assert!(start.elapsed() < Duration::from_secs(10), "timed out loading");
+        let t = Instant::now();
+        h.step();
+        slowest = slowest.max(ms(t.elapsed()));
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let t = Instant::now();
+    h.step();
+    slowest = slowest.max(ms(t.elapsed()));
+    println!("PERF {}x{} {total} msgs opening the chat, slowest frame: {slowest:.1} ms", size[0], size[1]);
+    h.run_steps(3);
     let time = |h: &mut Harness<'_, App>, what: &str, n: usize, each: &mut dyn FnMut(&mut Harness<'_, App>)| {
         let mut v = Vec::new();
         for _ in 0..n {
