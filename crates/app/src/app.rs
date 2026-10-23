@@ -281,6 +281,8 @@ pub struct App {
     drawer: bool,
     /// The last link the app was opened with, so it is paired with once.
     last_link: Option<String>,
+    /// How tall the on screen keyboard is, which the window is not resized for.
+    keyboard: f32,
     link_checked: Instant,
     /// The chat in each tile. Tiles past the grid's size are hidden but remembered.
     slots: [Option<SessionId>; SLOTS],
@@ -379,6 +381,7 @@ impl App {
             narrow: false,
             drawer: false,
             last_link: None,
+            keyboard: 0.0,
             link_checked: Instant::now() - Duration::from_secs(5),
             slots: {
                 let mut slots = [None; SLOTS];
@@ -540,6 +543,27 @@ impl App {
         self.last_link = Some(text.clone());
         if let Some(p) = foreman_core::pairing::Pairing::parse(&text) {
             self.pair(ctx, p);
+        }
+    }
+
+    /// On a phone the app is drawn under the status bar and the gesture bar, and the window is not
+    /// resized for the keyboard. Tell egui how much of the screen those take, so panels and
+    /// dialogs stay clear of them.
+    fn keep_clear_of_the_system(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if !cfg!(target_os = "android") {
+            return;
+        }
+        self.keyboard = crate::system::keyboard_height(ctx);
+        let bottom = self.keyboard.max(crate::system::bottom_inset(ctx));
+        raw.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {
+            left: 0.0,
+            right: 0.0,
+            top: crate::system::top_inset(ctx),
+            bottom,
+        }));
+        if self.keyboard > 0.0 || ctx.egui_wants_keyboard_input() {
+            // The keyboard slides in over several frames, and nothing else asks for them.
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
 
@@ -1197,7 +1221,7 @@ impl App {
             return;
         }
         let screen = ctx.content_rect();
-        let top = crate::system::top_inset(ctx);
+        let top = 0.0;
         let before = (self.project, self.session, self.tab);
         let width = (screen.width() * 0.86).min(420.0);
         let id = egui::Id::new("drawer");
@@ -3589,23 +3613,30 @@ impl App {
         let narrow = ctx.content_rect().width() < 720.0;
         self.narrow = narrow;
 
+        // The root panels cover the whole screen, so they keep clear of the system's bars and the
+        // keyboard themselves; dialogs already stay inside `content_rect`.
+        let (above, below) = (
+            ctx.content_rect().top() - ctx.viewport_rect().top(),
+            ctx.viewport_rect().bottom() - ctx.content_rect().bottom(),
+        );
+        if below > 0.0 {
+            egui::Panel::bottom("system-bottom")
+                .exact_size(below)
+                .resizable(false)
+                .frame(egui::Frame::NONE.fill(CHASSIS))
+                .show(ui, |_| {});
+        }
         egui::Panel::top("header")
             .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin {
                 left: 12,
                 right: 12,
-                // Below the status bar and camera cutout, which the app draws under on a phone.
-                top: 8 + crate::system::top_inset(&ctx) as i8,
+                top: 8 + above as i8,
                 bottom: 6,
             }))
             .show(ui, |ui| self.header(ui));
         if let Some((ok, text)) = self.notice.clone() {
             egui::Panel::bottom("notice")
-                .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin {
-                    left: 12,
-                    right: 12,
-                    top: 4,
-                    bottom: 4 + crate::system::bottom_inset(&ctx) as i8,
-                }))
+                .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin::symmetric(12, 4)))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         status(ui, ok, &text);
@@ -4354,6 +4385,7 @@ fn tool_summary(name: &str, input: &serde_json::Value) -> String {
 
 impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.keep_clear_of_the_system(ctx, raw);
         self.watch_paste(ctx, raw);
     }
 

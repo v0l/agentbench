@@ -96,3 +96,47 @@ pub fn launch_link() -> Option<String> {
 pub fn launch_link() -> Option<String> {
     None
 }
+
+/// How tall the on screen keyboard is, in points, or 0 when it is away. The window is not
+/// resized for it, so the app leaves that much room at the bottom itself.
+#[cfg(target_os = "android")]
+pub fn keyboard_height(ctx: &egui::Context) -> f32 {
+    use jni::{jni_sig, jni_str};
+    /// `WindowInsets.Type.ime()`.
+    const IME: i32 = 8;
+    let px = crate::voice::android::with_activity(|env, activity| {
+        let window = env
+            .call_method(activity, jni_str!("getWindow"), jni_sig!("()Landroid/view/Window;"), &[])?
+            .l()?;
+        let decor = env
+            .call_method(&window, jni_str!("getDecorView"), jni_sig!("()Landroid/view/View;"), &[])?
+            .l()?;
+        let insets = env
+            .call_method(
+                &decor,
+                jni_str!("getRootWindowInsets"),
+                jni_sig!("()Landroid/view/WindowInsets;"),
+                &[],
+            )?
+            .l()?;
+        if insets.is_null() {
+            return Ok(0);
+        }
+        let ime = env
+            .call_method(
+                &insets,
+                jni_str!("getInsets"),
+                jni_sig!("(I)Landroid/graphics/Insets;"),
+                &[IME.into()],
+            )?
+            .l()?;
+        env.get_field(&ime, jni_str!("bottom"), jni_sig!("I"))?.i()
+    })
+    .unwrap_or(0);
+    px.max(0) as f32 / ctx.pixels_per_point()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn keyboard_height(_ctx: &egui::Context) -> f32 {
+    0.0
+}
