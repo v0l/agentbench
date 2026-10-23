@@ -1136,6 +1136,25 @@ fn the_composer_keeps_focus_when_a_file_is_attached() {
 }
 
 #[test]
+fn a_long_draft_scrolls_in_the_composer_and_leaves_the_keys_on_screen() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(2);
+    click(&mut h, 800.0, 735.0);
+    let long = (0..60).map(|i| format!("line {i} of a very long dictation")).collect::<Vec<_>>();
+    h.event(egui::Event::Text(long.join("\n")));
+    h.run_steps(14);
+    shot(&mut h, "composer-long");
+    let send = h.get_by_label("send").rect();
+    assert!(send.bottom() <= 800.0, "the send key ends at {}, below the window", send.bottom());
+}
+
+#[test]
 fn escape_stops_the_agent_working_in_the_open_chat() {
     let slow = JsonCommand {
         name: "slow".into(),

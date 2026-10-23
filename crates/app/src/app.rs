@@ -304,6 +304,8 @@ pub struct App {
     thinking: bool,
     /// Put the cursor back in this tile's composer: set when speech lands in its draft.
     refocus: Option<Tile>,
+    /// How tall each tile's composer was when last drawn, so the transcript leaves it room.
+    composer_h: HashMap<Option<Tile>, f32>,
     /// The tile being drawn, so a key pressed in it knows whose draft it works on.
     drawing: Option<Tile>,
     /// The tile whose speak key started the take in progress; the words go to its draft.
@@ -400,6 +402,7 @@ impl App {
             follow: true,
             awaiting: None,
             refocus: None,
+            composer_h: HashMap::new(),
             drawing: None,
             speaking_in: None,
             spoken: String::new(),
@@ -2409,6 +2412,7 @@ impl App {
         hint_text: &str,
     ) -> Option<(String, Vec<foreman_core::Upload>)> {
         // Files go to the focused tile only: the tray is shared, and it is the tile you are using.
+        let top = ui.cursor().min.y;
         let files = self.focused && !self.tray.files.is_empty();
         if files {
             self.attachments_row(ui);
@@ -2427,6 +2431,8 @@ impl App {
                     &mut self.draft,
                     hint_text,
                     if compact { 2 } else { 3 },
+                    // Long text scrolls in the box; the send key never leaves the window.
+                    (ui.ctx().content_rect().height() * 0.3).clamp(60.0, 260.0),
                 )
             })
             .inner;
@@ -2461,10 +2467,11 @@ impl App {
                 let can = ready && !speaking && (!self.draft.trim().is_empty() || sending);
                 let label = if busy { "steer" } else { "send" };
                 let width = if compact { 64.0 } else { 100.0 };
-                if (ui.add(Key::new(label).solid(READOUT).enabled(can).min_width(width)).clicked()
-                    || (enter && can))
-                    && can
-                {
+                let key = ui.add(Key::new(label).solid(READOUT).enabled(can).min_width(width));
+                key.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, can, label)
+                });
+                if (key.clicked() || (enter && can)) && can {
                     let files = if self.focused { self.tray.take() } else { Vec::new() };
                     out = Some((self.draft.trim().to_string(), files));
                     self.draft.clear();
@@ -2484,6 +2491,12 @@ impl App {
                 }
             });
         });
+        let height = ui.cursor().min.y - top;
+        let before = self.composer_h.insert(self.drawing, height);
+        if before.is_none_or(|b| (b - height).abs() > 0.5) {
+            // The transcript above gives up room by what this measured, so lay out again.
+            ui.ctx().request_repaint();
+        }
         out
     }
 
@@ -2657,7 +2670,9 @@ impl App {
 
         // The composer, and the row of attachments above it when there are any.
         let files = self.focused && !self.tray.files.is_empty();
-        let input_h = if self.compact { 84.0 } else { 100.0 } + if files { 40.0 } else { 0.0 };
+        let input_h = self.composer_h.get(&self.drawing).copied().unwrap_or_else(|| {
+            (if self.compact { 84.0 } else { 100.0 }) + if files { 40.0 } else { 0.0 }
+        }) + 6.0;
         let avail = (ui.available_height() - input_h).max(120.0);
         let t = self.transcripts.entry(s.id).or_default();
         let messages = t.messages.clone();
