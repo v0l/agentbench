@@ -2786,49 +2786,10 @@ impl App {
     }
 
     /// The header of a chat in a small tile: status, project, worktree, then the keys that matter.
-    fn tile_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
-        let project = self.project_name(s.project_id);
-        ui.horizontal(|ui| {
-            let (_, word) = status_look(s.status);
-            lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
-            ui.add_space(4.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(Key::new("close").outline(FAULT))
-                    .on_hover_text("stop it and delete this chat")
-                    .clicked()
-                {
-                    self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
-                }
-                if s.status.busy()
-                    && ui.add(Key::new("stop").outline(FAULT)).clicked()
-                    && let Some(c) = &mut self.client
-                {
-                    c.interrupt(s.id);
-                }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    // Which project and which worktree, first: in a grid of tiles that is
-                    // what tells the windows apart. The chat's own title is on hover.
-                    let mut line = Line::new().value(&project).tint(READOUT).size(11.5);
-                    if let Some(w) = tree {
-                        line = line.gap(8.0).value(w.label()).size(11.5);
-                    }
-                    line.elided(ui).on_hover_text(format!(
-                        "{}\n{} {}\n{} in, {} out",
-                        s.title,
-                        s.agent,
-                        s.model.as_deref().unwrap_or_default(),
-                        tokens(s.usage.input_tokens + s.usage.cache_read_tokens),
-                        tokens(s.usage.output_tokens)
-                    ));
-                });
-            });
-        });
-    }
-
-    /// A chat's header on a phone, on one row: the status, the project and worktree as chips like
-    /// the status box's, and the stop and close keys. Model and tokens are in the status line.
-    fn phone_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
+    /// A chat's header, on one row, in a window, a tile or a phone: the status, the project and
+    /// worktree as chips like the status box's, and the stop and close keys. The agent, model and
+    /// tokens are on hover and in the status line.
+    fn chat_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
         let project = self.project_name(s.project_id);
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2849,9 +2810,18 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let (_, word) = status_look(s.status);
                     lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
-                    chip(ui, &project, READOUT, true).on_hover_text(&s.title);
+                    let about = format!(
+                        "{}\n{} {}{}\n{} in, {} out",
+                        s.title,
+                        s.agent,
+                        s.model.as_deref().unwrap_or_default(),
+                        s.issue_id.map(|i| format!("\nissue #{i}")).unwrap_or_default(),
+                        tokens(s.usage.input_tokens + s.usage.cache_read_tokens),
+                        tokens(s.usage.output_tokens)
+                    );
+                    chip(ui, &project, READOUT, true).on_hover_text(&about);
                     if let Some(w) = tree {
-                        chip(ui, &w.label(), VALUE, false);
+                        chip(ui, &w.label(), VALUE, false).on_hover_text(&about);
                     }
                 });
             });
@@ -2860,52 +2830,8 @@ impl App {
 
     fn session_view(&mut self, ui: &mut Ui, s: Session) {
         let tree = self.worktree(s.worktree_id).cloned();
-        if self.compact {
-            self.tile_header(ui, &s, tree.as_ref());
-        } else {
-            self.full_header(ui, &s, tree.as_ref());
-        }
+        self.chat_header(ui, &s, tree.as_ref());
         self.session_body(ui, s, tree);
-    }
-
-    fn full_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
-        if self.narrow {
-            return self.phone_header(ui, s, tree);
-        }
-        let project = self.project_name(s.project_id);
-        ui.horizontal(|ui| {
-            let (tint, word) = status_look(s.status);
-            let _ = tint;
-            lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
-            ui.add_space(6.0);
-            let mut line = Line::new().legend("project").gap(6.0).set(&project).size(11.0);
-            if let Some(w) = tree {
-                line = line.gap(14.0).legend("worktree").gap(6.0).value(w.label()).size(11.0);
-            }
-            line = line.gap(14.0).legend("agent").gap(6.0).value(&s.agent).size(11.0);
-            if let Some(m) = &s.model {
-                line = line.gap(14.0).legend("model").gap(6.0).set(m).size(11.0);
-            }
-            if let Some(i) = s.issue_id {
-                line = line.gap(14.0).legend("issue").gap(6.0).value(format!("#{i}")).size(11.0);
-            }
-            line.show(ui);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(Key::new("close").outline(FAULT))
-                    .on_hover_text("stop it and delete this chat")
-                    .clicked()
-                {
-                    self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
-                }
-                if s.status.busy()
-                    && ui.add(Key::new("stop").outline(FAULT)).clicked()
-                    && let Some(c) = &mut self.client
-                {
-                    c.interrupt(s.id);
-                }
-            });
-        });
     }
 
     fn session_body(&mut self, ui: &mut Ui, s: Session, tree: Option<Worktree>) {
