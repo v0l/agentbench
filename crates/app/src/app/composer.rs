@@ -232,7 +232,8 @@ impl App {
                 // Whatever room the keys leave holds the agent's status line.
                 if let Some(session) = session {
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        status_line(ui, session, compact || narrow);
+                        let (lean, short) = status_form(compact, narrow);
+                        status_line(ui, session, lean, short);
                     });
                 }
             });
@@ -303,19 +304,27 @@ impl App {
 
 /// The agent's status line: the server and model in use, how full the context is and how
 /// much of the input the prompt cache served. Whatever the agent has not said is left out.
-pub(super) fn status_line(ui: &mut Ui, s: &Session, narrow: bool) {
+/// How the status line is written: `(lean, short)`. A tile leaves out the server and the cache
+/// but keeps the words; only a narrow window (a phone) also writes the tags as `m` and `c`.
+pub(super) fn status_form(tile: bool, narrow: bool) -> (bool, bool) {
+    (tile || narrow, narrow)
+}
+
+/// `lean` leaves out the server and the cache, for a tile or a small window; `short` also writes
+/// the tags as `m` and `c`, for a phone, which has no room for the words.
+pub(super) fn status_line(ui: &mut Ui, s: &Session, lean: bool, short: bool) {
     let u = &s.usage;
     let model = if !u.model.is_empty() { Some(u.model.as_str()) } else { s.model.as_deref() };
     let mut line = Line::new();
     let mut any = false;
-    if !u.host.is_empty() && !narrow {
+    if !u.host.is_empty() && !lean {
         line = line.legend("server").gap(6.0).value(&u.host).size(11.0);
         any = true;
     }
     if let Some(m) = model {
         line = if any { line.gap(14.0) } else { line };
-        let tag = if narrow { "m" } else { "model" };
-        line = line.legend(tag).gap(if narrow { 4.0 } else { 6.0 }).set(m).size(11.0);
+        let tag = if short { "m" } else { "model" };
+        line = line.legend(tag).gap(if short { 4.0 } else { 6.0 }).set(m).size(11.0);
         any = true;
     }
     let fill = u.fill();
@@ -329,8 +338,8 @@ pub(super) fn status_line(ui: &mut Ui, s: &Session, narrow: bool) {
             0 => tokens(u.context),
             w => format!("{} / {}", tokens(u.context), tokens(w)),
         };
-        line = if any { line.gap(if narrow { 10.0 } else { 14.0 }) } else { line };
-        if narrow {
+        line = if any { line.gap(if short { 10.0 } else { 14.0 }) } else { line };
+        if short {
             // Short: the percent when the window is known, else the token count.
             let short = fill.map_or_else(|| tokens(u.context), |f| format!("{:.0}%", f * 100.0));
             line = line.legend("c").gap(4.0).measured(short).tint(tint).size(11.0);
@@ -342,7 +351,7 @@ pub(super) fn status_line(ui: &mut Ui, s: &Session, narrow: bool) {
         }
         any = true;
     }
-    if let Some(hit) = u.cache_hit().filter(|_| !narrow) {
+    if let Some(hit) = u.cache_hit().filter(|_| !lean) {
         line = if any { line.gap(14.0) } else { line };
         line = line.legend("cache").gap(6.0).measured(format!("{:.0}%", hit * 100.0)).size(11.0);
         any = true;

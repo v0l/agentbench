@@ -1635,6 +1635,14 @@ mod tests {
     }
 
     #[test]
+    fn only_a_phone_gets_the_short_status_tags() {
+        use super::composer::status_form;
+        assert_eq!(status_form(false, false), (false, false), "a wide window: everything, in words");
+        assert_eq!(status_form(true, false), (true, false), "a tile: less, still in words");
+        assert_eq!(status_form(false, true), (true, true), "a phone: less, and short");
+    }
+
+    #[test]
     fn a_notification_link_names_its_chat() {
         let id = "ab0e0099-33d5-494c-bc8c-cbdc8ea44989";
         let got = chat_in_link(&format!("foreman://open?session={id}&t=1"));
