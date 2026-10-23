@@ -7,6 +7,11 @@ All notable changes to Foreman are listed here. The format follows
 ## [Unreleased]
 
 ### Added
+- A grid of chats: the keys beside **settings** tile the chat area as 1, 2x1, 1x2 or 2x2.
+  Opening a chat puts it in the first tile, pushes the others back one place and drops the
+  last out of view, so there is nothing to assign by hand. Opening a chat that is already
+  on screen only focuses it. Each tile keeps its own draft; the grid and the chats in it
+  are remembered between runs.
 - Voice input: a speak key beside send in the composer records from the microphone and writes what you said into the message. Whisper runs on this machine (tiny, base or small, English, downloaded the first time) or on any server with an OpenAI style `/v1/audio/transcriptions`, chosen in settings.
 - The `foreman` agent can search the web with `web_search` and read a page with `web_fetch`, which
   turns HTML into markdown, reads long pages in pieces, and downloads any file with `save_to`.
