@@ -110,11 +110,9 @@ impl Worktree {
     pub fn label(&self) -> String {
         match &self.branch {
             Some(b) => b.clone(),
-            None => self
-                .head
-                .as_deref()
-                .map(|h| h.chars().take(8).collect())
-                .unwrap_or("folder".into()),
+            None => {
+                self.head.as_deref().map(|h| h.chars().take(8).collect()).unwrap_or("folder".into())
+            }
         }
     }
 }

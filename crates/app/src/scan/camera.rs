@@ -192,7 +192,8 @@ unsafe fn open_back_camera(shared: &Arc<Mutex<Shared>>) -> Result<Open, String> 
                 &mut entry,
             ) == camera_status_t::ACAMERA_OK
                 && entry.count > 0
-                && *entry.data.u8_ == acamera_metadata_enum_acamera_lens_facing::ACAMERA_LENS_FACING_BACK.0 as u8;
+                && *entry.data.u8_
+                    == acamera_metadata_enum_acamera_lens_facing::ACAMERA_LENS_FACING_BACK.0 as u8;
             ACameraMetadata_free(meta);
             if back {
                 chosen = Some(*id);
@@ -220,18 +221,21 @@ unsafe fn open_back_camera(shared: &Arc<Mutex<Shared>>) -> Result<Open, String> 
         }
 
         let mut reader: *mut AImageReader = std::ptr::null_mut();
-        if AImageReader_new(WIDTH, HEIGHT, AIMAGE_FORMATS::AIMAGE_FORMAT_YUV_420_888.0 as i32, 3, &mut reader)
-            != media_status_t::AMEDIA_OK
+        if AImageReader_new(
+            WIDTH,
+            HEIGHT,
+            AIMAGE_FORMATS::AIMAGE_FORMAT_YUV_420_888.0 as i32,
+            3,
+            &mut reader,
+        ) != media_status_t::AMEDIA_OK
         {
             ACameraDevice_close(device);
             ACameraManager_delete(manager);
             return Err("could not read the camera's pictures".into());
         }
         let listener = Box::into_raw(Box::new(shared.clone()));
-        let mut on_image = AImageReader_ImageListener {
-            context: listener.cast(),
-            onImageAvailable: Some(frame),
-        };
+        let mut on_image =
+            AImageReader_ImageListener { context: listener.cast(), onImageAvailable: Some(frame) };
         AImageReader_setImageListener(reader, &mut on_image);
 
         let mut window: *mut ANativeWindow = std::ptr::null_mut();
@@ -260,7 +264,8 @@ unsafe fn open_back_camera(shared: &Arc<Mutex<Shared>>) -> Result<Open, String> 
         };
         let mut session: *mut ACameraCaptureSession = std::ptr::null_mut();
         let made = ACameraDevice_createCaptureSession(device, outputs, &mut states, &mut session);
-        let o = Open { manager, device, reader, outputs, output, request, target, session, listener };
+        let o =
+            Open { manager, device, reader, outputs, output, request, target, session, listener };
         if made != camera_status_t::ACAMERA_OK || session.is_null() {
             close(o);
             return Err(format!("could not start the camera ({})", made.0));

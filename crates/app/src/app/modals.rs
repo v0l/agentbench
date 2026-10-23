@@ -25,7 +25,9 @@ impl App {
             self.scan_view = None;
             match found {
                 Some(p) => self.pair(ctx, p),
-                None => self.notice = Some((false, "that code is not a foreman pairing code".into())),
+                None => {
+                    self.notice = Some((false, "that code is not a foreman pairing code".into()))
+                }
             }
             return;
         }

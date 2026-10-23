@@ -88,7 +88,8 @@ mod tests {
 
     #[test]
     fn spaces_around_a_pasted_link_are_ignored() {
-        let p = Pairing::parse("  foreman://pair?token=t&url=http%3A%2F%2F10.0.0.2%3A7420\n").unwrap();
+        let p =
+            Pairing::parse("  foreman://pair?token=t&url=http%3A%2F%2F10.0.0.2%3A7420\n").unwrap();
         assert_eq!((p.url.as_str(), p.token.as_str()), ("http://10.0.0.2:7420", "t"));
     }
 }

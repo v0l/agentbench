@@ -422,14 +422,19 @@ pub(super) fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
             ),
             Where::Remote => {
                 if crate::scan::available() {
-                    let key = ui.add(Key::new("scan a code").solid(READOUT).min_width(ui.available_width()));
+                    let key = ui.add(
+                        Key::new("scan a code").solid(READOUT).min_width(ui.available_width()),
+                    );
                     key.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "scan a code")
                     });
                     if key.clicked() {
                         st.scan = true;
                     }
-                    hint(ui, "Scan the code in foreman's settings on your computer, under pair a phone.");
+                    hint(
+                        ui,
+                        "Scan the code in foreman's settings on your computer, under pair a phone.",
+                    );
                     ui.add_space(6.0);
                 }
                 row_help(
@@ -621,7 +626,12 @@ pub(super) fn choice_fit(
         });
 }
 
-pub(super) fn appearance_section(ui: &mut Ui, face: &mut Typeface, installed: &Installed, scanning: bool) {
+pub(super) fn appearance_section(
+    ui: &mut Ui,
+    face: &mut Typeface,
+    installed: &Installed,
+    scanning: bool,
+) {
     section(ui, "appearance", "kept on this device", |ui| {
         if installed.can_choose() {
             row_help(

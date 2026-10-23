@@ -99,7 +99,13 @@ impl App {
             return;
         };
         let kept = self.fresh.as_ref().map(|f| f.project).filter(|_| self.compact);
-        let Some(project) = kept.or(self.project).or(o.projects.first().map(|p| p.id)) else {
+        let Some(project) = kept.or(self.project).or(o
+            .projects
+            .iter()
+            .find(|p| !p.home)
+            .or(o.projects.first())
+            .map(|p| p.id))
+        else {
             section(ui, "no projects yet", "", |ui| {
                 note(
                     ui,
@@ -142,7 +148,7 @@ impl App {
             ui.set_max_width(ui.available_width().min(640.0));
             ui.label(
                 egui::RichText::new(
-                    if home { "home folder".to_string() } else { format!("{name} on {here}") }
+                    if home { "chats in ~".to_string() } else { format!("{name} on {here}") }
                         .to_uppercase(),
                 )
                     .font(legend_font(15.0))
@@ -289,7 +295,12 @@ impl App {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let (_, word) = status_look(s.status);
-                    lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
+                    lamp(
+                        ui,
+                        word,
+                        s.status != SessionStatus::Stopped,
+                        s.status == SessionStatus::Failed,
+                    );
                     let about = format!(
                         "{}\n{} {}{}\n{} in, {} out",
                         s.title,
@@ -349,11 +360,14 @@ impl App {
                     hint(ui, "no messages yet");
                 }
                 // Heights hold for one width and one look of the entries.
-                heights.keep_for((
-                    ui.available_width().to_bits(),
-                    self.thinking as u32 | (self.face.size.to_bits() << 1),
-                    self.fonts_loaded,
-                ), ui.available_width());
+                heights.keep_for(
+                    (
+                        ui.available_width().to_bits(),
+                        self.thinking as u32 | (self.face.size.to_bits() << 1),
+                        self.fonts_loaded,
+                    ),
+                    ui.available_width(),
+                );
                 let visible = ui.clip_rect().expand2(Vec2::new(0.0, OVERSCAN));
                 for m in &messages {
                     // Each entry gets a ui of the column's width, clipped to it, so one with
@@ -421,7 +435,9 @@ impl App {
         } else {
             "tell the agent what to do next"
         };
-        if let Some((text, files)) = self.composer(ui, !missing, s.status.busy(), hint_text, Some(&s)) {
+        if let Some((text, files)) =
+            self.composer(ui, !missing, s.status.busy(), hint_text, Some(&s))
+        {
             let slash = files.is_empty().then(|| foreman_core::parse_slash(&text)).flatten();
             match slash.map(|(c, _)| c.name) {
                 Some("new") => {

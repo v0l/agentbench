@@ -44,7 +44,6 @@ fn bar_height(ctx: &egui::Context, resource: &str) -> f32 {
     px.max(0) as f32 / ctx.pixels_per_point()
 }
 
-
 /// How far down the window's content must start, in points: the height of the status bar and
 /// camera cutout on a phone, which the app is drawn underneath. Nothing on other platforms.
 #[cfg(target_os = "android")]
@@ -74,7 +73,12 @@ pub fn launch_link() -> Option<String> {
     use jni::{jni_sig, jni_str};
     crate::voice::android::with_activity(|env, activity| {
         let intent = env
-            .call_method(activity, jni_str!("getIntent"), jni_sig!("()Landroid/content/Intent;"), &[])?
+            .call_method(
+                activity,
+                jni_str!("getIntent"),
+                jni_sig!("()Landroid/content/Intent;"),
+                &[],
+            )?
             .l()?;
         if intent.is_null() {
             return Ok(None);

@@ -85,11 +85,8 @@ fn android_main(app: android_activity::AndroidApp) {
     voice::android::remember_activity(app.activity_as_ptr());
     // eframe has no place to keep state on Android, so it is put in the app's private files.
     let persistence_path = app.internal_data_path().map(|d| d.join("app.ron"));
-    let opts = eframe::NativeOptions {
-        android_app: Some(app),
-        persistence_path,
-        ..Default::default()
-    };
+    let opts =
+        eframe::NativeOptions { android_app: Some(app), persistence_path, ..Default::default() };
     let _ = eframe::run_native(
         "foreman",
         opts,

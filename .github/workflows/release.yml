@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build and publish"
+        description: "Version to build, like v0.1.2. Builds only: nothing is published unless a tag was pushed."
         required: true
 
 permissions:
@@ -52,9 +52,9 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: zip
     steps:
+      # A manual run builds the branch it was started on, under the version it was given. Only a
+      # pushed tag checks out a tag.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -173,8 +173,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -231,6 +229,8 @@ jobs:
 
   release:
     needs: [build, android]
+    # A pushed tag publishes. A manual run is a dry run: it builds every package and stops.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -525,7 +525,7 @@ impl foreman_server::agent::Agent for Planner {
 #[test]
 fn several_questions_are_answered_together_with_multiple_choice() {
     let rig = rig_with(vec![Box::new(Planner)]);
-    let project = rig.store.projects().unwrap()[0].id;
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     let mut c = foreman::client::Client::new(
@@ -598,7 +598,7 @@ fn several_questions_are_answered_together_with_multiple_choice() {
 #[test]
 fn a_question_is_answered_by_clicking_an_option() {
     let rig = rig_with(vec![Box::new(Waiter)]);
-    let project = rig.store.projects().unwrap()[0].id;
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     let mut c = foreman::client::Client::new(
@@ -667,11 +667,11 @@ fn clicking_a_session_in_the_tree_opens_it() {
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.run_steps(3);
-    click(&mut h, 100.0, 142.0);
+    click(&mut h, 100.0, 237.0);
     h.run_steps(3);
     let hello = rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     assert_eq!(h.state().open(), Some(hello.id), "the first session opens");
-    click(&mut h, 120.0, 208.0);
+    click(&mut h, 120.0, 303.0);
     h.run_steps(3);
     let fix = rig
         .store
@@ -792,7 +792,7 @@ fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
     // Picking a chat closes it too, and opens the chat.
     h.get_by_label("projects").click();
     h.run_steps(3);
-    click(&mut h, 100.0, 129.0);
+    click(&mut h, 100.0, 224.0);
     h.run_steps(3);
     assert!(!h.state().drawer_open(), "picking a chat closes the drawer");
     assert!(h.state().open().is_some(), "and opens it");
@@ -1091,7 +1091,7 @@ fn the_home_row_opens_a_blank_chat_that_starts_in_the_home_folder() {
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.run_steps(3);
-    click(&mut h, 80.0, 327.0);
+    click(&mut h, 80.0, 118.0);
     h.run_steps(3);
     shot(&mut h, "home-blank");
     assert_eq!(h.state().open(), None, "the row opens a blank chat");
@@ -1109,7 +1109,7 @@ fn the_home_row_opens_a_blank_chat_that_starts_in_the_home_folder() {
 #[test]
 fn new_chat_stays_blank_while_other_agents_work() {
     let rig = rig();
-    let project = rig.store.projects().unwrap()[0].id;
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     click(&mut h, 1220.0, 23.0);
@@ -1180,7 +1180,7 @@ fn each_new_chat_from_the_tree_is_a_new_session() {
 #[test]
 fn a_new_chat_after_a_deleted_one_shows_none_of_its_messages() {
     let rig = rig();
-    let main = rig.store.projects().unwrap()[0].id;
+    let main = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
     let tree = rig.store.main_worktree(main).unwrap();
     let old = rig.store.add_session(tree.id, "echo", "old talk", None, None).unwrap();
     for text in ["one", "two", "three"] {
@@ -1326,7 +1326,7 @@ fn escape_stops_the_agent_working_in_the_open_chat() {
         plain: false,
     };
     let rig = rig_with(vec![Box::new(slow)]);
-    let project = rig.store.projects().unwrap()[0].id;
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     let mut other = foreman::client::Client::new(
@@ -1479,19 +1479,19 @@ fn clicking_a_chat_in_the_list_replaces_the_focused_tile() {
     let all = rig.store.sessions().unwrap();
     let hello = all.iter().find(|s| s.title == "say hello").unwrap().id;
     let fix = all.iter().find(|s| s.title == "#3 Fix the login loop").unwrap().id;
-    click(&mut h, 100.0, 142.0);
+    click(&mut h, 100.0, 237.0);
     h.run_steps(3);
     assert_eq!(h.state().tile_chat(0), Some(hello));
     // Focus the empty second tile, then click another chat: it fills that tile.
     h.state_mut().focus_tile(1);
     h.run_steps(2);
-    click(&mut h, 120.0, 208.0);
+    click(&mut h, 120.0, 303.0);
     h.run_steps(3);
     assert_eq!(h.state().tile_chat(0), Some(hello));
     assert_eq!(h.state().tile_chat(1), Some(fix));
     // With the first tile focused, the same click replaces it.
     h.state_mut().focus_tile(0);
-    click(&mut h, 120.0, 208.0);
+    click(&mut h, 120.0, 303.0);
     h.run_steps(3);
     assert_eq!(h.state().focused_tile(), 1, "it was already on screen, so it only took focus");
     shot(&mut h, "columns");
@@ -1603,18 +1603,28 @@ fn long_chat(rig: &Rig, turns: usize) -> foreman_core::Session {
     let add = |e: Entry| {
         rig.store.add_message(s.id, &e).unwrap();
     };
-    let long_out: String =
-        (0..400).map(|i| format!("src/module_{i}/file.rs:{i}: fn handler_{i}(request: &Request) -> Response {{")).collect::<Vec<_>>().join("\n");
+    let long_out: String = (0..400)
+        .map(|i| {
+            format!("src/module_{i}/file.rs:{i}: fn handler_{i}(request: &Request) -> Response {{")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     for n in 0..turns {
         add(Entry::user(&format!(
             "Turn {n}: look at **how credits are applied** and `tell me` what to change, see https://example.com/{n}.\n\n- first\n- second"
         )));
-        add(Entry::Thinking { text: format!("Thinking about turn {n}. Credits are applied without a ledger row, so the user can never see them. I should look in the billing worker.") });
+        add(Entry::Thinking {
+            text: format!(
+                "Thinking about turn {n}. Credits are applied without a ledger row, so the user can never see them. I should look in the billing worker."
+            ),
+        });
         add(Entry::Tool {
             call_id: format!("a{n}"),
             name: "search_files".into(),
             input: serde_json::json!({"pattern": "apply_credit"}),
-            output: Some("src/billing.rs:88: fn apply_credit(\nsrc/api.rs:210: apply_credit(".into()),
+            output: Some(
+                "src/billing.rs:88: fn apply_credit(\nsrc/api.rs:210: apply_credit(".into(),
+            ),
             error: false,
         });
         add(Entry::Tool {
@@ -1624,7 +1634,11 @@ fn long_chat(rig: &Rig, turns: usize) -> foreman_core::Session {
             output: Some(long_out.clone()),
             error: n % 7 == 3,
         });
-        add(Entry::Assistant { text: format!("## Turn {n}\n\nCredits are added to the balance with no **ledger row**, which is why users cannot see them. This paragraph is long enough to wrap over a couple of lines on a phone so that the layout has some work to do, with a [link](https://example.com) in it.\n\n1. Record every credit in `ledger`.\n2. Show the ledger on the billing page.\n3. Add a test.\n\n```rust\nfn apply_credit(user: &mut User, amount: u64) {{\n    user.credit += amount;\n    ledger.record(user, amount, Reason::Credit);\n}}\n```\n\n| column | meaning |\n|---|---|\n| a | first |\n| b | second |\n\n> a quoted remark about turn {n}") });
+        add(Entry::Assistant {
+            text: format!(
+                "## Turn {n}\n\nCredits are added to the balance with no **ledger row**, which is why users cannot see them. This paragraph is long enough to wrap over a couple of lines on a phone so that the layout has some work to do, with a [link](https://example.com) in it.\n\n1. Record every credit in `ledger`.\n2. Show the ledger on the billing page.\n3. Add a test.\n\n```rust\nfn apply_credit(user: &mut User, amount: u64) {{\n    user.credit += amount;\n    ledger.record(user, amount, Reason::Credit);\n}}\n```\n\n| column | meaning |\n|---|---|\n| a | first |\n| b | second |\n\n> a quoted remark about turn {n}"
+            ),
+        });
     }
     s
 }
@@ -1654,9 +1668,15 @@ fn time_frames(size: [f32; 2], turns: usize) {
     let t = Instant::now();
     h.step();
     slowest = slowest.max(ms(t.elapsed()));
-    println!("PERF {}x{} {total} msgs opening the chat, slowest frame: {slowest:.1} ms", size[0], size[1]);
+    println!(
+        "PERF {}x{} {total} msgs opening the chat, slowest frame: {slowest:.1} ms",
+        size[0], size[1]
+    );
     h.run_steps(3);
-    let time = |h: &mut Harness<'_, App>, what: &str, n: usize, each: &mut dyn FnMut(&mut Harness<'_, App>)| {
+    let time = |h: &mut Harness<'_, App>,
+                what: &str,
+                n: usize,
+                each: &mut dyn FnMut(&mut Harness<'_, App>)| {
         let mut v = Vec::new();
         for _ in 0..n {
             each(h);
@@ -1668,7 +1688,10 @@ fn time_frames(size: [f32; 2], turns: usize) {
         let mean = v.iter().sum::<f64>() / v.len() as f64;
         println!(
             "PERF {}x{} {total} msgs {what}: mean {mean:.1} ms, median {:.1} ms, max {:.1} ms",
-            size[0], size[1], v[v.len() / 2], v[v.len() - 1]
+            size[0],
+            size[1],
+            v[v.len() / 2],
+            v[v.len() - 1]
         );
     };
     // The first frames lay everything out and fill the markdown cache.

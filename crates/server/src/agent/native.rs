@@ -915,7 +915,8 @@ impl Agent for Native {
                     Err(e) => Err(e),
                     Ok(args) => match name {
                         "switch_model" => {
-                            switch(&base, &mut model, &args, turn.context, io, self.patience.probe).await
+                            switch(&base, &mut model, &args, turn.context, io, self.patience.probe)
+                                .await
                         }
                         "read_file" => {
                             let found = {
@@ -2326,7 +2327,8 @@ mod tests {
             ("/props", r#"{"default_generation_settings":{"n_ctx":16384}}"#),
         ]);
         assert_eq!(window_of(&serving_at(url, "gguf"), probe).await, 16384);
-        let url = json_server(vec![("/api/show", r#"{"model_info":{"qwen2.context_length":40960}}"#)]);
+        let url =
+            json_server(vec![("/api/show", r#"{"model_info":{"qwen2.context_length":40960}}"#)]);
         assert_eq!(window_of(&serving_at(url, "qwen"), probe).await, 40960);
     }
 
@@ -2335,7 +2337,9 @@ mod tests {
         let url = json_server(vec![("/v1/models", r#"{"data":[{"id":"quiet"}]}"#)]);
         let got = window_of(&serving_at(url, "quiet"), Duration::from_secs(5)).await;
         assert_eq!(got, foreman_core::DEFAULT_CONTEXT);
-        let got = window_of(&serving_at("http://127.0.0.1:1/v1".into(), "gone"), Duration::from_secs(5)).await;
+        let got =
+            window_of(&serving_at("http://127.0.0.1:1/v1".into(), "gone"), Duration::from_secs(5))
+                .await;
         assert_eq!(got, foreman_core::DEFAULT_CONTEXT);
     }
 
@@ -2607,11 +2611,7 @@ mod tests {
             model: "mid".into(),
             key: "secret".into(),
             low: Level { model: "tiny".into(), ..Level::default() },
-            high: Level {
-                url: "http://big/v1".into(),
-                model: "huge".into(),
-                key: "other".into(),
-                            },
+            high: Level { url: "http://big/v1".into(), model: "huge".into(), key: "other".into() },
             ..Model::default()
         };
         let low = m.level("LOW").unwrap();
@@ -2628,11 +2628,7 @@ mod tests {
         assert!(m.level("tiny").is_none());
         // A server of its own without a key does not get the foreman key.
         let bare = Model {
-            high: Level {
-                url: "http://big/v1".into(),
-                model: "x".into(),
-                key: String::new(),
-                            },
+            high: Level { url: "http://big/v1".into(), model: "x".into(), key: String::new() },
             ..m.clone()
         };
         assert_eq!(bare.level("high").unwrap().key, "");

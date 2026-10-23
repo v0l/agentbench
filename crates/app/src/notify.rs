@@ -57,11 +57,14 @@ mod android {
                     &[(&old_url).into(), (&none).into()],
                 )?
                 .l()?;
-            let before = env
-                .cast_local::<jni::objects::JString>(before)?
-                .try_to_string(env)?;
+            let before = env.cast_local::<jni::objects::JString>(before)?.try_to_string(env)?;
             let edit = env
-                .call_method(&p, jni_str!("edit"), jni_sig!("()Landroid/content/SharedPreferences$Editor;"), &[])?
+                .call_method(
+                    &p,
+                    jni_str!("edit"),
+                    jni_sig!("()Landroid/content/SharedPreferences$Editor;"),
+                    &[],
+                )?
                 .l()?;
             let put = |env: &mut Env<'_>, k: &str, v: &str| -> jni::errors::Result<()> {
                 let (k, v) = (env.new_string(k)?, env.new_string(v)?);

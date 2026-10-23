@@ -72,7 +72,7 @@ pub fn ensure_home(store: &Store, dir: &Path) -> Result<Project, StoreError> {
     if let Some(p) = store.home_project()? {
         return Ok(p);
     }
-    store.add_home("home", &dir.to_string_lossy())
+    store.add_home("chats", &dir.to_string_lossy())
 }
 
 pub fn sync(store: &Store, project_id: Id, created: Option<&Path>) -> Result<bool, StoreError> {
@@ -171,7 +171,7 @@ mod tests {
         let s = Store::memory().unwrap();
         let home = ensure_home(&s, dir.path()).unwrap();
         assert!(home.home);
-        assert_eq!(home.name, "home");
+        assert_eq!(home.name, "chats");
         assert_eq!(ensure_home(&s, dir.path()).unwrap().id, home.id, "made once");
         let tree = s.main_worktree(home.id).unwrap();
         assert_eq!(Path::new(&tree.path), dir.path());
@@ -185,7 +185,7 @@ mod tests {
         repo(&repo_dir);
         add(&s, &repo_dir, None, false).unwrap();
         let names: Vec<_> = s.projects().unwrap().into_iter().map(|p| p.name).collect();
-        assert_eq!(names, ["r", "home"], "home is listed last");
+        assert_eq!(names, ["chats", "r"], "the chats card is listed first");
     }
 
     #[test]

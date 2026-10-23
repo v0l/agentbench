@@ -215,7 +215,12 @@ impl App {
     }
 
     /// The files a message carried: pictures as thumbnails, anything else as a named chip.
-    pub(super) fn attached(&mut self, ui: &mut Ui, session: SessionId, files: &[foreman_core::Attachment]) {
+    pub(super) fn attached(
+        &mut self,
+        ui: &mut Ui,
+        session: SessionId,
+        files: &[foreman_core::Attachment],
+    ) {
         let client = self.client.as_ref();
         let ctx = ui.ctx().clone();
         ui.horizontal_wrapped(|ui| {
@@ -295,7 +300,8 @@ impl App {
                     ui.label(egui::RichText::new(mark).font(mono(11.0)).color(tint));
                     let mut line = Line::new().legend(name).size(10.0).tint(tint);
                     if command.is_none() {
-                        line = line.gap(8.0).value(tool_summary(name, input)).size(11.0).tint(VALUE);
+                        line =
+                            line.gap(8.0).value(tool_summary(name, input)).size(11.0).tint(VALUE);
                     }
                     if !state.is_empty() {
                         line = line.gap(10.0).legend(state).size(9.5).tint(tint);

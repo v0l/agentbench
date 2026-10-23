@@ -361,7 +361,7 @@ impl Store {
 
     pub fn projects(&self) -> Result<Vec<Project>> {
         let db = self.db();
-        let mut stmt = db.prepare("SELECT * FROM projects ORDER BY home, name")?;
+        let mut stmt = db.prepare("SELECT * FROM projects ORDER BY home DESC, name")?;
         let rows = stmt.query_map([], project_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

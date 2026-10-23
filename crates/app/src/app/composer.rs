@@ -208,9 +208,7 @@ impl App {
                 let label = if busy { "steer" } else { "send" };
                 let width = if compact { 64.0 } else { 100.0 };
                 let key = ui.add(Key::new(label).solid(READOUT).enabled(can).min_width(width));
-                key.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, can, label)
-                });
+                key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can, label));
                 if (key.clicked() || (enter && can)) && can {
                     let files = if self.focused { self.tray.take() } else { Vec::new() };
                     out = Some((self.draft.trim().to_string(), files));

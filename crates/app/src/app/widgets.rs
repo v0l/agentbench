@@ -2,7 +2,6 @@
 
 use super::*;
 
-
 /// The three bars that open the project list on a narrow window.
 pub(super) fn hamburger(ui: &mut Ui, open: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(34.0, 26.0), Sense::click());
@@ -16,7 +15,12 @@ pub(super) fn hamburger(ui: &mut Ui, open: bool) -> egui::Response {
     };
     let p = ui.painter();
     p.rect_filled(rect, 2.0, if open { tint.gamma_multiply(0.18) } else { WELL });
-    p.rect_stroke(rect, 2.0, Stroke::new(1.0, if open || resp.hovered() { tint } else { ETCH }), egui::StrokeKind::Inside);
+    p.rect_stroke(
+        rect,
+        2.0,
+        Stroke::new(1.0, if open || resp.hovered() { tint } else { ETCH }),
+        egui::StrokeKind::Inside,
+    );
     for i in -1..=1 {
         let y = rect.center().y + i as f32 * 5.0;
         p.line_segment(
@@ -133,7 +137,12 @@ pub(super) fn spinner(ui: &Ui, center: egui::Pos2, radius: f32, tint: egui::Colo
     ui.ctx().request_repaint_after(Duration::from_millis(33));
 }
 
-pub(super) fn rail_block(ui: &mut Ui, rail: egui::Color32, fill: egui::Color32, body: impl FnOnce(&mut Ui)) {
+pub(super) fn rail_block(
+    ui: &mut Ui,
+    rail: egui::Color32,
+    fill: egui::Color32,
+    body: impl FnOnce(&mut Ui),
+) {
     let r = egui::Frame::NONE
         .fill(fill)
         .inner_margin(Margin { left: 12, right: 8, top: 4, bottom: 4 })
@@ -276,8 +285,5 @@ pub(super) fn short_path(path: &str) -> String {
 /// The chat a `foreman://open?session=…` link names, as a notification's tap carries.
 pub(super) fn chat_in_link(link: &str) -> Option<SessionId> {
     let query = link.trim().strip_prefix("foreman://open?")?;
-    query
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("session="))
-        .and_then(|v| v.parse().ok())
+    query.split('&').find_map(|kv| kv.strip_prefix("session=")).and_then(|v| v.parse().ok())
 }

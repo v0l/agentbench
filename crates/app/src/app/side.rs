@@ -46,12 +46,14 @@ impl App {
                     picked_head = r.clicked();
                     menu = Some(r);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let count = if home { "no repo".to_string() } else { format!("{open} open") };
+                        let count =
+                            if home { "no repo".to_string() } else { format!("{open} open") };
                         Line::new().note(count).size(10.5).show(ui);
                     });
                 },
                 |ui| {
-                    let shown = if home { "~ chats anywhere".to_string() } else { short_path(&p.path) };
+                    let shown =
+                        if home { "no repo, starts in ~".to_string() } else { short_path(&p.path) };
                     let r = Line::new().note(shown).size(10.5).elided(ui);
                     if r.interact(Sense::click()).clicked() {
                         pick = true;
@@ -109,7 +111,9 @@ impl App {
             ui.add_space(8.0);
         }
         let add = ui.add(Key::new("add project").outline(VALUE).min_width(ui.available_width()));
-        add.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add project"));
+        add.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add project")
+        });
         if add.clicked() {
             self.add_project =
                 Some(AddProject { path: String::new(), name: String::new(), create: false });

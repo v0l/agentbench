@@ -225,11 +225,7 @@ fn level_merged(
     } else {
         String::new()
     };
-    crate::agent::native::Level {
-        url,
-        model: new.model.trim().to_string(),
-        key,
-    }
+    crate::agent::native::Level { url, model: new.model.trim().to_string(), key }
 }
 
 async fn get_model(State(api): State<Api>) -> Reply<foreman_core::ModelSettings> {

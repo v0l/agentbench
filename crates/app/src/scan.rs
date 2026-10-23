@@ -81,9 +81,8 @@ pub fn upright(grey: &[u8], width: usize, height: usize) -> (Vec<u8>, usize, usi
 
 /// Finds a QR code in a grey image and returns what it holds.
 pub fn decode(grey: &[u8], width: usize, height: usize) -> Option<String> {
-    let mut img = rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| {
-        grey[y * width + x]
-    });
+    let mut img =
+        rqrr::PreparedImage::prepare_from_greyscale(width, height, |x, y| grey[y * width + x]);
     img.detect_grids().into_iter().find_map(|g| g.decode().ok().map(|(_, text)| text))
 }
 
@@ -106,7 +105,11 @@ mod tests {
                 let (mx, my) = ((i % side) / scale, (i / side) / scale);
                 let dark = mx >= quiet
                     && my >= quiet
-                    && code.get(my - quiet).and_then(|r| r.get(mx - quiet)).copied().unwrap_or(false);
+                    && code
+                        .get(my - quiet)
+                        .and_then(|r| r.get(mx - quiet))
+                        .copied()
+                        .unwrap_or(false);
                 if dark { 20 } else { 235 }
             })
             .collect();

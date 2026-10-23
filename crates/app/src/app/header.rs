@@ -59,10 +59,7 @@ impl App {
         let id = egui::Id::new("drawer");
         let m = egui::Modal::new(id)
             .backdrop_color(egui::Color32::from_black_alpha(150))
-            .area(
-                egui::Modal::default_area(id)
-                    .anchor(egui::Align2::LEFT_TOP, Vec2::new(0.0, top)),
-            )
+            .area(egui::Modal::default_area(id).anchor(egui::Align2::LEFT_TOP, Vec2::new(0.0, top)))
             .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(8))
             .show(ctx, |ui| {
                 ui.set_width(width - 16.0);
@@ -95,7 +92,10 @@ impl App {
 
     pub(super) fn header_tabs(&mut self, ui: &mut Ui, _width: f32) {
         let open = self.overview.as_ref().map_or(0, |o| {
-            o.issues.iter().filter(|i| Some(i.project_id) == self.project && i.state.is_open()).count()
+            o.issues
+                .iter()
+                .filter(|i| Some(i.project_id) == self.project && i.state.is_open())
+                .count()
         });
         let issues_label = format!("issues {open}");
         let opts: Vec<(Tab, &str)> =
@@ -116,13 +116,16 @@ impl App {
     pub(super) fn key_file_issue(&mut self, ui: &mut Ui) {
         let ready = self.overview.is_some();
         if ui
-            .add(Key::new("file issue").outline(VALUE).enabled(
-                ready && self.project.is_some_and(|p| !self.is_home(p)),
-            ))
+            .add(
+                Key::new("file issue")
+                    .outline(VALUE)
+                    .enabled(ready && self.project.is_some_and(|p| !self.is_home(p))),
+            )
             .clicked()
             && let Some(p) = self.project
         {
-            self.file_issue = Some(FileIssue { project: p, title: String::new(), body: String::new() });
+            self.file_issue =
+                Some(FileIssue { project: p, title: String::new(), body: String::new() });
         }
     }
 

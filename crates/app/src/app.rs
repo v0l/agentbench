@@ -1,8 +1,8 @@
-use crate::scan::Scan;
 use crate::client::{Client, Reply, Server};
 use crate::fonts::{self, Installed, Typeface};
 use crate::form::{field, field_then, prose, prose_id, secret};
 use crate::picker::ModelPicker;
+use crate::scan::Scan;
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
 use egui_bench::markdown;
@@ -24,8 +24,8 @@ mod side;
 mod transcript;
 mod widgets;
 
-pub use self::widgets::status_counts;
 use self::settings::{model_input, pairing_of};
+pub use self::widgets::status_counts;
 use self::widgets::*;
 
 const SIDE_W: f32 = 320.0;
@@ -629,7 +629,10 @@ impl App {
     pub fn pair(&mut self, ctx: &egui::Context, with: foreman_core::pairing::Pairing) {
         self.settings = None;
         self.remote = true;
-        self.connect_to(ctx, Server { url: with.url.trim().to_string(), token: with.token.trim().to_string() });
+        self.connect_to(
+            ctx,
+            Server { url: with.url.trim().to_string(), token: with.token.trim().to_string() },
+        );
         self.notice = Some((true, format!("paired with {}", foreman_core::host_of(&with.url))));
     }
 
@@ -1041,7 +1044,8 @@ impl App {
                 self.offline = None;
                 let cursor = o.cursor;
                 if self.project.is_none_or(|p| !o.projects.iter().any(|x| x.id == p)) {
-                    self.project = o.projects.first().map(|p| p.id);
+                    self.project =
+                        o.projects.iter().find(|p| !p.home).or(o.projects.first()).map(|p| p.id);
                 }
                 if self.session.is_some_and(|s| !o.sessions.iter().any(|x| x.id == s)) {
                     self.session = None;
@@ -1672,7 +1676,11 @@ mod tests {
     #[test]
     fn only_a_phone_gets_the_short_status_tags() {
         use super::composer::status_form;
-        assert_eq!(status_form(false, false), (false, false), "a wide window: everything, in words");
+        assert_eq!(
+            status_form(false, false),
+            (false, false),
+            "a wide window: everything, in words"
+        );
         assert_eq!(status_form(true, false), (true, false), "a tile: less, still in words");
         assert_eq!(status_form(false, true), (true, true), "a phone: less, and short");
     }

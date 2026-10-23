@@ -163,7 +163,9 @@ impl Runner {
                 w
             }
             Place::New { .. } if project.home => {
-                return Err(bad("the home folder is not a git repo, so it has no worktrees".into()));
+                return Err(
+                    bad("the home folder is not a git repo, so it has no worktrees".into()),
+                );
             }
             Place::New { branch } => {
                 let branch = match branch.trim() {
@@ -189,7 +191,7 @@ impl Runner {
             .or_else(|| new.prompt.as_deref().map(|p| foreman_core::short_title(p, TITLE_MAX)))
             .unwrap_or_else(|| {
                 if project.home {
-                    format!("{} in {}", agent.label(), project.name)
+                    format!("{} in ~", agent.label())
                 } else {
                     format!("{} on {}", agent.label(), worktree.label())
                 }
