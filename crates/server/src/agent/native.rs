@@ -751,16 +751,29 @@ fn history(entries: &[Entry]) -> Vec<Value> {
             }
             Entry::User { text, .. } => out.push(json!({ "role": "user", "content": text })),
             Entry::Assistant { text } => out.push(json!({ "role": "assistant", "content": text })),
-            Entry::Tool { name, input, output, error, .. } => {
+            Entry::Tool { call_id, name, input, output, error } => {
                 let result = match (output, error) {
                     (Some(o), false) => clip(o, 2000),
                     (Some(o), true) => format!("failed: {}", clip(o, 2000)),
                     (None, _) => "no result".into(),
                 };
+                // Replayed as a real call and its result. As prose ("called x and got ...") the
+                // model copies the style and writes made up calls and output instead of calling.
+                let id = if call_id.is_empty() { format!("call_{}", out.len()) } else { call_id.clone() };
+                let args = match input {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
                 out.push(json!({
                     "role": "assistant",
-                    "content": format!("called {name}({input}) and got:\n{result}"),
+                    "content": "",
+                    "tool_calls": [{
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": args },
+                    }],
                 }));
+                out.push(json!({ "role": "tool", "tool_call_id": id, "content": result }));
             }
             Entry::Question { question, answer, .. } => out.push(json!({
                 "role": "assistant",
@@ -2224,9 +2237,17 @@ mod tests {
             Entry::Assistant { text: "there is a".into() },
         ];
         let h = history(&entries);
-        assert_eq!(h.len(), 3);
+        assert_eq!(h.len(), 4);
         assert_eq!(h[0], json!({"role": "user", "content": "hi"}));
-        assert!(h[1]["content"].as_str().unwrap().contains("called bash"));
+        let call = &h[1]["tool_calls"][0];
+        assert_eq!(call["id"], "c");
+        assert_eq!(call["function"]["name"], "bash");
+        assert_eq!(call["function"]["arguments"], r#"{"command":"ls"}"#);
+        assert_eq!(h[2], json!({"role": "tool", "tool_call_id": "c", "content": "a"}));
+        assert!(
+            !h.iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("called bash"))),
+            "a past call is not written out as prose the model would copy"
+        );
     }
 
     #[tokio::test]
