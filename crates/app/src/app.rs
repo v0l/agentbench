@@ -1628,8 +1628,12 @@ impl App {
                 c.title_models(&st.title);
             }
         }
-        if save {
+        // Only this device uses it, so it is kept as it is typed rather than on save.
+        if self.external != st.external.trim() {
             self.external = st.external.trim().to_string();
+            ctx.request_repaint();
+        }
+        if save {
             self.speech = st.speech.clone();
             if st.face != self.face {
                 self.face = st.face.clone();
