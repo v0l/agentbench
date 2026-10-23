@@ -5,7 +5,8 @@
 #   ANDROID_HOME   the SDK (default ~/Android/Sdk)
 #   ANDROID_NDK_ROOT   the NDK (default: the newest under $ANDROID_HOME/ndk)
 #   KOTLIN_HOME    a kotlinc install (default: downloaded to ~/.cache/foreman-android)
-#   KEYSTORE / KEYSTORE_PASS / KEY_ALIAS   to sign a release; the debug key is used otherwise
+#   KEYSTORE / KEYSTORE_PASS / KEY_PASS / KEY_ALIAS   to sign a release; the debug key is used
+#                  otherwise. KEY_PASS defaults to KEYSTORE_PASS.
 #   RELEASE=1      a release build: not debuggable, built with --release
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -36,6 +37,16 @@ else
 fi
 
 echo "== rust"
+if [ -n "${RELEASE:-}" ]; then
+    # cargo-apk will not build --release without a key, so it gets a throwaway one just to
+    # finish. The APK it makes is only a source of the compiled library: this script signs
+    # the real one below. The key is passed by an environment variable, never kept in the repo.
+    TMPKEY=$(mktemp -u)
+    keytool -genkeypair -keystore "$TMPKEY" -storepass android -keypass android -alias tmp \
+        -keyalg RSA -keysize 2048 -validity 1 -dname "CN=build" >/dev/null 2>&1
+    trap 'rm -f "$TMPKEY"' EXIT
+    export CARGO_APK_RELEASE_KEYSTORE=$TMPKEY CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
+fi
 cargo apk build --lib -p foreman $FLAG
 LIB=$ROOT/target/$PROFILE/apk/lib/arm64-v8a/libforeman.so
 [ -f "$LIB" ] || LIB=$(find "$ROOT/target" -path "*apk/lib/arm64-v8a/libforeman.so" | head -1)
@@ -70,6 +81,7 @@ PY
 "$BT/zipalign" -f -p 4 "$OUT/base.apk" "$OUT/aligned.apk"
 if [ -n "${KEYSTORE:-}" ]; then
     "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass "pass:${KEYSTORE_PASS:?}" \
+        --key-pass "pass:${KEY_PASS:-$KEYSTORE_PASS}" \
         ${KEY_ALIAS:+--ks-key-alias "$KEY_ALIAS"} --out "$OUT/foreman.apk" "$OUT/aligned.apk"
 else
     "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android \

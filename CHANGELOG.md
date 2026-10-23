@@ -8,6 +8,8 @@ All notable changes to Foreman are listed here. The format follows
 
 - A bash command is always shown whole and wrapped under the tool's name, whether the row is open or not, since it is the riskiest thing an agent does. It used to be cut to one line.
 
+- Releases include a signed Android APK (`foreman-<tag>-android-arm64.apk`), built by the release workflow with `packaging/android/build.sh`. A phone that has a debug build installed has to uninstall it first, because Android will not change an app's signing key.
+
 ### Fixed
 - Long chats are much faster to draw, most of all on a phone. Only the messages in view (and a
   screenful either side) are laid out; the others are given the height they were last measured at.
