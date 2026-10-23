@@ -7,6 +7,7 @@ pub mod native;
 mod pi;
 mod process;
 pub mod search;
+pub mod web;
 
 pub use async_trait::async_trait;
 pub use claude::Claude;

@@ -53,7 +53,9 @@ Data lives in `$FOREMAN_HOME` (default `~/.local/share/foreman`):
 ## Agents
 
 `foreman` is the built in agent: it talks to any OpenAI compatible server, works
-in the session's worktree with file tools and bash, loads skills from
+in the session's worktree with file tools and bash, searches the web
+(`web_search`) and reads, queries (`prompt`, answered by the title model) or downloads pages
+(`web_fetch`), loads skills from
 `~/.agents/skills`, and has tools for the tracker (`list_issues`, `file_issue`,
 `update_issue`, `comment_on_issue`, `list_sessions`, `read_session`) and
 `ask_user`, which puts a question in the chat and waits for the answer. Options

@@ -65,8 +65,19 @@ impl Config {
     }
 
     pub fn agents_with(&self, model: agent::native::Shared) -> Vec<Box<dyn Agent>> {
+        self.agents_with_titles(model, None)
+    }
+
+    /// The agents, with the foreman agent answering web page prompts using `titles`.
+    pub fn agents_with_titles(
+        &self,
+        model: agent::native::Shared,
+        titles: Option<titles::Titles>,
+    ) -> Vec<Box<dyn Agent>> {
+        let mut native = agent::Native::shared(model);
+        native.titles = titles;
         let mut all: Vec<Box<dyn Agent>> = vec![
-            Box::new(agent::Native::shared(model)),
+            Box::new(native),
             Box::new(agent::Pi::new(self.pi.clone().unwrap_or_else(|| "pi".into()))),
             Box::new(agent::Claude::new(self.claude.clone().unwrap_or_else(|| "claude".into()))),
             Box::new(agent::Codex::new(self.codex.clone().unwrap_or_else(|| "codex".into()))),
@@ -129,8 +140,8 @@ pub async fn serve_config(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
     let model = agent::native::Shared::new(saved_model(&store, &config.model));
-    let agents = config.agents_with(model.clone());
     let titles = titles::Titles::new(saved_title_model(&store, &config.title_model), model.clone());
+    let agents = config.agents_with_titles(model.clone(), Some(titles.clone()));
     serve_inner(store, agents, Some(model), Some(titles), listen, web, shutdown).await
 }
 

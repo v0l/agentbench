@@ -35,6 +35,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ignore = "0.4.33"
 base64 = "0.23"
 regex = "1.13.1"
+scraper = { version = "0.25", default-features = false }
+url = "2"
 
 
 [dev-dependencies]

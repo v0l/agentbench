@@ -153,6 +153,8 @@ impl Shared {
 pub struct Native {
     pub model: Shared,
     pub patience: Patience,
+    /// The small model that answers `prompt` about a page for `web_fetch`.
+    pub titles: Option<crate::titles::Titles>,
 }
 
 /// How long the model server may stay silent before a request is given up and sent again.
@@ -170,11 +172,17 @@ impl Default for Patience {
 
 impl Native {
     pub fn new(model: Model) -> Native {
-        Native { model: Shared::new(model), patience: Patience::default() }
+        Native { model: Shared::new(model), patience: Patience::default(), titles: None }
     }
 
     pub fn shared(model: Shared) -> Native {
-        Native { model, patience: Patience::default() }
+        Native { model, patience: Patience::default(), titles: None }
+    }
+
+    /// Answer `web_fetch` prompts with the title model.
+    pub fn with_titles(mut self, titles: crate::titles::Titles) -> Native {
+        self.titles = Some(titles);
+        self
     }
 }
 
@@ -399,9 +407,53 @@ fn file_specs() -> Vec<Spec> {
     specs
 }
 
+fn web_specs() -> Vec<Spec> {
+    vec![
+        Spec::new(
+            "web_search",
+            "Search the web and get back titles, addresses and snippets. Follow up the promising results with web_fetch. \
+             Use it for current facts, documentation, error messages and anything outside the worktree.",
+            object(
+                json!({
+                    "query": string("What to search for"),
+                    "limit": integer("How many results, default 8, at most 20"),
+                    "domains": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Only results from these sites, e.g. [\"docs.rs\"]; prefix one with - to leave it out, e.g. [\"-pinterest.com\"]",
+                    },
+                }),
+                &["query"],
+            ),
+        ),
+        Spec::new(
+            "web_fetch",
+            "Fetch a web address. A web page comes back as readable markdown with the menus, scripts and footers removed, \
+             and its links kept. Long pages are cut: the answer says which offset to ask for next, so read on only if you \
+             need to. Text such as JSON or plain files comes back as it is. Pass save_to to download any file (a zip, a \
+             picture, a PDF) to disk instead, then use read_file or bash on it. Pass prompt, a request such as \"list the \
+             breaking changes\" or \"how do I configure auth?\", to get just that answer from the page, written by a small fast \
+             model, instead of the page itself: use it to pull a fact or a summary out of a long page, and read the page when \
+             you need its exact text.",
+            object(
+                json!({
+                    "url": string("An http or https address"),
+                    "offset": integer("The character to start at, to read on from a cut page"),
+                    "max_chars": integer("How many characters to return, default 20000, at most 100000"),
+                    "raw": { "type": "boolean", "description": "Return the HTML source instead of markdown" },
+                    "prompt": string("What to extract from the page, e.g. \"summarise this\" or \"the install command\"; returns the answer, not the page"),
+                    "save_to": string("Save the response body to this path (a folder ending in / keeps the file's own name) instead of showing it"),
+                }),
+                &["url"],
+            ),
+        ),
+    ]
+}
+
 pub fn specs() -> Vec<Spec> {
     let mut all = file_specs();
     all.push(bash_spec());
+    all.extend(web_specs());
     all.extend(foreman_specs());
     all
 }
@@ -453,6 +505,8 @@ fn system(turn: &Turn, base: &Model) -> String {
          - read_file also shows you pictures, plays sound files and shows video as frames, so use it to look at screenshots, \
          images, recordings and clips instead of saying you cannot.\n\
          - bash runs commands in the worktree as the user.\n\
+         - web_search finds pages and web_fetch reads one as markdown, or downloads a file with save_to, or with prompt gives you just the answer to a question about a long page. Fetch before you \
+         answer from memory about anything recent, and say where a fact came from.\n\
          - Before writing a file format you were not taught, load its skill with load_skill.\n\
          - Write markdown, and put code in fenced blocks.\n",
     );
@@ -917,6 +971,8 @@ impl Native {
                 )
                 .await
             }
+            "web_search" => super::web::search(args, io.stop()).await,
+            "web_fetch" => super::web::fetch(args, ws, self.titles.as_ref(), io.stop()).await,
             "ask_user" => {
                 let asked: Vec<Question> = args
                     .get("questions")

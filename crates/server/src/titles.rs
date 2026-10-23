@@ -18,6 +18,16 @@ const USER_CLIP: usize = 800;
 const REPLY_CLIP: usize = 500;
 const TRANSCRIPT_MAX: usize = 3500;
 const TOKENS: u64 = 400;
+/// The most of a page given to the model, which a small model's context can hold.
+const EXTRACT_INPUT: usize = 24_000;
+const EXTRACT_TOKENS: u64 = 900;
+const EXTRACT_PATIENCE: Duration = Duration::from_secs(90);
+
+const EXTRACT_INSTRUCTIONS: &str = "You read a web page for a coding agent and answer a request \
+about it. The request comes first, then the page. Answer in plain markdown using only what the \
+page says: quote names, versions, commands, numbers and addresses exactly. If the page does not \
+hold the answer, say so rather than guessing. Do not add facts of your own. Reply with the answer \
+and nothing else.";
 
 const INSTRUCTIONS: &str = "You name chats between a person and a coding agent. \
 Read the conversation and reply with a title for it: three to seven words, sentence case, \
@@ -120,8 +130,36 @@ impl Titles {
         if transcript.is_empty() {
             return Err("nothing said yet".into());
         }
-        let raw = ask(&target, INSTRUCTIONS, &transcript).await?;
+        let raw = ask(&target, INSTRUCTIONS, &transcript, TOKENS, PATIENCE).await?;
         clean(&raw).ok_or_else(|| format!("the model gave no usable title: {raw:?}"))
+    }
+
+    /// What `prompt` asks for out of `text`, a web page or the like, answered by the same small
+    /// model that names chats. Text beyond what the model can take is left off, and the answer
+    /// says so.
+    pub async fn extract(&self, text: &str, prompt: &str) -> Result<String, String> {
+        let target = self.target().ok_or("no title model")?;
+        let (text, prompt) = (text.trim(), prompt.trim());
+        if prompt.is_empty() {
+            return Err("no prompt".into());
+        }
+        if text.is_empty() {
+            return Err("the page has no text".into());
+        }
+        let cut = text.len() > EXTRACT_INPUT;
+        let input = &text[..text.floor_char_boundary(EXTRACT_INPUT)];
+        let ask_text = format!("Request: {prompt}\n\nPage:\n\n{input}");
+        let raw =
+            ask(&target, EXTRACT_INSTRUCTIONS, &ask_text, EXTRACT_TOKENS, EXTRACT_PATIENCE).await?;
+        let answer = without_thinking(&raw).trim().to_string();
+        if answer.is_empty() {
+            return Err(format!("the model gave no answer: {raw:?}"));
+        }
+        Ok(if cut {
+            format!("{answer}\n\n[only the first {EXTRACT_INPUT} characters of the page were read]")
+        } else {
+            answer
+        })
     }
 }
 
@@ -159,7 +197,13 @@ pub fn transcript(entries: &[Entry]) -> String {
     if replied { out.trim_end().to_string() } else { String::new() }
 }
 
-async fn ask(target: &Target, system: &str, user: &str) -> Result<String, String> {
+async fn ask(
+    target: &Target,
+    system: &str,
+    user: &str,
+    max_tokens: u64,
+    patience: Duration,
+) -> Result<String, String> {
     let body = |thinking_off: bool| {
         let mut body = json!({
             "model": target.model.trim(),
@@ -168,7 +212,7 @@ async fn ask(target: &Target, system: &str, user: &str) -> Result<String, String
                 { "role": "user", "content": user },
             ],
             "temperature": 0.2,
-            "max_tokens": TOKENS,
+            "max_tokens": max_tokens,
             "stream": false,
         });
         if thinking_off {
@@ -179,7 +223,7 @@ async fn ask(target: &Target, system: &str, user: &str) -> Result<String, String
         body
     };
     let send = async |body: Value| -> Result<(u16, String), String> {
-        let mut req = crate::http::client().post(target.endpoint()).timeout(PATIENCE).json(&body);
+        let mut req = crate::http::client().post(target.endpoint()).timeout(patience).json(&body);
         if !target.key.trim().is_empty() {
             req = req.bearer_auth(target.key.trim());
         }
@@ -205,9 +249,8 @@ async fn ask(target: &Target, system: &str, user: &str) -> Result<String, String
         .ok_or_else(|| "the reply had no text".to_string())
 }
 
-/// A model's answer made into a title: no reasoning block, no label, no quotes,
-/// one line, short.
-pub fn clean(raw: &str) -> Option<String> {
+/// An answer without the reasoning block some models put in front of it.
+fn without_thinking(raw: &str) -> String {
     let mut text = raw.to_string();
     while let Some(start) = text.find("<think>") {
         match text[start..].find("</think>") {
@@ -218,6 +261,13 @@ pub fn clean(raw: &str) -> Option<String> {
     if let Some(end) = text.find("</think>") {
         text.replace_range(..end + "</think>".len(), "");
     }
+    text
+}
+
+/// A model's answer made into a title: no reasoning block, no label, no quotes,
+/// one line, short.
+pub fn clean(raw: &str) -> Option<String> {
+    let text = without_thinking(raw);
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
     let line = line.trim_start_matches('#').trim();
     let line = match line.split_once(':') {
