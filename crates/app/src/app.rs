@@ -281,8 +281,12 @@ pub struct App {
     follow: bool,
     awaiting: Option<Id>,
     thinking: bool,
-    /// Put the cursor back in the composer: set when speech lands in the draft.
-    refocus: bool,
+    /// Put the cursor back in this tile's composer: set when speech lands in its draft.
+    refocus: Option<Tile>,
+    /// The tile being drawn, so a key pressed in it knows whose draft it works on.
+    drawing: Option<Tile>,
+    /// The tile whose speak key started the take in progress; the words go to its draft.
+    speaking_in: Option<Tile>,
 }
 
 impl App {
@@ -367,7 +371,9 @@ impl App {
             markdown: markdown::Cache::default(),
             follow: true,
             awaiting: None,
-            refocus: false,
+            refocus: None,
+            drawing: None,
+            speaking_in: None,
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
         };
         if !app.remote {
@@ -516,6 +522,23 @@ impl App {
         if let Some(st) = &mut self.settings {
             st.face.size = size;
         }
+    }
+
+    /// Put what was said into the draft of the tile whose speak key was pressed. The draft on
+    /// screen belongs to whichever tile is being drawn, and none is when this runs.
+    pub fn add_speech(&mut self, text: &str) {
+        let tile = self.speaking_in.take().unwrap_or(Tile::New);
+        let draft = match tile {
+            Tile::Chat(s) => &mut self.panes.entry(s).or_default().draft,
+            Tile::New => &mut self.new_pane.draft,
+        };
+        crate::voice::append(draft, text);
+        self.refocus = Some(tile);
+    }
+
+    /// The draft of the chat `session`, as the tile shows it.
+    pub fn draft_of(&self, session: SessionId) -> &str {
+        self.panes.get(&session).map_or("", |p| p.draft.as_str())
     }
 
     /// Whether the microphone is open.
@@ -874,8 +897,7 @@ impl App {
                     self.notice = Some((false, "no speech was heard".into()));
                 }
                 Ok(text) => {
-                    crate::voice::append(&mut self.draft, &text);
-                    self.refocus = true;
+                    self.add_speech(&text);
                 }
                 Err(e) => self.notice = Some((false, e)),
             }
@@ -1906,7 +1928,9 @@ impl App {
         };
         let draft = std::mem::replace(&mut self.draft, pane.draft);
         let follow = std::mem::replace(&mut self.follow, pane.follow);
+        let before = self.drawing.replace(tile);
         let out = draw(self);
+        self.drawing = before;
         let pane = Pane {
             draft: std::mem::replace(&mut self.draft, draft),
             follow: std::mem::replace(&mut self.follow, follow),
@@ -2248,7 +2272,8 @@ impl App {
         }
         let compact = self.compact;
         let edit = prose(ui, &mut self.draft, hint_text, if compact { 2 } else { 3 });
-        if std::mem::take(&mut self.refocus) {
+        if self.refocus.is_some() && self.refocus == self.drawing {
+            self.refocus = None;
             edit.request_focus();
         }
         self.slash_menu(ui, edit.rect);
@@ -2351,6 +2376,8 @@ impl App {
                 self.notice = Some((false, p.into()));
             } else if let Err(e) = self.voice.start(wake) {
                 self.notice = Some((false, e));
+            } else {
+                self.speaking_in = self.drawing;
             }
         }
         // Escape on a listening composer throws the take away instead of reading it.
@@ -3843,6 +3870,21 @@ mod tests {
         for g in Grid::ALL {
             assert_eq!(Grid::from_key(g.key()), Some(g));
         }
+    }
+
+    #[test]
+    fn speech_lands_in_the_draft_of_the_tile_that_asked() {
+        let mut app = App::new(&egui::Context::default(), None, None);
+        let (a, b) = (
+            "00000000-0000-0000-0000-000000000001".parse::<SessionId>().unwrap(),
+            "00000000-0000-0000-0000-000000000002".parse::<SessionId>().unwrap(),
+        );
+        app.panes.entry(a).or_default().draft = "first".into();
+        app.speaking_in = Some(Tile::Chat(b));
+        app.add_speech(" hello there ");
+        assert_eq!(app.draft_of(b), "hello there");
+        assert_eq!(app.draft_of(a), "first");
+        assert_eq!(app.refocus, Some(Tile::Chat(b)));
     }
 
     #[test]
