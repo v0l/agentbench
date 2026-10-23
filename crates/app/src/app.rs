@@ -546,7 +546,7 @@ impl App {
         let tile = self.speaking_in.unwrap_or(Tile::New);
         let draft = match tile {
             Tile::Chat(s) => &mut self.panes.entry(s).or_default().draft,
-            Tile::New => &mut self.new_pane.draft,
+            Tile::New | Tile::Empty => &mut self.new_pane.draft,
         };
         (tile, draft)
     }
