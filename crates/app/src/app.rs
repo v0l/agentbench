@@ -624,6 +624,13 @@ impl App {
         self.voice.busy()
     }
 
+    /// The speech settings as the voice should use them now: the foreman server option becomes
+    /// the address and token of the server this window is connected to.
+    fn speech_now(&self) -> crate::voice::Settings {
+        let server = self.client.as_ref().map(|c| (c.server.url.as_str(), c.server.token.as_str()));
+        self.speech.resolved(server)
+    }
+
     /// The hotkey: start listening in the tile in use, or finish the take now.
     fn toggle_speech(&mut self, ctx: &egui::Context) {
         let wake = {
@@ -631,7 +638,7 @@ impl App {
             move || ctx.request_repaint()
         };
         if self.voice.listening() {
-            self.voice.finish(&self.speech, wake);
+            self.voice.finish(&self.speech_now(), wake);
             return;
         }
         let tile = match self.session {
@@ -648,6 +655,8 @@ impl App {
         }
         if let Some(p) = self.speech.problem() {
             self.notice = Some((false, p.into()));
+        } else if self.speech.mode == crate::voice::Mode::Foreman && self.client.is_none() {
+            self.notice = Some((false, "not connected to a foreman server to read speech".into()));
         } else if let Err(e) = self.voice.start(wake) {
             self.notice = Some((false, e));
         } else {
@@ -1002,7 +1011,8 @@ impl App {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
         };
-        self.voice.tick(&self.speech, wake);
+        let speech = self.speech_now();
+        self.voice.tick(&speech, wake);
         for said in self.voice.poll() {
             match said {
                 crate::voice::Said::Partial(text) => self.add_speech(&text, false),
@@ -2503,7 +2513,7 @@ impl App {
     /// The key that speaks into the composer: press to start the microphone, press again to stop
     /// and have what was said written into the draft.
     fn speak_key(&mut self, ui: &mut Ui) {
-        if cfg!(any(target_arch = "wasm32", target_os = "android")) {
+        if cfg!(target_arch = "wasm32") {
             return;
         }
         let ctx = ui.ctx().clone();
@@ -2542,7 +2552,7 @@ impl App {
         }
         if key.clicked() {
             if listening {
-                self.voice.finish(&self.speech, wake);
+                self.voice.finish(&self.speech_now(), wake);
             } else if let Some(tile) = self.drawing {
                 self.begin_speech(tile, wake);
             }
@@ -3680,9 +3690,10 @@ fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
 fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
     use crate::voice::{LOCAL_MODELS, Mode, Voice};
     section(ui, "voice input", "kept on this device", |ui| {
-        let mut options = vec![(Mode::Server, "speech server", None)];
-        if cfg!(feature = "local-speech") {
-            options.insert(0, (Mode::Local, "this machine", None));
+        let mut options =
+            vec![(Mode::Foreman, "foreman server", None), (Mode::Server, "other server", None)];
+        if cfg!(local_speech) {
+            options.insert(0, (Mode::Local, "this device", None));
         }
         segments(ui, &mut sp.mode, &options);
         ui.add_space(8.0);
@@ -3691,7 +3702,7 @@ fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
                 row_help(
                     ui,
                     "model",
-                    "Whisper, run by foreman on this machine. Downloaded the first time you speak.",
+                    "Whisper, run by foreman on this device. Downloaded the first time you speak.",
                     |ui| {
                         choice_fit(
                             ui,
@@ -3703,6 +3714,27 @@ fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
                             }),
                         );
                     },
+                );
+            }
+            Mode::Foreman => {
+                row_help(
+                    ui,
+                    "model",
+                    "The model the foreman server reads with. It downloads it the first time, and runs it on its GPU when it was built with CUDA.",
+                    |ui| {
+                        choice_fit(
+                            ui,
+                            "speech-model-server",
+                            &mut sp.model,
+                            LOCAL_MODELS
+                                .iter()
+                                .map(|m| (m.0.to_string(), format!("{}, {} MB", m.2, m.3))),
+                        );
+                    },
+                );
+                hint(
+                    ui,
+                    "Speech is sent to the foreman server you are connected to, with the same token. Nothing leaves your network unless that server does.",
                 );
             }
             Mode::Server => {

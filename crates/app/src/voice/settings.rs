@@ -8,47 +8,12 @@ pub enum Mode {
     Local,
     /// An OpenAI compatible `/v1/audio/transcriptions`.
     Server,
+    /// The foreman server this window is connected to, which reads speech with Whisper on its own
+    /// machine (on its GPU when it was built with CUDA). Needs no address or key of its own.
+    Foreman,
 }
 
-/// The models Whisper can be run from here: id, Hugging Face repository, label, download size.
-///
-/// Smallest first. The tiny to small English ones read a microphone well on a CPU in a second or
-/// two; medium and the large ones want a GPU (build with the `cuda` feature) to keep up. Sizes
-/// are the safetensors each repository publishes. The multilingual models are told to expect
-/// English.
-pub const LOCAL_MODELS: &[(&str, &str, &str, u32)] = &[
-    ("whisper-tiny.en", "openai/whisper-tiny.en", "tiny, English (fastest)", 151),
-    ("whisper-base.en", "openai/whisper-base.en", "base, English", 290),
-    ("whisper-small.en", "openai/whisper-small.en", "small, English", 967),
-    ("distil-whisper-small.en", "distil-whisper/distil-small.en", "distil small, English", 664),
-    (
-        "distil-whisper-medium.en",
-        "distil-whisper/distil-medium.en",
-        "distil medium, English (fast, accurate)",
-        1580,
-    ),
-    ("whisper-medium.en", "openai/whisper-medium.en", "medium, English", 3060),
-    ("whisper-tiny", "openai/whisper-tiny", "tiny, multilingual", 151),
-    ("whisper-base", "openai/whisper-base", "base, multilingual", 290),
-    ("whisper-small", "openai/whisper-small", "small, multilingual", 967),
-    ("whisper-medium", "openai/whisper-medium", "medium, multilingual", 3060),
-    (
-        "distil-whisper-large-v3",
-        "distil-whisper/distil-large-v3",
-        "distil large v3, multilingual (fast, accurate)",
-        3020,
-    ),
-    (
-        "whisper-large-v3-turbo",
-        "openai/whisper-large-v3-turbo",
-        "large v3 turbo, multilingual (fast, accurate)",
-        3230,
-    ),
-    ("whisper-large-v3", "openai/whisper-large-v3", "large v3, multilingual (most accurate)", 6170),
-];
-
-/// The model used when none is chosen.
-pub const DEFAULT_MODEL: &str = "whisper-base.en";
+pub use foreman_core::speech_models::{DEFAULT_MODEL, LOCAL_MODELS, model};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
@@ -65,10 +30,11 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            mode: if cfg!(feature = "local-speech") && cfg!(not(target_arch = "wasm32")) {
-                Mode::Local
+            mode: if !cfg!(local_speech) {
+                // A phone is better at listening than at reading: let the server do that.
+                Mode::Foreman
             } else {
-                Mode::Server
+                Mode::Local
             },
             model: DEFAULT_MODEL.into(),
             url: String::new(),
@@ -85,8 +51,9 @@ impl Settings {
             return s;
         };
         match st.get_string("voice_mode").as_deref() {
-            Some("local") if cfg!(feature = "local-speech") => s.mode = Mode::Local,
+            Some("local") if cfg!(local_speech) => s.mode = Mode::Local,
             Some("server") => s.mode = Mode::Server,
+            Some("foreman") => s.mode = Mode::Foreman,
             _ => {}
         }
         if let Some(m) = st.get_string("voice_model").filter(|m| model(m).is_some()) {
@@ -104,6 +71,7 @@ impl Settings {
             match self.mode {
                 Mode::Local => "local",
                 Mode::Server => "server",
+                Mode::Foreman => "foreman",
             }
             .into(),
         );
@@ -116,7 +84,7 @@ impl Settings {
     /// What is missing before speech can be read, or `None` when it can.
     pub fn problem(&self) -> Option<&'static str> {
         match self.mode {
-            Mode::Local if !cfg!(feature = "local-speech") => {
+            Mode::Local if !cfg!(local_speech) => {
                 Some("this build has no local speech model; choose a speech server in settings")
             }
             Mode::Server if self.url.trim().is_empty() => {
@@ -124,6 +92,19 @@ impl Settings {
             }
             _ => None,
         }
+    }
+
+    /// These settings as a plain speech server, with `mode` Foreman turned into the connected
+    /// foreman server's own endpoint, token and the model picked here.
+    pub fn resolved(&self, foreman: Option<(&str, &str)>) -> Settings {
+        let mut s = self.clone();
+        if let (Mode::Foreman, Some((url, token))) = (self.mode, foreman) {
+            s.mode = Mode::Server;
+            s.url = format!("{}/v1", url.trim_end_matches('/'));
+            s.key = token.to_string();
+            s.server_model = self.model.clone();
+        }
+        s
     }
 
     /// The full URL of the transcription endpoint.
@@ -135,10 +116,6 @@ impl Settings {
             format!("{base}/audio/transcriptions")
         }
     }
-}
-
-pub fn model(id: &str) -> Option<&'static (&'static str, &'static str, &'static str, u32)> {
-    LOCAL_MODELS.iter().find(|m| m.0 == id)
 }
 
 #[cfg(test)]
@@ -159,20 +136,5 @@ mod tests {
         assert!(s.problem().is_some());
         let s = Settings { mode: Mode::Server, url: "http://x/v1".into(), ..Default::default() };
         assert!(s.problem().is_none());
-    }
-
-    #[test]
-    fn every_model_has_a_unique_id_and_repository() {
-        for (i, a) in LOCAL_MODELS.iter().enumerate() {
-            for b in &LOCAL_MODELS[i + 1..] {
-                assert_ne!(a.0, b.0);
-                assert_ne!(a.1, b.1);
-            }
-        }
-    }
-
-    #[test]
-    fn the_default_model_is_on_the_list() {
-        assert!(model(DEFAULT_MODEL).is_some());
     }
 }

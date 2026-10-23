@@ -9,11 +9,16 @@ license.workspace = true
 [lib]
 name = "foreman_server"
 
+[features]
+# Read speech on an NVIDIA card when there is one; the CUDA runtime is loaded only if present.
+cuda = ["foreman-speech/cuda"]
+
 [dependencies]
 foreman-core = { workspace = true, features = ["rusqlite"] }
+foreman-speech.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "signal", "net", "fs"] }
 tower-http = { version = "0.7", features = ["cors", "fs"] }

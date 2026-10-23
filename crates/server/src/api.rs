@@ -22,6 +22,7 @@ pub struct Api {
     pub runner: Runner,
     pub token: String,
     pub model: Option<crate::agent::native::Shared>,
+    pub speech: crate::speech::Speech,
 }
 
 pub struct Failure(StatusCode, String);
@@ -94,6 +95,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/sessions/{id}/messages", get(messages).post(send))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/sessions/{id}/answer", post(answer))
+        .route("/v1/audio/transcriptions", post(transcribe))
         .route("/api/sessions/{id}/attachments/{file}", get(attachment))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
         .layer(middleware::from_fn_with_state(api.clone(), auth));
@@ -102,6 +104,38 @@ pub fn router(api: Api) -> Router {
         .merge(protected)
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(api)
+}
+
+/// OpenAI's speech to text, answered with Whisper on this machine. Takes a multipart form with a
+/// `file` (WAV) and optionally `model`; answers `{"text": "..."}`.
+async fn transcribe(
+    State(api): State<Api>,
+    mut form: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, Failure> {
+    let (mut wav, mut asked) = (None, String::new());
+    while let Some(field) = form.next_field().await.map_err(|e| bad(e.to_string()))? {
+        match field.name().unwrap_or_default() {
+            "file" => wav = Some(field.bytes().await.map_err(|e| bad(e.to_string()))?),
+            "model" => asked = field.text().await.map_err(|e| bad(e.to_string()))?,
+            _ => {}
+        }
+    }
+    let wav = wav.ok_or_else(|| bad("the form has no file"))?;
+    let (pcm, rate) = foreman_core::audio::read_wav(&wav).map_err(bad)?;
+    let pcm = foreman_core::audio::to_whisper_rate(&pcm, rate);
+    let id = api.speech.pick(&asked);
+    let started = std::time::Instant::now();
+    let (text, on) = api
+        .speech
+        .read(&id, pcm.clone())
+        .await
+        .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    tracing::info!(
+        "read {:.1}s of speech with {id} on the {on} in {:.1}s",
+        pcm.len() as f32 / foreman_core::audio::SPEECH_RATE as f32,
+        started.elapsed().as_secs_f32()
+    );
+    Ok(Json(json!({ "text": text })))
 }
 
 fn changed(api: &Api) {
@@ -655,6 +689,7 @@ mod tests {
             runner: Runner::new(store, vec![Box::new(echo)]),
             token: "secret".into(),
             model: None,
+            speech: Default::default(),
         };
         Fixture { app: router(api.clone()), api, _dir: dir, repo: repo_path }
     }
@@ -1116,6 +1151,7 @@ mod tests {
             runner: Runner::new(f.api.runner.store().clone(), vec![Box::new(slow)]),
             token: "secret".into(),
             model: None,
+            speech: Default::default(),
         };
         let app = router(api.clone());
         let (_, sess) = call(

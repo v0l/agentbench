@@ -13,9 +13,9 @@ crate-type = ["lib", "cdylib"]
 [features]
 default = ["local-speech"]
 # Whisper on this machine. Without it voice input can only use a server.
-local-speech = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:byteorder"]
+local-speech = ["dep:foreman-speech"]
 # Run Whisper on an NVIDIA card when there is one. Needs the CUDA toolkit to build.
-cuda = ["local-speech", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+cuda = ["local-speech", "foreman-speech/cuda"]
 
 [[bin]]
 name = "foreman"
@@ -59,20 +59,17 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tim
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "rustls-no-provider", "http2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+# Voice input: the microphone. On Android that is all there is: the foreman server reads it.
+cpal = "0.18"
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+# Whisper on this machine through candle.
+foreman-speech = { workspace = true, optional = true }
 foreman-server = { path = "../server" }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 clap = { version = "4.6", features = ["derive", "env"] }
 fontdb = "0.23"
-# Voice input: the microphone, and Whisper on this machine through candle.
-cpal = "0.18"
-candle-core = { version = "0.11", optional = true }
-candle-nn = { version = "0.11", optional = true }
-candle-transformers = { version = "0.11", optional = true }
-tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"], optional = true }
-byteorder = { version = "1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["wayland", "x11"] }
@@ -87,6 +84,8 @@ eframe = { version = "0.35", default-features = false, features = ["android-nati
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.14"
 log = "0.4"
+jni = "0.22"
+ndk-context = "0.1"
 
 [package.metadata.android]
 package = "io.v0l.foreman"
@@ -100,8 +99,13 @@ target_sdk_version = 34
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
 
+[[package.metadata.android.uses_permission]]
+name = "android.permission.RECORD_AUDIO"
+
 [package.metadata.android.application]
 label = "Foreman"
+# A foreman server on the LAN is plain http, which Android refuses unless the app says it may.
+uses_cleartext_traffic = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

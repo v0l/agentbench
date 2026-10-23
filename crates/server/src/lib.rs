@@ -6,6 +6,7 @@ pub mod http;
 pub mod local;
 pub mod projects;
 pub mod runner;
+pub mod speech;
 pub mod store;
 pub mod titles;
 pub mod tools;
@@ -179,6 +180,11 @@ async fn serve_inner(
         tracing::info!("{stale} sessions were running when foreman last stopped");
     }
     let token = token(&store).map_err(|e| e.0)?;
+    // The model a speech request gets when it names none of ours: set it with FOREMAN_SPEECH_MODEL.
+    let speech_model = std::env::var("FOREMAN_SPEECH_MODEL")
+        .ok()
+        .or_else(|| store.setting("speech_model").ok().flatten())
+        .unwrap_or_else(|| "whisper-large-v3-turbo".into());
     let mut runner = runner::Runner::new(store, agents);
     let titles = titles.or_else(|| {
         model
@@ -190,7 +196,8 @@ async fn serve_inner(
     }
     *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
         runner::Base { url: local_url(listen), token: token.clone() };
-    let api = api::Api { runner, token, model };
+    let speech = speech::Speech::new(home().join("models"), &speech_model);
+    let api = api::Api { runner, token, model, speech };
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     let listener =
         tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;

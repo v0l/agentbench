@@ -14,7 +14,7 @@ use web_time::Instant;
 /// What the worker has to say.
 pub enum Event {
     /// Progress worth showing while the user waits.
-    #[cfg_attr(not(feature = "local-speech"), allow(dead_code))]
+    #[cfg_attr(not(local_speech), allow(dead_code))]
     Status(String),
     /// What was said.
     Text(String),
@@ -47,9 +47,9 @@ struct Take {
     partial_busy: Arc<AtomicBool>,
 }
 
-#[cfg(feature = "local-speech")]
-type Loaded = Arc<Mutex<Option<(String, super::whisper::Whisper)>>>;
-#[cfg(not(feature = "local-speech"))]
+#[cfg(local_speech)]
+type Loaded = Arc<Mutex<Option<foreman_speech::Transcriber>>>;
+#[cfg(not(local_speech))]
 type Loaded = ();
 
 pub struct Voice {
@@ -121,6 +121,13 @@ impl Voice {
             return Ok(());
         }
         let _ = wake;
+        #[cfg(target_os = "android")]
+        if !super::android::microphone_allowed() {
+            super::android::ask_for_microphone()?;
+            return Err(
+                "allow the microphone in the box that just opened, then press speak again".into()
+            );
+        }
         self.state = State::Listening(Box::new(open()?));
         self.take_id += 1;
         self.status.clear();
@@ -228,6 +235,8 @@ impl Voice {
                 let said = match settings.mode {
                     Mode::Local => read_locally(&settings, &pcm, &tx, &wake, &loaded, quiet),
                     Mode::Server => read_on_server(&settings, &pcm),
+                    // `Settings::resolved` turns this into a server before a take is read.
+                    Mode::Foreman => Err("not connected to a foreman server".to_string()),
                 };
                 match partial {
                     Some((id, busy)) => {
@@ -277,16 +286,21 @@ impl Voice {
 
     /// Whether the files of `model` are already on this machine.
     pub fn installed(model: &str) -> bool {
-        model_dir(model).is_some_and(|d| has_files(&d))
+        #[cfg(local_speech)]
+        {
+            foreman_speech::Transcriber::new(models_dir()).installed(model)
+        }
+        #[cfg(not(local_speech))]
+        {
+            let _ = model;
+            false
+        }
     }
 }
 
-fn model_dir(model: &str) -> Option<std::path::PathBuf> {
-    super::settings::model(model).map(|m| foreman_server::home().join("models").join(m.0))
-}
-
-fn has_files(dir: &std::path::Path) -> bool {
-    ["config.json", "tokenizer.json", "model.safetensors"].iter().all(|f| dir.join(f).exists())
+#[cfg(local_speech)]
+fn models_dir() -> std::path::PathBuf {
+    foreman_server::home().join("models")
 }
 
 /// Open the default microphone and start collecting mono samples.
@@ -378,7 +392,7 @@ fn push<T: cpal::SizedSample>(
     }
 }
 
-#[cfg(feature = "local-speech")]
+#[cfg(local_speech)]
 fn read_locally(
     settings: &Settings,
     pcm: &[f32],
@@ -387,35 +401,26 @@ fn read_locally(
     loaded: &Loaded,
     quiet: bool,
 ) -> Result<String, String> {
-    let dir = model_dir(&settings.model).ok_or("unknown speech model")?;
     let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
-    if slot.as_ref().is_none_or(|(id, _)| *id != settings.model) {
-        *slot = None;
-        if !has_files(&dir) {
-            let repo = super::settings::model(&settings.model).map(|m| m.1).unwrap_or_default();
-            download(repo, &dir, tx, wake)?;
-        }
-        let _ = tx.send(Event::Status("loading the speech model".into()));
-        wake();
-        let files = super::whisper::Files::in_dir(&dir)
-            .ok_or_else(|| format!("{} is missing model files", dir.display()))?;
-        let (device, _) = super::whisper::best_device();
-        let model = match super::whisper::Whisper::load(&files, device) {
-            Ok(m) => m,
-            // A card that took the weights and then failed falls back to the CPU.
-            Err(_) => super::whisper::Whisper::load(&files, candle_core::Device::Cpu)?,
-        };
-        *slot = Some((settings.model.clone(), model));
+    let t = slot.get_or_insert_with(|| foreman_speech::Transcriber::new(models_dir()));
+    if !t.installed(&settings.model) {
+        crate::runtime().block_on(t.download(&crate::client::http(), &settings.model, |p| {
+            let of = if p.total_mb > 0 { format!(" of {} MB", p.total_mb) } else { String::new() };
+            let _ = tx.send(Event::Status(format!("downloading {}: {} MB{of}", p.name, p.got_mb)));
+            wake();
+        }))?;
     }
+    let _ = tx.send(Event::Status("loading the speech model".into()));
+    wake();
+    t.load(&settings.model)?;
     if !quiet {
         let _ = tx.send(Event::Status("reading".into()));
         wake();
     }
-    let (_, model) = slot.as_mut().expect("model loaded above");
-    model.transcribe(pcm)
+    t.transcribe(pcm)
 }
 
-#[cfg(not(feature = "local-speech"))]
+#[cfg(not(local_speech))]
 fn read_locally(
     _: &Settings,
     _: &[f32],
@@ -425,58 +430,6 @@ fn read_locally(
     _: bool,
 ) -> Result<String, String> {
     Err("this build has no local speech model; choose a speech server in settings".into())
-}
-
-/// Fetch the three files of a model from Hugging Face into `dir`, once.
-#[cfg(feature = "local-speech")]
-fn download(
-    repo: &str,
-    dir: &std::path::Path,
-    tx: &Sender<Event>,
-    wake: &(impl Fn() + Send + Sync + 'static),
-) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let name = repo.rsplit('/').next().unwrap_or(repo);
-    crate::runtime().block_on(async {
-        let http = crate::client::http();
-        for file in ["config.json", "tokenizer.json", "model.safetensors"] {
-            let target = dir.join(file);
-            if target.exists() {
-                continue;
-            }
-            let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
-            let mut resp = http
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| format!("{url}: {e}"))?
-                .error_for_status()
-                .map_err(|e| format!("{url}: {e}"))?;
-            let total = resp.content_length().unwrap_or(0);
-            // Written beside the target and renamed, so a download that stops half way is not
-            // taken for a model.
-            let part = dir.join(format!("{file}.part"));
-            let mut out =
-                std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
-            let (mut got, mut shown) = (0u64, 0u64);
-            while let Some(chunk) = resp.chunk().await.map_err(|e| format!("{url}: {e}"))? {
-                std::io::Write::write_all(&mut out, &chunk)
-                    .map_err(|e| format!("{}: {e}", part.display()))?;
-                got += chunk.len() as u64;
-                if got - shown > 1 << 20 || got == total {
-                    shown = got;
-                    let of =
-                        if total > 0 { format!(" of {} MB", total >> 20) } else { String::new() };
-                    let _ =
-                        tx.send(Event::Status(format!("downloading {name}: {} MB{of}", got >> 20)));
-                    wake();
-                }
-            }
-            drop(out);
-            std::fs::rename(&part, &target).map_err(|e| format!("{}: {e}", target.display()))?;
-        }
-        Ok::<(), String>(())
-    })
 }
 
 /// Post the take as a WAV to an OpenAI compatible transcription endpoint.
@@ -621,7 +574,7 @@ mod tests {
 
     /// Needs a model on disc: `FOREMAN_TEST_MODEL=~/.local/share/waveshark/models/whisper-base.en`
     /// and a recording: `FOREMAN_TEST_WAV=said.wav` (16 bit mono). Prints what it read.
-    #[cfg(feature = "local-speech")]
+    #[cfg(local_speech)]
     #[test]
     #[ignore = "needs a downloaded model and a recording"]
     fn whisper_reads_a_recording() {
@@ -637,9 +590,9 @@ mod tests {
             .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
             .collect();
         let pcm = super::super::to_whisper_rate(&pcm, rate);
-        let files = super::super::whisper::Files::in_dir(std::path::Path::new(&dir)).unwrap();
-        let (device, on) = super::super::whisper::best_device();
-        let mut w = super::super::whisper::Whisper::load(&files, device).unwrap();
+        let files = foreman_speech::Files::in_dir(std::path::Path::new(&dir)).unwrap();
+        let (device, on) = foreman_speech::best_device();
+        let mut w = foreman_speech::Whisper::load(&files, device).unwrap();
         let t = std::time::Instant::now();
         let said = w.transcribe(&pcm).unwrap();
         println!(
