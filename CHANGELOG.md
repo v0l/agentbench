@@ -6,6 +6,14 @@ All notable changes to Foreman are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Long chats are much faster to draw, most of all on a phone. Only the messages in view (and a
+  screenful either side) are laid out; the others are given the height they were last measured at,
+  and heights are measured again when the width, text size, thinking switch or fonts change. The
+  transcript is no longer cloned every frame, and the markdown cache is only swept when it has
+  grown large. A 400-message chat took about 6 to 7 ms to draw when idle and 14 to 16 ms while
+  scrolling on a desktop, and 6.5 / 16 ms in the phone layout; it now takes 0.2 ms and 0.4 ms.
+
 ### Changed
 - Settings are split into four tabs: general, speech, agent and titles.
 - The CUDA build loads the CUDA runtime when the window starts instead of linking it, the way
