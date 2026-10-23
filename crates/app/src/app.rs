@@ -2230,7 +2230,7 @@ impl App {
         } else {
             "what should it do"
         };
-        let sent = self.composer(ui, agent_ready && !needs_branch, false, hint_text);
+        let sent = self.composer(ui, agent_ready && !needs_branch, false, hint_text, None);
         if let (Some((text, attachments)), Some(f)) = (sent, self.fresh.clone()) {
             let place = match f.place {
                 PlaceChoice::Main => Place::Main,
@@ -2410,6 +2410,7 @@ impl App {
         ready: bool,
         busy: bool,
         hint_text: &str,
+        session: Option<&Session>,
     ) -> Option<(String, Vec<foreman_core::Upload>)> {
         // Files go to the focused tile only: the tray is shared, and it is the tile you are using.
         let top = ui.cursor().min.y;
@@ -2451,17 +2452,6 @@ impl App {
         }
         let mut out = None;
         ui.horizontal(|ui| {
-            let tip = match (compact, busy) {
-                (true, true) => "enter steers, / for commands",
-                (true, false) => "enter sends, / for commands",
-                (false, true) => {
-                    "enter steers the agent, shift+enter for a new line, / for commands, drop or paste files"
-                }
-                (false, false) => {
-                    "enter sends, shift+enter for a new line, / for commands, drop or paste files"
-                }
-            };
-            hint(ui, tip);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let sending = self.focused && !self.tray.files.is_empty();
                 let can = ready && !speaking && (!self.draft.trim().is_empty() || sending);
@@ -2488,6 +2478,12 @@ impl App {
                     if key.clicked() {
                         crate::attach::pick(self.tray.sender(), ui.ctx().clone());
                     }
+                }
+                // Whatever room the keys leave holds the agent's status line.
+                if let Some(session) = session {
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        status_line(ui, session, compact);
+                    });
                 }
             });
         });
@@ -2554,8 +2550,18 @@ impl App {
         }
     }
 
-    /// The header of a chat in a small tile: its state, its name, and the keys that matter.
+    /// The name of the project a chat belongs to.
+    fn project_name(&self, id: Id) -> String {
+        self.overview
+            .as_ref()
+            .and_then(|o| o.projects.iter().find(|p| p.id == id))
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// The header of a chat in a small tile: status, project, worktree, then the keys that matter.
     fn tile_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
+        let project = self.project_name(s.project_id);
         ui.horizontal(|ui| {
             let (_, word) = status_look(s.status);
             lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
@@ -2575,22 +2581,20 @@ impl App {
                     c.interrupt(s.id);
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    let place = tree.map(|w| format!(" {}", w.label())).unwrap_or_default();
-                    Line::new()
-                        .value(&s.title)
-                        .size(11.5)
-                        .gap(6.0)
-                        .note(format!("{}{place}", s.agent))
-                        .size(10.5)
-                        .elided(ui)
-                        .on_hover_text(format!(
-                            "{}\n{} {}\n{} in, {} out",
-                            s.title,
-                            s.agent,
-                            s.model.as_deref().unwrap_or_default(),
-                            tokens(s.usage.input_tokens + s.usage.cache_read_tokens),
-                            tokens(s.usage.output_tokens)
-                        ));
+                    // Which project and which worktree, first: in a grid of tiles that is
+                    // what tells the windows apart. The chat's own title is on hover.
+                    let mut line = Line::new().value(&project).tint(READOUT).size(11.5);
+                    if let Some(w) = tree {
+                        line = line.gap(8.0).value(w.label()).size(11.5);
+                    }
+                    line.elided(ui).on_hover_text(format!(
+                        "{}\n{} {}\n{} in, {} out",
+                        s.title,
+                        s.agent,
+                        s.model.as_deref().unwrap_or_default(),
+                        tokens(s.usage.input_tokens + s.usage.cache_read_tokens),
+                        tokens(s.usage.output_tokens)
+                    ));
                 });
             });
         });
@@ -2603,22 +2607,23 @@ impl App {
         } else {
             self.full_header(ui, &s, tree.as_ref());
         }
-        status_line(ui, &s, self.compact);
         self.session_body(ui, s, tree);
     }
 
     fn full_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
+        let project = self.project_name(s.project_id);
         ui.horizontal(|ui| {
             let (tint, word) = status_look(s.status);
             let _ = tint;
             lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
             ui.add_space(6.0);
-            let mut line = Line::new().legend("agent").gap(6.0).value(&s.agent).size(11.0);
-            if let Some(m) = &s.model {
-                line = line.gap(14.0).legend("model").gap(6.0).set(m).size(11.0);
-            }
+            let mut line = Line::new().legend("project").gap(6.0).set(&project).size(11.0);
             if let Some(w) = tree {
                 line = line.gap(14.0).legend("worktree").gap(6.0).value(w.label()).size(11.0);
+            }
+            line = line.gap(14.0).legend("agent").gap(6.0).value(&s.agent).size(11.0);
+            if let Some(m) = &s.model {
+                line = line.gap(14.0).legend("model").gap(6.0).set(m).size(11.0);
             }
             if let Some(i) = s.issue_id {
                 line = line.gap(14.0).legend("issue").gap(6.0).value(format!("#{i}")).size(11.0);
@@ -2725,9 +2730,6 @@ impl App {
                     );
                     ui.add_space(6.0);
                 }
-                if s.status == SessionStatus::Running {
-                    hint(ui, "working");
-                }
             });
         ui.allocate_rect(rect, Sense::hover());
         let at_bottom =
@@ -2745,7 +2747,7 @@ impl App {
         } else {
             "tell the agent what to do next"
         };
-        if let Some((text, files)) = self.composer(ui, !missing, s.status.busy(), hint_text) {
+        if let Some((text, files)) = self.composer(ui, !missing, s.status.busy(), hint_text, Some(&s)) {
             let slash = files.is_empty().then(|| foreman_core::parse_slash(&text)).flatten();
             match slash.map(|(c, _)| c.name) {
                 Some("new") => {
@@ -3881,34 +3883,39 @@ fn status_line(ui: &mut Ui, s: &Session, narrow: bool) {
     if !any {
         return;
     }
-    ui.horizontal(|ui| {
-        let r = line.show(ui);
-        if let Some(f) = fill {
-            ui.add_space(8.0);
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(64.0, 6.0), Sense::hover());
-            let tint = if f >= 0.8 {
-                FAULT
-            } else if f >= 0.6 {
-                WARN
-            } else {
-                TRACE
-            };
-            ui.painter().rect_filled(rect, 1.0, WELL);
-            let mut done = rect;
-            done.set_width(rect.width() * f.clamp(0.0, 1.0) as f32);
-            ui.painter().rect_filled(done, 1.0, tint);
+    // The context bar sits after the text; keep its room so the text is what gets cut.
+    let bar = if fill.is_some() { 72.0 } else { 0.0 };
+    let r = ui
+        .scope(|ui| {
+            ui.set_max_width((ui.available_width() - bar).max(0.0));
+            line.elided(ui)
+        })
+        .inner;
+    if let Some(f) = fill {
+        ui.add_space(8.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(64.0, 6.0), Sense::hover());
+        let tint = if f >= 0.8 {
+            FAULT
+        } else if f >= 0.6 {
+            WARN
+        } else {
+            TRACE
+        };
+        ui.painter().rect_filled(rect, 1.0, WELL);
+        let mut done = rect;
+        done.set_width(rect.width() * f.clamp(0.0, 1.0) as f32);
+        ui.painter().rect_filled(done, 1.0, tint);
+    }
+    r.on_hover_text(format!(
+        "{}{}{}",
+        if u.host.is_empty() { String::new() } else { format!("server {}\n", u.host) },
+        model.map(|m| format!("model {m}\n")).unwrap_or_default(),
+        match (u.context, u.window) {
+            (0, _) => "context not reported yet".to_string(),
+            (c, 0) => format!("{c} tokens of context; the window is not known"),
+            (c, w) => format!("{c} of {w} tokens of context"),
         }
-        r.on_hover_text(format!(
-            "{}{}{}",
-            if u.host.is_empty() { String::new() } else { format!("server {}\n", u.host) },
-            model.map(|m| format!("model {m}\n")).unwrap_or_default(),
-            match (u.context, u.window) {
-                (0, _) => "context not reported yet".to_string(),
-                (c, 0) => format!("{c} tokens of context; the window is not known"),
-                (c, w) => format!("{c} of {w} tokens of context"),
-            }
-        ));
-    });
+    ));
 }
 
 fn tokens(n: u64) -> String {
