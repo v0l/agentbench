@@ -19,11 +19,106 @@ const RETRY: Duration = Duration::from_secs(3);
 const TREE_INDENT: f32 = 16.0;
 const TAB_TITLE: usize = 32;
 const TREE_X: f32 = 5.0;
+/// The most tiles any grid has.
+const SLOTS: usize = 4;
+/// The space between tiles of the grid.
+const TILE_GAP: f32 = 8.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Chat,
     Issues,
+}
+
+/// How the chat area is tiled. One tile is focused; opening a chat replaces what it shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Grid {
+    /// One chat filling the area.
+    Single,
+    /// Two chats side by side.
+    Columns,
+    /// Two chats one above the other.
+    Rows,
+    /// Four chats, two by two.
+    Quad,
+}
+
+impl Grid {
+    pub const ALL: [Grid; 4] = [Grid::Single, Grid::Columns, Grid::Rows, Grid::Quad];
+
+    /// Columns and rows.
+    pub fn dims(self) -> (usize, usize) {
+        match self {
+            Grid::Single => (1, 1),
+            Grid::Columns => (2, 1),
+            Grid::Rows => (1, 2),
+            Grid::Quad => (2, 2),
+        }
+    }
+
+    /// How many chats are on screen at once.
+    pub fn slots(self) -> usize {
+        let (c, r) = self.dims();
+        c * r
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Grid::Single => "1x1",
+            Grid::Columns => "2x1",
+            Grid::Rows => "1x2",
+            Grid::Quad => "2x2",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Grid> {
+        Grid::ALL.into_iter().find(|g| g.key() == key)
+    }
+
+    fn about(self) -> &'static str {
+        match self {
+            Grid::Single => "one chat",
+            Grid::Columns => "two chats side by side",
+            Grid::Rows => "two chats, one above the other",
+            Grid::Quad => "four chats in a grid",
+        }
+    }
+}
+
+/// What fills one tile of the grid.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Tile {
+    /// The form for starting a chat, in the focused tile when it has no chat.
+    New,
+    Chat(SessionId),
+    /// A tile with nothing in it.
+    Empty,
+}
+
+/// What is typed into a chat but not yet sent, kept per chat so each tile has its own.
+struct Pane {
+    draft: String,
+    follow: bool,
+}
+
+impl Default for Pane {
+    fn default() -> Self {
+        Pane { draft: String::new(), follow: true }
+    }
+}
+
+/// Opens `sid` in the grid: a chat already on screen is only focused, and any other
+/// replaces what the focused tile shows. Returns the tile that ends up focused.
+fn place(slots: &mut [Option<SessionId>], shown: usize, focus: usize, sid: SessionId) -> usize {
+    if let Some(at) = slots.iter().take(shown).position(|x| *x == Some(sid)) {
+        return at;
+    }
+    // The chat may sit in a hidden tile; it lives in one place only.
+    for x in slots.iter_mut().filter(|x| **x == Some(sid)) {
+        *x = None;
+    }
+    slots[focus] = Some(sid);
+    focus
 }
 
 #[derive(Clone, PartialEq)]
@@ -157,6 +252,18 @@ pub struct App {
     filter: Filter,
     project: Option<Id>,
     session: Option<SessionId>,
+    grid: Grid,
+    narrow: bool,
+    /// The chat in each tile. Tiles past the grid's size are hidden but remembered.
+    slots: [Option<SessionId>; SLOTS],
+    /// The focused tile: the one a chat opened from the list replaces.
+    focus_at: usize,
+    panes: HashMap<SessionId, Pane>,
+    /// The form for a new chat has its own draft, as it has no session to key one by.
+    new_pane: Pane,
+    /// Set while a tile is drawn: it is small, and it is the one the keyboard and files go to.
+    compact: bool,
+    focused: bool,
     issue: Option<Id>,
     collapsed: HashSet<Id>,
     transcripts: HashMap<SessionId, Transcript>,
@@ -180,8 +287,12 @@ pub struct App {
     follow: bool,
     awaiting: Option<Id>,
     thinking: bool,
-    /// Put the cursor back in the composer: set when speech lands in the draft.
-    refocus: bool,
+    /// Put the cursor back in this tile's composer: set when speech lands in its draft.
+    refocus: Option<Tile>,
+    /// The tile being drawn, so a key pressed in it knows whose draft it works on.
+    drawing: Option<Tile>,
+    /// The tile whose speak key started the take in progress; the words go to its draft.
+    speaking_in: Option<Tile>,
 }
 
 impl App {
@@ -227,6 +338,28 @@ impl App {
             filter: Filter::Open,
             project: None,
             session: None,
+            grid: storage
+                .and_then(|s| s.get_string("grid"))
+                .and_then(|k| Grid::from_key(&k))
+                .unwrap_or(Grid::Single),
+            narrow: false,
+            slots: {
+                let mut slots = [None; SLOTS];
+                let saved = storage.and_then(|s| s.get_string("tiles")).unwrap_or_default();
+                for (slot, id) in slots.iter_mut().zip(saved.split(',')) {
+                    *slot = id.parse::<SessionId>().ok();
+                }
+                slots
+            },
+            focus_at: storage
+                .and_then(|s| s.get_string("focus"))
+                .and_then(|f| f.parse::<usize>().ok())
+                .filter(|f| *f < SLOTS)
+                .unwrap_or(0),
+            panes: HashMap::new(),
+            new_pane: Pane::default(),
+            compact: false,
+            focused: true,
             issue: None,
             collapsed: HashSet::new(),
             transcripts: HashMap::new(),
@@ -248,7 +381,9 @@ impl App {
             markdown: markdown::Cache::default(),
             follow: true,
             awaiting: None,
-            refocus: false,
+            refocus: None,
+            drawing: None,
+            speaking_in: None,
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
         };
         if !app.remote {
@@ -269,6 +404,11 @@ impl App {
         storage.set_string("remote", self.remote.to_string());
         storage.set_string("thinking", self.thinking.to_string());
         self.speech.save(storage);
+        storage.set_string("grid", self.grid.key().to_string());
+        let tiles: Vec<String> =
+            self.slots.iter().map(|s| s.map(|s| s.to_string()).unwrap_or_default()).collect();
+        storage.set_string("tiles", tiles.join(","));
+        storage.set_string("focus", self.focus_at.to_string());
         if let Some(c) = self.client.as_ref().filter(|_| self.remote) {
             storage.set_string("url", c.server.url.clone());
             storage.set_string("token", c.server.token.clone());
@@ -396,6 +536,23 @@ impl App {
         }
     }
 
+    /// Put what was said into the draft of the tile whose speak key was pressed. The draft on
+    /// screen belongs to whichever tile is being drawn, and none is when this runs.
+    pub fn add_speech(&mut self, text: &str) {
+        let tile = self.speaking_in.take().unwrap_or(Tile::New);
+        let draft = match tile {
+            Tile::Chat(s) => &mut self.panes.entry(s).or_default().draft,
+            Tile::New => &mut self.new_pane.draft,
+        };
+        crate::voice::append(draft, text);
+        self.refocus = Some(tile);
+    }
+
+    /// The draft of the chat `session`, as the tile shows it.
+    pub fn draft_of(&self, session: SessionId) -> &str {
+        self.panes.get(&session).map_or("", |p| p.draft.as_str())
+    }
+
     /// Whether the microphone is open.
     pub fn listening(&self) -> bool {
         self.voice.listening()
@@ -461,8 +618,101 @@ impl App {
     }
 
     fn current_session(&self) -> Option<&Session> {
-        let id = self.session?;
+        self.session_by_id(self.session?)
+    }
+
+    fn session_by_id(&self, id: SessionId) -> Option<&Session> {
         self.overview.as_ref()?.sessions.iter().find(|s| s.id == id)
+    }
+
+    /// The grid in use: a narrow window has no room to tile.
+    fn grid_now(&self) -> Grid {
+        if self.narrow { Grid::Single } else { self.grid }
+    }
+
+    pub fn grid(&self) -> Grid {
+        self.grid
+    }
+
+    pub fn set_grid(&mut self, grid: Grid) {
+        self.grid = grid;
+        // A tile that is hidden cannot stay focused: its chat moves to the first tile.
+        let n = self.grid_now().slots();
+        if self.focus_at >= n {
+            self.slots.swap(0, self.focus_at);
+            self.focus_at = 0;
+        }
+        self.fetch_shown();
+    }
+
+    /// The focused tile, which stays inside the grid.
+    fn focus_slot(&self) -> usize {
+        self.focus_at.min(self.grid_now().slots() - 1)
+    }
+
+    /// What each tile of the chat area shows, first tile first.
+    fn tiles(&self) -> Vec<Tile> {
+        let focus = self.focus_slot();
+        (0..self.grid_now().slots())
+            .map(|i| match self.slots[i] {
+                Some(s) => Tile::Chat(s),
+                None if i == focus => Tile::New,
+                None => Tile::Empty,
+            })
+            .collect()
+    }
+
+    /// The chats on screen, first tile first.
+    pub fn shown(&self) -> Vec<SessionId> {
+        self.slots[..self.grid_now().slots()].iter().flatten().copied().collect()
+    }
+
+    /// The focused tile, counting from 0 in reading order.
+    pub fn focused_tile(&self) -> usize {
+        self.focus_slot()
+    }
+
+    /// Forgets a chat that has been deleted, as closing it does.
+    pub fn forget_chat(&mut self, sid: SessionId) {
+        self.forget(sid);
+    }
+
+    fn fetch_shown(&mut self) {
+        for sid in self.shown() {
+            self.fetch_messages(sid);
+        }
+    }
+
+    /// The chat in tile `at`, if it has one.
+    pub fn tile_chat(&self, at: usize) -> Option<SessionId> {
+        self.slots.get(at).copied().flatten()
+    }
+
+    /// Moves focus to a tile. Its chat, if any, becomes the open one.
+    pub fn focus_tile(&mut self, at: usize) {
+        self.focus_at = at;
+        let next = self.slots[at];
+        if self.session == next {
+            return;
+        }
+        self.session = next;
+        if self.fresh.is_none()
+            && let Some(p) = next.and_then(|s| self.session_by_id(s)).map(|s| s.project_id)
+        {
+            self.project = Some(p);
+        }
+    }
+
+    /// A chat is gone: drop what is kept for it. Its tile is left empty.
+    fn forget(&mut self, sid: SessionId) {
+        for x in self.slots.iter_mut().filter(|x| **x == Some(sid)) {
+            *x = None;
+        }
+        self.panes.remove(&sid);
+        self.transcripts.remove(&sid);
+        if self.session == Some(sid) {
+            self.session = None;
+        }
     }
 
     fn worktree(&self, id: Id) -> Option<&Worktree> {
@@ -480,14 +730,22 @@ impl App {
                 if self.session.is_some_and(|s| !o.sessions.iter().any(|x| x.id == s)) {
                     self.session = None;
                 }
+                for x in self.slots.iter_mut() {
+                    if x.is_some_and(|s| !o.sessions.iter().any(|y| y.id == s)) {
+                        *x = None;
+                    }
+                }
+                self.panes.retain(|id, _| o.sessions.iter().any(|x| x.id == *id));
                 // Ids can be reused once a chat is deleted, so a cached transcript must not
                 // outlive its session or the next chat to take the id would show it.
                 self.transcripts.retain(|id, _| o.sessions.iter().any(|x| x.id == *id));
                 self.overview = Some(o);
                 self.cursor = Some(cursor);
-                if let Some(sid) = self.session {
-                    self.fetch_messages(sid);
+                // A window just started gets back the chat of the tile that was focused.
+                if self.session.is_none() && self.fresh.is_none() {
+                    self.session = self.slots[self.focus_slot()];
                 }
+                self.fetch_shown();
                 if let Some(iid) = self.issue
                     && let Some(c) = &mut self.client
                 {
@@ -635,8 +893,7 @@ impl App {
                     self.notice = Some((false, "no speech was heard".into()));
                 }
                 Ok(text) => {
-                    crate::voice::append(&mut self.draft, &text);
-                    self.refocus = true;
+                    self.add_speech(&text);
                 }
                 Err(e) => self.notice = Some((false, e)),
             }
@@ -651,7 +908,7 @@ impl App {
             .map(|s| s.agent.clone())
             .or_else(|| {
                 let fresh = self.fresh.as_ref()?;
-                (self.session.is_none() && self.tab == Tab::Chat).then(|| fresh.agent.clone())
+                (self.tab == Tab::Chat).then(|| fresh.agent.clone())
             })
             .filter(|a| !a.is_empty());
         if let Some(agent) = wants
@@ -722,7 +979,8 @@ impl App {
                 .unwrap_or_else(|| "new chat".to_string());
             let opts: Vec<(Tab, &str)> =
                 vec![(Tab::Chat, chat_label.as_str()), (Tab::Issues, issues_label.as_str())];
-            let w = (ui.available_width() - 640.0).clamp(200.0, 560.0);
+            let w = (ui.available_width() - 640.0 - if self.narrow { 0.0 } else { 120.0 })
+                .clamp(200.0, 560.0);
             ui.allocate_ui(Vec2::new(w, 24.0), |ui| tabs(ui, &mut self.tab, &opts));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let ready = self.overview.is_some();
@@ -747,6 +1005,13 @@ impl App {
                 {
                     self.file_issue =
                         Some(FileIssue { project: p, title: String::new(), body: String::new() });
+                }
+                if !self.narrow {
+                    for g in Grid::ALL.into_iter().rev() {
+                        if grid_button(ui, g, self.grid == g).clicked() {
+                            self.set_grid(g);
+                        }
+                    }
                 }
                 let key = ui.add(Key::new("settings").outline(VALUE));
                 key.widget_info(|| {
@@ -1104,9 +1369,12 @@ impl App {
             return;
         };
         self.project = Some(project);
+        // The form takes the focused tile; the chat that was there is only closed to view.
+        let at = self.focus_slot();
+        self.slots[at] = None;
         self.session = None;
         self.tab = Tab::Chat;
-        self.draft.clear();
+        self.new_pane.draft.clear();
         let agent = self.default_agent();
         let place = match worktree {
             Some(w) if !w.main => PlaceChoice::Existing(w.id),
@@ -1373,6 +1641,17 @@ impl App {
         let reach = if last { elbow } else { row.bottom() + ui.spacing().item_spacing.y };
         ui.painter().vline(x, top - ui.spacing().item_spacing.y..=reach, stroke);
         ui.painter().hline(x..=row.left() + TREE_INDENT * 2.0 - 2.0, elbow, stroke);
+        if self.grid_now().slots() > 1 && self.tab == Tab::Chat && self.shown().contains(&s.id) {
+            let tint = if on { READOUT } else { LEGEND };
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(row.right() - 2.0, row.top() + 1.0),
+                    egui::pos2(row.right(), row.bottom() - 1.0),
+                ),
+                0.0,
+                tint,
+            );
+        }
         if resp.clicked() && !close {
             self.open_session(s.id, s.project_id);
         }
@@ -1396,8 +1675,11 @@ impl App {
         self.project = Some(project);
         self.tab = Tab::Chat;
         self.fresh = None;
-        self.follow = true;
-        self.draft.clear();
+        self.panes.entry(sid).or_default().follow = true;
+        // The chat replaces the one in the focused tile. One already on screen is only focused.
+        let shown = self.grid_now().slots();
+        let focus = self.focus_slot();
+        self.focus_at = place(&mut self.slots, shown, focus, sid);
         self.fetch_messages(sid);
     }
 
@@ -1572,9 +1854,93 @@ impl App {
     }
 
     fn chat(&mut self, ui: &mut Ui) {
-        match self.current_session().cloned() {
-            Some(s) => self.session_view(ui, s),
-            None => self.blank_chat(ui),
+        if self.grid_now().slots() == 1 {
+            self.focused = true;
+            self.compact = false;
+            let tile = self.tiles()[0];
+            self.in_pane(tile, |app| app.tile(ui, tile));
+            return;
+        }
+        let (cols, rows) = self.grid_now().dims();
+        let area = ui.available_rect_before_wrap();
+        let w = (area.width() - TILE_GAP * (cols - 1) as f32) / cols as f32;
+        let h = (area.height() - TILE_GAP * (rows - 1) as f32) / rows as f32;
+        let rects: Vec<egui::Rect> = (0..cols * rows)
+            .map(|i| {
+                let (col, row) = ((i % cols) as f32, (i / cols) as f32);
+                egui::Rect::from_min_size(
+                    area.min + Vec2::new(col * (w + TILE_GAP), row * (h + TILE_GAP)),
+                    Vec2::new(w, h),
+                )
+            })
+            .collect();
+        // Pressing anywhere in a tile focuses it.
+        if ui.input(|i| i.pointer.any_pressed())
+            && let Some(at) = rects.iter().position(|r| ui.rect_contains_pointer(*r))
+            && at != self.focus_slot()
+        {
+            self.focus_tile(at);
+        }
+        let tiles = self.tiles();
+        for (i, (rect, tile)) in rects.into_iter().zip(tiles).enumerate() {
+            let focused = i == self.focus_slot();
+            let edge = if focused { READOUT.gamma_multiply(0.75) } else { ETCH };
+            ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("tile", i, tile))
+                    .max_rect(rect.shrink(8.0))
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            child.set_clip_rect(rect.shrink(1.0).intersect(ui.clip_rect()));
+            self.focused = focused;
+            self.compact = true;
+            self.in_pane(tile, |app| app.tile(&mut child, tile));
+            self.compact = false;
+            self.focused = true;
+        }
+        ui.allocate_rect(area, Sense::hover());
+    }
+
+    /// Runs `draw` with the draft and scroll state of the chat in this tile, so each tile
+    /// keeps what was typed into it.
+    fn in_pane<R>(&mut self, tile: Tile, draw: impl FnOnce(&mut Self) -> R) -> R {
+        let pane = match tile {
+            Tile::Chat(s) => self.panes.remove(&s).unwrap_or_default(),
+            Tile::New => std::mem::take(&mut self.new_pane),
+            Tile::Empty => Pane::default(),
+        };
+        let draft = std::mem::replace(&mut self.draft, pane.draft);
+        let follow = std::mem::replace(&mut self.follow, pane.follow);
+        let before = self.drawing.replace(tile);
+        let out = draw(self);
+        self.drawing = before;
+        let pane = Pane {
+            draft: std::mem::replace(&mut self.draft, draft),
+            follow: std::mem::replace(&mut self.follow, follow),
+        };
+        match tile {
+            Tile::Chat(s) => {
+                self.panes.insert(s, pane);
+            }
+            Tile::New => self.new_pane = pane,
+            Tile::Empty => {}
+        }
+        out
+    }
+
+    fn tile(&mut self, ui: &mut Ui, tile: Tile) {
+        match tile {
+            Tile::New => self.blank_chat(ui),
+            Tile::Empty => {
+                ui.add_space(12.0);
+                hint(ui, "click a chat in the list to fill the focused tile");
+            }
+            Tile::Chat(sid) => match self.session_by_id(sid).cloned() {
+                Some(s) => self.session_view(ui, s),
+                None if self.compact => hint(ui, "loading"),
+                None => self.blank_chat(ui),
+            },
         }
     }
 
@@ -1582,7 +1948,8 @@ impl App {
         let Some(o) = self.overview.clone() else {
             return;
         };
-        let Some(project) = self.project.or(o.projects.first().map(|p| p.id)) else {
+        let kept = self.fresh.as_ref().map(|f| f.project).filter(|_| self.compact);
+        let Some(project) = kept.or(self.project).or(o.projects.first().map(|p| p.id)) else {
             section(ui, "no projects yet", "", |ui| {
                 note(
                     ui,
@@ -1619,7 +1986,7 @@ impl App {
         }
         .map(|w| w.label())
         .unwrap_or_else(|| "a new worktree".to_string());
-        ui.add_space(ui.available_height() * 0.18);
+        ui.add_space(ui.available_height() * if self.compact { 0.06 } else { 0.18 });
         ui.vertical_centered(|ui| {
             ui.set_max_width(640.0);
             ui.label(
@@ -1635,7 +2002,7 @@ impl App {
             );
             ui.add_space(14.0);
             let fresh = self.fresh.as_mut().expect("fresh chat");
-            ui.horizontal(|ui| {
+            let mut row = |ui: &mut Ui| {
                 ui.allocate_ui(Vec2::new(180.0, KEY_H), |ui| {
                     if choice(
                         ui,
@@ -1682,7 +2049,12 @@ impl App {
                 };
                 let list = self.agent_models.get(&fresh.agent);
                 model_input(ui, "fresh-model", &mut fresh.model, &hint_text, list);
-            });
+            };
+            if self.compact {
+                ui.horizontal_wrapped(&mut row);
+            } else {
+                ui.horizontal(&mut row);
+            }
         });
         ui.add_space(10.0);
         let agent_ready = o
@@ -1738,7 +2110,7 @@ impl App {
         let height = matches.len() as f32 * 24.0 + 10.0;
         let at = egui::pos2(field.left(), field.top() - height - 4.0);
         let mut picked = None;
-        egui::Area::new(egui::Id::new("slash-menu"))
+        egui::Area::new(ui.id().with("slash-menu"))
             .order(egui::Order::Foreground)
             .fixed_pos(at)
             .show(ui.ctx(), |ui| {
@@ -1881,12 +2253,16 @@ impl App {
         busy: bool,
         hint_text: &str,
     ) -> Option<(String, Vec<foreman_core::Upload>)> {
-        if !self.tray.files.is_empty() {
+        // Files go to the focused tile only: the tray is shared, and it is the tile you are using.
+        let files = self.focused && !self.tray.files.is_empty();
+        if files {
             self.attachments_row(ui);
             ui.add_space(4.0);
         }
-        let edit = prose(ui, &mut self.draft, hint_text, 3);
-        if std::mem::take(&mut self.refocus) {
+        let compact = self.compact;
+        let edit = prose(ui, &mut self.draft, hint_text, if compact { 2 } else { 3 });
+        if self.refocus.is_some() && self.refocus == self.drawing {
+            self.refocus = None;
             edit.request_focus();
         }
         self.slash_menu(ui, edit.rect);
@@ -1900,27 +2276,35 @@ impl App {
         }
         let mut out = None;
         ui.horizontal(|ui| {
-            hint(
-                ui,
-                if busy {
+            let tip = match (compact, busy) {
+                (true, true) => "enter steers, / for commands",
+                (true, false) => "enter sends, / for commands",
+                (false, true) => {
                     "enter steers the agent, shift+enter for a new line, / for commands, drop or paste files"
-                } else {
+                }
+                (false, false) => {
                     "enter sends, shift+enter for a new line, / for commands, drop or paste files"
-                },
-            );
+                }
+            };
+            hint(ui, tip);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let can = ready && (!self.draft.trim().is_empty() || !self.tray.files.is_empty());
+                let sending = self.focused && !self.tray.files.is_empty();
+                let can = ready && (!self.draft.trim().is_empty() || sending);
                 let label = if busy { "steer" } else { "send" };
-                if (ui.add(Key::new(label).solid(READOUT).enabled(can).min_width(100.0)).clicked()
+                let width = if compact { 64.0 } else { 100.0 };
+                if (ui.add(Key::new(label).solid(READOUT).enabled(can).min_width(width)).clicked()
                     || (enter && can))
                     && can
                 {
-                    out = Some((self.draft.trim().to_string(), self.tray.take()));
+                    let files = if self.focused { self.tray.take() } else { Vec::new() };
+                    out = Some((self.draft.trim().to_string(), files));
                     self.draft.clear();
                     self.follow = true;
                 }
-                self.speak_key(ui);
-                if crate::attach::can_pick() {
+                if !compact || self.focused {
+                    self.speak_key(ui);
+                }
+                if crate::attach::can_pick() && !compact {
                     let key = ui.add(Key::new("attach").outline(VALUE));
                     key.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "attach")
@@ -1981,6 +2365,8 @@ impl App {
                 self.notice = Some((false, p.into()));
             } else if let Err(e) = self.voice.start(wake) {
                 self.notice = Some((false, e));
+            } else {
+                self.speaking_in = self.drawing;
             }
         }
         // Escape on a listening composer throws the take away instead of reading it.
@@ -1989,8 +2375,59 @@ impl App {
         }
     }
 
+    /// The header of a chat in a small tile: its state, its name, and the keys that matter.
+    fn tile_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
+        ui.horizontal(|ui| {
+            let (_, word) = status_look(s.status);
+            lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
+            ui.add_space(4.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(Key::new("close").outline(FAULT))
+                    .on_hover_text("stop it and delete this chat")
+                    .clicked()
+                {
+                    self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
+                }
+                if s.status.busy()
+                    && ui.add(Key::new("stop").outline(FAULT)).clicked()
+                    && let Some(c) = &mut self.client
+                {
+                    c.interrupt(s.id);
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    let place = tree.map(|w| format!(" {}", w.label())).unwrap_or_default();
+                    Line::new()
+                        .value(&s.title)
+                        .size(11.5)
+                        .gap(6.0)
+                        .note(format!("{}{place}", s.agent))
+                        .size(10.5)
+                        .elided(ui)
+                        .on_hover_text(format!(
+                            "{}\n{} {}\n{} in, {} out",
+                            s.title,
+                            s.agent,
+                            s.model.as_deref().unwrap_or_default(),
+                            tokens(s.usage.input_tokens + s.usage.cache_read_tokens),
+                            tokens(s.usage.output_tokens)
+                        ));
+                });
+            });
+        });
+    }
+
     fn session_view(&mut self, ui: &mut Ui, s: Session) {
         let tree = self.worktree(s.worktree_id).cloned();
+        if self.compact {
+            self.tile_header(ui, &s, tree.as_ref());
+        } else {
+            self.full_header(ui, &s, tree.as_ref());
+        }
+        self.session_body(ui, s, tree);
+    }
+
+    fn full_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
         ui.horizontal(|ui| {
             let (tint, word) = status_look(s.status);
             let _ = tint;
@@ -2000,7 +2437,7 @@ impl App {
             if let Some(m) = &s.model {
                 line = line.gap(14.0).legend("model").gap(6.0).set(m).size(11.0);
             }
-            if let Some(w) = &tree {
+            if let Some(w) = tree {
                 line = line.gap(14.0).legend("worktree").gap(6.0).value(w.label()).size(11.0);
             }
             if let Some(i) = s.issue_id {
@@ -2046,30 +2483,71 @@ impl App {
                 usage.show(ui);
             });
         });
+    }
+
+    fn session_body(&mut self, ui: &mut Ui, s: Session, tree: Option<Worktree>) {
         ui.add_space(6.0);
 
         // The composer, and the row of attachments above it when there are any.
-        let input_h = 100.0 + if self.tray.files.is_empty() { 0.0 } else { 40.0 };
-        let avail = ui.available_height() - input_h;
+        let files = self.focused && !self.tray.files.is_empty();
+        let input_h = if self.compact { 84.0 } else { 100.0 } + if files { 40.0 } else { 0.0 };
+        let avail = (ui.available_height() - input_h).max(120.0);
         let t = self.transcripts.entry(s.id).or_default();
         let messages = t.messages.clone();
+        // The transcript gets a rect of its own and is clipped to it: something that cannot
+        // wrap (a long link, a table) widens the ui it is drawn in, and in a tile that would
+        // push the composer and the tile's edge along with it.
+        let rect = egui::Rect::from_min_size(
+            ui.cursor().min,
+            Vec2::new(ui.available_width(), avail.min(ui.available_height())),
+        );
+        let mut inner = ui
+            .new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+        inner.set_clip_rect(rect.intersect(ui.clip_rect()));
         let scroll = egui::ScrollArea::vertical()
-            .max_height(avail.max(120.0))
+            .max_height(rect.height())
             .auto_shrink([false, false])
             .stick_to_bottom(self.follow)
-            .show(ui, |ui| {
+            .show(&mut inner, |ui| {
                 ui.set_max_width(ui.available_width());
                 if messages.is_empty() {
                     hint(ui, "no messages yet");
                 }
                 for m in &messages {
-                    self.entry(ui, m, s.id);
+                    // Each entry gets a ui of the column's width, clipped to it, so one with
+                    // something that cannot wrap does not widen the entries after it.
+                    let column = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        Vec2::new(ui.available_width(), f32::INFINITY),
+                    );
+                    let mut one = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(column)
+                            .layout(Layout::top_down(Align::Min)),
+                    );
+                    one.set_clip_rect(
+                        egui::Rect::from_min_max(
+                            column.min,
+                            egui::pos2(column.right(), f32::INFINITY),
+                        )
+                        .intersect(ui.clip_rect()),
+                    );
+                    self.entry(&mut one, m, s.id);
+                    let used = one.min_rect();
+                    ui.allocate_rect(
+                        egui::Rect::from_min_max(
+                            column.min,
+                            egui::pos2(column.right(), used.bottom().max(column.top())),
+                        ),
+                        Sense::hover(),
+                    );
                     ui.add_space(6.0);
                 }
                 if s.status == SessionStatus::Running {
                     hint(ui, "working");
                 }
             });
+        ui.allocate_rect(rect, Sense::hover());
         let at_bottom =
             scroll.state.offset.y + scroll.inner_rect.height() >= scroll.content_size.y - 4.0;
         self.follow = at_bottom;
@@ -2745,6 +3223,7 @@ impl App {
             ),
         };
         let mut done = false;
+        let mut gone = None;
         let m = egui::Modal::new(egui::Id::new("confirm"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -2759,10 +3238,7 @@ impl App {
                                 Confirm::Worktree(id, _, _) => client.remove_worktree(*id, true),
                                 Confirm::Session(id, _) => {
                                     client.delete_session(*id);
-                                    self.transcripts.remove(id);
-                                    if self.session == Some(*id) {
-                                        self.session = None;
-                                    }
+                                    gone = Some(*id);
                                 }
                                 Confirm::Issue(id, _) => client.delete_issue(*id),
                             }
@@ -2774,6 +3250,9 @@ impl App {
                     }
                 });
             });
+        if let Some(id) = gone {
+            self.forget(id);
+        }
         if done || m.should_close() {
             self.confirm = None;
         }
@@ -2799,6 +3278,7 @@ impl App {
         let ctx = ui.ctx().clone();
         self.tick(&ctx);
         let narrow = ctx.content_rect().width() < 720.0;
+        self.narrow = narrow;
 
         egui::Panel::top("header")
             .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin {
@@ -2850,10 +3330,61 @@ impl App {
                 RETRY.saturating_sub(at.elapsed()) + Duration::from_millis(50),
             );
         }
-        if self.current_session().is_some_and(|s| s.status.busy()) {
+        if self.tab == Tab::Chat
+            && self
+                .shown()
+                .into_iter()
+                .any(|id| self.session_by_id(id).is_some_and(|s| s.status.busy()))
+        {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
     }
+}
+
+/// A key for one grid layout, drawn as the tiles it makes.
+fn grid_button(ui: &mut Ui, grid: Grid, on: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(26.0, 22.0), Sense::click());
+    let resp = resp.on_hover_text(grid.about());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            true,
+            on,
+            format!("layout {}", grid.key()),
+        )
+    });
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let tint = if on {
+        READOUT
+    } else if resp.hovered() {
+        VALUE
+    } else {
+        LEGEND
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 2.0, if on { tint.gamma_multiply(0.18) } else { WELL });
+    p.rect_stroke(
+        rect,
+        2.0,
+        Stroke::new(1.0, if on || resp.hovered() { tint } else { ETCH }),
+        egui::StrokeKind::Inside,
+    );
+    let (cols, rows) = grid.dims();
+    let art = rect.shrink2(Vec2::new(6.0, 5.0));
+    let gap = 1.5;
+    let (w, h) = (
+        (art.width() - gap * (cols - 1) as f32) / cols as f32,
+        (art.height() - gap * (rows - 1) as f32) / rows as f32,
+    );
+    for r in 0..rows {
+        for c in 0..cols {
+            let at = art.min + Vec2::new(c as f32 * (w + gap), r as f32 * (h + gap));
+            p.rect_filled(egui::Rect::from_min_size(at, Vec2::new(w, h)), 0.5, tint);
+        }
+    }
+    resp
 }
 
 /// A small spinning arc, for something that is working. Keeps the frame loop going while visible.
@@ -3356,6 +3887,61 @@ mod tests {
             ]
         );
         assert!(status_counts(&[]).is_empty());
+    }
+
+    fn ids(n: usize) -> Vec<SessionId> {
+        (0..n).map(|i| format!("00000000-0000-0000-0000-{:012}", i + 1).parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn a_chat_replaces_the_focused_tile() {
+        let id = ids(6);
+        let mut slots = [Some(id[0]), Some(id[1]), Some(id[2]), Some(id[3])];
+        let at = place(&mut slots, 4, 1, id[4]);
+        assert_eq!(at, 1);
+        assert_eq!(slots, [Some(id[0]), Some(id[4]), Some(id[2]), Some(id[3])]);
+    }
+
+    #[test]
+    fn a_chat_already_on_screen_only_takes_focus() {
+        let id = ids(5);
+        let mut slots = [Some(id[0]), Some(id[1]), Some(id[2]), Some(id[3])];
+        let at = place(&mut slots, 4, 0, id[2]);
+        assert_eq!(at, 2);
+        assert_eq!(slots, [Some(id[0]), Some(id[1]), Some(id[2]), Some(id[3])]);
+    }
+
+    #[test]
+    fn a_chat_in_a_hidden_tile_moves_instead_of_showing_twice() {
+        let id = ids(5);
+        let mut slots = [Some(id[0]), Some(id[1]), None, Some(id[3])];
+        let at = place(&mut slots, 2, 0, id[3]);
+        assert_eq!(at, 0);
+        assert_eq!(slots, [Some(id[3]), Some(id[1]), None, None]);
+    }
+
+    #[test]
+    fn grids_know_their_size() {
+        let sizes: Vec<usize> = Grid::ALL.iter().map(|g| g.slots()).collect();
+        assert_eq!(sizes, vec![1, 2, 2, 4]);
+        for g in Grid::ALL {
+            assert_eq!(Grid::from_key(g.key()), Some(g));
+        }
+    }
+
+    #[test]
+    fn speech_lands_in_the_draft_of_the_tile_that_asked() {
+        let mut app = App::new(&egui::Context::default(), None, None);
+        let (a, b) = (
+            "00000000-0000-0000-0000-000000000001".parse::<SessionId>().unwrap(),
+            "00000000-0000-0000-0000-000000000002".parse::<SessionId>().unwrap(),
+        );
+        app.panes.entry(a).or_default().draft = "first".into();
+        app.speaking_in = Some(Tile::Chat(b));
+        app.add_speech(" hello there ");
+        assert_eq!(app.draft_of(b), "hello there");
+        assert_eq!(app.draft_of(a), "first");
+        assert_eq!(app.refocus, Some(Tile::Chat(b)));
     }
 
     #[test]
