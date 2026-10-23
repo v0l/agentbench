@@ -2580,6 +2580,7 @@ impl App {
             ui.add_space(4.0);
         }
         let compact = self.compact;
+        let narrow = self.narrow;
         // While this tile's speech is being listened to or read, the words are written into the
         // draft for it, so typing or sending now would be overwritten or cut the take short.
         let speaking =
@@ -2642,7 +2643,7 @@ impl App {
                 // Whatever room the keys leave holds the agent's status line.
                 if let Some(session) = session {
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        status_line(ui, session, compact);
+                        status_line(ui, session, compact || narrow);
                     });
                 }
             });
