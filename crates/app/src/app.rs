@@ -18,7 +18,6 @@ use web_time::{Duration, Instant};
 const SIDE_W: f32 = 320.0;
 const RETRY: Duration = Duration::from_secs(3);
 const TREE_INDENT: f32 = 16.0;
-const TAB_TITLE: usize = 32;
 const TREE_X: f32 = 5.0;
 /// The most tiles any grid has.
 const SLOTS: usize = 6;
@@ -1268,12 +1267,8 @@ impl App {
             o.issues.iter().filter(|i| Some(i.project_id) == self.project && i.state.is_open()).count()
         });
         let issues_label = format!("issues {open}");
-        let chat_label = self
-            .current_session()
-            .map(|s| foreman_core::short_title(&s.title, TAB_TITLE))
-            .unwrap_or_else(|| "new chat".to_string());
         let opts: Vec<(Tab, &str)> =
-            vec![(Tab::Chat, chat_label.as_str()), (Tab::Issues, issues_label.as_str())];
+            vec![(Tab::Chat, "agents"), (Tab::Issues, issues_label.as_str())];
         tabs(ui, &mut self.tab, &opts);
     }
 
@@ -2761,6 +2756,37 @@ impl App {
         });
     }
 
+    /// A chat's header on a phone: what and where on the first row, with the stop and close keys,
+    /// then the model and thinking keys and the token counts on a second.
+    fn phone_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
+        self.tile_header(ui, s, tree);
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add(Key::new("model").outline(VALUE))
+                .on_hover_text("switch this chat to another model: low, medium, high or an id")
+                .clicked()
+            {
+                self.draft = "/model ".into();
+            }
+            if toggle(ui, "thinking", self.thinking).clicked() {
+                self.thinking = !self.thinking;
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                Line::new()
+                    .measured(format!(
+                        "{} in",
+                        tokens(s.usage.input_tokens + s.usage.cache_read_tokens)
+                    ))
+                    .size(11.0)
+                    .gap(8.0)
+                    .measured(format!("{} out", tokens(s.usage.output_tokens)))
+                    .size(11.0)
+                    .show(ui);
+            });
+        });
+    }
+
     fn session_view(&mut self, ui: &mut Ui, s: Session) {
         let tree = self.worktree(s.worktree_id).cloned();
         if self.compact {
@@ -2772,6 +2798,9 @@ impl App {
     }
 
     fn full_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
+        if self.narrow {
+            return self.phone_header(ui, s, tree);
+        }
         let project = self.project_name(s.project_id);
         ui.horizontal(|ui| {
             let (tint, word) = status_look(s.status);

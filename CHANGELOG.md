@@ -54,6 +54,8 @@ All notable changes to Foreman are listed here. The format follows
   stacks onto three rows, dialogs fit the screen, and the app keeps clear of the status and
   gesture bars.
 
+- The main tabs read **agents** and **issues**, not the open chat's title.
+
 ### Fixed
 - A long draft scrolls inside the composer instead of growing it until the send, speak and attach keys are pushed out of the window.
 - A long speech model name no longer pushes the dropdown and its help icon out of the settings dialog.

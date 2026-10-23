@@ -799,6 +799,20 @@ fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
 }
 
 #[test]
+fn on_a_phone_an_open_chat_fits_the_screen() {
+    let rig = rig();
+    let mut h = harness_at(rig.url.clone(), [450.0, 1000.0]);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(3);
+    shot(&mut h, "phone-chat");
+    h.get_by_label("send");
+}
+
+#[test]
 fn settings_pair_a_phone_with_a_code_for_the_external_address() {
     let rig = rig();
     let mut h = harness(rig.url.clone());
