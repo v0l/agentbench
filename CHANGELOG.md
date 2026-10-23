@@ -6,6 +6,13 @@ All notable changes to Foreman are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- A grid of chats: the keys beside **settings** tile the chat area as 1, 2x1, 1x2 or 2x2.
+  Opening a chat puts it in the first tile, pushes the others back one place and drops the
+  last out of view, so there is nothing to assign by hand. Opening a chat that is already
+  on screen only focuses it. Each tile keeps its own draft; the grid and the chats in it
+  are remembered between runs.
+
 ## [0.1.1] - 2026-10-23
 
 ### Changed

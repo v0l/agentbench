@@ -1,3 +1,4 @@
+use eframe::Storage as _;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use foreman::App;
@@ -1122,4 +1123,109 @@ fn escape_stops_the_agent_working_in_the_open_chat() {
         h.step();
         std::thread::sleep(Duration::from_millis(30));
     }
+}
+
+fn extra_chats(rig: &Rig, n: usize) -> Vec<foreman_core::Session> {
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    (0..n)
+        .map(|i| rig.store.add_session(main.id, "echo", &format!("extra {i}"), None, None).unwrap())
+        .collect()
+}
+
+#[test]
+fn opening_chats_fills_a_grid_newest_first_and_pushes_the_oldest_out() {
+    use foreman::app::Grid;
+    let rig = rig();
+    let more = extra_chats(&rig, 3);
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_grid(Grid::Quad);
+    h.run_steps(2);
+    let all = rig.store.sessions().unwrap();
+    assert_eq!(all.len(), 6);
+    for s in all.iter().take(5) {
+        h.state_mut().open_session(s.id, s.project_id);
+    }
+    h.run_steps(3);
+    let order: Vec<_> = all.iter().take(5).rev().map(|s| s.id).collect();
+    assert_eq!(h.state().shown(), order[..4].to_vec(), "four tiles, the newest first");
+    assert_eq!(h.state().open(), Some(order[0]), "the newest chat has focus");
+    shot(&mut h, "grid");
+
+    // Opening one that is on screen moves focus and nothing else.
+    h.state_mut().open_session(order[2], all[0].project_id);
+    h.run_steps(2);
+    assert_eq!(h.state().shown(), order[..4].to_vec());
+    assert_eq!(h.state().open(), Some(order[2]));
+
+    // The one that dropped off comes back at the front and pushes the last one off.
+    h.state_mut().open_session(order[4], all[0].project_id);
+    h.run_steps(2);
+    assert_eq!(h.state().shown(), vec![order[4], order[0], order[1], order[2]]);
+    let _ = more;
+}
+
+#[test]
+fn clicking_a_chat_in_the_list_takes_the_first_tile() {
+    use foreman::app::Grid;
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_grid(Grid::Columns);
+    h.run_steps(3);
+    let hello = rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let fix = rig
+        .store
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.title == "#3 Fix the login loop")
+        .unwrap();
+    click(&mut h, 100.0, 142.0);
+    h.run_steps(3);
+    click(&mut h, 120.0, 208.0);
+    h.run_steps(3);
+    assert_eq!(h.state().shown(), vec![fix.id, hello.id]);
+    shot(&mut h, "columns");
+}
+
+#[test]
+fn closing_a_tiled_chat_leaves_the_others_and_focuses_one() {
+    use foreman::app::Grid;
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_grid(Grid::Rows);
+    let all = rig.store.sessions().unwrap();
+    h.state_mut().open_session(all[0].id, all[0].project_id);
+    h.state_mut().open_session(all[1].id, all[1].project_id);
+    h.run_steps(3);
+    assert_eq!(h.state().shown(), vec![all[1].id, all[0].id]);
+    h.state_mut().forget_chat(all[1].id);
+    h.run_steps(2);
+    assert_eq!(h.state().shown(), vec![all[0].id]);
+    assert_eq!(h.state().open(), Some(all[0].id), "focus moves to a chat still on screen");
+}
+
+#[test]
+fn the_grid_and_its_chats_are_remembered() {
+    use foreman::app::Grid;
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_grid(Grid::Quad);
+    let all = rig.store.sessions().unwrap();
+    h.state_mut().open_session(all[0].id, all[0].project_id);
+    h.state_mut().open_session(all[1].id, all[1].project_id);
+    let mut saved = Mem::default();
+    h.state().store(&mut saved);
+    assert_eq!(saved.get_string("grid").as_deref(), Some("2x2"));
+    assert_eq!(h.state().recent(), &[all[1].id, all[0].id]);
+    let again = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(|cc| {
+        saved.0.insert("url".into(), rig.url.clone());
+        saved.0.insert("token".into(), TOKEN.into());
+        App::new(&cc.egui_ctx, Some(&saved), None)
+    });
+    assert_eq!(again.state().grid(), Grid::Quad);
+    assert_eq!(again.state().recent(), &[all[1].id, all[0].id]);
 }

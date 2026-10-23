@@ -50,6 +50,16 @@ database.
 Data lives in `$FOREMAN_HOME` (default `~/.local/share/foreman`):
 `foreman.db` and an optional `foreman.toml`.
 
+## Watching several chats
+
+The four keys beside **settings** tile the chat area: one chat, two side by side, two
+stacked, or a 2x2 grid. There is nothing to assign. Click a chat in the list and it takes
+the first tile, the others move back a place and the one at the end drops out of view
+(it is still queued, and comes back when you click it). Clicking a chat already on screen
+just focuses it, so tiles never shuffle under you while you jump between active agents.
+The focused tile has the bright border; it is the one that gets dropped or pasted files and
+that **new chat** replaces. Each tile has its own draft. Narrow windows show one chat.
+
 ## Agents
 
 `foreman` is the built in agent: it talks to any OpenAI compatible server, works
