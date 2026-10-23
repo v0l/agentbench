@@ -799,6 +799,23 @@ fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
 }
 
 #[test]
+fn settings_pair_a_phone_with_a_code_for_the_external_address() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("settings").click();
+    h.run_steps(3);
+    // This window reaches the server on loopback, which a phone cannot, so there is no code yet.
+    assert!(h.state().settings_pairing().is_none());
+    h.state_mut().settings_set_external("https://foreman.harkin.network");
+    h.run_steps(3);
+    let p = h.state().settings_pairing().expect("a code once the address is given");
+    assert_eq!(p.url, "https://foreman.harkin.network");
+    assert_eq!(p.token, TOKEN);
+    shot(&mut h, "settings-pair");
+}
+
+#[test]
 fn the_settings_key_opens_one_dialog_for_server_look_and_agent() {
     let rig = rig();
     let mut h = harness(rig.url.clone());

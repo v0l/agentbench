@@ -220,6 +220,12 @@ struct Settings {
     place: Where,
     url: String,
     token: String,
+    /// The address a phone reaches this server at, for the pairing code.
+    external: String,
+    /// The token of the server this window is connected to, which the code carries.
+    pair_token: String,
+    /// The address of the connected server, used for the code when no other is given.
+    pair_url: String,
     face: Typeface,
     agent_error: Option<String>,
     asking_agent: bool,
@@ -255,6 +261,8 @@ pub struct App {
     font_load: Option<std::sync::mpsc::Receiver<egui::FontDefinitions>>,
     local: Option<std::sync::Arc<LocalServer>>,
     remote: bool,
+    /// The address a phone reaches the server at, for the pairing code. Kept on this device.
+    external: String,
     starting: Option<std::sync::mpsc::Receiver<Result<Server, String>>>,
     overview: Option<Overview>,
     cursor: Option<Id>,
@@ -271,6 +279,9 @@ pub struct App {
     narrow: bool,
     /// Whether the project list is open over a narrow window, where it has no panel of its own.
     drawer: bool,
+    /// The last link the app was opened with, so it is paired with once.
+    last_link: Option<String>,
+    link_checked: Instant,
     /// The chat in each tile. Tiles past the grid's size are hidden but remembered.
     slots: [Option<SessionId>; SLOTS],
     /// The focused tile: the one a chat opened from the list replaces.
@@ -348,6 +359,7 @@ impl App {
             font_load: None,
             local: local.map(std::sync::Arc::new),
             remote,
+            external: storage.and_then(|s| s.get_string("external")).unwrap_or_default(),
             starting: None,
             overview: None,
             cursor: None,
@@ -366,6 +378,8 @@ impl App {
                 .unwrap_or(Grid::Single),
             narrow: false,
             drawer: false,
+            last_link: None,
+            link_checked: Instant::now() - Duration::from_secs(5),
             slots: {
                 let mut slots = [None; SLOTS];
                 let saved = storage.and_then(|s| s.get_string("tiles")).unwrap_or_default();
@@ -427,6 +441,7 @@ impl App {
     pub fn store(&self, storage: &mut dyn eframe::Storage) {
         self.face.save(storage);
         storage.set_string("remote", self.remote.to_string());
+        storage.set_string("external", self.external.clone());
         storage.set_string("thinking", self.thinking.to_string());
         self.speech.save(storage);
         storage.set_string("grid", self.grid.key().to_string());
@@ -506,6 +521,28 @@ impl App {
         out
     }
 
+    /// Connect to the server a pairing link names, and keep it for next time.
+    pub fn pair(&mut self, ctx: &egui::Context, with: foreman_core::pairing::Pairing) {
+        self.settings = None;
+        self.remote = true;
+        self.connect_to(ctx, Server { url: with.url.trim().to_string(), token: with.token.trim().to_string() });
+        self.notice = Some((true, format!("paired with {}", foreman_core::host_of(&with.url))));
+    }
+
+    /// Reads the link the app was opened with, when it is new, and pairs with it.
+    fn open_launch_link(&mut self, ctx: &egui::Context) {
+        let Some(text) = crate::system::launch_link() else {
+            return;
+        };
+        if self.last_link.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        self.last_link = Some(text.clone());
+        if let Some(p) = foreman_core::pairing::Pairing::parse(&text) {
+            self.pair(ctx, p);
+        }
+    }
+
     /// Whether the project list is open over a narrow window.
     pub fn drawer_open(&self) -> bool {
         self.drawer
@@ -577,6 +614,17 @@ impl App {
             st.url = url.into();
             st.token = token.into();
         }
+    }
+
+    pub fn settings_set_external(&mut self, external: &str) {
+        if let Some(st) = &mut self.settings {
+            st.external = external.into();
+        }
+    }
+
+    /// The link the settings' pairing code holds, if it shows one.
+    pub fn settings_pairing(&self) -> Option<foreman_core::pairing::Pairing> {
+        self.settings.as_ref().and_then(pairing_of)
     }
 
     pub fn settings_set_text_size(&mut self, size: f32) {
@@ -1000,6 +1048,11 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         self.poll_starting(ctx);
+        if cfg!(target_os = "android") && self.link_checked.elapsed() > Duration::from_secs(1) {
+            self.link_checked = Instant::now();
+            self.open_launch_link(ctx);
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         if let Some(found) = self.font_scan.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.font_scan = None;
             self.installed = std::sync::Arc::new(found);
@@ -1245,6 +1298,9 @@ impl App {
             place: if self.remote || self.local.is_none() { Where::Remote } else { Where::Local },
             url,
             token,
+            external: self.external.clone(),
+            pair_token: self.client.as_ref().map(|c| c.server.token.clone()).unwrap_or_default(),
+            pair_url: self.client.as_ref().map(|c| c.server.url.clone()).unwrap_or_default(),
             face: self.face.clone(),
             agent_error: None,
             asking_agent,
@@ -1324,6 +1380,8 @@ impl App {
                 ui.set_width(ui.available_width() - 12.0);
                 if st.page == Page::General {
                     server_section(ui, &mut st, has_local);
+                    ui.add_space(14.0);
+                    pair_section(ui, &mut st);
                     ui.add_space(14.0);
                     appearance_section(ui, &mut st.face, &installed, scanning);
                 } else if st.page == Page::Speech {
@@ -1539,6 +1597,7 @@ impl App {
             }
         }
         if save {
+            self.external = st.external.trim().to_string();
             self.speech = st.speech.clone();
             if st.face != self.face {
                 self.face = st.face.clone();
@@ -3541,7 +3600,12 @@ impl App {
             .show(ui, |ui| self.header(ui));
         if let Some((ok, text)) = self.notice.clone() {
             egui::Panel::bottom("notice")
-                .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin::symmetric(12, 4)))
+                .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin {
+                    left: 12,
+                    right: 12,
+                    top: 4,
+                    bottom: 4 + crate::system::bottom_inset(&ctx) as i8,
+                }))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         status(ui, ok, &text);
@@ -3762,7 +3826,14 @@ fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
                     "address",
                     "Where the server listens, through whatever tunnel or DNAT you put in front of it.",
                     |ui| {
-                        field(ui, &mut st.url, "https://foreman.example.com");
+                        let r = field(ui, &mut st.url, "https://foreman.example.com");
+                        // A pairing link pasted here fills in the address and the token.
+                        if r.changed()
+                            && let Some(p) = foreman_core::pairing::Pairing::parse(&st.url)
+                        {
+                            st.url = p.url;
+                            st.token = p.token;
+                        }
                     },
                 );
                 row_help(ui, "token", "Printed by `foreman token` on that machine.", |ui| {
@@ -3771,6 +3842,58 @@ fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
             }
         }
     });
+}
+
+/// A code for a phone to scan, which holds the server's address and token.
+fn pair_section(ui: &mut Ui, st: &mut Settings) {
+    section(ui, "pair a phone", "scan to connect", |ui| {
+        row_help(
+            ui,
+            "external address",
+            "Where a phone reaches this server from outside this machine: a public address, a tunnel, or the machine's address on your network. Kept on this device.",
+            |ui| {
+                field(ui, &mut st.external, "https://foreman.example.com");
+            },
+        );
+        match pairing_of(st) {
+            Some(p) => {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    crate::pair::show(ui, &p.link(), 220.0_f32.min(ui.available_width()));
+                });
+                ui.add_space(6.0);
+                hint(
+                    ui,
+                    "Scan it with the phone's camera and open it in foreman. The code holds the server's token, so keep it to yourself.",
+                );
+            }
+            None if st.pair_token.is_empty() => {
+                hint(ui, "Connect to a server first: the code carries its token.");
+            }
+            None => hint(ui, "Give the address a phone reaches this server at to get a code."),
+        }
+    });
+}
+
+/// What the pairing code says: the external address, or the connected server's when that one is
+/// not just this machine, with the connected server's token.
+fn pairing_of(st: &Settings) -> Option<foreman_core::pairing::Pairing> {
+    let given = st.external.trim();
+    let url = if !given.is_empty() {
+        given.to_string()
+    } else if !is_loopback(&st.pair_url) {
+        st.pair_url.trim().to_string()
+    } else {
+        return None;
+    };
+    (!st.pair_token.trim().is_empty() && !url.is_empty())
+        .then(|| foreman_core::pairing::Pairing { url, token: st.pair_token.trim().to_string() })
+}
+
+fn is_loopback(url: &str) -> bool {
+    let host = foreman_core::host_of(url);
+    let host = host.rsplit_once(':').map_or(host.as_str(), |(h, _)| h);
+    host.is_empty() || matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1" | "0.0.0.0")
 }
 
 fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {

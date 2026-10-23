@@ -3,6 +3,7 @@ pub mod attach;
 pub mod client;
 pub mod fonts;
 mod form;
+mod pair;
 mod picker;
 mod system;
 pub mod voice;
@@ -80,6 +81,7 @@ fn android_main(app: android_activity::AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
+    voice::android::remember_activity(app.activity_as_ptr());
     let opts = eframe::NativeOptions { android_app: Some(app), ..Default::default() };
     let _ = eframe::run_native(
         "foreman",

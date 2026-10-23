@@ -11,15 +11,25 @@ const PERMISSION: &str = "android.permission.RECORD_AUDIO";
 /// `PackageManager.PERMISSION_GRANTED`.
 const GRANTED: i32 = 0;
 
+/// The running Activity, kept when the app starts. `ndk_context` hands out the Application,
+/// which cannot ask for permissions or say what launched the app.
+static ACTIVITY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Remember the Activity for the rest of the process. The pointer is a global reference that
+/// `android-activity` keeps alive until the app is dropped, which is after `run_native` returns.
+pub(crate) fn remember_activity(raw: *mut std::ffi::c_void) {
+    ACTIVITY.store(raw as usize, std::sync::atomic::Ordering::Release);
+}
+
 pub(crate) fn with_activity<R>(
     f: impl for<'j> FnOnce(&mut Env<'j>, &JObject<'j>) -> jni::errors::Result<R>,
 ) -> Result<R, String> {
     let ctx = ndk_context::android_context();
-    if ctx.vm().is_null() || ctx.context().is_null() {
+    let raw = ACTIVITY.load(std::sync::atomic::Ordering::Acquire) as jni::sys::jobject;
+    if ctx.vm().is_null() || raw.is_null() {
         return Err("no Android activity yet".into());
     }
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) };
-    let raw = ctx.context() as jni::sys::jobject;
     vm.attach_current_thread(|env: &mut Env<'_>| {
         let activity = unsafe { JObject::from_raw(env, raw) };
         f(env, &activity)

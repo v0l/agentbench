@@ -53,6 +53,7 @@ web-time = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 base64 = "0.23"
 eframe = { version = "0.35", default-features = false, features = ["default_fonts", "wgpu", "persistence"] }
+qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
@@ -107,7 +108,22 @@ label = "Foreman"
 # A foreman server on the LAN is plain http, which Android refuses unless the app says it may.
 uses_cleartext_traffic = true
 
+[package.metadata.android.application.activity]
+# One instance, so a scanned code opens the app that is already running instead of a second copy.
+launch_mode = "singleTask"
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+categories = ["android.intent.category.LAUNCHER"]
+
+# `foreman://pair?url=…&token=…`, which the pairing code holds.
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
+data = [{ scheme = "foreman", host = "pair" }]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 egui_kittest = { version = "0.35", features = ["wgpu", "snapshot", "eframe"] }
 tempfile = "3"
+rqrr = "0.11.0"

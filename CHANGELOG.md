@@ -46,6 +46,14 @@ All notable changes to Foreman are listed here. The format follows
   `/props`, Ollama's `/api/show`), or 128k when it does not say; there is no setting for it.
   `pi`, `claude` and `codex` compact themselves.
 
+- Pair a phone: settings has a **pair a phone** section. Give it the address a phone reaches the
+  server at and it shows a QR code holding `foreman://pair?url=…&token=…`. Opening that link in
+  the Android app connects it, and pasting one into the address field fills in the address and
+  token.
+- On a narrow window (a phone) the project list is a drawer behind a hamburger, the header
+  stacks onto three rows, dialogs fit the screen, and the app keeps clear of the status and
+  gesture bars.
+
 ### Fixed
 - A long draft scrolls inside the composer instead of growing it until the send, speak and attach keys are pushed out of the window.
 - A long speech model name no longer pushes the dropdown and its help icon out of the settings dialog.
