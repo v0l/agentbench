@@ -1455,8 +1455,11 @@ impl App {
                 if st.page == Page::General {
                     server_section(ui, &mut st, has_local);
                     ui.add_space(14.0);
-                    pair_section(ui, &mut st);
-                    ui.add_space(14.0);
+                    // A phone is what scans the code, so it has no use for showing one.
+                    if !cfg!(target_os = "android") {
+                        pair_section(ui, &mut st);
+                        ui.add_space(14.0);
+                    }
                     appearance_section(ui, &mut st.face, &installed, scanning);
                     ui.add_space(14.0);
                     section(ui, "chats", "kept on this device", |ui| {
