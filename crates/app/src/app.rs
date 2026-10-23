@@ -19,8 +19,8 @@ const RETRY: Duration = Duration::from_secs(3);
 const TREE_INDENT: f32 = 16.0;
 const TAB_TITLE: usize = 32;
 const TREE_X: f32 = 5.0;
-/// How many chats are remembered for the grid to bring back when it grows.
-const RECENT: usize = 12;
+/// The most tiles any grid has.
+const SLOTS: usize = 4;
 /// The space between tiles of the grid.
 const TILE_GAP: f32 = 8.0;
 
@@ -30,8 +30,7 @@ enum Tab {
     Issues,
 }
 
-/// How the chat area is tiled. The chats shown are the most recently opened ones, so
-/// opening another pushes the rest back a place and the last one drops out of view.
+/// How the chat area is tiled. One tile is focused; opening a chat replaces what it shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Grid {
     /// One chat filling the area.
@@ -89,9 +88,11 @@ impl Grid {
 /// What fills one tile of the grid.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Tile {
-    /// The form for starting a chat.
+    /// The form for starting a chat, in the focused tile when it has no chat.
     New,
     Chat(SessionId),
+    /// A tile with nothing in it.
+    Empty,
 }
 
 /// What is typed into a chat but not yet sent, kept per chat so each tile has its own.
@@ -106,15 +107,18 @@ impl Default for Pane {
     }
 }
 
-/// Puts `sid` first in the queue of recent chats. A chat already among the first `shown`
-/// stays where it is, so clicking one that is on screen never shuffles the tiles.
-fn bring_forward(recent: &mut Vec<SessionId>, sid: SessionId, shown: usize) {
-    if recent.iter().take(shown).any(|x| *x == sid) {
-        return;
+/// Opens `sid` in the grid: a chat already on screen is only focused, and any other
+/// replaces what the focused tile shows. Returns the tile that ends up focused.
+fn place(slots: &mut [Option<SessionId>], shown: usize, focus: usize, sid: SessionId) -> usize {
+    if let Some(at) = slots.iter().take(shown).position(|x| *x == Some(sid)) {
+        return at;
     }
-    recent.retain(|x| *x != sid);
-    recent.insert(0, sid);
-    recent.truncate(RECENT);
+    // The chat may sit in a hidden tile; it lives in one place only.
+    for x in slots.iter_mut().filter(|x| **x == Some(sid)) {
+        *x = None;
+    }
+    slots[focus] = Some(sid);
+    focus
 }
 
 #[derive(Clone, PartialEq)]
@@ -250,8 +254,10 @@ pub struct App {
     session: Option<SessionId>,
     grid: Grid,
     narrow: bool,
-    /// Chats in the order they were opened, newest first. The first few are on screen.
-    recent: Vec<SessionId>,
+    /// The chat in each tile. Tiles past the grid's size are hidden but remembered.
+    slots: [Option<SessionId>; SLOTS],
+    /// The focused tile: the one a chat opened from the list replaces.
+    focus_at: usize,
     panes: HashMap<SessionId, Pane>,
     /// The form for a new chat has its own draft, as it has no session to key one by.
     new_pane: Pane,
@@ -340,15 +346,19 @@ impl App {
                 .and_then(|k| Grid::from_key(&k))
                 .unwrap_or(Grid::Single),
             narrow: false,
-            recent: storage
-                .and_then(|s| s.get_string("recent"))
-                .map(|r| {
-                    r.split(',')
-                        .filter_map(|id| id.parse::<SessionId>().ok())
-                        .take(RECENT)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            slots: {
+                let mut slots = [None; SLOTS];
+                let saved = storage.and_then(|s| s.get_string("tiles")).unwrap_or_default();
+                for (slot, id) in slots.iter_mut().zip(saved.split(',')) {
+                    *slot = id.parse::<SessionId>().ok();
+                }
+                slots
+            },
+            focus_at: storage
+                .and_then(|s| s.get_string("focus"))
+                .and_then(|f| f.parse::<usize>().ok())
+                .filter(|f| *f < SLOTS)
+                .unwrap_or(0),
             panes: HashMap::new(),
             new_pane: Pane::default(),
             compact: false,
@@ -399,8 +409,10 @@ impl App {
         storage.set_string("thinking", self.thinking.to_string());
         self.speech.save(storage);
         storage.set_string("grid", self.grid.key().to_string());
-        let recent: Vec<String> = self.recent.iter().map(|s| s.to_string()).collect();
-        storage.set_string("recent", recent.join(","));
+        let tiles: Vec<String> =
+            self.slots.iter().map(|s| s.map(|s| s.to_string()).unwrap_or_default()).collect();
+        storage.set_string("tiles", tiles.join(","));
+        storage.set_string("focus", self.focus_at.to_string());
         if let Some(c) = self.client.as_ref().filter(|_| self.remote) {
             storage.set_string("url", c.server.url.clone());
             storage.set_string("token", c.server.token.clone());
@@ -695,64 +707,45 @@ impl App {
 
     pub fn set_grid(&mut self, grid: Grid) {
         self.grid = grid;
-        self.keep_focus_shown();
+        // A tile that is hidden cannot stay focused: its chat moves to the first tile.
+        let n = self.grid_now().slots();
+        if self.focus_at >= n {
+            self.slots.swap(0, self.focus_at);
+            self.focus_at = 0;
+        }
         self.fetch_shown();
+    }
+
+    /// The focused tile, which stays inside the grid.
+    fn focus_slot(&self) -> usize {
+        self.focus_at.min(self.grid_now().slots() - 1)
     }
 
     /// What each tile of the chat area shows, first tile first.
     fn tiles(&self) -> Vec<Tile> {
-        let slots = self.grid_now().slots();
-        if slots == 1 {
-            return vec![self.session.map_or(Tile::New, Tile::Chat)];
-        }
-        let mut out = Vec::with_capacity(slots);
-        // A chat being started takes the first tile until it exists, then it is the newest.
-        if self.session.is_none() || self.fresh.is_some() {
-            out.push(Tile::New);
-        }
-        let room = slots - out.len();
-        out.extend(self.recent.iter().take(room).map(|s| Tile::Chat(*s)));
-        out
-    }
-
-    /// The chats on screen, newest first.
-    pub fn shown(&self) -> Vec<SessionId> {
-        self.tiles()
-            .into_iter()
-            .filter_map(|t| match t {
-                Tile::Chat(s) => Some(s),
-                Tile::New => None,
+        let focus = self.focus_slot();
+        (0..self.grid_now().slots())
+            .map(|i| match self.slots[i] {
+                Some(s) => Tile::Chat(s),
+                None if i == focus => Tile::New,
+                None => Tile::Empty,
             })
             .collect()
+    }
+
+    /// The chats on screen, first tile first.
+    pub fn shown(&self) -> Vec<SessionId> {
+        self.slots[..self.grid_now().slots()].iter().flatten().copied().collect()
+    }
+
+    /// The focused tile, counting from 0 in reading order.
+    pub fn focused_tile(&self) -> usize {
+        self.focus_slot()
     }
 
     /// Forgets a chat that has been deleted, as closing it does.
     pub fn forget_chat(&mut self, sid: SessionId) {
         self.forget(sid);
-    }
-
-    /// The most recently opened chats, the first few of which are on screen.
-    pub fn recent(&self) -> &[SessionId] {
-        &self.recent
-    }
-
-    /// Makes sure the focused chat has a tile after the grid shrank.
-    fn keep_focus_shown(&mut self) {
-        if self.grid_now().slots() == 1 {
-            return;
-        }
-        match self.session {
-            Some(s) if !self.tiles().contains(&Tile::Chat(s)) => {
-                self.recent.retain(|x| *x != s);
-                self.recent.insert(0, s);
-            }
-            None if self.fresh.is_none() => {
-                if let Some(first) = self.recent.first().copied() {
-                    self.focus(first);
-                }
-            }
-            _ => {}
-        }
     }
 
     fn fetch_shown(&mut self) {
@@ -761,31 +754,35 @@ impl App {
         }
     }
 
-    /// Focus moves to a chat that is already on screen, without moving any tile.
-    fn focus(&mut self, sid: SessionId) {
-        if self.session == Some(sid) {
+    /// The chat in tile `at`, if it has one.
+    pub fn tile_chat(&self, at: usize) -> Option<SessionId> {
+        self.slots.get(at).copied().flatten()
+    }
+
+    /// Moves focus to a tile. Its chat, if any, becomes the open one.
+    pub fn focus_tile(&mut self, at: usize) {
+        self.focus_at = at;
+        let next = self.slots[at];
+        if self.session == next {
             return;
         }
-        self.session = Some(sid);
+        self.session = next;
         if self.fresh.is_none()
-            && let Some(p) = self.session_by_id(sid).map(|s| s.project_id)
+            && let Some(p) = next.and_then(|s| self.session_by_id(s)).map(|s| s.project_id)
         {
             self.project = Some(p);
         }
     }
 
-    /// A chat is gone: drop what is kept for it, and in a grid focus another tile.
+    /// A chat is gone: drop what is kept for it. Its tile is left empty.
     fn forget(&mut self, sid: SessionId) {
-        self.recent.retain(|x| *x != sid);
+        for x in self.slots.iter_mut().filter(|x| **x == Some(sid)) {
+            *x = None;
+        }
         self.panes.remove(&sid);
         self.transcripts.remove(&sid);
         if self.session == Some(sid) {
             self.session = None;
-            if self.grid_now().slots() > 1
-                && let Some(next) = self.recent.first().copied()
-            {
-                self.focus(next);
-            }
         }
     }
 
@@ -804,21 +801,20 @@ impl App {
                 if self.session.is_some_and(|s| !o.sessions.iter().any(|x| x.id == s)) {
                     self.session = None;
                 }
-                self.recent.retain(|id| o.sessions.iter().any(|x| x.id == *id));
+                for x in self.slots.iter_mut() {
+                    if x.is_some_and(|s| !o.sessions.iter().any(|y| y.id == s)) {
+                        *x = None;
+                    }
+                }
                 self.panes.retain(|id, _| o.sessions.iter().any(|x| x.id == *id));
                 // Ids can be reused once a chat is deleted, so a cached transcript must not
                 // outlive its session or the next chat to take the id would show it.
                 self.transcripts.retain(|id, _| o.sessions.iter().any(|x| x.id == *id));
                 self.overview = Some(o);
                 self.cursor = Some(cursor);
-                // With room for several chats, a window that has none focused (just started,
-                // or its chat was closed) lands on the newest instead of a blank form.
-                if self.session.is_none()
-                    && self.fresh.is_none()
-                    && self.grid_now().slots() > 1
-                    && let Some(first) = self.recent.first().copied()
-                {
-                    self.focus(first);
+                // A window just started gets back the chat of the tile that was focused.
+                if self.session.is_none() && self.fresh.is_none() {
+                    self.session = self.slots[self.focus_slot()];
                 }
                 self.fetch_shown();
                 if let Some(iid) = self.issue
@@ -1455,6 +1451,9 @@ impl App {
             return;
         };
         self.project = Some(project);
+        // The form takes the focused tile; the chat that was there is only closed to view.
+        let at = self.focus_slot();
+        self.slots[at] = None;
         self.session = None;
         self.tab = Tab::Chat;
         self.new_pane.draft.clear();
@@ -1759,10 +1758,10 @@ impl App {
         self.tab = Tab::Chat;
         self.fresh = None;
         self.panes.entry(sid).or_default().follow = true;
-        // In a grid the chat takes the first tile and the rest move back one place, the last
-        // dropping out of view. One already on screen is only focused, so tiles hold still.
-        let shown = self.shown().len();
-        bring_forward(&mut self.recent, sid, shown);
+        // The chat replaces the one in the focused tile. One already on screen is only focused.
+        let shown = self.grid_now().slots();
+        let focus = self.focus_slot();
+        self.focus_at = place(&mut self.slots, shown, focus, sid);
         self.fetch_messages(sid);
     }
 
@@ -1937,11 +1936,10 @@ impl App {
     }
 
     fn chat(&mut self, ui: &mut Ui) {
-        let tiles = self.tiles();
         if self.grid_now().slots() == 1 {
             self.focused = true;
             self.compact = false;
-            let tile = tiles[0];
+            let tile = self.tiles()[0];
             self.in_pane(tile, |app| app.tile(ui, tile));
             return;
         }
@@ -1949,52 +1947,37 @@ impl App {
         let area = ui.available_rect_before_wrap();
         let w = (area.width() - TILE_GAP * (cols - 1) as f32) / cols as f32;
         let h = (area.height() - TILE_GAP * (rows - 1) as f32) / rows as f32;
-        for i in 0..cols * rows {
-            let (col, row) = ((i % cols) as f32, (i / cols) as f32);
-            let rect = egui::Rect::from_min_size(
-                area.min + Vec2::new(col * (w + TILE_GAP), row * (h + TILE_GAP)),
-                Vec2::new(w, h),
-            );
-            let tile = tiles.get(i).copied();
-            let focused = match tile {
-                Some(Tile::Chat(s)) => self.session == Some(s),
-                Some(Tile::New) => self.session.is_none(),
-                None => false,
-            };
-            if ui.rect_contains_pointer(rect)
-                && ui.input(|i| i.pointer.any_pressed())
-                && let Some(t) = tile
-            {
-                match t {
-                    Tile::Chat(s) => self.focus(s),
-                    Tile::New => self.session = None,
-                }
-            }
-            let focused = focused
-                || match tile {
-                    Some(Tile::Chat(s)) => self.session == Some(s),
-                    Some(Tile::New) => self.session.is_none(),
-                    None => false,
-                };
+        let rects: Vec<egui::Rect> = (0..cols * rows)
+            .map(|i| {
+                let (col, row) = ((i % cols) as f32, (i / cols) as f32);
+                egui::Rect::from_min_size(
+                    area.min + Vec2::new(col * (w + TILE_GAP), row * (h + TILE_GAP)),
+                    Vec2::new(w, h),
+                )
+            })
+            .collect();
+        // Pressing anywhere in a tile focuses it.
+        if ui.input(|i| i.pointer.any_pressed())
+            && let Some(at) = rects.iter().position(|r| ui.rect_contains_pointer(*r))
+            && at != self.focus_slot()
+        {
+            self.focus_tile(at);
+        }
+        let tiles = self.tiles();
+        for (i, (rect, tile)) in rects.into_iter().zip(tiles).enumerate() {
+            let focused = i == self.focus_slot();
             let edge = if focused { READOUT.gamma_multiply(0.75) } else { ETCH };
             ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
-            let inner = rect.shrink(8.0);
             let mut child = ui.new_child(
                 egui::UiBuilder::new()
-                    .id_salt(("tile", tile))
-                    .max_rect(inner)
+                    .id_salt(("tile", i, tile))
+                    .max_rect(rect.shrink(8.0))
                     .layout(Layout::top_down(Align::Min)),
             );
             child.set_clip_rect(rect.shrink(1.0).intersect(ui.clip_rect()));
             self.focused = focused;
             self.compact = true;
-            match tile {
-                Some(t) => self.in_pane(t, |app| app.tile(&mut child, t)),
-                None => {
-                    child.add_space(12.0);
-                    hint(&mut child, "open a chat from the list to fill this tile");
-                }
-            }
+            self.in_pane(tile, |app| app.tile(&mut child, tile));
             self.compact = false;
             self.focused = true;
         }
@@ -2007,6 +1990,7 @@ impl App {
         let pane = match tile {
             Tile::Chat(s) => self.panes.remove(&s).unwrap_or_default(),
             Tile::New => std::mem::take(&mut self.new_pane),
+            Tile::Empty => Pane::default(),
         };
         let draft = std::mem::replace(&mut self.draft, pane.draft);
         let follow = std::mem::replace(&mut self.follow, pane.follow);
@@ -2022,6 +2006,7 @@ impl App {
                 self.panes.insert(s, pane);
             }
             Tile::New => self.new_pane = pane,
+            Tile::Empty => {}
         }
         out
     }
@@ -2029,6 +2014,10 @@ impl App {
     fn tile(&mut self, ui: &mut Ui, tile: Tile) {
         match tile {
             Tile::New => self.blank_chat(ui),
+            Tile::Empty => {
+                ui.add_space(12.0);
+                hint(ui, "click a chat in the list to fill the focused tile");
+            }
             Tile::Chat(sid) => match self.session_by_id(sid).cloned() {
                 Some(s) => self.session_view(ui, s),
                 None if self.compact => hint(ui, "loading"),
@@ -2581,26 +2570,63 @@ impl App {
         // The composer, and the row of attachments above it when there are any.
         let files = self.focused && !self.tray.files.is_empty();
         let input_h = if self.compact { 84.0 } else { 100.0 } + if files { 40.0 } else { 0.0 };
-        let avail = ui.available_height() - input_h;
+        let avail = (ui.available_height() - input_h).max(120.0);
         let t = self.transcripts.entry(s.id).or_default();
         let messages = t.messages.clone();
+        // The transcript gets a rect of its own and is clipped to it: something that cannot
+        // wrap (a long link, a table) widens the ui it is drawn in, and in a tile that would
+        // push the composer and the tile's edge along with it.
+        let rect = egui::Rect::from_min_size(
+            ui.cursor().min,
+            Vec2::new(ui.available_width(), avail.min(ui.available_height())),
+        );
+        let mut inner = ui
+            .new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+        inner.set_clip_rect(rect.intersect(ui.clip_rect()));
         let scroll = egui::ScrollArea::vertical()
-            .max_height(avail.max(120.0))
+            .max_height(rect.height())
             .auto_shrink([false, false])
             .stick_to_bottom(self.follow)
-            .show(ui, |ui| {
+            .show(&mut inner, |ui| {
                 ui.set_max_width(ui.available_width());
                 if messages.is_empty() {
                     hint(ui, "no messages yet");
                 }
                 for m in &messages {
-                    self.entry(ui, m, s.id);
+                    // Each entry gets a ui of the column's width, clipped to it, so one with
+                    // something that cannot wrap does not widen the entries after it.
+                    let column = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        Vec2::new(ui.available_width(), f32::INFINITY),
+                    );
+                    let mut one = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(column)
+                            .layout(Layout::top_down(Align::Min)),
+                    );
+                    one.set_clip_rect(
+                        egui::Rect::from_min_max(
+                            column.min,
+                            egui::pos2(column.right(), f32::INFINITY),
+                        )
+                        .intersect(ui.clip_rect()),
+                    );
+                    self.entry(&mut one, m, s.id);
+                    let used = one.min_rect();
+                    ui.allocate_rect(
+                        egui::Rect::from_min_max(
+                            column.min,
+                            egui::pos2(column.right(), used.bottom().max(column.top())),
+                        ),
+                        Sense::hover(),
+                    );
                     ui.add_space(6.0);
                 }
                 if s.status == SessionStatus::Running {
                     hint(ui, "working");
                 }
             });
+        ui.allocate_rect(rect, Sense::hover());
         let at_bottom =
             scroll.state.offset.y + scroll.inner_rect.height() >= scroll.content_size.y - 4.0;
         self.follow = at_bottom;
@@ -3907,40 +3933,30 @@ mod tests {
     }
 
     #[test]
-    fn a_new_chat_takes_the_first_place_and_pushes_the_rest_back() {
+    fn a_chat_replaces_the_focused_tile() {
         let id = ids(6);
-        let mut recent = vec![id[0], id[1], id[2], id[3]];
-        bring_forward(&mut recent, id[4], 4);
-        assert_eq!(recent, vec![id[4], id[0], id[1], id[2], id[3]]);
-        // The one that fell off the end of the grid is still queued, to come back later.
-        assert_eq!(&recent[..4], &[id[4], id[0], id[1], id[2]]);
+        let mut slots = [Some(id[0]), Some(id[1]), Some(id[2]), Some(id[3])];
+        let at = place(&mut slots, 4, 1, id[4]);
+        assert_eq!(at, 1);
+        assert_eq!(slots, [Some(id[0]), Some(id[4]), Some(id[2]), Some(id[3])]);
     }
 
     #[test]
-    fn a_chat_already_on_screen_does_not_move_the_tiles() {
+    fn a_chat_already_on_screen_only_takes_focus() {
         let id = ids(5);
-        let mut recent = vec![id[0], id[1], id[2], id[3], id[4]];
-        bring_forward(&mut recent, id[2], 4);
-        assert_eq!(recent, vec![id[0], id[1], id[2], id[3], id[4]]);
+        let mut slots = [Some(id[0]), Some(id[1]), Some(id[2]), Some(id[3])];
+        let at = place(&mut slots, 4, 0, id[2]);
+        assert_eq!(at, 2);
+        assert_eq!(slots, [Some(id[0]), Some(id[1]), Some(id[2]), Some(id[3])]);
     }
 
     #[test]
-    fn a_chat_that_fell_off_the_grid_comes_back_to_the_front_once() {
+    fn a_chat_in_a_hidden_tile_moves_instead_of_showing_twice() {
         let id = ids(5);
-        let mut recent = vec![id[0], id[1], id[2], id[3], id[4]];
-        bring_forward(&mut recent, id[4], 4);
-        assert_eq!(recent, vec![id[4], id[0], id[1], id[2], id[3]]);
-    }
-
-    #[test]
-    fn the_queue_is_bounded() {
-        let id = ids(RECENT + 5);
-        let mut recent = Vec::new();
-        for s in &id {
-            bring_forward(&mut recent, *s, 4);
-        }
-        assert_eq!(recent.len(), RECENT);
-        assert_eq!(recent[0], id[RECENT + 4]);
+        let mut slots = [Some(id[0]), Some(id[1]), None, Some(id[3])];
+        let at = place(&mut slots, 2, 0, id[3]);
+        assert_eq!(at, 0);
+        assert_eq!(slots, [Some(id[3]), Some(id[1]), None, None]);
     }
 
     #[test]
