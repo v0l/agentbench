@@ -1497,3 +1497,137 @@ fn markdown_sits_on_one_baseline_and_links_open() {
     h.run_steps(6);
     shot(&mut h, "markdown-baseline");
 }
+
+/// A long chat: markdown, code blocks, tables, tool calls with long output and thinking.
+fn long_chat(rig: &Rig, turns: usize) -> foreman_core::Session {
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "echo", "a very long chat", None, None).unwrap();
+    let add = |e: Entry| {
+        rig.store.add_message(s.id, &e).unwrap();
+    };
+    let long_out: String =
+        (0..400).map(|i| format!("src/module_{i}/file.rs:{i}: fn handler_{i}(request: &Request) -> Response {{")).collect::<Vec<_>>().join("\n");
+    for n in 0..turns {
+        add(Entry::user(&format!(
+            "Turn {n}: look at **how credits are applied** and `tell me` what to change, see https://example.com/{n}.\n\n- first\n- second"
+        )));
+        add(Entry::Thinking { text: format!("Thinking about turn {n}. Credits are applied without a ledger row, so the user can never see them. I should look in the billing worker.") });
+        add(Entry::Tool {
+            call_id: format!("a{n}"),
+            name: "search_files".into(),
+            input: serde_json::json!({"pattern": "apply_credit"}),
+            output: Some("src/billing.rs:88: fn apply_credit(\nsrc/api.rs:210: apply_credit(".into()),
+            error: false,
+        });
+        add(Entry::Tool {
+            call_id: format!("b{n}"),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "cargo test -p billing"}),
+            output: Some(long_out.clone()),
+            error: n % 7 == 3,
+        });
+        add(Entry::Assistant { text: format!("## Turn {n}\n\nCredits are added to the balance with no **ledger row**, which is why users cannot see them. This paragraph is long enough to wrap over a couple of lines on a phone so that the layout has some work to do, with a [link](https://example.com) in it.\n\n1. Record every credit in `ledger`.\n2. Show the ledger on the billing page.\n3. Add a test.\n\n```rust\nfn apply_credit(user: &mut User, amount: u64) {{\n    user.credit += amount;\n    ledger.record(user, amount, Reason::Credit);\n}}\n```\n\n| column | meaning |\n|---|---|\n| a | first |\n| b | second |\n\n> a quoted remark about turn {n}") });
+    }
+    s
+}
+
+fn ms(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+/// Times frames on a long transcript. Run with `--nocapture` to see the numbers.
+fn time_frames(size: [f32; 2], turns: usize) {
+    let rig = rig();
+    let s = long_chat(&rig, turns);
+    let total = turns * 5;
+    let mut h = harness_at(rig.url.clone(), size);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == total);
+    let time = |h: &mut Harness<'_, App>, what: &str, n: usize, each: &mut dyn FnMut(&mut Harness<'_, App>)| {
+        let mut v = Vec::new();
+        for _ in 0..n {
+            each(h);
+            let t = Instant::now();
+            h.step();
+            v.push(ms(t.elapsed()));
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mean = v.iter().sum::<f64>() / v.len() as f64;
+        println!(
+            "PERF {}x{} {total} msgs {what}: mean {mean:.1} ms, median {:.1} ms, max {:.1} ms",
+            size[0], size[1], v[v.len() / 2], v[v.len() - 1]
+        );
+    };
+    // The first frames lay everything out and fill the markdown cache.
+    time(&mut h, "first frames", 3, &mut |_| {});
+    time(&mut h, "idle at the bottom", 20, &mut |_| {});
+    let mut y = 0.0;
+    time(&mut h, "scrolling", 20, &mut |h| {
+        y += 90.0;
+        h.event(egui::Event::PointerMoved(egui::pos2(size[0] * 0.6, size[1] * 0.4)));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, if (y as u32 / 900) % 2 == 0 { 90.0 } else { -90.0 }),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+    });
+    shot(&mut h, &format!("long-chat-{}", size[0]));
+    // A new width measures every entry again, as the first frame of a chat does.
+    let mut w = size[0];
+    time(&mut h, "resizing", 6, &mut |h| {
+        w -= 7.0;
+        h.set_size(egui::vec2(w, size[1]));
+    });
+}
+
+#[test]
+fn frame_times_on_a_long_transcript() {
+    time_frames([1280.0, 800.0], 80);
+}
+
+#[test]
+fn frame_times_on_a_phone_with_a_long_transcript() {
+    time_frames([450.0, 1000.0], 80);
+}
+
+#[test]
+fn a_long_transcript_draws_what_is_scrolled_to() {
+    let rig = rig();
+    let s = long_chat(&rig, 40);
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 200);
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Turn 39:").is_some(), "the end is in view");
+    assert!(h.query_by_label_contains("Turn 0:").is_none(), "the start is not laid out");
+    let wheel = |h: &mut Harness<'_, App>, dy: f32| {
+        h.event(egui::Event::PointerMoved(egui::pos2(800.0, 300.0)));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(3);
+    };
+    for _ in 0..60 {
+        wheel(&mut h, 4000.0);
+    }
+    shot(&mut h, "long-chat-top");
+    assert!(h.query_by_label_contains("Turn 0:").is_some(), "the start is drawn at the top");
+    assert!(h.query_by_label_contains("Turn 39:").is_none(), "the end is not");
+    for _ in 0..60 {
+        wheel(&mut h, -4000.0);
+    }
+    assert!(h.query_by_label_contains("Turn 39:").is_some(), "back at the end");
+    // A new message at the end is followed.
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Text("the very last word".into()));
+    h.run_steps(2);
+    click(&mut h, 1220.0, 784.0);
+    until(&mut h, "the reply", |h| h.state().transcript_len(s.id) >= 202);
+    assert!(h.query_by_label_contains("echo: the very last word").is_some(), "follows the bottom");
+}
