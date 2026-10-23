@@ -162,6 +162,8 @@ CREATE TABLE notes (
 "#,
     "ALTER TABLE projects ADD COLUMN home INTEGER NOT NULL DEFAULT 0;",
     "UPDATE sessions SET agent = 'native' WHERE agent = 'agentbench';",
+    // The built-in agent was called foreman, not agentbench, so the step above moved nothing.
+    "UPDATE sessions SET agent = 'native' WHERE agent IN ('foreman', 'agentbench');",
 ];
 
 #[derive(Debug)]
@@ -1265,6 +1267,32 @@ mod tests {
         let b = s.add_session(main.id, "x", "b", None, None).unwrap();
         assert_ne!(a.id, b.id);
         assert!(s.messages(b.id, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sessions_of_the_old_foreman_agent_move_to_native() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for step in &SCHEMA[..7] {
+                conn.execute_batch(step).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 7).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO projects VALUES (1, 'demo', '/r', 'main', NULL, 0, 0);
+                INSERT INTO worktrees VALUES (1, 1, '/r', 'main', NULL, 1, 0, 0, 0);
+                INSERT INTO sessions VALUES ('11111111-1111-4111-8111-111111111111', 1, 1, 'foreman', 'old', NULL, NULL, 'idle', NULL, '{}', 5, 6, 0);
+                INSERT INTO sessions VALUES ('22222222-2222-4222-8222-222222222222', 1, 1, 'pi', 'other', NULL, NULL, 'idle', NULL, '{}', 5, 6, 0);
+                "#,
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let mut agents: Vec<_> = s.sessions().unwrap().into_iter().map(|x| x.agent).collect();
+        agents.sort();
+        assert_eq!(agents, ["native", "pi"]);
     }
 
     #[test]
