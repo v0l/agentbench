@@ -225,3 +225,7 @@ Projects, worktrees, issues and messages keep plain numbers.
 
 `place` is `{"kind": "main"}`, `{"kind": "existing", "worktree_id": 3}` or
 `{"kind": "new", "branch": "fix-login"}`.
+
+## License
+
+GPL-3.0-only. See [LICENSE](LICENSE).

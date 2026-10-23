@@ -6,6 +6,9 @@ All notable changes to Foreman are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Foreman is licensed under the GPL-3.0 instead of the MIT license.
+
 ### Added
 - A grid of chats: the keys beside **settings** tile the chat area as 1, 2x1, 1x2, 2x2 or 3x2.
   One tile is focused (click in it to focus it) and opening a chat from the list replaces the
