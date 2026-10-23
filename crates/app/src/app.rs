@@ -222,6 +222,10 @@ struct Settings {
     token: String,
     /// The address a phone reaches this server at, for the pairing code.
     external: String,
+    /// Whether the model's thinking is shown in chats.
+    thinking: bool,
+    /// Whether a phone tells you in the background when a chat needs you or finishes.
+    alerts: bool,
     /// Set by the scan key, for the window to open the camera.
     scan: bool,
     /// The token of the server this window is connected to, which the code carries.
@@ -348,6 +352,8 @@ pub struct App {
     thinking: bool,
     /// How many times the fonts were swapped, so measured transcript heights are dropped.
     fonts_loaded: u32,
+    /// Whether a phone tells you in the background when a chat needs you or finishes.
+    alerts: bool,
     /// Put the cursor back in this tile's composer: set when speech lands in its draft.
     refocus: Option<Tile>,
     /// How tall each tile's composer was when last drawn, so the transcript leaves it room.
@@ -461,6 +467,7 @@ impl App {
             spoken: String::new(),
             fonts_loaded: 0,
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
+            alerts: storage.and_then(|s| s.get_string("alerts")).as_deref() != Some("false"),
         };
         if !app.remote {
             app.start_local(ctx);
@@ -480,6 +487,7 @@ impl App {
         storage.set_string("remote", self.remote.to_string());
         storage.set_string("external", self.external.clone());
         storage.set_string("thinking", self.thinking.to_string());
+        storage.set_string("alerts", self.alerts.to_string());
         self.speech.save(storage);
         storage.set_string("grid", self.grid.key().to_string());
         let tiles: Vec<String> =
@@ -530,7 +538,15 @@ impl App {
         }
     }
 
+    /// Tell the background service which server to watch, and whether to.
+    fn sync_alerts(&self) {
+        if let Some(c) = &self.client {
+            crate::notify::watch(&c.server.url, &c.server.token, self.alerts);
+        }
+    }
+
     fn connect_to(&mut self, ctx: &egui::Context, server: Server) {
+        crate::notify::watch(&server.url, &server.token, self.alerts);
         let ctx = ctx.clone();
         let mut client = Client::new(server, move || ctx.request_repaint());
         client.overview();
@@ -1355,6 +1371,8 @@ impl App {
             url,
             token,
             external: self.external.clone(),
+            thinking: self.thinking,
+            alerts: self.alerts,
             scan: false,
             pair_token: self.client.as_ref().map(|c| c.server.token.clone()).unwrap_or_default(),
             pair_url: self.client.as_ref().map(|c| c.server.url.clone()).unwrap_or_default(),
@@ -1441,6 +1459,26 @@ impl App {
                     pair_section(ui, &mut st);
                     ui.add_space(14.0);
                     appearance_section(ui, &mut st.face, &installed, scanning);
+                    ui.add_space(14.0);
+                    section(ui, "chats", "kept on this device", |ui| {
+                        if crate::notify::available() {
+                            row_help(
+                                ui,
+                                "alerts",
+                                "Tell me when an agent needs an answer, a chat fails or an agent finishes, even with the app closed. Keeps a quiet notification up while watching.",
+                                |ui| {
+                                    if toggle(ui, if st.alerts { "on" } else { "off" }, st.alerts).clicked() {
+                                        st.alerts = !st.alerts;
+                                    }
+                                },
+                            );
+                        }
+                        row_help(ui, "show thinking", "Show the model's reasoning in the transcript.", |ui| {
+                            if toggle(ui, if st.thinking { "on" } else { "off" }, st.thinking).clicked() {
+                                st.thinking = !st.thinking;
+                            }
+                        });
+                    });
                 } else if st.page == Page::Speech {
                     speech_section(ui, &mut st.speech);
                 } else if !can_close && st.place == Where::Remote {
@@ -1658,6 +1696,11 @@ impl App {
             }
         }
         // Only this device uses it, so it is kept as it is typed rather than on save.
+        self.thinking = st.thinking;
+        if self.alerts != st.alerts {
+            self.alerts = st.alerts;
+            self.sync_alerts();
+        }
         if self.external != st.external.trim() {
             self.external = st.external.trim().to_string();
             ctx.request_repaint();
@@ -2862,35 +2905,12 @@ impl App {
                 {
                     self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
                 }
-                if ui
-                    .add(Key::new("model").outline(VALUE))
-                    .on_hover_text("switch this chat to another model: low, medium, high or an id")
-                    .clicked()
-                {
-                    self.draft = "/model ".into();
-                }
-                if toggle(ui, "thinking", self.thinking).clicked() {
-                    self.thinking = !self.thinking;
-                }
                 if s.status.busy()
                     && ui.add(Key::new("stop").outline(FAULT)).clicked()
                     && let Some(c) = &mut self.client
                 {
                     c.interrupt(s.id);
                 }
-                let mut usage = Line::new()
-                    .measured(format!(
-                        "{} in",
-                        tokens(s.usage.input_tokens + s.usage.cache_read_tokens)
-                    ))
-                    .size(11.0)
-                    .gap(8.0)
-                    .measured(format!("{} out", tokens(s.usage.output_tokens)))
-                    .size(11.0);
-                if s.usage.cost_usd > 0.0 {
-                    usage = usage.gap(8.0).measured(format!("${:.2}", s.usage.cost_usd)).size(11.0);
-                }
-                usage.show(ui);
             });
         });
     }

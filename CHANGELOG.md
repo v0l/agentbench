@@ -64,6 +64,14 @@ All notable changes to Foreman are listed here. The format follows
 
 - The main tabs read **agents** and **issues**, not the open chat's title.
 
+- Android notifications: a chat that **needs you** or **failed**, and one that **finished**, raise a
+  notification even with the app closed. A small foreground service holds one long poll open to the
+  server (a request every 25 seconds, answered at once when something changes), backs off while the
+  server is away, and restarts after a reboot; a 15 minute job looks as well when the system stops
+  the service. Turn it off with settings → general → chats → alerts. The Android build is now
+  `packaging/android/build.sh`, which adds the Kotlin service (compiled with kotlinc, no Gradle).
+- Android: a launcher icon.
+
 ### Fixed
 
 - Android: the app kept nothing between launches, so the paired server was forgotten. Its settings are now saved in the app's private files.
