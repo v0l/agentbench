@@ -222,6 +222,8 @@ struct Settings {
     token: String,
     /// The address a phone reaches this server at, for the pairing code.
     external: String,
+    /// Whether the model's thinking is shown in chats.
+    thinking: bool,
     /// Set by the scan key, for the window to open the camera.
     scan: bool,
     /// The token of the server this window is connected to, which the code carries.
@@ -1326,6 +1328,7 @@ impl App {
             url,
             token,
             external: self.external.clone(),
+            thinking: self.thinking,
             scan: false,
             pair_token: self.client.as_ref().map(|c| c.server.token.clone()).unwrap_or_default(),
             pair_url: self.client.as_ref().map(|c| c.server.url.clone()).unwrap_or_default(),
@@ -1412,6 +1415,14 @@ impl App {
                     pair_section(ui, &mut st);
                     ui.add_space(14.0);
                     appearance_section(ui, &mut st.face, &installed, scanning);
+                    ui.add_space(14.0);
+                    section(ui, "chats", "kept on this device", |ui| {
+                        row_help(ui, "show thinking", "Show the model's reasoning in the transcript.", |ui| {
+                            if toggle(ui, if st.thinking { "on" } else { "off" }, st.thinking).clicked() {
+                                st.thinking = !st.thinking;
+                            }
+                        });
+                    });
                 } else if st.page == Page::Speech {
                     speech_section(ui, &mut st.speech);
                 } else if !can_close && st.place == Where::Remote {
@@ -1629,6 +1640,7 @@ impl App {
             }
         }
         // Only this device uses it, so it is kept as it is typed rather than on save.
+        self.thinking = st.thinking;
         if self.external != st.external.trim() {
             self.external = st.external.trim().to_string();
             ctx.request_repaint();
@@ -2833,35 +2845,12 @@ impl App {
                 {
                     self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
                 }
-                if ui
-                    .add(Key::new("model").outline(VALUE))
-                    .on_hover_text("switch this chat to another model: low, medium, high or an id")
-                    .clicked()
-                {
-                    self.draft = "/model ".into();
-                }
-                if toggle(ui, "thinking", self.thinking).clicked() {
-                    self.thinking = !self.thinking;
-                }
                 if s.status.busy()
                     && ui.add(Key::new("stop").outline(FAULT)).clicked()
                     && let Some(c) = &mut self.client
                 {
                     c.interrupt(s.id);
                 }
-                let mut usage = Line::new()
-                    .measured(format!(
-                        "{} in",
-                        tokens(s.usage.input_tokens + s.usage.cache_read_tokens)
-                    ))
-                    .size(11.0)
-                    .gap(8.0)
-                    .measured(format!("{} out", tokens(s.usage.output_tokens)))
-                    .size(11.0);
-                if s.usage.cost_usd > 0.0 {
-                    usage = usage.gap(8.0).measured(format!("${:.2}", s.usage.cost_usd)).size(11.0);
-                }
-                usage.show(ui);
             });
         });
     }
