@@ -20,6 +20,8 @@
 	<string>__VERSION__</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Foreman listens while you press speak, to turn what you say into a message.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>

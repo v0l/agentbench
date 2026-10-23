@@ -84,7 +84,7 @@ fn reason(e: &reqwest::Error) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn http() -> reqwest::Client {
+pub(crate) fn http() -> reqwest::Client {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
     let tls = rustls::ClientConfig::builder_with_provider(provider)
