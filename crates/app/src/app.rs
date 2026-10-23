@@ -253,7 +253,31 @@ struct Transcript {
     messages: Vec<Message>,
     last: Id,
     loading: bool,
+    /// How tall each message was when last laid out, so the ones scrolled out of sight are not
+    /// laid out again, only given their room. Thrown away when the width or the look changes.
+    heights: Heights,
 }
+
+/// Measured heights of transcript entries, valid for one width and one look of the entries.
+#[derive(Default)]
+struct Heights {
+    key: (u32, u32, u32),
+    of: HashMap<Id, f32>,
+}
+
+impl Heights {
+    /// Forget every height unless they were measured for this width and look.
+    fn keep_for(&mut self, key: (u32, u32, u32)) {
+        if self.key != key {
+            self.key = key;
+            self.of.clear();
+        }
+    }
+}
+
+/// How far past the visible part of the transcript entries are still laid out, so a scroll
+/// of a few lines never shows a gap.
+const OVERSCAN: f32 = 300.0;
 
 pub struct App {
     client: Option<Client>,
@@ -322,6 +346,8 @@ pub struct App {
     follow: bool,
     awaiting: Option<Id>,
     thinking: bool,
+    /// How many times the fonts were swapped, so measured transcript heights are dropped.
+    fonts_loaded: u32,
     /// Put the cursor back in this tile's composer: set when speech lands in its draft.
     refocus: Option<Tile>,
     /// How tall each tile's composer was when last drawn, so the transcript leaves it room.
@@ -433,6 +459,7 @@ impl App {
             drawing: None,
             speaking_in: None,
             spoken: String::new(),
+            fonts_loaded: 0,
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
         };
         if !app.remote {
@@ -969,7 +996,8 @@ impl App {
                 t.loading = false;
                 for m in msgs {
                     t.last = t.last.max(m.id);
-                    match t.messages.iter_mut().find(|x| x.id == m.id) {
+                    t.heights.of.remove(&m.id);
+                    match t.messages.iter_mut().rev().find(|x| x.id == m.id) {
                         Some(x) => *x = m,
                         None => t.messages.push(m),
                     }
@@ -1092,6 +1120,7 @@ impl App {
         if let Some(defs) = self.font_load.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.font_load = None;
             ctx.set_fonts(defs);
+            self.fonts_loaded += 1;
         }
         if let Some(problem) = self.tray.poll(ctx) {
             self.notice = Some((false, problem));
@@ -2875,8 +2904,12 @@ impl App {
             (if self.compact { 84.0 } else { 100.0 }) + if files { 40.0 } else { 0.0 }
         }) + 6.0;
         let avail = (ui.available_height() - input_h).max(120.0);
-        let t = self.transcripts.entry(s.id).or_default();
-        let messages = t.messages.clone();
+        // Taken out while the transcript is drawn, so drawing it can borrow the app and nothing
+        // is cloned; put back below.
+        let (messages, mut heights) = {
+            let t = self.transcripts.entry(s.id).or_default();
+            (std::mem::take(&mut t.messages), std::mem::take(&mut t.heights))
+        };
         // The transcript gets a rect of its own and is clipped to it: something that cannot
         // wrap (a long link, a table) widens the ui it is drawn in, and in a tile that would
         // push the composer and the tile's edge along with it.
@@ -2896,6 +2929,13 @@ impl App {
                 if messages.is_empty() {
                     hint(ui, "no messages yet");
                 }
+                // Heights hold for one width and one look of the entries.
+                heights.keep_for((
+                    ui.available_width().to_bits(),
+                    self.thinking as u32 | (self.face.size.to_bits() << 1),
+                    self.fonts_loaded,
+                ));
+                let visible = ui.clip_rect().expand2(Vec2::new(0.0, OVERSCAN));
                 for m in &messages {
                     // Each entry gets a ui of the column's width, clipped to it, so one with
                     // something that cannot wrap does not widen the entries after it.
@@ -2903,8 +2943,19 @@ impl App {
                         ui.cursor().min,
                         Vec2::new(ui.available_width(), f32::INFINITY),
                     );
+                    // An entry that was measured and is out of sight is not laid out, only
+                    // given the room it took.
+                    if let Some(h) = heights.of.get(&m.id).copied()
+                        && !(egui::Rect::from_min_size(column.min, Vec2::new(column.width(), h)))
+                            .intersects(visible)
+                    {
+                        ui.allocate_space(Vec2::new(column.width(), h));
+                        ui.add_space(6.0);
+                        continue;
+                    }
                     let mut one = ui.new_child(
                         egui::UiBuilder::new()
+                            .id(ui.id().with(("entry", m.id)))
                             .max_rect(column)
                             .layout(Layout::top_down(Align::Min)),
                     );
@@ -2917,16 +2968,24 @@ impl App {
                     );
                     self.entry(&mut one, m, s.id);
                     let used = one.min_rect();
+                    let h = (used.bottom().max(column.top()) - column.top()).max(0.0);
+                    heights.of.insert(m.id, h);
                     ui.allocate_rect(
                         egui::Rect::from_min_max(
                             column.min,
-                            egui::pos2(column.right(), used.bottom().max(column.top())),
+                            egui::pos2(column.right(), column.top() + h),
                         ),
                         Sense::hover(),
                     );
                     ui.add_space(6.0);
                 }
             });
+        if let Some(t) = self.transcripts.get_mut(&s.id) {
+            // Messages that arrived while drawing cannot happen, but keep anything that did.
+            let arrived = std::mem::replace(&mut t.messages, messages);
+            t.messages.extend(arrived);
+            t.heights = heights;
+        }
         ui.allocate_rect(rect, Sense::hover());
         let at_bottom =
             scroll.state.offset.y + scroll.inner_rect.height() >= scroll.content_size.y - 4.0;
@@ -3782,7 +3841,11 @@ impl App {
         });
         self.modals(&ctx);
         self.escape_stops_agent(&ctx);
-        self.markdown.sweep();
+        // Entries scrolled out of sight are not drawn, so they do not touch their markdown; keep
+        // it until the cache has grown well past what a screen needs.
+        if self.markdown.len() > 400 {
+            self.markdown.sweep();
+        }
         if let Some((_, at)) = &self.offline {
             ctx.request_repaint_after(
                 RETRY.saturating_sub(at.elapsed()) + Duration::from_millis(50),

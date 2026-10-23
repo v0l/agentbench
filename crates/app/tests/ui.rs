@@ -1573,7 +1573,13 @@ fn time_frames(size: [f32; 2], turns: usize) {
             phase: egui::TouchPhase::Move,
         });
     });
-    shot(&mut h, "long-chat");
+    shot(&mut h, &format!("long-chat-{}", size[0]));
+    // A new width measures every entry again, as the first frame of a chat does.
+    let mut w = size[0];
+    time(&mut h, "resizing", 6, &mut |h| {
+        w -= 7.0;
+        h.set_size(egui::vec2(w, size[1]));
+    });
 }
 
 #[test]
