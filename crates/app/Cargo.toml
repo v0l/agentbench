@@ -93,6 +93,8 @@ ndk-context = "0.1"
 [package.metadata.android]
 package = "io.v0l.foreman"
 apk_name = "foreman"
+# The launcher icon: an adaptive icon, with plain PNGs for older Android.
+resources = "android/res"
 build_targets = ["aarch64-linux-android"]
 
 [package.metadata.android.sdk]
@@ -115,6 +117,7 @@ required = false
 
 [package.metadata.android.application]
 label = "Foreman"
+icon = "@mipmap/ic_launcher"
 # A foreman server on the LAN is plain http, which Android refuses unless the app says it may.
 uses_cleartext_traffic = true
 
