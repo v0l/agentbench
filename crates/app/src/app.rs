@@ -3109,7 +3109,7 @@ impl App {
             }
             Entry::Assistant { text } => {
                 egui::Frame::NONE
-                    .inner_margin(Margin { left: 4, right: 4, top: 2, bottom: 2 })
+                    .inner_margin(Margin { left: 13, right: 8, top: 2, bottom: 2 })
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         markdown::show(ui, &mut self.markdown, text, m.id as usize);
@@ -3269,6 +3269,7 @@ impl App {
                     let more = out.lines().count().saturating_sub(1);
                     let tail = if more > 0 { format!("   +{more} lines") } else { String::new() };
                     ui.horizontal(|ui| {
+                        // Under the tool's name, not its marker.
                         ui.add_space(16.0);
                         ui.add(
                             egui::Label::new(
