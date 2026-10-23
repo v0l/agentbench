@@ -6,6 +6,9 @@ All notable changes to Foreman are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Voice input: a speak key beside send in the composer records from the microphone and writes what you said into the message. Whisper runs on this machine (tiny, base or small, English, downloaded the first time) or on any server with an OpenAI style `/v1/audio/transcriptions`, chosen in settings.
+
 ## [0.1.1] - 2026-10-23
 
 ### Changed

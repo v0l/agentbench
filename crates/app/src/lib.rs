@@ -4,6 +4,7 @@ pub mod client;
 pub mod fonts;
 mod form;
 mod picker;
+pub mod voice;
 
 pub use app::{App, LocalServer, status_counts};
 

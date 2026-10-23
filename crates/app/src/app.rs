@@ -106,6 +106,7 @@ struct Start {
 }
 
 struct Settings {
+    speech: crate::voice::Settings,
     place: Where,
     url: String,
     token: String,
@@ -170,6 +171,8 @@ pub struct App {
     settings: Option<Settings>,
     save_requested: bool,
     tray: crate::attach::Tray,
+    voice: crate::voice::Voice,
+    speech: crate::voice::Settings,
     /// Models on the server the foreman agent is saved to use. None until asked.
     agent_models: HashMap<String, Result<Vec<String>, String>>,
     asking_models: HashSet<String>,
@@ -177,6 +180,8 @@ pub struct App {
     follow: bool,
     awaiting: Option<Id>,
     thinking: bool,
+    /// Put the cursor back in the composer: set when speech lands in the draft.
+    refocus: bool,
 }
 
 impl App {
@@ -236,11 +241,14 @@ impl App {
             settings: None,
             save_requested: false,
             tray: crate::attach::Tray::default(),
+            voice: Default::default(),
+            speech: crate::voice::Settings::load(storage),
             agent_models: HashMap::new(),
             asking_models: HashSet::new(),
             markdown: markdown::Cache::default(),
             follow: true,
             awaiting: None,
+            refocus: false,
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
         };
         if !app.remote {
@@ -260,6 +268,7 @@ impl App {
         self.face.save(storage);
         storage.set_string("remote", self.remote.to_string());
         storage.set_string("thinking", self.thinking.to_string());
+        self.speech.save(storage);
         if let Some(c) = self.client.as_ref().filter(|_| self.remote) {
             storage.set_string("url", c.server.url.clone());
             storage.set_string("token", c.server.token.clone());
@@ -385,6 +394,11 @@ impl App {
         if let Some(st) = &mut self.settings {
             st.face.size = size;
         }
+    }
+
+    /// Whether the microphone is open.
+    pub fn listening(&self) -> bool {
+        self.voice.listening()
     }
 
     pub fn pending_files(&self) -> usize {
@@ -615,6 +629,21 @@ impl App {
         if let Some(problem) = self.tray.poll(ctx) {
             self.notice = Some((false, problem));
         }
+        for said in self.voice.poll() {
+            match said {
+                Ok(text) if text.trim().is_empty() => {
+                    self.notice = Some((false, "no speech was heard".into()));
+                }
+                Ok(text) => {
+                    crate::voice::append(&mut self.draft, &text);
+                    self.refocus = true;
+                }
+                Err(e) => self.notice = Some((false, e)),
+            }
+        }
+        if self.voice.busy() {
+            ctx.request_repaint_after(Duration::from_millis(60));
+        }
         self.take_dropped(ctx);
         let wants = self
             .start
@@ -745,6 +774,7 @@ impl App {
             .unwrap_or_default();
         let asking_agent = self.client.is_some();
         self.settings = Some(Settings {
+            speech: self.speech.clone(),
             place: if self.remote || self.local.is_none() { Where::Remote } else { Where::Local },
             url,
             token,
@@ -815,6 +845,8 @@ impl App {
                 server_section(ui, &mut st, has_local);
                 ui.add_space(14.0);
                 appearance_section(ui, &mut st.face, &installed, scanning);
+                ui.add_space(14.0);
+                speech_section(ui, &mut st.speech);
                 ui.add_space(14.0);
                 if !can_close && st.place == Where::Remote {
                     hint(ui, "Connect to a server to set up its agents.");
@@ -1019,6 +1051,7 @@ impl App {
             }
         }
         if save {
+            self.speech = st.speech.clone();
             if st.face != self.face {
                 self.face = st.face.clone();
                 self.load_fonts(ctx);
@@ -1853,6 +1886,9 @@ impl App {
             ui.add_space(4.0);
         }
         let edit = prose(ui, &mut self.draft, hint_text, 3);
+        if std::mem::take(&mut self.refocus) {
+            edit.request_focus();
+        }
         self.slash_menu(ui, edit.rect);
         let enter = edit.has_focus()
             && ui.input(|i| {
@@ -1883,6 +1919,7 @@ impl App {
                     self.draft.clear();
                     self.follow = true;
                 }
+                self.speak_key(ui);
                 if crate::attach::can_pick() {
                     let key = ui.add(Key::new("attach").outline(VALUE));
                     key.widget_info(|| {
@@ -1895,6 +1932,61 @@ impl App {
             });
         });
         out
+    }
+
+    /// The key that speaks into the composer: press to start the microphone, press again to stop
+    /// and have what was said written into the draft.
+    fn speak_key(&mut self, ui: &mut Ui) {
+        if cfg!(any(target_arch = "wasm32", target_os = "android")) {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        };
+        let (listening, reading) = (self.voice.listening(), self.voice.reading());
+        let label = if listening {
+            format!("stop {:.0}s", self.voice.seconds())
+        } else if reading {
+            let w = self.voice.status.clone();
+            if w.is_empty() { "reading".to_string() } else { w }
+        } else {
+            "speak".to_string()
+        };
+        let key = if listening {
+            Key::new(&label).solid(FAULT)
+        } else {
+            Key::new(&label).outline(if reading { LEGEND } else { VALUE }).enabled(!reading)
+        };
+        let key = ui.add(key);
+        key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "speak"));
+        if listening {
+            // A meter beside the key, so a muted microphone shows before the words do not.
+            let level = self.voice.level().sqrt().clamp(0.0, 1.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(36.0, 6.0), Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, WELL);
+            let mut on = rect;
+            on.set_width(rect.width() * level);
+            ui.painter().rect_filled(on, 2.0, OK);
+            key.clone().on_hover_text(format!("listening on {}", self.voice.device()));
+        } else if !reading {
+            key.clone()
+                .on_hover_text("speak instead of typing; the words are added to the message");
+        }
+        if key.clicked() {
+            if listening {
+                self.voice.finish(&self.speech, wake);
+            } else if let Some(p) = self.speech.problem() {
+                self.notice = Some((false, p.into()));
+            } else if let Err(e) = self.voice.start(wake) {
+                self.notice = Some((false, e));
+            }
+        }
+        // Escape on a listening composer throws the take away instead of reading it.
+        if listening && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.voice.cancel();
+        }
     }
 
     fn session_view(&mut self, ui: &mut Ui, s: Session) {
@@ -2857,6 +2949,67 @@ fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
             }
         }
     });
+}
+
+fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
+    use crate::voice::{LOCAL_MODELS, Mode, Voice};
+    section(ui, "voice input", "kept on this device", |ui| {
+        let mut options = vec![(Mode::Server, "speech server", None)];
+        if cfg!(feature = "local-speech") {
+            options.insert(0, (Mode::Local, "this machine", None));
+        }
+        segments(ui, &mut sp.mode, &options);
+        ui.add_space(8.0);
+        match sp.mode {
+            Mode::Local => {
+                row_help(
+                    ui,
+                    "model",
+                    "Whisper, run by foreman on this machine. Downloaded the first time you speak.",
+                    |ui| {
+                        choice(
+                            ui,
+                            "speech-model",
+                            &mut sp.model,
+                            LOCAL_MODELS.iter().map(|m| {
+                                let have = if Voice::installed(m.0) { ", downloaded" } else { "" };
+                                (m.0.to_string(), format!("{}, {} MB{have}", m.2, m.3))
+                            }),
+                        );
+                    },
+                );
+            }
+            Mode::Server => {
+                row_help(
+                    ui,
+                    "address",
+                    "Any server with an OpenAI style /v1/audio/transcriptions: OpenAI, Groq, faster-whisper-server, whisper.cpp.",
+                    |ui| {
+                        field(ui, &mut sp.url, "http://localhost:8000/v1");
+                    },
+                );
+                row_help(
+                    ui,
+                    "key",
+                    "Sent as a bearer token. Leave empty if the server needs none.",
+                    |ui| {
+                        secret(ui, &mut sp.key);
+                    },
+                );
+                row_help(ui, "model", "Sent as the model name. Empty sends whisper-1.", |ui| {
+                    field(ui, &mut sp.server_model, "whisper-1");
+                });
+            }
+        }
+        if let Some(p) = sp.problem() {
+            status(ui, false, p);
+        }
+    });
+    ui.add_space(8.0);
+    hint(
+        ui,
+        "The speak key beside send records from the default microphone until you press it again, then adds what you said to the message. Nothing is sent until you send it.",
+    );
 }
 
 fn appearance_section(ui: &mut Ui, face: &mut Typeface, installed: &Installed, scanning: bool) {

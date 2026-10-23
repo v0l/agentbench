@@ -1123,3 +1123,30 @@ fn escape_stops_the_agent_working_in_the_open_chat() {
         std::thread::sleep(Duration::from_millis(30));
     }
 }
+
+#[test]
+fn the_speak_key_sits_in_the_composer_and_says_what_is_missing() {
+    let rig = rig();
+    // A speech server with no address, so pressing the key never opens a real microphone.
+    let url = rig.url.clone();
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(move |cc| {
+        let mut storage = Mem::default();
+        storage.0.insert("url".into(), url);
+        storage.0.insert("token".into(), TOKEN.into());
+        storage.0.insert("voice_mode".into(), "server".into());
+        App::new(&cc.egui_ctx, Some(&storage), None)
+    });
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    click(&mut h, 80.0, 110.0);
+    h.run_steps(3);
+    shot(&mut h, "composer-speak");
+    let speak = h.get_by_label("speak");
+    let attach = h.get_by_label("attach");
+    assert!(attach.rect().right() <= speak.rect().left(), "speak sits beside attach");
+    assert!(speak.rect().bottom() <= 800.0);
+    speak.click();
+    h.run_steps(3);
+    let e = h.state().last_error().expect("a notice");
+    assert!(e.contains("speech server"), "{e}");
+    assert!(!h.state().listening(), "nothing was opened");
+}

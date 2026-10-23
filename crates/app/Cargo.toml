@@ -10,6 +10,13 @@ repository.workspace = true
 [lib]
 crate-type = ["lib", "cdylib"]
 
+[features]
+default = ["local-speech"]
+# Whisper on this machine. Without it voice input can only use a server.
+local-speech = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:byteorder"]
+# Run Whisper on an NVIDIA card when there is one. Needs the CUDA toolkit to build.
+cuda = ["local-speech", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
 [[bin]]
 name = "foreman"
 path = "src/main.rs"
@@ -49,7 +56,7 @@ eframe = { version = "0.35", default-features = false, features = ["default_font
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "rustls-no-provider", "http2"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
 
@@ -59,6 +66,13 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "t
 arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 clap = { version = "4.6", features = ["derive", "env"] }
 fontdb = "0.23"
+# Voice input: the microphone, and Whisper on this machine through candle.
+cpal = "0.18"
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"], optional = true }
+byteorder = { version = "1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.35", default-features = false, features = ["wayland", "x11"] }
