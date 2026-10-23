@@ -171,7 +171,11 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn foreman_server::agent::Agent>>) ->
 }
 
 fn harness(url: String) -> Harness<'static, App> {
-    Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(move |cc| {
+    harness_at(url, [1280.0, 800.0])
+}
+
+fn harness_at(url: String, size: [f32; 2]) -> Harness<'static, App> {
+    Harness::builder().with_size(size).wgpu().build_eframe(move |cc| {
         let mut storage = Mem::default();
         storage.0.insert("url".into(), url);
         storage.0.insert("token".into(), TOKEN.into());
@@ -765,6 +769,33 @@ fn a_busy_transcript_reads_cleanly() {
     h.event(egui::Event::PointerMoved(egui::pos2(800.0, 300.0)));
     h.run_steps(4);
     shot(&mut h, "transcript-top");
+}
+
+#[test]
+fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
+    let rig = rig();
+    let mut h = harness_at(rig.url.clone(), [450.0, 1000.0]);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    assert!(h.query_by_label("add project").is_none(), "no side panel on a phone");
+    shot(&mut h, "phone");
+    h.get_by_label("projects").click();
+    h.run_steps(3);
+    h.get_by_label("add project");
+    shot(&mut h, "phone-drawer");
+    assert!(h.state().drawer_open());
+    // A tap on the backdrop, right of the drawer, puts it away.
+    click(&mut h, 440.0, 600.0);
+    h.run_steps(3);
+    assert!(!h.state().drawer_open(), "tapping outside closes it");
+    assert!(h.query_by_label("add project").is_none());
+    // Picking a chat closes it too, and opens the chat.
+    h.get_by_label("projects").click();
+    h.run_steps(3);
+    click(&mut h, 100.0, 97.0);
+    h.run_steps(3);
+    assert!(!h.state().drawer_open(), "picking a chat closes the drawer");
+    assert!(h.state().open().is_some(), "and opens it");
 }
 
 #[test]

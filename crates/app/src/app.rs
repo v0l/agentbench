@@ -269,6 +269,8 @@ pub struct App {
     session: Option<SessionId>,
     grid: Grid,
     narrow: bool,
+    /// Whether the project list is open over a narrow window, where it has no panel of its own.
+    drawer: bool,
     /// The chat in each tile. Tiles past the grid's size are hidden but remembered.
     slots: [Option<SessionId>; SLOTS],
     /// The focused tile: the one a chat opened from the list replaces.
@@ -363,6 +365,7 @@ impl App {
                 .and_then(|k| Grid::from_key(&k))
                 .unwrap_or(Grid::Single),
             narrow: false,
+            drawer: false,
             slots: {
                 let mut slots = [None; SLOTS];
                 let saved = storage.and_then(|s| s.get_string("tiles")).unwrap_or_default();
@@ -501,6 +504,11 @@ impl App {
         // status change, which made chats jump around the tree while agents worked.
         out.sort_by_key(|s| std::cmp::Reverse((s.created_at, s.id)));
         out
+    }
+
+    /// Whether the project list is open over a narrow window.
+    pub fn drawer_open(&self) -> bool {
+        self.drawer
     }
 
     pub fn settings_loaded(&self) -> Option<bool> {
@@ -1088,22 +1096,76 @@ impl App {
 
     fn header(&mut self, ui: &mut Ui) {
         if self.narrow {
-            // A phone is too narrow for the title, the tabs and the keys on one line.
+            // A phone is too narrow for the title, the tabs and every key on one line, so the
+            // title and the two keys used most come first, then the tabs, then the rest.
             ui.horizontal(|ui| {
+                if hamburger(ui, self.drawer).clicked() {
+                    self.drawer = !self.drawer;
+                }
                 self.header_title(ui);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.header_keys(ui));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.key_new_chat(ui);
+                    self.key_settings(ui);
+                });
             });
             ui.add_space(4.0);
             let w = ui.available_width();
             ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                self.key_file_issue(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.header_badges(ui));
+            });
         } else {
             ui.horizontal(|ui| {
                 self.header_title(ui);
                 ui.add_space(18.0);
                 let w = (ui.available_width() - 640.0 - 120.0).clamp(200.0, 560.0);
                 ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.header_keys(ui));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.key_new_chat(ui);
+                    self.key_file_issue(ui);
+                    for g in Grid::ALL.into_iter().rev() {
+                        if grid_button(ui, g, self.grid == g).clicked() {
+                            self.set_grid(g);
+                        }
+                    }
+                    self.key_settings(ui);
+                    self.header_badges(ui);
+                });
             });
+        }
+    }
+
+    /// The project list on a narrow window: a drawer from the left edge, opened by the hamburger
+    /// and put away by picking something, tapping outside it, or the hamburger again.
+    fn drawer_panel(&mut self, ctx: &egui::Context) {
+        if !self.drawer {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let top = crate::system::top_inset(ctx);
+        let before = (self.project, self.session, self.tab);
+        let width = (screen.width() * 0.86).min(420.0);
+        let id = egui::Id::new("drawer");
+        let m = egui::Modal::new(id)
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .area(
+                egui::Modal::default_area(id)
+                    .anchor(egui::Align2::LEFT_TOP, Vec2::new(0.0, top)),
+            )
+            .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(8))
+            .show(ctx, |ui| {
+                ui.set_width(width - 16.0);
+                ui.set_height(screen.height() - top - 16.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    self.side(ui);
+                });
+            });
+        let picked = before != (self.project, self.session, self.tab);
+        if m.should_close() || picked {
+            self.drawer = false;
         }
     }
 
@@ -1130,7 +1192,7 @@ impl App {
         tabs(ui, &mut self.tab, &opts);
     }
 
-    fn header_keys(&mut self, ui: &mut Ui) {
+    fn key_new_chat(&mut self, ui: &mut Ui) {
         let ready = self.overview.is_some();
         if ui
             .add(Key::new("new chat").solid(READOUT).enabled(ready && self.project.is_some()))
@@ -1138,6 +1200,10 @@ impl App {
         {
             self.new_chat(None);
         }
+    }
+
+    fn key_file_issue(&mut self, ui: &mut Ui) {
+        let ready = self.overview.is_some();
         if ui
             .add(Key::new("file issue").outline(VALUE).enabled(ready && self.project.is_some()))
             .clicked()
@@ -1145,18 +1211,18 @@ impl App {
         {
             self.file_issue = Some(FileIssue { project: p, title: String::new(), body: String::new() });
         }
-        if !self.narrow {
-            for g in Grid::ALL.into_iter().rev() {
-                if grid_button(ui, g, self.grid == g).clicked() {
-                    self.set_grid(g);
-                }
-            }
-        }
+    }
+
+    fn key_settings(&mut self, ui: &mut Ui) {
         let key = ui.add(Key::new("settings").outline(VALUE));
         key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "settings"));
         if key.clicked() {
             self.open_settings();
         }
+    }
+
+    /// Where the server is, and how many agents are in each state.
+    fn header_badges(&mut self, ui: &mut Ui) {
         if !self.remote {
             chip(ui, "this machine", OK, self.overview.is_some());
         }
@@ -1670,12 +1736,12 @@ impl App {
             });
             ui.add_space(8.0);
         }
-        ui.add(Key::new("add project").outline(VALUE).min_width(ui.available_width()))
-            .clicked()
-            .then(|| {
-                self.add_project =
-                    Some(AddProject { path: String::new(), name: String::new(), create: false });
-            });
+        let add = ui.add(Key::new("add project").outline(VALUE).min_width(ui.available_width()));
+        add.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add project"));
+        if add.clicked() {
+            self.add_project =
+                Some(AddProject { path: String::new(), name: String::new(), create: false });
+        }
     }
 
     fn worktree_row(&mut self, ui: &mut Ui, w: &Worktree, last: bool) {
@@ -3487,17 +3553,21 @@ impl App {
                     });
                 });
         }
-        let side_w = if narrow { ctx.content_rect().width() * 0.42 } else { SIDE_W };
-        egui::Panel::left("side")
-            .exact_size(side_w)
-            .resizable(false)
-            .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(8))
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    self.side(ui);
+        if narrow {
+            self.drawer_panel(&ctx);
+        } else {
+            self.drawer = false;
+            egui::Panel::left("side")
+                .exact_size(SIDE_W)
+                .resizable(false)
+                .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(8))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        self.side(ui);
+                    });
                 });
-            });
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let r = ui.max_rect();
             ui.painter().rect_filled(r, 0.0, CHASSIS);
@@ -3524,6 +3594,30 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
     }
+}
+
+/// The three bars that open the project list on a narrow window.
+fn hamburger(ui: &mut Ui, open: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(34.0, 26.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "projects"));
+    let tint = if open {
+        READOUT
+    } else if resp.hovered() {
+        VALUE
+    } else {
+        LEGEND
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 2.0, if open { tint.gamma_multiply(0.18) } else { WELL });
+    p.rect_stroke(rect, 2.0, Stroke::new(1.0, if open || resp.hovered() { tint } else { ETCH }), egui::StrokeKind::Inside);
+    for i in -1..=1 {
+        let y = rect.center().y + i as f32 * 5.0;
+        p.line_segment(
+            [egui::pos2(rect.left() + 9.0, y), egui::pos2(rect.right() - 9.0, y)],
+            Stroke::new(1.5, tint),
+        );
+    }
+    resp
 }
 
 /// A key for one grid layout, drawn as the tiles it makes.
