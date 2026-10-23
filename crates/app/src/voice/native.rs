@@ -4,9 +4,9 @@
 //! Whisper, and the request to a server. The window asks [`Voice::poll`] once a frame what has
 //! finished.
 
-use super::{MAX_SECONDS, MIN_PEAK, MIN_SECONDS, Mode, RATE, Settings};
+use super::{Endpoint, Heard, MAX_SECONDS, MIN_PEAK, MIN_SECONDS, Mode, RATE, Said, Settings};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use web_time::Instant;
@@ -18,13 +18,15 @@ pub enum Event {
     Status(String),
     /// What was said.
     Text(String),
+    /// A reading of take number `.0` while it is still going.
+    Partial(u64, String),
     /// Why nothing was.
     Failed(String),
 }
 
 enum State {
     Idle,
-    Listening(Take),
+    Listening(Box<Take>),
     /// A take is being read; `Event::Text` or `Event::Failed` ends it.
     Reading,
 }
@@ -37,6 +39,12 @@ struct Take {
     rate: u32,
     device: String,
     since: Instant,
+    /// Decides when the speaker has finished.
+    endpoint: Endpoint,
+    /// How many samples had been heard when the last partial reading was started.
+    partial_at: usize,
+    /// A partial reading is under way; only one runs at a time.
+    partial_busy: Arc<AtomicBool>,
 }
 
 #[cfg(feature = "local-speech")]
@@ -52,12 +60,21 @@ pub struct Voice {
     loaded: Loaded,
     /// The last thing the worker said while a take was being read.
     pub status: String,
+    /// Which take is current, so a late partial from an earlier one is dropped.
+    take_id: u64,
 }
 
 impl Default for Voice {
     fn default() -> Self {
         let (tx, rx) = channel();
-        Voice { state: State::Idle, tx, rx, loaded: Default::default(), status: String::new() }
+        Voice {
+            state: State::Idle,
+            tx,
+            rx,
+            loaded: Default::default(),
+            status: String::new(),
+            take_id: 0,
+        }
     }
 }
 
@@ -104,9 +121,48 @@ impl Voice {
             return Ok(());
         }
         let _ = wake;
-        self.state = State::Listening(open()?);
+        self.state = State::Listening(Box::new(open()?));
+        self.take_id += 1;
         self.status.clear();
         Ok(())
+    }
+
+    /// Called once a frame while the microphone is open. Listens for the end of the speech and
+    /// closes the take by itself, and every couple of seconds starts a reading of what has been
+    /// said so far so the words can appear while you are still talking.
+    pub fn tick(&mut self, settings: &Settings, wake: impl Fn() + Send + Sync + Clone + 'static) {
+        let State::Listening(take) = &mut self.state else {
+            return;
+        };
+        let (heard, samples) = {
+            let heard = take.heard.lock().unwrap_or_else(|e| e.into_inner());
+            (take.endpoint.feed(&heard), heard.len())
+        };
+        match heard {
+            Heard::Done => self.finish(settings, wake),
+            Heard::GaveUp => {
+                self.state = State::Idle;
+                let _ = self.tx.send(Event::Failed("no speech was heard".into()));
+            }
+            Heard::Speaking | Heard::Pause => {
+                let due = take.rate as usize * super::PARTIAL_SECONDS;
+                if settings.problem().is_none()
+                    && !take.partial_busy.load(Ordering::Relaxed)
+                    && samples >= take.partial_at + due
+                {
+                    take.partial_at = samples;
+                    take.partial_busy.store(true, Ordering::Relaxed);
+                    let pcm = {
+                        let h = take.heard.lock().unwrap_or_else(|e| e.into_inner());
+                        super::to_whisper_rate(&h, take.rate)
+                    };
+                    let busy = take.partial_busy.clone();
+                    let id = self.take_id;
+                    self.read(pcm, settings, Some((id, busy)), wake);
+                }
+            }
+            Heard::Waiting => {}
+        }
     }
 
     /// Close the microphone without reading anything.
@@ -122,7 +178,11 @@ impl Voice {
             return;
         };
         let rate = take.rate;
-        let heard = std::mem::take(&mut *take.heard.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut heard = std::mem::take(&mut *take.heard.lock().unwrap_or_else(|e| e.into_inner()));
+        // Keep a little of the silence the take ended on and drop the rest: Whisper invents words
+        // for a long quiet tail.
+        let tail = ((take.endpoint.quiet_seconds() - 0.3).max(0.0) * rate as f32) as usize;
+        heard.truncate(heard.len().saturating_sub(tail));
         drop(take);
 
         let seconds = heard.len() as f32 / rate.max(1) as f32;
@@ -146,41 +206,69 @@ impl Voice {
         self.state = State::Reading;
         self.status = "reading".into();
         let pcm = super::to_whisper_rate(&heard, rate);
+        self.read(pcm, settings, None, wake);
+    }
+
+    /// Read `pcm` on a worker thread. A partial reading carries its take's id and busy flag and
+    /// reports `Event::Partial`; the last one reports `Event::Text` or `Event::Failed`.
+    fn read(
+        &self,
+        pcm: Vec<f32>,
+        settings: &Settings,
+        partial: Option<(u64, Arc<AtomicBool>)>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) {
         let tx = self.tx.clone();
         let settings = settings.clone();
         let loaded = self.loaded.clone();
         std::thread::Builder::new()
             .name("foreman-speech".into())
             .spawn(move || {
+                let quiet = partial.is_some();
                 let said = match settings.mode {
-                    Mode::Local => read_locally(&settings, &pcm, &tx, &wake, &loaded),
+                    Mode::Local => read_locally(&settings, &pcm, &tx, &wake, &loaded, quiet),
                     Mode::Server => read_on_server(&settings, &pcm),
                 };
-                let _ = tx.send(match said {
-                    Ok(t) => Event::Text(t),
-                    Err(e) => Event::Failed(e),
-                });
+                match partial {
+                    Some((id, busy)) => {
+                        busy.store(false, Ordering::Relaxed);
+                        // A partial that fails says nothing: the last reading reports it.
+                        if let Ok(t) = said {
+                            let _ = tx.send(Event::Partial(id, t));
+                        }
+                    }
+                    None => {
+                        let _ = tx.send(match said {
+                            Ok(t) => Event::Text(t),
+                            Err(e) => Event::Failed(e),
+                        });
+                    }
+                }
                 wake();
             })
             .ok();
     }
 
-    /// Take in what the worker finished. `Ok` carries words to add to the draft, `Err` a problem to
-    /// show.
-    pub fn poll(&mut self) -> Vec<Result<String, String>> {
+    /// Take in what the worker finished: partial readings, then the last one or a problem.
+    pub fn poll(&mut self) -> Vec<Said> {
         let mut out = Vec::new();
         for ev in self.rx.try_iter().collect::<Vec<_>>() {
             match ev {
                 Event::Status(s) => self.status = s,
+                Event::Partial(id, t) => {
+                    if id == self.take_id && self.busy() {
+                        out.push(Said::Partial(t));
+                    }
+                }
                 Event::Text(t) => {
                     self.state = State::Idle;
                     self.status.clear();
-                    out.push(Ok(t));
+                    out.push(Said::Final(t));
                 }
                 Event::Failed(e) => {
                     self.state = State::Idle;
                     self.status.clear();
-                    out.push(Err(e));
+                    out.push(Said::Failed(e));
                 }
             }
         }
@@ -237,7 +325,17 @@ fn open() -> Result<Take, String> {
     }
     .map_err(|e| format!("{name}: {e}"))?;
     stream.play().map_err(|e| format!("{name}: {e}"))?;
-    Ok(Take { _stream: stream, heard, peak, rate, device: name, since: Instant::now() })
+    Ok(Take {
+        _stream: stream,
+        heard,
+        peak,
+        rate,
+        device: name,
+        since: Instant::now(),
+        endpoint: Endpoint::new(rate),
+        partial_at: 0,
+        partial_busy: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 fn tracing_free_warn(e: &str) {
@@ -287,6 +385,7 @@ fn read_locally(
     tx: &Sender<Event>,
     wake: &(impl Fn() + Send + Sync + 'static),
     loaded: &Loaded,
+    quiet: bool,
 ) -> Result<String, String> {
     let dir = model_dir(&settings.model).ok_or("unknown speech model")?;
     let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
@@ -308,8 +407,10 @@ fn read_locally(
         };
         *slot = Some((settings.model.clone(), model));
     }
-    let _ = tx.send(Event::Status("reading".into()));
-    wake();
+    if !quiet {
+        let _ = tx.send(Event::Status("reading".into()));
+        wake();
+    }
     let (_, model) = slot.as_mut().expect("model loaded above");
     model.transcribe(pcm)
 }
@@ -321,6 +422,7 @@ fn read_locally(
     _: &Sender<Event>,
     _: &(impl Fn() + Send + Sync + 'static),
     _: &Loaded,
+    _: bool,
 ) -> Result<String, String> {
     Err("this build has no local speech model; choose a speech server in settings".into())
 }
