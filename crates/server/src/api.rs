@@ -191,7 +191,6 @@ fn level_masked(l: &crate::agent::native::Level) -> foreman_core::LevelSettings 
         model: l.model.clone(),
         key: String::new(),
         has_key: !l.key.trim().is_empty(),
-        context: l.context,
     }
 }
 
@@ -202,7 +201,6 @@ fn masked(m: &crate::agent::native::Model) -> foreman_core::ModelSettings {
         key: String::new(),
         has_key: !m.key.trim().is_empty(),
         steps: m.steps,
-        context: m.context,
         compact_at: m.compact_at,
         low: level_masked(&m.low),
         medium: level_masked(&m.medium),
@@ -231,7 +229,6 @@ fn level_merged(
         url,
         model: new.model.trim().to_string(),
         key,
-        context: new.context,
     }
 }
 
@@ -255,9 +252,6 @@ async fn put_model(
     }
     if new.steps > 0 {
         m.steps = new.steps.min(100_000);
-    }
-    if new.context > 0 {
-        m.context = new.context;
     }
     m.compact_at = new.compact_at.min(100);
     m.low = level_merged(&m.low, &new.low);

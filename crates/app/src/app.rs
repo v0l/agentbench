@@ -1182,7 +1182,6 @@ impl App {
                 key: String::new(),
                 has_key: false,
                 steps: 0,
-                context: foreman_core::DEFAULT_CONTEXT,
                 compact_at: foreman_core::DEFAULT_COMPACT_AT,
                 low: Default::default(),
                 medium: Default::default(),
@@ -1319,14 +1318,6 @@ impl App {
                     );
                     row_help(
                         ui,
-                        "context",
-                        "Tokens the model holds at once. The status line and auto-compact measure against it, and servers rarely say.",
-                        |ui| {
-                            ui.add(egui::DragValue::new(&mut st.model.context).range(1_000..=10_000_000).speed(1000));
-                        },
-                    );
-                    row_help(
-                        ui,
                         "compact at",
                         "Summarise a chat and start it afresh once its context is this full, in percent. 0 never does. Only the foreman agent needs this; the others manage their own.",
                         |ui| {
@@ -1364,14 +1355,6 @@ impl App {
                                 "Empty uses the foreman agent's server and key. A server of its own never gets the foreman key.",
                                 |ui| {
                                     field(ui, &mut level.url, &own);
-                                },
-                            );
-                            row_help(
-                                ui,
-                                "  context",
-                                "Tokens this model holds at once. 0 uses the foreman agent's.",
-                                |ui| {
-                                    ui.add(egui::DragValue::new(&mut level.context).range(0..=10_000_000).speed(1000));
                                 },
                             );
                             if !level.url.trim().is_empty() {

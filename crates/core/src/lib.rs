@@ -434,9 +434,6 @@ pub struct ModelSettings {
     pub has_key: bool,
     #[serde(default)]
     pub steps: usize,
-    /// Tokens the foreman agent's model holds at once, for models that do not say.
-    #[serde(default = "default_context")]
-    pub context: u64,
     /// Compact a chat once its context is this many percent full. 0 turns it off.
     #[serde(default = "default_compact_at")]
     pub compact_at: u64,
@@ -462,9 +459,6 @@ pub struct LevelSettings {
     pub key: String,
     #[serde(default)]
     pub has_key: bool,
-    /// Tokens this model holds at once. 0 uses the foreman agent's.
-    #[serde(default)]
-    pub context: u64,
 }
 
 /// The host part of a server address: `http://user@gpu.lan:11434/v1` is `gpu.lan:11434`.
@@ -474,12 +468,9 @@ pub fn host_of(url: &str) -> String {
     authority.rsplit('@').next().unwrap_or_default().to_string()
 }
 
+/// The window assumed for a model whose server does not say.
 pub const DEFAULT_CONTEXT: u64 = 128_000;
 pub const DEFAULT_COMPACT_AT: u64 = 80;
-
-fn default_context() -> u64 {
-    DEFAULT_CONTEXT
-}
 
 fn default_compact_at() -> u64 {
     DEFAULT_COMPACT_AT

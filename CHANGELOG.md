@@ -42,8 +42,9 @@ All notable changes to Foreman are listed here. The format follows
   following `/model` and `switch_model` as they change.
 - Auto-compact for the `foreman` agent: once a chat's context passes **compact at** (80% by
   default, 0 to turn it off) foreman summarises it and starts the agent afresh from the summary,
-  as `/compact` does. Set the model's **context** size, and one per model level, under settings,
-  since servers rarely report it. `pi`, `claude` and `codex` compact themselves.
+  as `/compact` does. The window is whatever the model's server reports (`/models`, llama.cpp's
+  `/props`, Ollama's `/api/show`), or 128k when it does not say; there is no setting for it.
+  `pi`, `claude` and `codex` compact themselves.
 
 ### Fixed
 - A long draft scrolls inside the composer instead of growing it until the send, speak and attach keys are pushed out of the window.

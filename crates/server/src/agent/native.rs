@@ -34,9 +34,6 @@ pub struct Model {
     pub key: String,
     #[serde(default = "default_steps")]
     pub steps: usize,
-    /// Tokens the model holds at once, which the context gauge and auto-compact measure against.
-    #[serde(default = "default_context")]
-    pub context: u64,
     /// Compact a chat once its context is this many percent full. 0 turns it off.
     #[serde(default = "default_compact_at")]
     pub compact_at: u64,
@@ -60,13 +57,6 @@ pub struct Level {
     pub model: String,
     #[serde(default)]
     pub key: String,
-    /// Tokens this model holds at once. 0 uses the foreman agent's.
-    #[serde(default)]
-    pub context: u64,
-}
-
-fn default_context() -> u64 {
-    foreman_core::DEFAULT_CONTEXT
 }
 
 fn default_compact_at() -> u64 {
@@ -91,7 +81,6 @@ impl Default for Model {
             model: String::new(),
             key: String::new(),
             steps: default_steps(),
-            context: default_context(),
             compact_at: default_compact_at(),
             low: Level::default(),
             medium: Level::default(),
@@ -114,7 +103,6 @@ impl Model {
         let model = own(&level.model)?;
         let mut out = self.clone();
         out.model = model;
-        out.context = Some(level.context).filter(|c| *c > 0).unwrap_or(self.context);
         if let Some(url) = own(&level.url) {
             out.url = url;
             out.key = level.key.trim().to_string();
@@ -184,11 +172,16 @@ pub struct Native {
 pub struct Patience {
     pub headers: Duration,
     pub stall: Duration,
+    /// How long to ask a server what window its model has before assuming the default.
+    /// Zero does not ask.
+    pub probe: Duration,
 }
 
 impl Default for Patience {
     fn default() -> Self {
-        Patience { headers: HEADERS, stall: STALL }
+        // The stub servers in tests answer one request per reply, so they are not probed.
+        let probe = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(4) };
+        Patience { headers: HEADERS, stall: STALL, probe }
     }
 }
 
@@ -871,7 +864,7 @@ impl Agent for Native {
         messages.extend(history(turn.history));
         messages.push(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(&base);
-        io.emit(Event::Usage(serving(&model)));
+        io.emit(Event::Usage(serving(&model, self.patience.probe).await));
         for _ in 0..model.steps.max(1) {
             if io.stopped() {
                 return Err("stopped".into());
@@ -908,7 +901,9 @@ impl Agent for Native {
                 let result = match parsed {
                     Err(e) => Err(e),
                     Ok(args) => match name {
-                        "switch_model" => switch(&base, &mut model, &args, turn.context, io),
+                        "switch_model" => {
+                            switch(&base, &mut model, &args, turn.context, io, self.patience.probe).await
+                        }
                         "read_file" => {
                             let found = {
                                 let (ws, args) = (workspace.clone(), args.clone());
@@ -979,9 +974,115 @@ impl Agent for Native {
     }
 }
 
-/// The model and server a request goes to, for the status line.
-fn serving(model: &Model) -> Usage {
-    Usage::serving(model.model.trim(), &foreman_core::host_of(&model.url), model.context)
+/// The model and server a request goes to, for the status line, with the window the server
+/// says the model has, or a default when it does not say.
+async fn serving(model: &Model, probe: Duration) -> Usage {
+    let window = window_of(model, probe).await;
+    Usage::serving(model.model.trim(), &foreman_core::host_of(&model.url), window)
+}
+
+/// The windows already found, by server and model.
+fn windows() -> &'static std::sync::Mutex<std::collections::HashMap<(String, String), u64>> {
+    static WINDOWS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(String, String), u64>>,
+    > = std::sync::OnceLock::new();
+    WINDOWS.get_or_init(Default::default)
+}
+
+/// How many tokens the model holds at once: what its server says, else the default.
+/// An answer is kept for the model, but a server that could not be reached is asked again.
+async fn window_of(model: &Model, probe: Duration) -> u64 {
+    if probe.is_zero() {
+        return foreman_core::DEFAULT_CONTEXT;
+    }
+    let key = (model.url.trim().to_string(), model.model.trim().to_string());
+    if let Some(n) = windows().lock().ok().and_then(|w| w.get(&key).copied()) {
+        return n;
+    }
+    match tokio::time::timeout(probe, ask_window(&model.url, &model.key, &model.model)).await {
+        Ok(Some(n)) => {
+            if let Ok(mut w) = windows().lock() {
+                w.insert(key, n);
+            }
+            n
+        }
+        _ => foreman_core::DEFAULT_CONTEXT,
+    }
+}
+
+/// The first number found under any of these names, which the servers spell differently.
+fn window_in(v: &Value) -> Option<u64> {
+    const NAMES: [&str; 6] = [
+        "max_model_len",
+        "context_length",
+        "context_window",
+        "max_context_length",
+        "n_ctx",
+        "num_ctx",
+    ];
+    match v {
+        Value::Object(o) => NAMES
+            .iter()
+            .find_map(|n| o.get(*n).and_then(Value::as_u64).filter(|n| *n > 0))
+            .or_else(|| o.values().find_map(window_in)),
+        Value::Array(a) => a.iter().find_map(window_in),
+        _ => None,
+    }
+}
+
+/// Ollama spells it `<architecture>.context_length` in `model_info`.
+fn ollama_window(v: &Value) -> Option<u64> {
+    v.get("model_info")?
+        .as_object()?
+        .iter()
+        .find(|(k, n)| k.ends_with(".context_length") && n.as_u64().is_some_and(|n| n > 0))
+        .and_then(|(_, n)| n.as_u64())
+}
+
+/// Ask the server how big the model's window is. Servers that follow the OpenAI listing say
+/// so in `/models`; llama.cpp says it in `/props` and Ollama in `/api/show`.
+async fn ask_window(url: &str, key: &str, model: &str) -> Option<u64> {
+    let url = url.trim().trim_end_matches('/');
+    let base = url.trim_end_matches("/chat/completions");
+    let root = base.strip_suffix("/v1").unwrap_or(base);
+    let model = model.trim();
+    let get = |u: String| {
+        let mut req = crate::http::client().get(u);
+        if !key.trim().is_empty() {
+            req = req.bearer_auth(key.trim());
+        }
+        async move {
+            let resp = req.send().await.ok()?.error_for_status().ok()?;
+            resp.json::<Value>().await.ok()
+        }
+    };
+    if let Some(list) = get(format!("{base}/models")).await {
+        let entries = list.get("data").or_else(|| list.get("models")).and_then(Value::as_array);
+        let mine = entries.and_then(|a| {
+            a.iter().find(|m| {
+                m.get("id").or_else(|| m.get("name")).and_then(Value::as_str) == Some(model)
+            })
+        });
+        // Only the model's own entry: another model's window is not this one's.
+        if let Some(n) = mine.and_then(window_in) {
+            return Some(n);
+        }
+    }
+    if let Some(n) = get(format!("{root}/props"))
+        .await
+        .and_then(|v| v.pointer("/default_generation_settings/n_ctx")?.as_u64())
+        .filter(|n| *n > 0)
+    {
+        return Some(n);
+    }
+    let mut req = crate::http::client()
+        .post(format!("{root}/api/show"))
+        .json(&json!({ "model": model, "name": model }));
+    if !key.trim().is_empty() {
+        req = req.bearer_auth(key.trim());
+    }
+    let shown: Value = req.send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
+    ollama_window(&shown)
 }
 
 /// What the user said, with any pictures, sound or video they attached shown to the model.
@@ -1011,12 +1112,13 @@ async fn user_message(text: &str, files: &[super::Attached]) -> Value {
 }
 
 /// Move the rest of this turn, and the chat after it, to another level.
-fn switch(
+async fn switch(
     base: &Model,
     model: &mut Model,
     args: &Value,
     cx: &Context,
     io: &dyn Io,
+    probe: Duration,
 ) -> Result<String, String> {
     let name = args.get("level").and_then(Value::as_str).ok_or("missing `level`")?.trim();
     let set = levels(base);
@@ -1042,7 +1144,7 @@ fn switch(
         reason
     )));
     let done = format!("now on {name} ({}); the next step runs on it", next.model);
-    io.emit(Event::Usage(serving(&next)));
+    io.emit(Event::Usage(serving(&next, probe).await));
     *model = next;
     Ok(done)
 }
@@ -2144,6 +2246,78 @@ mod tests {
         assert!(slow.contains("killed after 1s"), "{slow}");
     }
 
+    #[test]
+    fn the_window_is_found_under_whatever_name_a_server_uses() {
+        assert_eq!(window_in(&json!({"id": "m", "max_model_len": 32768})), Some(32768));
+        assert_eq!(window_in(&json!({"id": "m", "context_length": 200000})), Some(200000));
+        assert_eq!(window_in(&json!({"id": "m", "meta": {"n_ctx": 4096}})), Some(4096));
+        assert_eq!(window_in(&json!({"id": "m"})), None);
+        let shown = json!({"model_info": {"general.name": "x", "llama.context_length": 8192}});
+        assert_eq!(ollama_window(&shown), Some(8192));
+    }
+
+    /// Serves one canned JSON body per path; anything else is a 404.
+    fn json_server(routes: Vec<(&'static str, &'static str)>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { return };
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or_default().to_string();
+                let (status, body) = routes
+                    .iter()
+                    .find(|(p, _)| *p == path)
+                    .map_or(("404 Not Found", "{}"), |(_, b)| ("200 OK", *b));
+                let _ = s.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        url
+    }
+
+    fn serving_at(url: String, name: &str) -> Model {
+        Model { url, model: name.into(), ..Model::default() }
+    }
+
+    #[tokio::test]
+    async fn the_window_is_what_the_server_says_for_that_model() {
+        let probe = Duration::from_secs(5);
+        let url = json_server(vec![(
+            "/v1/models",
+            r#"{"data":[{"id":"other","max_model_len":1000},{"id":"mine","max_model_len":65536}]}"#,
+        )]);
+        assert_eq!(window_of(&serving_at(url, "mine"), probe).await, 65536);
+    }
+
+    #[tokio::test]
+    async fn llama_cpp_and_ollama_say_it_elsewhere() {
+        let probe = Duration::from_secs(5);
+        let url = json_server(vec![
+            ("/v1/models", r#"{"data":[{"id":"gguf"}]}"#),
+            ("/props", r#"{"default_generation_settings":{"n_ctx":16384}}"#),
+        ]);
+        assert_eq!(window_of(&serving_at(url, "gguf"), probe).await, 16384);
+        let url = json_server(vec![("/api/show", r#"{"model_info":{"qwen2.context_length":40960}}"#)]);
+        assert_eq!(window_of(&serving_at(url, "qwen"), probe).await, 40960);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_does_not_say_gets_the_default() {
+        let url = json_server(vec![("/v1/models", r#"{"data":[{"id":"quiet"}]}"#)]);
+        let got = window_of(&serving_at(url, "quiet"), Duration::from_secs(5)).await;
+        assert_eq!(got, foreman_core::DEFAULT_CONTEXT);
+        let got = window_of(&serving_at("http://127.0.0.1:1/v1".into(), "gone"), Duration::from_secs(5)).await;
+        assert_eq!(got, foreman_core::DEFAULT_CONTEXT);
+    }
+
     #[tokio::test]
     async fn the_model_list_is_read_from_the_server() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2307,6 +2481,7 @@ mod tests {
             patience: Patience {
                 headers: Duration::from_millis(400),
                 stall: Duration::from_millis(400),
+                probe: Duration::ZERO,
             },
             ..Native::new(Model { url, model: "m".into(), ..Model::default() })
         }
@@ -2415,8 +2590,7 @@ mod tests {
                 url: "http://big/v1".into(),
                 model: "huge".into(),
                 key: "other".into(),
-                context: 0,
-            },
+                            },
             ..Model::default()
         };
         let low = m.level("LOW").unwrap();
@@ -2437,8 +2611,7 @@ mod tests {
                 url: "http://big/v1".into(),
                 model: "x".into(),
                 key: String::new(),
-                context: 0,
-            },
+                            },
             ..m.clone()
         };
         assert_eq!(bare.level("high").unwrap().key, "");
@@ -2470,7 +2643,7 @@ mod tests {
         let native = Native::new(Model {
             url,
             model: "m".into(),
-            high: Level { url: big_url, model: "big".into(), key: String::new(), context: 0 },
+            high: Level { url: big_url, model: "big".into(), key: String::new() },
             ..Model::default()
         });
         let io = TestIo::new(Arc::new(FakeApi));
