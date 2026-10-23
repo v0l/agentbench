@@ -9,14 +9,13 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use foreman_core::{
     Answer, ApiError, Id, IssuePatch, IssueState, NewComment, NewIssue, NewProject, NewSession,
-    NewWorktree, Overview, Place, SendMessage, SessionId, branch_slug, issue_prompt,
+    NewWorktree, Overview, SendMessage, SessionId,
 };
 use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
 
 const LONG_POLL: Duration = Duration::from_secs(25);
-const TITLE_MAX: usize = 40;
 
 #[derive(Clone)]
 pub struct Api {
@@ -77,6 +76,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/agents", get(agents))
         .route("/api/settings/model", get(get_model).put(put_model))
         .route("/api/settings/models", post(list_models))
+        .route("/api/settings/cross-project", get(get_cross).delete(clear_cross))
         .route("/api/settings/title", get(get_title).put(put_title))
         .route("/api/settings/title/models", post(list_title_models))
         .route("/api/agents/{name}/models", get(agent_models))
@@ -239,6 +239,25 @@ fn title_masked(t: &crate::titles::TitleModel) -> foreman_core::TitleSettings {
 
 fn titles_of(api: &Api) -> Result<&crate::titles::Titles, Failure> {
     api.runner.titles().ok_or_else(|| bad("this server has no title model"))
+}
+
+/// Which projects agents may start sessions in without asking.
+async fn get_cross(State(api): State<Api>) -> Reply<serde_json::Value> {
+    let store = api.runner.store();
+    let any = store.setting("start_session_any_project")?.as_deref() == Some("1");
+    let ids: Vec<Id> = store
+        .setting("start_session_projects")?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    Ok(Json(json!({ "any": any, "projects": ids })))
+}
+
+/// Take back every "always allow" and ask again.
+async fn clear_cross(State(api): State<Api>) -> Result<StatusCode, Failure> {
+    let store = api.runner.store();
+    store.delete_setting("start_session_any_project")?;
+    store.delete_setting("start_session_projects")?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_title(State(api): State<Api>) -> Reply<foreman_core::TitleSettings> {
@@ -454,67 +473,11 @@ async fn session(
 }
 
 async fn spawn(api: &Api, new: NewSession) -> Result<foreman_core::Session, Failure> {
-    let store = api.runner.store().clone();
-    let agent =
-        api.runner.agent(&new.agent).ok_or_else(|| bad(format!("no agent named {}", new.agent)))?;
-    if !agent.available() {
-        return Err(bad(format!("{} is not ready: {}", agent.label(), agent.about())));
-    }
-    let project = store.project(new.project_id)?;
-    let issue = new.issue_id.map(|id| store.issue(id)).transpose()?;
-    if let Some(i) = issue.as_ref().filter(|i| i.project_id != project.id) {
-        return Err(bad(format!("issue #{} belongs to another project", i.id)));
-    }
-    let worktree = match new.place.clone() {
-        Place::Main => store.main_worktree(project.id)?,
-        Place::Existing { worktree_id } => {
-            let w = store.worktree(worktree_id)?;
-            if w.project_id != project.id {
-                return Err(bad("that worktree belongs to another project"));
-            }
-            w
-        }
-        Place::New { branch } => {
-            let branch = match branch.trim() {
-                "" => issue
-                    .as_ref()
-                    .map(|i| format!("issue-{}-{}", i.id, branch_slug(&i.title)))
-                    .ok_or_else(|| bad("name the branch for the new worktree"))?,
-                b => b.to_string(),
-            };
-            let s = store.clone();
-            let pid = project.id;
-            tokio::task::spawn_blocking(move || projects::add_worktree(&s, pid, &branch, None))
-                .await
-                .map_err(|e| bad(e.to_string()))??
-        }
-    };
-    if worktree.missing || !std::path::Path::new(&worktree.path).is_dir() {
-        return Err(bad(format!("{} no longer exists", worktree.path)));
-    }
-    let chosen = new
-        .title
-        .clone()
-        .filter(|t| !t.trim().is_empty())
-        .or_else(|| issue.as_ref().map(|i| format!("#{} {}", i.id, i.title)));
-    let stand_in = chosen.is_none();
-    let title = chosen
-        .or_else(|| new.prompt.as_deref().map(|p| foreman_core::short_title(p, TITLE_MAX)))
-        .unwrap_or_else(|| format!("{} on {}", agent.label(), worktree.label()));
-    let model = new.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
-    let session =
-        store.add_session(worktree.id, agent.name(), title.trim(), model, new.issue_id)?;
-    if stand_in {
-        store.set_title_auto(session.id, true)?;
-    }
-    let prompt = new.prompt.clone().filter(|p| !p.trim().is_empty()).or_else(|| {
-        issue.as_ref().map(|i| issue_prompt(i, &store.comments(i.id).unwrap_or_default()))
-    });
-    if prompt.is_some() || !new.attachments.is_empty() {
-        api.runner.send_with(&session, prompt.as_deref().unwrap_or_default(), &new.attachments)?;
-    }
-    changed(api);
-    Ok(store.session(session.id)?)
+    let runner = api.runner.clone();
+    tokio::task::spawn_blocking(move || runner.start_session(new))
+        .await
+        .map_err(|e| bad(e.to_string()))?
+        .map_err(Failure::from)
 }
 
 async fn add_session(
@@ -917,6 +880,22 @@ mod tests {
         assert_eq!(shared.get().model, "other");
         let saved = f.api.runner.store().setting("model").unwrap().unwrap();
         assert!(saved.contains("\"other\""));
+    }
+
+    #[tokio::test]
+    async fn always_allow_for_other_projects_can_be_read_and_taken_back() {
+        let f = fixture();
+        let app = router(f.api.clone());
+        let store = f.api.runner.store();
+        store.set_setting("start_session_projects", "[3]").unwrap();
+        store.set_setting("start_session_any_project", "1").unwrap();
+        let (s, got) = call(&app, "GET", "/api/settings/cross-project", None, T).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(got, json!({"any": true, "projects": [3]}));
+        let (s, _) = call(&app, "DELETE", "/api/settings/cross-project", None, T).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+        let (_, got) = call(&app, "GET", "/api/settings/cross-project", None, T).await;
+        assert_eq!(got, json!({"any": false, "projects": []}));
     }
 
     #[tokio::test]

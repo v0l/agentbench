@@ -151,6 +151,15 @@ CREATE INDEX messages_session ON messages(session_id, id);
 CREATE INDEX attachments_session ON attachments(session_id);
 DROP TABLE session_ids;
 "#,
+    r#"
+CREATE TABLE notes (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    topic TEXT NOT NULL,
+    body TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (project_id, topic)
+);
+"#,
 ];
 
 #[derive(Debug)]
@@ -753,6 +762,36 @@ impl Store {
             return Err(not_found("session", id));
         }
         Store::changed(&db, "session", id)
+    }
+
+    /// What was remembered about a project, as (topic, note), oldest topic first.
+    pub fn notes(&self, project_id: Id) -> Result<Vec<(String, String)>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT topic, body FROM notes WHERE project_id = ?1 ORDER BY updated_at, topic",
+        )?;
+        let rows = stmt.query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Keep a note under a topic, replacing what was there. An empty note forgets the topic.
+    /// Answers whether anything changed.
+    pub fn set_note(&self, project_id: Id, topic: &str, body: &str) -> Result<bool> {
+        let db = self.db();
+        let n = if body.trim().is_empty() {
+            db.execute(
+                "DELETE FROM notes WHERE project_id = ?1 AND topic = ?2",
+                params![project_id, topic],
+            )?
+        } else {
+            db.execute(
+                "INSERT INTO notes (project_id, topic, body, updated_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(project_id, topic) DO UPDATE
+                 SET body = excluded.body, updated_at = excluded.updated_at",
+                params![project_id, topic, body.trim(), now()],
+            )?
+        };
+        Ok(n > 0)
     }
 
     pub fn reset_running(&self) -> Result<usize> {

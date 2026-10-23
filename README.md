@@ -56,13 +56,33 @@ Data lives in `$FOREMAN_HOME` (default `~/.local/share/foreman`):
 in the session's worktree with file tools and bash, searches the web
 (`web_search`) and reads, queries (`prompt`, answered by the title model) or downloads pages
 (`web_fetch`), loads skills from
-`~/.agents/skills`, and has tools for the tracker (`list_issues`, `file_issue`,
-`update_issue`, `comment_on_issue`, `list_sessions`, `read_session`) and
+`~/.agents/skills`, and has tools for the tracker (`list_issues`, `get_issue`,
+`file_issue`, `update_issue`, `comment_on_issue`) and
 `ask_user`, which puts a question in the chat and waits for the answer. Options
 show one to a row, `multiple` lets the user tick several, and `questions` asks a
 whole set at once, answered together. A
-message sent while it works steers it at the next step. Set its model in
-`foreman.toml`:
+message sent while it works steers it at the next step.
+
+Beyond that it can:
+
+- run things in the background: `bash` with `background` answers with a handle,
+  `bash_output` reads what it printed since the last look and `bash_kill` stops it;
+- hand work to other agents: `start_session` (an issue or a prompt, in its own
+  worktree), `wait_for_session`, `send_message`, and `list_sessions`,
+  `read_session` and `session_status` to watch them. `start_session` can name
+  another `project` (`list_projects`), but the chat first asks you: *Allow once*,
+  *Always allow in that project*, *Always allow, any project* or *Deny*. The
+  agent cannot grant this itself. `GET`/`DELETE /api/settings/cross-project`
+  shows and clears the standing permissions;
+- manage worktrees with `list_worktrees` and `create_worktree`;
+- keep a checklist for the user to follow with `todo_write`;
+- remember things about a project with `remember` and `recall`; the notes open
+  every later session of that project;
+- look at its own UI with `screenshot`, which needs Chrome, Chromium or Edge;
+- tell the user with `notify_user`, a notice in the chat and a desktop
+  notification where `notify-send` (Linux) or `osascript` (macOS) exists.
+
+Set its model in `foreman.toml`:
 
 ```toml
 [model]
