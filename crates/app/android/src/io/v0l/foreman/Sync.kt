@@ -100,7 +100,9 @@ object Watcher {
             now.put(id, status)
             val was = before?.optString(id, "")
             val nid = id.hashCode()
-            if (status != "waiting" && status != "failed") nm.cancel(nid)
+            // Take down an alert once the chat has moved on from needing you.
+            if (was != status && (was == "waiting" || was == "failed")) nm.cancel(nid)
+            if (was != status) android.util.Log.i("foreman", "$id: $was -> $status (alerting: $show)")
             if (!show || was == status) continue
             val project = projects[s.optLong("project_id")].orEmpty()
             val title = s.optString("title").ifBlank { "chat" }
