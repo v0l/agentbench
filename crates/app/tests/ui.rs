@@ -1294,7 +1294,13 @@ fn escape_stops_the_agent_working_in_the_open_chat() {
         std::thread::sleep(Duration::from_millis(30));
     };
     h.state_mut().open_session(session.id, session.project_id);
-    until(&mut h, "the chat to show it working", |h| h.state().open() == Some(session.id));
+    until(&mut h, "the chat to show it working", |h| {
+        // Escape only stops a chat the window knows is busy, so wait for the window to know.
+        h.state().open() == Some(session.id)
+            && h.state()
+                .overview()
+                .is_some_and(|o| o.sessions.iter().any(|x| x.id == session.id && x.status.busy()))
+    });
     h.key_press(egui::Key::Escape);
     let start = Instant::now();
     while running(&rig).is_some() {
