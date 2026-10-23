@@ -7,6 +7,11 @@ All notable changes to Foreman are listed here. The format follows
 ## [Unreleased]
 
 ### Changed
+- Settings are split into four tabs: general, speech, agent and titles.
+- The CUDA build loads the CUDA runtime when the window starts instead of linking it, the way
+  WaveShark does. One `--features cuda` build runs on a machine with no NVIDIA runtime and reads
+  speech on the CPU there. `.cargo/config.toml` builds the kernels as PTX for compute 8.0, which
+  the driver finishes for any later card.
 - Voice input offers the larger Whisper models: small, medium and distil medium in English, the
   multilingual tiny to medium, and large v3, large v3 turbo and distil large v3. They run on an
   NVIDIA card when foreman is built with `--features cuda`, which the default build is not.

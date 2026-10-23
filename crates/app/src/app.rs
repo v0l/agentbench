@@ -205,7 +205,17 @@ struct Start {
     prompt: String,
 }
 
+/// The pages of the settings dialog.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    General,
+    Speech,
+    Agent,
+    Titles,
+}
+
 struct Settings {
+    page: Page,
     speech: crate::voice::Settings,
     place: Where,
     url: String,
@@ -504,6 +514,18 @@ impl App {
         match self.agent_models.get(agent)? {
             Ok(l) => Some(l.len()),
             Err(_) => Some(0),
+        }
+    }
+
+    /// Show a page of the settings dialog: general, speech, agent or titles.
+    pub fn settings_page(&mut self, page: &str) {
+        if let Some(st) = &mut self.settings {
+            st.page = match page {
+                "speech" => Page::Speech,
+                "agent" => Page::Agent,
+                "titles" => Page::Titles,
+                _ => Page::General,
+            };
         }
     }
 
@@ -1126,6 +1148,7 @@ impl App {
             .unwrap_or_default();
         let asking_agent = self.client.is_some();
         self.settings = Some(Settings {
+            page: Page::General,
             speech: self.speech.clone(),
             place: if self.remote || self.local.is_none() { Where::Remote } else { Where::Local },
             url,
@@ -1193,16 +1216,28 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(540.0);
                 modal_title(ui, "Settings");
-                let body_h = (ctx.content_rect().height() - 220.0).max(240.0);
-                egui::ScrollArea::vertical().max_height(body_h).auto_shrink([false, true]).show(ui, |ui| {
+                let pages = [
+                    (Page::General, "general"),
+                    (Page::Speech, "speech"),
+                    (Page::Agent, "agent"),
+                    (Page::Titles, "titles"),
+                ];
+                tabs(ui, &mut st.page, &pages);
+                // One height for every page, so the dialog does not jump as you move between them.
+                let body_h = (ctx.content_rect().height() - 260.0).clamp(240.0, 520.0);
+                egui::ScrollArea::vertical()
+                    .min_scrolled_height(body_h)
+                    .max_height(body_h)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                 ui.set_width(ui.available_width() - 12.0);
-                server_section(ui, &mut st, has_local);
-                ui.add_space(14.0);
-                appearance_section(ui, &mut st.face, &installed, scanning);
-                ui.add_space(14.0);
-                speech_section(ui, &mut st.speech);
-                ui.add_space(14.0);
-                if !can_close && st.place == Where::Remote {
+                if st.page == Page::General {
+                    server_section(ui, &mut st, has_local);
+                    ui.add_space(14.0);
+                    appearance_section(ui, &mut st.face, &installed, scanning);
+                } else if st.page == Page::Speech {
+                    speech_section(ui, &mut st.speech);
+                } else if !can_close && st.place == Where::Remote {
                     hint(ui, "Connect to a server to set up its agents.");
                 } else if let Some(e) = &st.agent_error {
                     section(ui, "foreman agent", "set on the server", |ui| status(ui, false, e));
@@ -1210,7 +1245,7 @@ impl App {
                     section(ui, "foreman agent", "set on the server", |ui| {
                         hint(ui, if st.asking_agent { "asking the server" } else { "connect to a server to set up its agents" });
                     });
-                } else {
+                } else if st.page == Page::Agent {
                 let main_list = main_list.as_ref();
                 section(ui, "model server", "any OpenAI compatible endpoint", |ui| {
                     row_help(ui, "address", "The base URL, ending in /v1 for most servers.", |ui| {
@@ -1334,8 +1369,7 @@ impl App {
                 );
                 ui.add_space(8.0);
                 hint(ui, "The agent can call switch_model to go up a level for hard work and down for easy work. A level with no model is left out. In a chat, /model high does the same by hand, and /model with nothing goes back to the default.");
-                if st.title_loaded {
-                    ui.add_space(14.0);
+                } else if st.title_loaded {
                     section(
                         ui,
                         "chat titles",
@@ -1396,7 +1430,8 @@ impl App {
                     );
                     ui.add_space(8.0);
                     hint(ui, "/title in a chat asks for a new title, and /title with words sets it yourself.");
-                }
+                } else {
+                    hint(ui, "asking the server");
                 }
                 });
                 footer(ui, |ui| {

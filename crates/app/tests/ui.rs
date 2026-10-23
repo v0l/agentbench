@@ -778,6 +778,17 @@ fn the_settings_key_opens_one_dialog_for_server_look_and_agent() {
     h.run_steps(3);
     shot(&mut h, "settings");
     until(&mut h, "the installed fonts", |h| h.query_all_by_label("choose font").count() == 2);
+    // The tab labels are painted, not widgets, so click the speech one by position.
+    click(&mut h, 480.0, 118.0);
+    h.run_steps(3);
+    assert!(h.query_all_by_label("choose font").count() == 0, "speech is its own page");
+    shot(&mut h, "settings-speech");
+    h.state_mut().settings_page("general");
+    h.run_steps(3);
+    assert!(h.query_by_label("name chats with a model").is_none(), "titles are on their own page");
+    h.state_mut().settings_page("titles");
+    h.run_steps(3);
+    shot(&mut h, "settings-titles");
     h.get_by_label("name chats with a model");
     assert!(h.query_by_label("agent").is_none(), "one settings key, not three");
 }
@@ -814,6 +825,8 @@ fn the_title_model_is_set_in_the_settings_and_saved_on_the_server() {
     h.run_steps(2);
     until(&mut h, "the title settings", |h| h.state().settings_title_loaded());
     h.run_steps(3);
+    h.state_mut().settings_page("titles");
+    h.run_steps(3);
     shot(&mut h, "title-settings");
     h.get_by_label("name chats with a model");
     h.state_mut().settings_set_title("http://127.0.0.1:1/v1", "tiny");
@@ -835,6 +848,8 @@ fn the_model_levels_are_set_in_the_settings_and_saved_on_the_server() {
     h.get_by_label("settings").click();
     h.run_steps(2);
     until(&mut h, "the title settings", |h| h.state().settings_title_loaded());
+    h.run_steps(3);
+    h.state_mut().settings_page("agent");
     h.run_steps(3);
     shot(&mut h, "model-levels");
     h.state_mut().settings_set_level("low", "", "tiny");
@@ -861,6 +876,7 @@ fn a_long_model_list_is_a_filterable_dropdown() {
     until(&mut h, "the model list", |h| h.state().settings_models() == Some(5000));
     // The dialog grows as the title settings arrive and re-centres, so let it settle first.
     until(&mut h, "the title settings", |h| h.state().settings_title_loaded());
+    h.state_mut().settings_page("agent");
     h.run_steps(8);
     shot(&mut h, "model-settings");
     h.get_by_label("choose model").click();

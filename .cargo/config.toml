@@ -1,0 +1,6 @@
+# The CUDA kernels are built as PTX for compute 8.0 (Ampere) whatever card this machine has. Left
+# unset, candle's build asks nvidia-smi and builds for that card alone, with an arch-specific
+# suffix on recent cards that no other card will load. PTX for 8.0 is finished by the driver for any
+# later card at first load. Override with the environment variable to build for one card only.
+[env]
+CUDA_COMPUTE_CAP = "80"
