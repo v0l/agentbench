@@ -34,6 +34,12 @@ pub struct Model {
     pub key: String,
     #[serde(default = "default_steps")]
     pub steps: usize,
+    /// Tokens the model holds at once, which the context gauge and auto-compact measure against.
+    #[serde(default = "default_context")]
+    pub context: u64,
+    /// Compact a chat once its context is this many percent full. 0 turns it off.
+    #[serde(default = "default_compact_at")]
+    pub compact_at: u64,
     /// The models a chat can be switched to, by the agent or by the user.
     #[serde(default)]
     pub low: Level,
@@ -54,6 +60,17 @@ pub struct Level {
     pub model: String,
     #[serde(default)]
     pub key: String,
+    /// Tokens this model holds at once. 0 uses the foreman agent's.
+    #[serde(default)]
+    pub context: u64,
+}
+
+fn default_context() -> u64 {
+    foreman_core::DEFAULT_CONTEXT
+}
+
+fn default_compact_at() -> u64 {
+    foreman_core::DEFAULT_COMPACT_AT
 }
 
 fn default_url() -> String {
@@ -74,6 +91,8 @@ impl Default for Model {
             model: String::new(),
             key: String::new(),
             steps: default_steps(),
+            context: default_context(),
+            compact_at: default_compact_at(),
             low: Level::default(),
             medium: Level::default(),
             high: Level::default(),
@@ -95,6 +114,7 @@ impl Model {
         let model = own(&level.model)?;
         let mut out = self.clone();
         out.model = model;
+        out.context = Some(level.context).filter(|c| *c > 0).unwrap_or(self.context);
         if let Some(url) = own(&level.url) {
             out.url = url;
             out.key = level.key.trim().to_string();
@@ -633,6 +653,10 @@ impl Agent for Native {
         true
     }
 
+    fn compact_at(&self) -> u64 {
+        self.model.get().compact_at
+    }
+
     async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
         let base = self.model.get();
         let mut model = base.choose(turn.model.unwrap_or_default());
@@ -644,13 +668,16 @@ impl Agent for Native {
         messages.extend(history(turn.history));
         messages.push(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(&base);
+        io.emit(Event::Usage(serving(&model)));
         for _ in 0..model.steps.max(1) {
             if io.stopped() {
                 return Err("stopped".into());
             }
             let reply = complete(&model, &messages, &tools, self.patience, io).await?;
-            if let Some(u) = reply.usage {
-                io.emit(Event::Usage(u));
+            if let Some(mut u) = reply.usage {
+                // The prompt just sent is what the conversation weighs now.
+                u.context = u.input_tokens + u.cache_read_tokens;
+                io.emit(Event::Usage(Usage { model: String::new(), ..u }));
             }
             let mut message = json!({ "role": "assistant", "content": reply.text });
             if !reply.calls.is_empty() {
@@ -743,6 +770,11 @@ impl Agent for Native {
     }
 }
 
+/// The model and server a request goes to, for the status line.
+fn serving(model: &Model) -> Usage {
+    Usage::serving(model.model.trim(), &foreman_core::host_of(&model.url), model.context)
+}
+
 /// What the user said, with any pictures, sound or video they attached shown to the model.
 /// Anything that cannot be shown is named with its path so the model can read it.
 async fn user_message(text: &str, files: &[super::Attached]) -> Value {
@@ -801,6 +833,7 @@ fn switch(
         reason
     )));
     let done = format!("now on {name} ({}); the next step runs on it", next.model);
+    io.emit(Event::Usage(serving(&next)));
     *model = next;
     Ok(done)
 }
@@ -1117,6 +1150,7 @@ fn take(v: &Value, reply: &mut Reply, io: &dyn Io) {
             cache_read_tokens: cached,
             cost_usd: 0.0,
             turns: 1,
+            ..Usage::default()
         });
     }
     let Some(delta) = v.pointer("/choices/0/delta") else { return };
@@ -1842,7 +1876,12 @@ mod tests {
             model: "mid".into(),
             key: "secret".into(),
             low: Level { model: "tiny".into(), ..Level::default() },
-            high: Level { url: "http://big/v1".into(), model: "huge".into(), key: "other".into() },
+            high: Level {
+                url: "http://big/v1".into(),
+                model: "huge".into(),
+                key: "other".into(),
+                context: 0,
+            },
             ..Model::default()
         };
         let low = m.level("LOW").unwrap();
@@ -1859,7 +1898,12 @@ mod tests {
         assert!(m.level("tiny").is_none());
         // A server of its own without a key does not get the foreman key.
         let bare = Model {
-            high: Level { url: "http://big/v1".into(), model: "x".into(), key: String::new() },
+            high: Level {
+                url: "http://big/v1".into(),
+                model: "x".into(),
+                key: String::new(),
+                context: 0,
+            },
             ..m.clone()
         };
         assert_eq!(bare.level("high").unwrap().key, "");
@@ -1891,7 +1935,7 @@ mod tests {
         let native = Native::new(Model {
             url,
             model: "m".into(),
-            high: Level { url: big_url, model: "big".into(), key: String::new() },
+            high: Level { url: big_url, model: "big".into(), key: String::new(), context: 0 },
             ..Model::default()
         });
         let io = TestIo::new(Arc::new(FakeApi));

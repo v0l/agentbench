@@ -107,6 +107,8 @@ impl Decoder for CodexDecoder {
                         cache_read_tokens: u64_at(&u, "cached_input_tokens"),
                         cost_usd: 0.0,
                         turns: 1,
+                        context: u64_at(&u, "input_tokens"),
+                        ..Usage::default()
                     }),
                     Event::Done,
                 ]

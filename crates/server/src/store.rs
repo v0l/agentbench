@@ -467,16 +467,21 @@ impl Store {
                 ],
             )?;
         }
-        for gone in before.iter().filter(|w| !w.missing && !seen.iter().any(|t| t.path == w.path)) {
-            changed = true;
+        for gone in before.iter().filter(|w| !seen.iter().any(|t| t.path == w.path)) {
             let in_use: i64 = db.query_row(
                 "SELECT COUNT(*) FROM sessions WHERE worktree_id = ?1",
                 [gone.id],
                 |r| r.get(0),
             )?;
             if in_use > 0 {
-                db.execute("UPDATE worktrees SET missing = 1 WHERE id = ?1", [gone.id])?;
+                if !gone.missing {
+                    changed = true;
+                    db.execute("UPDATE worktrees SET missing = 1 WHERE id = ?1", [gone.id])?;
+                }
             } else {
+                // Nothing left to read: a worktree already marked missing is dropped
+                // once its last session is deleted, instead of lingering as "gone".
+                changed = true;
                 db.execute("DELETE FROM worktrees WHERE id = ?1", [gone.id])?;
             }
         }
@@ -675,11 +680,15 @@ impl Store {
         Store::changed(&db, "session", id)
     }
 
+    /// Forget the agent's own session, so it starts afresh. The context it held is gone
+    /// with it, so the reading of how full it was goes too.
     pub fn clear_agent_session(&self, id: SessionId) -> Result<()> {
+        let mut usage = self.session(id)?.usage;
+        usage.context = 0;
         let db = self.db();
         db.execute(
-            "UPDATE sessions SET agent_session = NULL, updated_at = ?1 WHERE id = ?2",
-            params![now(), id],
+            "UPDATE sessions SET agent_session = NULL, usage = ?1, updated_at = ?2 WHERE id = ?3",
+            params![serde_json::to_string(&usage).unwrap_or_default(), now(), id],
         )?;
         Store::changed(&db, "session", id)
     }
@@ -749,10 +758,31 @@ impl Store {
 
     pub fn delete_session(&self, id: SessionId) -> Result<()> {
         let db = self.db();
+        let tree: Option<(Id, Id)> = db
+            .query_row(
+                "SELECT w.id, w.project_id FROM sessions s JOIN worktrees w ON w.id = s.worktree_id
+                 WHERE s.id = ?1 AND w.missing = 1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
         if db.execute("DELETE FROM sessions WHERE id = ?1", [id])? == 0 {
             return Err(not_found("session", id));
         }
-        Store::changed(&db, "session", id)
+        Store::changed(&db, "session", id)?;
+        // A vanished worktree only stays listed so its sessions can be read; once the
+        // last one is deleted there is nothing left to show.
+        if let Some((wid, pid)) = tree {
+            let left: i64 =
+                db.query_row("SELECT COUNT(*) FROM sessions WHERE worktree_id = ?1", [wid], |r| {
+                    r.get(0)
+                })?;
+            if left == 0 {
+                db.execute("DELETE FROM worktrees WHERE id = ?1", [wid])?;
+                Store::changed(&db, "project", pid)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn reset_running(&self) -> Result<usize> {
@@ -947,6 +977,23 @@ mod tests {
     }
 
     #[test]
+    fn deleting_the_last_session_of_a_missing_worktree_drops_it() {
+        let s = Store::memory().unwrap();
+        let (p, _) = project(&s, "/r");
+        s.sync_worktrees(p.id, &[tree("/r", "main", true), tree("/r-a", "a", false)], None)
+            .unwrap();
+        let wt = s.worktrees(Some(p.id)).unwrap().into_iter().find(|w| !w.main).unwrap();
+        let a = s.add_session(wt.id, "pi", "t", None, None).unwrap();
+        let b = s.add_session(wt.id, "pi", "t", None, None).unwrap();
+        s.sync_worktrees(p.id, &[tree("/r", "main", true)], None).unwrap();
+
+        s.delete_session(a.id).unwrap();
+        assert!(s.worktree(wt.id).is_ok(), "another session still needs it");
+        s.delete_session(b.id).unwrap();
+        assert!(s.worktree(wt.id).is_err(), "nothing left, so the gone marker goes");
+    }
+
+    #[test]
     fn issues_round_trip_and_patch() {
         let s = Store::memory().unwrap();
         let (p, _) = project(&s, "/r");
@@ -1054,6 +1101,26 @@ mod tests {
         assert_eq!(got.input_tokens, 20);
         assert_eq!(got.turns, 2);
         assert_eq!(got.cost_usd, 1.0);
+    }
+
+    #[test]
+    fn clearing_the_agent_empties_the_context_but_keeps_the_totals() {
+        let s = Store::memory().unwrap();
+        let (_, main) = project(&s, "/r");
+        let sess = s.add_session(main.id, "pi", "t", None, None).unwrap();
+        let u = Usage {
+            input_tokens: 10,
+            context: 900,
+            window: 1000,
+            model: "m".into(),
+            host: "h".into(),
+            ..Default::default()
+        };
+        s.add_usage(sess.id, &u).unwrap();
+        s.clear_agent_session(sess.id).unwrap();
+        let got = s.session(sess.id).unwrap().usage;
+        assert_eq!((got.context, got.window, got.input_tokens), (0, 1000, 10));
+        assert_eq!((got.model.as_str(), got.host.as_str()), ("m", "h"));
     }
 
     #[test]

@@ -127,6 +127,11 @@ pub trait Agent: Send + Sync {
     fn steerable(&self) -> bool {
         false
     }
+    /// Once a chat's context is this many percent full, foreman summarises it and starts the
+    /// agent afresh. 0 for agents that manage their own context.
+    fn compact_at(&self) -> u64 {
+        0
+    }
     async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String>;
 
     /// The models this agent can be told to use. Empty when it cannot say, and then the

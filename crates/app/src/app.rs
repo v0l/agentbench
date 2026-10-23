@@ -542,7 +542,7 @@ impl App {
         let tile = self.speaking_in.take().unwrap_or(Tile::New);
         let draft = match tile {
             Tile::Chat(s) => &mut self.panes.entry(s).or_default().draft,
-            Tile::New => &mut self.new_pane.draft,
+            Tile::New | Tile::Empty => &mut self.new_pane.draft,
         };
         crate::voice::append(draft, text);
         self.refocus = Some(tile);
@@ -1052,6 +1052,8 @@ impl App {
                 key: String::new(),
                 has_key: false,
                 steps: 0,
+                context: foreman_core::DEFAULT_CONTEXT,
+                compact_at: foreman_core::DEFAULT_COMPACT_AT,
                 low: Default::default(),
                 medium: Default::default(),
                 high: Default::default(),
@@ -1173,6 +1175,22 @@ impl App {
                             ui.add(egui::DragValue::new(&mut st.model.steps).range(1..=100_000).speed(10));
                         },
                     );
+                    row_help(
+                        ui,
+                        "context",
+                        "Tokens the model holds at once. The status line and auto-compact measure against it, and servers rarely say.",
+                        |ui| {
+                            ui.add(egui::DragValue::new(&mut st.model.context).range(1_000..=10_000_000).speed(1000));
+                        },
+                    );
+                    row_help(
+                        ui,
+                        "compact at",
+                        "Summarise a chat and start it afresh once its context is this full, in percent. 0 never does. Only the foreman agent needs this; the others manage their own.",
+                        |ui| {
+                            ui.add(egui::DragValue::new(&mut st.model.compact_at).range(0..=100).suffix("%"));
+                        },
+                    );
                     match &st.models {
                         Some(Err(e)) => status(ui, false, e),
                         Some(Ok(l)) => status(ui, true, &format!("{} models on the server", l.len())),
@@ -1204,6 +1222,14 @@ impl App {
                                 "Empty uses the foreman agent's server and key. A server of its own never gets the foreman key.",
                                 |ui| {
                                     field(ui, &mut level.url, &own);
+                                },
+                            );
+                            row_help(
+                                ui,
+                                "  context",
+                                "Tokens this model holds at once. 0 uses the foreman agent's.",
+                                |ui| {
+                                    ui.add(egui::DragValue::new(&mut level.context).range(0..=10_000_000).speed(1000));
                                 },
                             );
                             if !level.url.trim().is_empty() {
@@ -2424,6 +2450,7 @@ impl App {
         } else {
             self.full_header(ui, &s, tree.as_ref());
         }
+        status_line(ui, &s, self.compact);
         self.session_body(ui, s, tree);
     }
 
@@ -3629,6 +3656,78 @@ fn short_about(about: &str) -> String {
 fn short_path(path: &str) -> String {
     let parts: Vec<&str> = path.trim_end_matches('/').rsplit('/').take(2).collect();
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
+}
+
+/// The agent's status line: the server and model in use, how full the context is and how
+/// much of the input the prompt cache served. Whatever the agent has not said is left out.
+fn status_line(ui: &mut Ui, s: &Session, narrow: bool) {
+    let u = &s.usage;
+    let model = if !u.model.is_empty() { Some(u.model.as_str()) } else { s.model.as_deref() };
+    let mut line = Line::new();
+    let mut any = false;
+    if !u.host.is_empty() && !narrow {
+        line = line.legend("server").gap(6.0).value(&u.host).size(11.0);
+        any = true;
+    }
+    if let Some(m) = model {
+        line = if any { line.gap(14.0) } else { line };
+        line = line.legend("model").gap(6.0).set(m).size(11.0);
+        any = true;
+    }
+    let fill = u.fill();
+    if u.context > 0 {
+        let tint = match fill {
+            Some(f) if f >= 0.8 => FAULT,
+            Some(f) if f >= 0.6 => WARN,
+            _ => TRACE,
+        };
+        let size = match u.window {
+            0 => tokens(u.context),
+            w => format!("{} / {}", tokens(u.context), tokens(w)),
+        };
+        line = if any { line.gap(14.0) } else { line };
+        line = line.legend("context").gap(6.0).measured(size).tint(tint).size(11.0);
+        if let Some(f) = fill {
+            line = line.gap(6.0).measured(format!("{:.0}%", f * 100.0)).tint(tint).size(11.0);
+        }
+        any = true;
+    }
+    if let Some(hit) = u.cache_hit().filter(|_| !narrow) {
+        line = if any { line.gap(14.0) } else { line };
+        line = line.legend("cache").gap(6.0).measured(format!("{:.0}%", hit * 100.0)).size(11.0);
+        any = true;
+    }
+    if !any {
+        return;
+    }
+    ui.horizontal(|ui| {
+        let r = line.show(ui);
+        if let Some(f) = fill {
+            ui.add_space(8.0);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(64.0, 6.0), Sense::hover());
+            let tint = if f >= 0.8 {
+                FAULT
+            } else if f >= 0.6 {
+                WARN
+            } else {
+                TRACE
+            };
+            ui.painter().rect_filled(rect, 1.0, WELL);
+            let mut done = rect;
+            done.set_width(rect.width() * f.clamp(0.0, 1.0) as f32);
+            ui.painter().rect_filled(done, 1.0, tint);
+        }
+        r.on_hover_text(format!(
+            "{}{}{}",
+            if u.host.is_empty() { String::new() } else { format!("server {}\n", u.host) },
+            model.map(|m| format!("model {m}\n")).unwrap_or_default(),
+            match (u.context, u.window) {
+                (0, _) => "context not reported yet".to_string(),
+                (c, 0) => format!("{c} tokens of context; the window is not known"),
+                (c, w) => format!("{c} of {w} tokens of context"),
+            }
+        ));
+    });
 }
 
 fn tokens(n: u64) -> String {

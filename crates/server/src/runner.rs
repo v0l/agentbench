@@ -374,6 +374,16 @@ impl Runner {
                 if status != SessionStatus::Idle || mode == Mode::Compact {
                     break;
                 }
+                if runner.full(agent.as_ref(), session_id) {
+                    let status = runner
+                        .auto_compact(agent.as_ref(), session_id, &stop, &inbox, &questions)
+                        .await;
+                    let _ = runner.store.set_status(session_id, status);
+                    runner.changed.notify_waiters();
+                    if status != SessionStatus::Idle {
+                        break;
+                    }
+                }
                 let mut queued = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 if !queued.is_empty() {
                     let all: Vec<Message> = queued.drain(..).collect();
@@ -399,6 +409,32 @@ impl Runner {
             runner.changed.notify_waiters();
         });
         Ok(())
+    }
+
+    /// Whether the chat has outgrown the agent's context enough to summarise it now.
+    fn full(&self, agent: &dyn Agent, id: SessionId) -> bool {
+        self.store.session(id).is_ok_and(|s| s.usage.past(agent.compact_at()))
+    }
+
+    /// Summarise a chat that has filled up, so the next turn starts from the summary.
+    async fn auto_compact(
+        &self,
+        agent: &dyn Agent,
+        id: SessionId,
+        stop: &CancellationToken,
+        inbox: &Arc<Mutex<Vec<Message>>>,
+        questions: &Waiting,
+    ) -> SessionStatus {
+        let Ok(session) = self.store.session(id) else { return SessionStatus::Failed };
+        let used = session.usage.fill().unwrap_or_default();
+        let _ = self.store.add_message(
+            id,
+            &Entry::Notice {
+                text: format!("the context is {:.0}% full, so it is being compacted", used * 100.0),
+            },
+        );
+        let prompt = Message { text: COMPACT_PROMPT.into(), attachments: Vec::new(), queued: None };
+        self.turn(agent, &session, &prompt, false, stop, inbox, questions, Mode::Compact).await
     }
 
     fn context(&self, session: &Session) -> Context {
@@ -777,6 +813,7 @@ impl Io for Sink {
 mod tests {
     use super::*;
     use crate::agent::JsonCommand;
+    use foreman_core::Usage;
 
     fn script_agent(name: &str, script: &str) -> Box<dyn Agent> {
         Box::new(JsonCommand {
@@ -1227,6 +1264,71 @@ mod tests {
             io.emit(Event::Text { delta: reply.into() });
             Ok(())
         }
+    }
+
+    /// Reports a nearly full context on every turn, and asks to be compacted at 80%.
+    struct Heavy(u64);
+
+    #[async_trait]
+    impl Agent for Heavy {
+        fn name(&self) -> &str {
+            "heavy"
+        }
+        fn label(&self) -> &str {
+            "Heavy"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            true
+        }
+        fn compact_at(&self) -> u64 {
+            self.0
+        }
+        async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            io.emit(Event::Started { agent_session: "s1".into() });
+            let reply = if turn.prompt.starts_with("Summarise") { "A summary." } else { "ok" };
+            io.emit(Event::Text { delta: reply.into() });
+            io.emit(Event::Usage(Usage {
+                context: 900,
+                window: 1000,
+                model: "big".into(),
+                host: "gpu.lan".into(),
+                ..Usage::default()
+            }));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_chat_that_fills_its_window_is_compacted_after_the_turn() {
+        let (runner, s) = setup(Box::new(Heavy(80)));
+        runner.send(&s, "hello").unwrap();
+        let done = wait_idle(&runner, s.id).await;
+        assert_eq!(done.status, SessionStatus::Idle);
+        let msgs: Vec<Entry> =
+            runner.store().messages(s.id, 0).unwrap().into_iter().map(|m| m.entry).collect();
+        assert!(msgs.contains(&Entry::Summary { text: "A summary.".into() }), "{msgs:?}");
+        assert!(msgs.iter().any(|e| matches!(e, Entry::Notice { text } if text.contains("90%"))));
+        assert_eq!(done.agent_session, None, "the agent starts afresh from the summary");
+        assert_eq!(done.usage.context, 0, "the new session holds nothing yet");
+        assert_eq!((done.usage.model.as_str(), done.usage.host.as_str()), ("big", "gpu.lan"));
+    }
+
+    #[tokio::test]
+    async fn a_chat_is_left_alone_when_auto_compact_is_off() {
+        let (runner, s) = setup(Box::new(Heavy(0)));
+        runner.send(&s, "hello").unwrap();
+        let done = wait_idle(&runner, s.id).await;
+        let msgs: Vec<Entry> =
+            runner.store().messages(s.id, 0).unwrap().into_iter().map(|m| m.entry).collect();
+        assert!(!msgs.iter().any(|e| matches!(e, Entry::Summary { .. })));
+        assert_eq!(done.agent_session.as_deref(), Some("s1"));
+        assert_eq!(done.usage.context, 900);
     }
 
     #[tokio::test]
