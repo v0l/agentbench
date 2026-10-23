@@ -2211,7 +2211,7 @@ impl App {
         .unwrap_or_else(|| "a new worktree".to_string());
         ui.add_space(ui.available_height() * if self.compact { 0.06 } else { 0.18 });
         ui.vertical_centered(|ui| {
-            ui.set_max_width(640.0);
+            ui.set_max_width(ui.available_width().min(640.0));
             ui.label(
                 egui::RichText::new(format!("{name} on {here}").to_uppercase())
                     .font(legend_font(15.0))
@@ -2273,7 +2273,7 @@ impl App {
                 let list = self.agent_models.get(&fresh.agent);
                 model_input(ui, "fresh-model", &mut fresh.model, &hint_text, list);
             };
-            if self.compact {
+            if self.compact || self.narrow {
                 ui.horizontal_wrapped(&mut row);
             } else {
                 ui.horizontal(&mut row);
