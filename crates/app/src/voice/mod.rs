@@ -21,7 +21,7 @@ mod native;
 pub use native::Voice;
 
 #[cfg(target_os = "android")]
-mod android;
+pub(crate) mod android;
 
 #[cfg(target_arch = "wasm32")]
 mod stub;

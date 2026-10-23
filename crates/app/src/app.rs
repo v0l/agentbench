@@ -1087,76 +1087,82 @@ impl App {
     }
 
     fn header(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("FOREMAN")
-                    .font(legend_font(17.0))
-                    .color(VALUE)
-                    .extra_letter_spacing(2.5),
-            );
-            ui.add_space(18.0);
-            let open = self.overview.as_ref().map_or(0, |o| {
-                o.issues
-                    .iter()
-                    .filter(|i| Some(i.project_id) == self.project && i.state.is_open())
-                    .count()
+        if self.narrow {
+            // A phone is too narrow for the title, the tabs and the keys on one line.
+            ui.horizontal(|ui| {
+                self.header_title(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.header_keys(ui));
             });
-            let issues_label = format!("issues {open}");
-            let chat_label = self
-                .current_session()
-                .map(|s| foreman_core::short_title(&s.title, TAB_TITLE))
-                .unwrap_or_else(|| "new chat".to_string());
-            let opts: Vec<(Tab, &str)> =
-                vec![(Tab::Chat, chat_label.as_str()), (Tab::Issues, issues_label.as_str())];
-            let w = (ui.available_width() - 640.0 - if self.narrow { 0.0 } else { 120.0 })
-                .clamp(200.0, 560.0);
-            ui.allocate_ui(Vec2::new(w, 24.0), |ui| tabs(ui, &mut self.tab, &opts));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let ready = self.overview.is_some();
-                if ui
-                    .add(
-                        Key::new("new chat")
-                            .solid(READOUT)
-                            .enabled(ready && self.project.is_some()),
-                    )
-                    .clicked()
-                {
-                    self.new_chat(None);
-                }
-                if ui
-                    .add(
-                        Key::new("file issue")
-                            .outline(VALUE)
-                            .enabled(ready && self.project.is_some()),
-                    )
-                    .clicked()
-                    && let Some(p) = self.project
-                {
-                    self.file_issue =
-                        Some(FileIssue { project: p, title: String::new(), body: String::new() });
-                }
-                if !self.narrow {
-                    for g in Grid::ALL.into_iter().rev() {
-                        if grid_button(ui, g, self.grid == g).clicked() {
-                            self.set_grid(g);
-                        }
-                    }
-                }
-                let key = ui.add(Key::new("settings").outline(VALUE));
-                key.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "settings")
-                });
-                if key.clicked() {
-                    self.open_settings();
-                }
-                if !self.remote {
-                    chip(ui, "this machine", OK, self.overview.is_some());
-                }
-                if let Some(o) = &self.overview {
-                    status_badge(ui, &o.sessions);
-                }
+            ui.add_space(4.0);
+            let w = ui.available_width();
+            ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
+        } else {
+            ui.horizontal(|ui| {
+                self.header_title(ui);
+                ui.add_space(18.0);
+                let w = (ui.available_width() - 640.0 - 120.0).clamp(200.0, 560.0);
+                ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.header_keys(ui));
             });
+        }
+    }
+
+    fn header_title(&self, ui: &mut Ui) {
+        ui.label(
+            egui::RichText::new("FOREMAN")
+                .font(legend_font(17.0))
+                .color(VALUE)
+                .extra_letter_spacing(2.5),
+        );
+    }
+
+    fn header_tabs(&mut self, ui: &mut Ui, _width: f32) {
+        let open = self.overview.as_ref().map_or(0, |o| {
+            o.issues.iter().filter(|i| Some(i.project_id) == self.project && i.state.is_open()).count()
         });
+        let issues_label = format!("issues {open}");
+        let chat_label = self
+            .current_session()
+            .map(|s| foreman_core::short_title(&s.title, TAB_TITLE))
+            .unwrap_or_else(|| "new chat".to_string());
+        let opts: Vec<(Tab, &str)> =
+            vec![(Tab::Chat, chat_label.as_str()), (Tab::Issues, issues_label.as_str())];
+        tabs(ui, &mut self.tab, &opts);
+    }
+
+    fn header_keys(&mut self, ui: &mut Ui) {
+        let ready = self.overview.is_some();
+        if ui
+            .add(Key::new("new chat").solid(READOUT).enabled(ready && self.project.is_some()))
+            .clicked()
+        {
+            self.new_chat(None);
+        }
+        if ui
+            .add(Key::new("file issue").outline(VALUE).enabled(ready && self.project.is_some()))
+            .clicked()
+            && let Some(p) = self.project
+        {
+            self.file_issue = Some(FileIssue { project: p, title: String::new(), body: String::new() });
+        }
+        if !self.narrow {
+            for g in Grid::ALL.into_iter().rev() {
+                if grid_button(ui, g, self.grid == g).clicked() {
+                    self.set_grid(g);
+                }
+            }
+        }
+        let key = ui.add(Key::new("settings").outline(VALUE));
+        key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "settings"));
+        if key.clicked() {
+            self.open_settings();
+        }
+        if !self.remote {
+            chip(ui, "this machine", OK, self.overview.is_some());
+        }
+        if let Some(o) = &self.overview {
+            status_badge(ui, &o.sessions);
+        }
     }
 
     fn open_settings(&mut self) {
@@ -1233,7 +1239,7 @@ impl App {
         let m = egui::Modal::new(egui::Id::new("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
-                ui.set_width(540.0);
+                ui.set_width(modal_width(ctx, 540.0));
                 modal_title(ui, "Settings");
                 let pages = [
                     (Page::General, "general"),
@@ -3109,7 +3115,7 @@ impl App {
         };
         let (mut go, mut close) = (false, false);
         let m = egui::Modal::new(egui::Id::new("add-project")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
-            ui.set_width(500.0);
+            ui.set_width(modal_width(ctx, 500.0));
             modal_title(ui, "Add a project");
             section(ui, "repository", "a folder on the server", |ui| {
                 row_help(ui, "path", "Any folder inside the repo works, even a worktree. The main checkout becomes the project.", |ui| {
@@ -3163,7 +3169,7 @@ impl App {
         let m = egui::Modal::new(egui::Id::new("file-issue"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
-                ui.set_width(520.0);
+                ui.set_width(modal_width(ctx, 520.0));
                 modal_title(ui, &format!("File an issue in {name}"));
                 section(ui, "issue", "what needs doing", |ui| {
                     row(ui, "title", |ui| {
@@ -3231,7 +3237,7 @@ impl App {
             .unwrap_or_default();
         let (mut go, mut close) = (false, false);
         let m = egui::Modal::new(egui::Id::new("start")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
-            ui.set_width(520.0);
+            ui.set_width(modal_width(ctx, 520.0));
             modal_title(ui, &match &issue {
                 Some(i) => format!("Start an agent on #{}", i.id),
                 None => format!("Start an agent in {project}"),
@@ -3339,7 +3345,7 @@ impl App {
         };
         let (mut go, mut close) = (false, false);
         let m = egui::Modal::new(egui::Id::new("worktree")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
-            ui.set_width(460.0);
+            ui.set_width(modal_width(ctx, 460.0));
             modal_title(ui, "New worktree");
             section(ui, "branch", "checked out beside the repo", |ui| {
                 row_help(ui, "name", "An existing branch is checked out, a new one is made off the main checkout.", |ui| {
@@ -3404,7 +3410,7 @@ impl App {
         let m = egui::Modal::new(egui::Id::new("confirm"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
-                ui.set_width(400.0);
+                ui.set_width(modal_width(ctx, 400.0));
                 modal_title(ui, &title);
                 note(ui, body, LEGEND);
                 footer(ui, |ui| {
@@ -3462,7 +3468,8 @@ impl App {
             .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin {
                 left: 12,
                 right: 12,
-                top: 8,
+                // Below the status bar and camera cutout, which the app draws under on a phone.
+                top: 8 + crate::system::top_inset(&ctx) as i8,
                 bottom: 6,
             }))
             .show(ui, |ui| self.header(ui));
@@ -4283,4 +4290,9 @@ mod tests {
         assert_eq!(short_path("/home/k/git/snort"), "git/snort");
         assert_eq!(short_path("snort/"), "snort");
     }
+}
+
+/// A dialog's width: what it wants, but never wider than the screen less a margin.
+fn modal_width(ctx: &egui::Context, wanted: f32) -> f32 {
+    wanted.min((ctx.content_rect().width() - 24.0).max(200.0))
 }

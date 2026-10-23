@@ -96,7 +96,7 @@ impl<'a> ModelPicker<'a> {
         let m = egui::Modal::new(self.id.with("dialog"))
             .backdrop_color(Color32::from_black_alpha(150))
             .show(ctx, |ui| {
-                ui.set_width(WIDTH);
+                ui.set_width(WIDTH.min((ctx.content_rect().width() - 24.0).max(200.0)));
                 modal_title(ui, &format!("Select {}", self.noun));
 
                 let filter = field(ui, &mut st.query, &format!("filter {}s…", self.noun));

@@ -11,7 +11,7 @@ const PERMISSION: &str = "android.permission.RECORD_AUDIO";
 /// `PackageManager.PERMISSION_GRANTED`.
 const GRANTED: i32 = 0;
 
-fn with_activity<R>(
+pub(crate) fn with_activity<R>(
     f: impl for<'j> FnOnce(&mut Env<'j>, &JObject<'j>) -> jni::errors::Result<R>,
 ) -> Result<R, String> {
     let ctx = ndk_context::android_context();
