@@ -4248,7 +4248,8 @@ fn status_line(ui: &mut Ui, s: &Session, narrow: bool) {
     }
     if let Some(m) = model {
         line = if any { line.gap(14.0) } else { line };
-        line = line.legend("model").gap(6.0).set(m).size(11.0);
+        let tag = if narrow { "m" } else { "model" };
+        line = line.legend(tag).gap(if narrow { 4.0 } else { 6.0 }).set(m).size(11.0);
         any = true;
     }
     let fill = u.fill();
@@ -4262,10 +4263,16 @@ fn status_line(ui: &mut Ui, s: &Session, narrow: bool) {
             0 => tokens(u.context),
             w => format!("{} / {}", tokens(u.context), tokens(w)),
         };
-        line = if any { line.gap(14.0) } else { line };
-        line = line.legend("context").gap(6.0).measured(size).tint(tint).size(11.0);
-        if let Some(f) = fill {
-            line = line.gap(6.0).measured(format!("{:.0}%", f * 100.0)).tint(tint).size(11.0);
+        line = if any { line.gap(if narrow { 10.0 } else { 14.0 }) } else { line };
+        if narrow {
+            // Short: the percent when the window is known, else the token count.
+            let short = fill.map_or_else(|| tokens(u.context), |f| format!("{:.0}%", f * 100.0));
+            line = line.legend("c").gap(4.0).measured(short).tint(tint).size(11.0);
+        } else {
+            line = line.legend("context").gap(6.0).measured(size).tint(tint).size(11.0);
+            if let Some(f) = fill {
+                line = line.gap(6.0).measured(format!("{:.0}%", f * 100.0)).tint(tint).size(11.0);
+            }
         }
         any = true;
     }
@@ -4277,29 +4284,7 @@ fn status_line(ui: &mut Ui, s: &Session, narrow: bool) {
     if !any {
         return;
     }
-    // The context bar sits after the text; keep its room so the text is what gets cut.
-    let bar = if fill.is_some() { 72.0 } else { 0.0 };
-    let r = ui
-        .scope(|ui| {
-            ui.set_max_width((ui.available_width() - bar).max(0.0));
-            line.elided(ui)
-        })
-        .inner;
-    if let Some(f) = fill {
-        ui.add_space(8.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(64.0, 6.0), Sense::hover());
-        let tint = if f >= 0.8 {
-            FAULT
-        } else if f >= 0.6 {
-            WARN
-        } else {
-            TRACE
-        };
-        ui.painter().rect_filled(rect, 1.0, WELL);
-        let mut done = rect;
-        done.set_width(rect.width() * f.clamp(0.0, 1.0) as f32);
-        ui.painter().rect_filled(done, 1.0, tint);
-    }
+    let r = ui.scope(|ui| line.elided(ui)).inner;
     r.on_hover_text(format!(
         "{}{}{}",
         if u.host.is_empty() { String::new() } else { format!("server {}\n", u.host) },
