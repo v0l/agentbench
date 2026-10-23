@@ -1501,7 +1501,7 @@ fn markdown_sits_on_one_baseline_and_links_open() {
 /// A long chat: markdown, code blocks, tables, tool calls with long output and thinking.
 fn long_chat(rig: &Rig, turns: usize) -> foreman_core::Session {
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
-    let s = rig.store.add_session(main.id, "foreman", "a very long chat", None, None).unwrap();
+    let s = rig.store.add_session(main.id, "echo", "a very long chat", None, None).unwrap();
     let add = |e: Entry| {
         rig.store.add_message(s.id, &e).unwrap();
     };
@@ -1590,4 +1590,44 @@ fn frame_times_on_a_long_transcript() {
 #[test]
 fn frame_times_on_a_phone_with_a_long_transcript() {
     time_frames([450.0, 1000.0], 80);
+}
+
+#[test]
+fn a_long_transcript_draws_what_is_scrolled_to() {
+    let rig = rig();
+    let s = long_chat(&rig, 40);
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 200);
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Turn 39:").is_some(), "the end is in view");
+    assert!(h.query_by_label_contains("Turn 0:").is_none(), "the start is not laid out");
+    let wheel = |h: &mut Harness<'_, App>, dy: f32| {
+        h.event(egui::Event::PointerMoved(egui::pos2(800.0, 300.0)));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(3);
+    };
+    for _ in 0..60 {
+        wheel(&mut h, 4000.0);
+    }
+    shot(&mut h, "long-chat-top");
+    assert!(h.query_by_label_contains("Turn 0:").is_some(), "the start is drawn at the top");
+    assert!(h.query_by_label_contains("Turn 39:").is_none(), "the end is not");
+    for _ in 0..60 {
+        wheel(&mut h, -4000.0);
+    }
+    assert!(h.query_by_label_contains("Turn 39:").is_some(), "back at the end");
+    // A new message at the end is followed.
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Text("the very last word".into()));
+    h.run_steps(2);
+    click(&mut h, 1220.0, 784.0);
+    until(&mut h, "the reply", |h| h.state().transcript_len(s.id) >= 202);
+    assert!(h.query_by_label_contains("echo: the very last word").is_some(), "follows the bottom");
 }
