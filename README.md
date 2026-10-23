@@ -53,12 +53,11 @@ Data lives in `$FOREMAN_HOME` (default `~/.local/share/foreman`):
 ## Watching several chats
 
 The four keys beside **settings** tile the chat area: one chat, two side by side, two
-stacked, or a 2x2 grid. There is nothing to assign. Click a chat in the list and it takes
-the first tile, the others move back a place and the one at the end drops out of view
-(it is still queued, and comes back when you click it). Clicking a chat already on screen
-just focuses it, so tiles never shuffle under you while you jump between active agents.
-The focused tile has the bright border; it is the one that gets dropped or pasted files and
-that **new chat** replaces. Each tile has its own draft. Narrow windows show one chat.
+stacked, or a 2x2 grid. Click in a tile to focus it (it gets the bright border), then click
+a chat in the list and it replaces what that tile shows; the other tiles stay put. Clicking
+a chat that is already on screen just focuses its tile. The focused tile is the one that
+gets dropped or pasted files and that **new chat** fills. Each tile has its own draft.
+Narrow windows show one chat.
 
 ## Agents
 

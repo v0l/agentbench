@@ -1160,64 +1160,73 @@ fn extra_chats(rig: &Rig, n: usize) -> Vec<foreman_core::Session> {
 }
 
 #[test]
-fn opening_chats_fills_a_grid_newest_first_and_pushes_the_oldest_out() {
+fn opening_a_chat_replaces_the_focused_tile() {
     use foreman::app::Grid;
     let rig = rig();
-    let more = extra_chats(&rig, 3);
+    extra_chats(&rig, 3);
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().set_grid(Grid::Quad);
     h.run_steps(2);
     let all = rig.store.sessions().unwrap();
     assert_eq!(all.len(), 6);
-    for s in all.iter().take(5) {
-        h.state_mut().open_session(s.id, s.project_id);
+    let id: Vec<_> = all.iter().map(|s| s.id).collect();
+    let project = all[0].project_id;
+    for (at, sid) in id.iter().take(4).enumerate() {
+        h.state_mut().focus_tile(at);
+        h.state_mut().open_session(*sid, project);
     }
     h.run_steps(3);
-    let order: Vec<_> = all.iter().take(5).rev().map(|s| s.id).collect();
-    assert_eq!(h.state().shown(), order[..4].to_vec(), "four tiles, the newest first");
-    assert_eq!(h.state().open(), Some(order[0]), "the newest chat has focus");
+    assert_eq!(h.state().shown(), id[..4].to_vec(), "one chat per tile");
     shot(&mut h, "grid");
 
-    // Opening one that is on screen moves focus and nothing else.
-    h.state_mut().open_session(order[2], all[0].project_id);
+    // A click on another chat replaces the chat in the focused tile and leaves the rest.
+    h.state_mut().focus_tile(1);
+    h.state_mut().open_session(id[4], project);
     h.run_steps(2);
-    assert_eq!(h.state().shown(), order[..4].to_vec());
-    assert_eq!(h.state().open(), Some(order[2]));
+    assert_eq!(h.state().shown(), vec![id[0], id[4], id[2], id[3]]);
+    assert_eq!(h.state().open(), Some(id[4]));
+    assert_eq!(h.state().focused_tile(), 1);
 
-    // The one that dropped off comes back at the front and pushes the last one off.
-    h.state_mut().open_session(order[4], all[0].project_id);
+    // A chat already on screen is only focused; nothing is replaced.
+    h.state_mut().open_session(id[3], project);
     h.run_steps(2);
-    assert_eq!(h.state().shown(), vec![order[4], order[0], order[1], order[2]]);
-    let _ = more;
+    assert_eq!(h.state().shown(), vec![id[0], id[4], id[2], id[3]]);
+    assert_eq!(h.state().open(), Some(id[3]));
+    assert_eq!(h.state().focused_tile(), 3);
 }
 
 #[test]
-fn clicking_a_chat_in_the_list_takes_the_first_tile() {
+fn clicking_a_chat_in_the_list_replaces_the_focused_tile() {
     use foreman::app::Grid;
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().set_grid(Grid::Columns);
     h.run_steps(3);
-    let hello = rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
-    let fix = rig
-        .store
-        .sessions()
-        .unwrap()
-        .into_iter()
-        .find(|s| s.title == "#3 Fix the login loop")
-        .unwrap();
+    let all = rig.store.sessions().unwrap();
+    let hello = all.iter().find(|s| s.title == "say hello").unwrap().id;
+    let fix = all.iter().find(|s| s.title == "#3 Fix the login loop").unwrap().id;
     click(&mut h, 100.0, 142.0);
     h.run_steps(3);
+    assert_eq!(h.state().tile_chat(0), Some(hello));
+    // Focus the empty second tile, then click another chat: it fills that tile.
+    h.state_mut().focus_tile(1);
+    h.run_steps(2);
     click(&mut h, 120.0, 208.0);
     h.run_steps(3);
-    assert_eq!(h.state().shown(), vec![fix.id, hello.id]);
+    assert_eq!(h.state().tile_chat(0), Some(hello));
+    assert_eq!(h.state().tile_chat(1), Some(fix));
+    // With the first tile focused, the same click replaces it.
+    h.state_mut().focus_tile(0);
+    click(&mut h, 120.0, 208.0);
+    h.run_steps(3);
+    assert_eq!(h.state().focused_tile(), 1, "it was already on screen, so it only took focus");
     shot(&mut h, "columns");
 }
 
 #[test]
-fn closing_a_tiled_chat_leaves_the_others_and_focuses_one() {
+fn closing_a_tiled_chat_leaves_its_tile_empty() {
     use foreman::app::Grid;
     let rig = rig();
     let mut h = harness(rig.url.clone());
@@ -1225,13 +1234,15 @@ fn closing_a_tiled_chat_leaves_the_others_and_focuses_one() {
     h.state_mut().set_grid(Grid::Rows);
     let all = rig.store.sessions().unwrap();
     h.state_mut().open_session(all[0].id, all[0].project_id);
+    h.state_mut().focus_tile(1);
     h.state_mut().open_session(all[1].id, all[1].project_id);
     h.run_steps(3);
-    assert_eq!(h.state().shown(), vec![all[1].id, all[0].id]);
+    assert_eq!(h.state().shown(), vec![all[0].id, all[1].id]);
     h.state_mut().forget_chat(all[1].id);
     h.run_steps(2);
     assert_eq!(h.state().shown(), vec![all[0].id]);
-    assert_eq!(h.state().open(), Some(all[0].id), "focus moves to a chat still on screen");
+    assert_eq!(h.state().tile_chat(1), None);
+    assert_eq!(h.state().open(), None, "the focused tile is now the empty one");
 }
 
 #[test]
@@ -1243,16 +1254,51 @@ fn the_grid_and_its_chats_are_remembered() {
     h.state_mut().set_grid(Grid::Quad);
     let all = rig.store.sessions().unwrap();
     h.state_mut().open_session(all[0].id, all[0].project_id);
+    h.state_mut().focus_tile(1);
     h.state_mut().open_session(all[1].id, all[1].project_id);
     let mut saved = Mem::default();
     h.state().store(&mut saved);
     assert_eq!(saved.get_string("grid").as_deref(), Some("2x2"));
-    assert_eq!(h.state().recent(), &[all[1].id, all[0].id]);
     let again = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(|cc| {
         saved.0.insert("url".into(), rig.url.clone());
         saved.0.insert("token".into(), TOKEN.into());
         App::new(&cc.egui_ctx, Some(&saved), None)
     });
     assert_eq!(again.state().grid(), Grid::Quad);
-    assert_eq!(again.state().recent(), &[all[1].id, all[0].id]);
+    assert_eq!(again.state().tile_chat(0), Some(all[0].id));
+    assert_eq!(again.state().tile_chat(1), Some(all[1].id));
+    assert_eq!(again.state().focused_tile(), 1);
+}
+
+#[test]
+fn long_markdown_wraps_inside_a_tile() {
+    use foreman::app::Grid;
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "foreman", "a long answer", None, None).unwrap();
+    let long = "On the 4mm gap: if 4mm is fine for your saw, I can switch the plan back. At 380 deep it doesn't change the number of boards either way. Do you want the same cut list with the other gap?";
+    let add = |e: Entry| {
+        rig.store.add_message(s.id, &e).unwrap();
+    };
+    add(Entry::user(format!("ok its fine, as is {long}")));
+    add(Entry::Assistant {
+        text: format!(
+            "{long}\n\n- **Instrument shelf:** {long}\n- `cutplan.txt`: {long}\n\n{long} with `inline code` in it"
+        ),
+    });
+    // Things that cannot wrap, in their own entries: they must not widen the rest.
+    add(Entry::Assistant {
+        text: format!(
+            "| part | size | note |\n|---|---|---|\n| side | 2440x600 | {long} |\n\nhttps://example.com/{}",
+            "a".repeat(160)
+        ),
+    });
+    add(Entry::Assistant { text: format!("{long}\n\n- {long}\n- {long}") });
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_grid(Grid::Quad);
+    h.state_mut().focus_tile(1);
+    h.state_mut().open_session(s.id, main.project_id);
+    h.run_steps(6);
+    shot(&mut h, "tile-wrap");
 }
