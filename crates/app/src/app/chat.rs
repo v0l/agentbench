@@ -1,5 +1,6 @@
 //! A chat: the tiles, a tile's header, and the session view that holds the transcript above the composer.
 
+use super::transcript::{latest_plan, plan_panel};
 use super::*;
 
 impl App {
@@ -327,6 +328,11 @@ impl App {
 
     pub(super) fn session_body(&mut self, ui: &mut Ui, s: Session, tree: Option<Worktree>) {
         ui.add_space(6.0);
+
+        // The agent's current plan stays up top while the transcript scrolls under it.
+        if let Some(plan) = self.transcripts.get(&s.id).and_then(|t| latest_plan(&t.messages)) {
+            plan_panel(ui, s.id, &plan, !(self.narrow || self.compact));
+        }
 
         // The composer, and the row of attachments above it when there are any.
         let files = self.focused && !self.tray.files.is_empty();

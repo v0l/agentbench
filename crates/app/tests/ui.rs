@@ -779,6 +779,47 @@ fn a_busy_transcript_reads_cleanly() {
 }
 
 #[test]
+fn a_checklist_shows_its_items_in_the_transcript() {
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "native", "plan it", None, None).unwrap();
+    rig.store.add_message(s.id, &Entry::user("plan it")).unwrap();
+    rig.store
+        .add_message(
+            s.id,
+            &Entry::Tool {
+                call_id: "t1".into(),
+                name: "todo_write".into(),
+                input: serde_json::json!({"items": [
+                    {"text": "read the code", "status": "done"},
+                    {"text": "write the fix", "status": "in_progress"},
+                    {"text": "run the tests", "status": "pending"},
+                ]}),
+                output: Some("[x] read the code\n[~] write the fix\n[ ] run the tests".into()),
+                error: false,
+            },
+        )
+        .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 2);
+    h.run_steps(3);
+    shot(&mut h, "checklist");
+    h.get_by_label("write the fix");
+    h.get_by_label("run the tests");
+
+    // On a phone it starts folded, with the step in hand still in its header.
+    let mut h = harness_at(rig.url.clone(), [450.0, 1000.0]);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 2);
+    h.run_steps(3);
+    shot(&mut h, "checklist-phone");
+    assert!(h.query_by_label("run the tests").is_none(), "folded on a phone");
+}
+
+#[test]
 fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
     let rig = rig();
     let mut h = harness_at(rig.url.clone(), [450.0, 1000.0]);

@@ -6,6 +6,9 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 
 ## [Unreleased]
 
+### Added
+- The agent's current checklist is pinned above a chat, so what it is working on shows without reading the transcript. Click its header to fold it; it starts folded on a phone or in a tile. Claude's `TodoWrite` is drawn too.
+
 ## [0.2.0] - 2026-10-23
 
 ### Changed

@@ -367,6 +367,34 @@ pub(super) fn shell_command(input: &serde_json::Value) -> Option<&str> {
     input.get("command").and_then(|v| v.as_str()).filter(|c| !c.trim().is_empty())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Check {
+    Todo,
+    Doing,
+    Done,
+}
+
+/// The items of a checklist call: ours (`todo_write`, `items`) or Claude's (`TodoWrite`, `todos`).
+pub(super) fn checklist(name: &str, input: &serde_json::Value) -> Option<Vec<(Check, String)>> {
+    if !matches!(name, "todo_write" | "TodoWrite") {
+        return None;
+    }
+    let items = input.get("items").or_else(|| input.get("todos"))?.as_array()?;
+    let list: Vec<(Check, String)> = items
+        .iter()
+        .filter_map(|i| {
+            let text = i.get("text").or_else(|| i.get("content"))?.as_str()?.trim();
+            let status = match i.get("status").and_then(|s| s.as_str()) {
+                Some("done" | "completed") => Check::Done,
+                Some("in_progress" | "doing") => Check::Doing,
+                _ => Check::Todo,
+            };
+            Some((status, text.to_string()))
+        })
+        .collect();
+    (!list.is_empty()).then_some(list)
+}
+
 pub(super) fn tool_body(name: &str, input: &serde_json::Value) -> Option<String> {
     let pick = |k: &str| input.get(k).and_then(|v| v.as_str());
     // A command is drawn whole by the row itself, not as an extra block when it is open.
@@ -374,21 +402,19 @@ pub(super) fn tool_body(name: &str, input: &serde_json::Value) -> Option<String>
         return None;
     }
     match name {
-        "todo_write" => {
-            let items = input.get("items")?.as_array()?;
-            let lines: Vec<String> = items
-                .iter()
-                .filter_map(|i| {
-                    let text = i.get("text").or_else(|| i.get("content"))?.as_str()?;
-                    let mark = match i.get("status").and_then(|s| s.as_str()) {
-                        Some("done" | "completed") => "[x]",
-                        Some("in_progress" | "doing") => "[~]",
-                        _ => "[ ]",
+        "todo_write" | "TodoWrite" => {
+            let lines: Vec<String> = checklist(name, input)?
+                .into_iter()
+                .map(|(c, t)| {
+                    let mark = match c {
+                        Check::Done => "[x]",
+                        Check::Doing => "[~]",
+                        Check::Todo => "[ ]",
                     };
-                    Some(format!("{mark} {text}"))
+                    format!("{mark} {t}")
                 })
                 .collect();
-            (!lines.is_empty()).then(|| lines.join("\n"))
+            Some(lines.join("\n"))
         }
         "edit_file" | "edit" => {
             let old = pick("old").or(pick("oldText"))?;
@@ -414,15 +440,8 @@ pub(super) fn tool_body(name: &str, input: &serde_json::Value) -> Option<String>
 
 pub(super) fn tool_summary(name: &str, input: &serde_json::Value) -> String {
     let pick = |k: &str| input.get(k).and_then(|v| v.as_str()).map(str::to_string);
-    if name == "todo_write"
-        && let Some(items) = input.get("items").and_then(|i| i.as_array())
-    {
-        let done = items
-            .iter()
-            .filter(|i| {
-                matches!(i.get("status").and_then(|s| s.as_str()), Some("done" | "completed"))
-            })
-            .count();
+    if let Some(items) = checklist(name, input) {
+        let done = items.iter().filter(|(c, _)| *c == Check::Done).count();
         return format!("{done} of {} done", items.len());
     }
     let text = pick("command")
@@ -438,4 +457,83 @@ pub(super) fn tool_summary(name: &str, input: &serde_json::Value) -> String {
     let line = text.lines().next().unwrap_or_default().to_string();
     let _ = name;
     line.chars().take(160).collect()
+}
+
+/// The newest checklist in a transcript: the agent's current plan.
+pub(super) fn latest_plan(messages: &[Message]) -> Option<Vec<(Check, String)>> {
+    messages.iter().rev().find_map(|m| match &m.entry {
+        Entry::Tool { name, input, .. } => checklist(name, input),
+        _ => None,
+    })
+}
+
+/// The plan, pinned above the transcript so what the agent is on shows without scrolling. It
+/// starts folded where room is short (a phone, a small window, a tile), and a click overrides that.
+pub(super) fn plan_panel(
+    ui: &mut Ui,
+    session: SessionId,
+    plan: &[(Check, String)],
+    open_by_default: bool,
+) {
+    let done = plan.iter().filter(|(c, _)| *c == Check::Done).count();
+    let open_id = egui::Id::new(("plan-open", session));
+    let mut open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(open_by_default);
+    let doing = plan.iter().find(|(c, _)| *c == Check::Doing).map(|(_, t)| t.as_str());
+    rail_block(ui, ETCH, egui::Color32::TRANSPARENT, |ui| {
+        let head = ui
+            .horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(if open { "▾" } else { "▸" })
+                        .font(mono(11.0))
+                        .color(LEGEND),
+                );
+                let mut line = Line::new()
+                    .legend("plan")
+                    .size(10.0)
+                    .tint(LEGEND)
+                    .gap(8.0)
+                    .value(format!("{done} of {} done", plan.len()))
+                    .size(11.0)
+                    .tint(VALUE);
+                // Folded, the step in hand still shows.
+                if let (false, Some(t)) = (open, doing) {
+                    line = line.gap(10.0).value(t).size(11.0).tint(READOUT);
+                }
+                line.elided(ui);
+            })
+            .response
+            .interact(Sense::click());
+        if head.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if head.clicked() {
+            open = !open;
+        }
+        if open {
+            egui::ScrollArea::vertical()
+                .id_salt(("plan-scroll", session))
+                .max_height(150.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for (status, text) in plan {
+                        let (mark, tint) = match status {
+                            Check::Done => ("[x]", LEGEND),
+                            Check::Doing => ("[~]", READOUT),
+                            Check::Todo => ("[ ]", VALUE),
+                        };
+                        ui.horizontal_top(|ui| {
+                            ui.add_space(16.0);
+                            ui.label(egui::RichText::new(mark).font(mono(11.0)).color(tint));
+                            let mut t = egui::RichText::new(text).font(mono(11.0)).color(tint);
+                            if *status == Check::Done {
+                                t = t.strikethrough();
+                            }
+                            ui.add(egui::Label::new(t).wrap());
+                        });
+                    }
+                });
+        }
+    });
+    ui.ctx().data_mut(|d| d.insert_temp(open_id, open));
+    ui.add_space(6.0);
 }

@@ -1675,6 +1675,44 @@ mod tests {
     }
 
     #[test]
+    fn claudes_checklist_is_drawn_too() {
+        let input = serde_json::json!({"todos": [
+            {"content": "read", "status": "completed"},
+            {"content": "write", "status": "pending"},
+        ]});
+        assert_eq!(tool_body("TodoWrite", &input).unwrap(), "[x] read\n[ ] write");
+        assert_eq!(tool_summary("TodoWrite", &input), "1 of 2 done");
+    }
+
+    #[test]
+    fn the_pinned_plan_is_the_newest_checklist() {
+        let call = |id: i64, name: &str, input: serde_json::Value| Message {
+            id,
+            session_id: SessionId(Default::default()),
+            entry: Entry::Tool {
+                call_id: format!("c{id}"),
+                name: name.into(),
+                input,
+                output: None,
+                error: false,
+            },
+            created_at: 0,
+        };
+        let old = serde_json::json!({"items": [{"text": "old", "status": "done"}]});
+        let new = serde_json::json!({"items": [{"text": "new", "status": "in_progress"}]});
+        let msgs = vec![
+            call(1, "todo_write", old),
+            call(2, "bash", serde_json::json!({"command": "ls"})),
+            call(3, "todo_write", new),
+            call(4, "bash", serde_json::json!({"command": "ls"})),
+        ];
+        let plan = super::transcript::latest_plan(&msgs).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].1, "new");
+        assert!(super::transcript::latest_plan(&msgs[1..2]).is_none());
+    }
+
+    #[test]
     fn only_a_phone_gets_the_short_status_tags() {
         use super::composer::status_form;
         assert_eq!(
