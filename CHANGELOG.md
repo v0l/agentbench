@@ -46,6 +46,8 @@ All notable changes to Foreman are listed here. The format follows
   since servers rarely report it. `pi`, `claude` and `codex` compact themselves.
 
 ### Fixed
+- A long speech model name no longer pushes the dropdown and its help icon out of the settings dialog.
+- Pasting or attaching a picture no longer takes the cursor out of the composer.
 - A worktree that was deleted from disk no longer keeps its **gone** marker after you delete its
   last chat. The marker stays only while a chat there still needs reading.
 

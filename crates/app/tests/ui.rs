@@ -783,6 +783,12 @@ fn the_settings_key_opens_one_dialog_for_server_look_and_agent() {
     h.run_steps(3);
     assert!(h.query_all_by_label("choose font").count() == 0, "speech is its own page");
     shot(&mut h, "settings-speech");
+    h.state_mut().settings_set_speech_model("whisper-large-v3");
+    h.state_mut().settings_set_text_size(18.0);
+    h.run_steps(4);
+    shot(&mut h, "settings-speech-long");
+    h.state_mut().settings_set_text_size(13.0);
+    h.run_steps(3);
     h.state_mut().settings_page("general");
     h.run_steps(3);
     assert!(h.query_by_label("name chats with a model").is_none(), "titles are on their own page");
@@ -1107,6 +1113,26 @@ fn a_dropped_picture_is_sent_with_the_message_and_shown_in_the_chat() {
     shot(&mut h, "composer-attachment-chat");
     let bottom = h.get_by_label("attach").rect().bottom();
     assert!(bottom <= 800.0, "the composer buttons end at {bottom}, below the 800 point window");
+}
+
+#[test]
+fn the_composer_keeps_focus_when_a_file_is_attached() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(2);
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Text("one".into()));
+    h.run_steps(2);
+    drop_file(&mut h, "pasted.png", png(64, 40));
+    until(&mut h, "the picture in the composer", |h| h.state().pending_files() == 1);
+    h.event(egui::Event::Text(" two".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().draft_of(session.id), "one two", "typing carries on after the paste");
 }
 
 #[test]

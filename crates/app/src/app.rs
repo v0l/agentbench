@@ -1,6 +1,6 @@
 use crate::client::{Client, Reply, Server};
 use crate::fonts::{self, Installed, Typeface};
-use crate::form::{field, field_then, prose, secret};
+use crate::form::{field, field_then, prose, prose_id, secret};
 use crate::picker::ModelPicker;
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
@@ -526,6 +526,13 @@ impl App {
                 "titles" => Page::Titles,
                 _ => Page::General,
             };
+        }
+    }
+
+    /// Pick the model voice input runs locally.
+    pub fn settings_set_speech_model(&mut self, id: &str) {
+        if let Some(st) = &mut self.settings {
+            st.speech.model = id.into();
         }
     }
 
@@ -2414,7 +2421,13 @@ impl App {
             self.voice.busy() && self.speaking_in.is_some() && self.speaking_in == self.drawing;
         let edit = ui
             .add_enabled_ui(!speaking, |ui| {
-                prose(ui, &mut self.draft, hint_text, if compact { 2 } else { 3 })
+                prose_id(
+                    ui,
+                    ("composer", self.drawing),
+                    &mut self.draft,
+                    hint_text,
+                    if compact { 2 } else { 3 },
+                )
             })
             .inner;
         if self.refocus.is_some() && self.refocus == self.drawing {
@@ -3665,7 +3678,7 @@ fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
                     "model",
                     "Whisper, run by foreman on this machine. Downloaded the first time you speak.",
                     |ui| {
-                        choice(
+                        choice_fit(
                             ui,
                             "speech-model",
                             &mut sp.model,
@@ -3708,6 +3721,31 @@ fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
         ui,
         "The speak key beside send records from the default microphone until you press it again, then adds what you said to the message. Nothing is sent until you send it.",
     );
+}
+
+/// `choice`, but a long label is cut to the width of the box instead of widening it past the dialog.
+fn choice_fit(
+    ui: &mut Ui,
+    id: &str,
+    picked: &mut String,
+    options: impl IntoIterator<Item = (String, String)>,
+) {
+    let options: Vec<(String, String)> = options.into_iter().collect();
+    let shown = options.iter().find(|(v, _)| v == picked).map(|(_, l)| l.clone());
+    let width = ui.available_width();
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(shown.unwrap_or_default())
+        .width(width)
+        .truncate()
+        .show_ui(ui, |ui| {
+            ui.set_max_width(width);
+            for (v, label) in options {
+                let on = *picked == v;
+                if ui.add(egui::Button::selectable(on, label).truncate()).clicked() {
+                    *picked = v;
+                }
+            }
+        });
 }
 
 fn appearance_section(ui: &mut Ui, face: &mut Typeface, installed: &Installed, scanning: bool) {

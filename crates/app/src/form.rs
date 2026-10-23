@@ -10,7 +10,7 @@ use egui_bench::prelude::*;
 const SIZE: f32 = 13.0;
 
 pub fn field(ui: &mut Ui, text: &mut String, hint: &str) -> Response {
-    field_of(ui, text, hint, false, 1, f32::INFINITY)
+    field_of(ui, text, hint, false, 1, f32::INFINITY, None)
 }
 
 /// A one line field that leaves `reserve` points for whatever `after` adds beside it.
@@ -22,17 +22,29 @@ pub fn field_then(
     after: impl FnOnce(&mut Ui),
 ) -> Response {
     let w = (ui.available_width() - reserve).max(60.0);
-    let r = field_of(ui, text, hint, false, 1, w);
+    let r = field_of(ui, text, hint, false, 1, w, None);
     after(ui);
     r
 }
 
 pub fn secret(ui: &mut Ui, text: &mut String) -> Response {
-    field_of(ui, text, "", true, 1, f32::INFINITY)
+    field_of(ui, text, "", true, 1, f32::INFINITY, None)
 }
 
 pub fn prose(ui: &mut Ui, text: &mut String, hint: &str, rows: usize) -> Response {
-    field_of(ui, text, hint, false, rows, f32::INFINITY)
+    field_of(ui, text, hint, false, rows, f32::INFINITY, None)
+}
+
+/// A multi line input with an id of its own. Without one egui numbers a field by the widgets
+/// drawn before it, so one that appears above (an attachment row) takes its focus away.
+pub fn prose_id(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    text: &mut String,
+    hint: &str,
+    rows: usize,
+) -> Response {
+    field_of(ui, text, hint, false, rows, f32::INFINITY, Some(egui::Id::new(id)))
 }
 
 fn field_of(
@@ -42,6 +54,7 @@ fn field_of(
     secret: bool,
     rows: usize,
     width: f32,
+    id: Option<egui::Id>,
 ) -> Response {
     let font = egui::FontId::proportional(SIZE);
     let hint = egui::RichText::new(hint).font(font.clone()).color(LEGEND.gamma_multiply(0.6));
@@ -56,6 +69,9 @@ fn field_of(
             } else {
                 egui::TextEdit::singleline(text)
             };
+            if let Some(id) = id {
+                edit = edit.id(id);
+            }
             edit = edit
                 .frame(egui::Frame::NONE)
                 .font(font)
