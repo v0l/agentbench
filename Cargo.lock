@@ -2054,7 +2054,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "foreman"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -2095,7 +2095,7 @@ dependencies = [
 
 [[package]]
 name = "foreman-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "rusqlite",
  "serde",
@@ -2105,7 +2105,7 @@ dependencies = [
 
 [[package]]
 name = "foreman-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -2141,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "foreman-speech"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "byteorder",
  "candle-core",
