@@ -1046,7 +1046,7 @@ fn a_dropped_picture_is_sent_with_the_message_and_shown_in_the_chat() {
     assert_eq!(h.state().pending_files(), 0, "sent files leave the composer");
     let id = h.state().open().unwrap();
     let first = rig.store.messages(id, 0).unwrap();
-    let Entry::User { text, attachments } = &first[0].entry else { panic!("{first:?}") };
+    let Entry::User { text, attachments, .. } = &first[0].entry else { panic!("{first:?}") };
     assert_eq!(text, "what is this");
     assert_eq!(attachments.len(), 1);
     assert_eq!(

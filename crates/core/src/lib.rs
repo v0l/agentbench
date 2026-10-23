@@ -295,6 +295,9 @@ pub enum Entry {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<Attachment>,
+        /// Sent while the agent was busy and not yet read by it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        queued: bool,
     },
     Question {
         id: String,
@@ -333,7 +336,7 @@ pub enum Entry {
 
 impl Entry {
     pub fn user(text: impl Into<String>) -> Entry {
-        Entry::User { text: text.into(), attachments: Vec::new() }
+        Entry::User { text: text.into(), attachments: Vec::new(), queued: false }
     }
 
     pub fn text(&self) -> &str {

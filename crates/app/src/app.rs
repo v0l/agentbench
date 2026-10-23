@@ -2126,16 +2126,28 @@ impl App {
 
     fn entry(&mut self, ui: &mut Ui, m: &Message, session: SessionId) {
         match &m.entry {
-            Entry::User { text, attachments } => {
+            Entry::User { text, attachments, queued } => {
                 ui.add_space(6.0);
-                rail_block(ui, READOUT, PANEL, |ui| {
-                    Line::new()
-                        .legend("you")
-                        .size(10.0)
-                        .gap(8.0)
-                        .note(ago(m.created_at))
-                        .size(10.0)
-                        .show(ui);
+                let (rail, fill) =
+                    if *queued { (LEGEND, egui::Color32::TRANSPARENT) } else { (READOUT, PANEL) };
+                rail_block(ui, rail, fill, |ui| {
+                    if *queued {
+                        Line::new()
+                            .legend("you")
+                            .size(10.0)
+                            .gap(8.0)
+                            .note("queued: the agent has not read this yet")
+                            .size(10.0)
+                            .show(ui);
+                    } else {
+                        Line::new()
+                            .legend("you")
+                            .size(10.0)
+                            .gap(8.0)
+                            .note(ago(m.created_at))
+                            .size(10.0)
+                            .show(ui);
+                    }
                     ui.add_space(2.0);
                     if !text.is_empty() {
                         markdown::show(ui, &mut self.markdown, text, m.id as usize);

@@ -472,7 +472,7 @@ fn history(entries: &[Entry]) -> Vec<Value> {
                 "role": "user",
                 "content": format!("Here is a summary of our conversation so far. Carry on from it.\n\n{text}"),
             })),
-            Entry::User { text, attachments } if !attachments.is_empty() => {
+            Entry::User { text, attachments, .. } if !attachments.is_empty() => {
                 let names: Vec<&str> = attachments.iter().map(|a| a.name.as_str()).collect();
                 out.push(json!({
                     "role": "user",

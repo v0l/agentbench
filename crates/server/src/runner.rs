@@ -28,11 +28,24 @@ struct Live {
 struct Message {
     text: String,
     attachments: Vec<Attachment>,
+    /// The transcript row showing this message while it waits for the agent to read it.
+    queued: Option<Id>,
 }
 
 impl Message {
     fn entry(&self) -> Entry {
-        Entry::User { text: self.text.clone(), attachments: self.attachments.clone() }
+        Entry::User {
+            text: self.text.clone(),
+            attachments: self.attachments.clone(),
+            queued: false,
+        }
+    }
+
+    /// Show the waiting row as sent, now the agent has it.
+    fn delivered(&self, store: &Store) {
+        if let Some(id) = self.queued {
+            let _ = store.update_message(id, &self.entry());
+        }
     }
 }
 
@@ -137,7 +150,15 @@ impl Runner {
         };
         l.stop.cancel();
         l.questions.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        l.inbox.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let dropped: Vec<Message> =
+            l.inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+        drop(live);
+        for m in dropped {
+            if let Some(id) = m.queued {
+                let text = format!("not sent, the agent was stopped first: {}", m.text);
+                let _ = self.store.update_message(id, &Entry::Notice { text });
+            }
+        }
         true
     }
 
@@ -207,7 +228,11 @@ impl Runner {
                 .unwrap_or("application/octet-stream");
             attachments.push(self.store.add_attachment(session.id, &name, mime, &data)?);
         }
-        self.send_text(session, Message { text: text.to_string(), attachments }, Mode::Chat)
+        self.send_text(
+            session,
+            Message { text: text.to_string(), attachments, queued: None },
+            Mode::Chat,
+        )
     }
 
     /// The files of a message, written to a folder of this session's so an agent can read them.
@@ -276,7 +301,8 @@ impl Runner {
                         "stop the agent or let it finish before compacting".into(),
                     ));
                 }
-                let prompt = Message { text: COMPACT_PROMPT.into(), attachments: Vec::new() };
+                let prompt =
+                    Message { text: COMPACT_PROMPT.into(), attachments: Vec::new(), queued: None };
                 self.send_text(session, prompt, Mode::Compact)
             }
             other => Err(StoreError(format!("/{other} is handled by the window"))),
@@ -293,16 +319,23 @@ impl Runner {
         {
             let live = self.live();
             if let Some(l) = live.get(&session.id) {
-                l.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg.clone());
-                drop(live);
                 // Show it at once. A steerable agent only reads the inbox between steps, which
-                // can be a while, and the composer has already cleared by then.
+                // can be a while, and the composer has already cleared by then. It shows as
+                // queued until the agent takes it.
+                let mut msg = msg;
                 let shown = if agent.steerable() {
-                    msg.entry()
+                    Entry::User {
+                        text: msg.text.clone(),
+                        attachments: msg.attachments.clone(),
+                        queued: true,
+                    }
                 } else {
                     Entry::Notice { text: format!("queued for when this turn ends: {}", msg.text) }
                 };
-                self.store.add_message(session.id, &shown)?;
+                let row = self.store.add_message(session.id, &shown)?;
+                msg.queued = agent.steerable().then_some(row.id);
+                l.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+                drop(live);
                 self.changed.notify_waiters();
                 return Ok(());
             }
@@ -344,11 +377,22 @@ impl Runner {
                 let mut queued = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 if !queued.is_empty() {
                     let all: Vec<Message> = queued.drain(..).collect();
+                    all.iter().for_each(|m| m.delivered(&runner.store));
                     next = Some(Message {
+                        queued: None,
                         text: all.iter().map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n\n"),
                         attachments: all.into_iter().flat_map(|m| m.attachments).collect(),
                     });
                     shown = agent.steerable();
+                }
+            }
+            // A turn that failed or was stopped never reads what was waiting.
+            let left: Vec<Message> =
+                inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+            for m in left {
+                if let Some(id) = m.queued {
+                    let text = format!("not sent, the turn ended first: {}", m.text);
+                    let _ = runner.store.update_message(id, &Entry::Notice { text });
                 }
             }
             runner.live().remove(&session_id);
@@ -690,6 +734,8 @@ impl Io for Sink {
         let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
         let msg = (!inbox.is_empty()).then(|| inbox.remove(0))?;
         drop(inbox);
+        msg.delivered(&self.store);
+        self.runner.changed.notify_waiters();
         let files = self.runner.materialise(self.session, &msg.attachments);
         Some(Steer { text: msg.text, files })
     }
@@ -908,8 +954,21 @@ mod tests {
                 .collect()
         };
         assert_eq!(users(&runner), ["go", "left instead"]);
+        let queued = |runner: &Runner| -> Vec<bool> {
+            runner
+                .store()
+                .messages(s.id, 0)
+                .unwrap()
+                .into_iter()
+                .filter_map(|m| match m.entry {
+                    Entry::User { queued, .. } => Some(queued),
+                    _ => None,
+                })
+                .collect()
+        };
         wait_idle(&runner, s.id).await;
         assert_eq!(users(&runner), ["go", "left instead"]);
+        assert_eq!(queued(&runner), [false, false], "once read it no longer shows as waiting");
     }
 
     struct Looker(Mutex<Vec<Steer>>);
@@ -999,7 +1058,7 @@ mod tests {
         let shown = runner.store().messages(s.id, 0).unwrap();
         assert!(matches!(
             &shown[1].entry,
-            Entry::User { text, attachments } if text == "and this" && attachments.len() == 1
+            Entry::User { text, attachments, .. } if text == "and this" && attachments.len() == 1
         ));
     }
 
