@@ -3,15 +3,15 @@ use crate::fonts::{self, Installed, Typeface};
 use crate::form::{field, field_then, prose, prose_id, secret};
 use crate::picker::ModelPicker;
 use crate::scan::Scan;
-use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
-use egui_bench::key::Key;
-use egui_bench::markdown;
-use egui_bench::prelude::*;
-use foreman_core::{
+use agentbench_core::{
     Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue, NewProject,
     NewSession, NewWorktree, Overview, Place, Question, Session, SessionId, SessionStatus,
     Worktree,
 };
+use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
+use egui_bench::key::Key;
+use egui_bench::markdown;
+use egui_bench::prelude::*;
 use std::collections::{HashMap, HashSet};
 use web_time::{Duration, Instant};
 
@@ -248,11 +248,11 @@ struct Settings {
     face: Typeface,
     agent_error: Option<String>,
     asking_agent: bool,
-    model: foreman_core::ModelSettings,
+    model: agentbench_core::ModelSettings,
     loaded: bool,
     models: Option<Result<Vec<String>, String>>,
     asking: bool,
-    title: foreman_core::TitleSettings,
+    title: agentbench_core::TitleSettings,
     title_loaded: bool,
     title_models: Option<Result<Vec<String>, String>>,
     title_asking: bool,
@@ -388,7 +388,7 @@ pub struct App {
     tray: crate::attach::Tray,
     voice: crate::voice::Voice,
     speech: crate::voice::Settings,
-    /// Models on the server the foreman agent is saved to use. None until asked.
+    /// Models on the server the native agent is saved to use. None until asked.
     agent_models: HashMap<String, Result<Vec<String>, String>>,
     asking_models: HashSet<String>,
     markdown: markdown::Cache,
@@ -626,14 +626,14 @@ impl App {
     }
 
     /// Connect to the server a pairing link names, and keep it for next time.
-    pub fn pair(&mut self, ctx: &egui::Context, with: foreman_core::pairing::Pairing) {
+    pub fn pair(&mut self, ctx: &egui::Context, with: agentbench_core::pairing::Pairing) {
         self.settings = None;
         self.remote = true;
         self.connect_to(
             ctx,
             Server { url: with.url.trim().to_string(), token: with.token.trim().to_string() },
         );
-        self.notice = Some((true, format!("paired with {}", foreman_core::host_of(&with.url))));
+        self.notice = Some((true, format!("paired with {}", agentbench_core::host_of(&with.url))));
     }
 
     /// Reads the link the app was opened with, when it is new, and pairs with it.
@@ -645,7 +645,7 @@ impl App {
             return;
         }
         self.last_link = Some(text.clone());
-        if let Some(p) = foreman_core::pairing::Pairing::parse(&text) {
+        if let Some(p) = agentbench_core::pairing::Pairing::parse(&text) {
             self.pair(ctx, p);
         } else if let Some(id) = chat_in_link(&text) {
             // A tapped notification: show that chat once the overview has it.
@@ -769,7 +769,7 @@ impl App {
     }
 
     /// The link the settings' pairing code holds, if it shows one.
-    pub fn settings_pairing(&self) -> Option<foreman_core::pairing::Pairing> {
+    pub fn settings_pairing(&self) -> Option<agentbench_core::pairing::Pairing> {
         self.settings.as_ref().and_then(pairing_of)
     }
 
@@ -826,7 +826,7 @@ impl App {
         self.voice.busy()
     }
 
-    /// The speech settings as the voice should use them now: the foreman server option becomes
+    /// The speech settings as the voice should use them now: the agentbench server option becomes
     /// the address and token of the server this window is connected to.
     fn speech_now(&self) -> crate::voice::Settings {
         let server = self.client.as_ref().map(|c| (c.server.url.as_str(), c.server.token.as_str()));
@@ -857,8 +857,9 @@ impl App {
         }
         if let Some(p) = self.speech.problem() {
             self.notice = Some((false, p.into()));
-        } else if self.speech.mode == crate::voice::Mode::Foreman && self.client.is_none() {
-            self.notice = Some((false, "not connected to a foreman server to read speech".into()));
+        } else if self.speech.mode == crate::voice::Mode::Agentbench && self.client.is_none() {
+            self.notice =
+                Some((false, "not connected to an agentbench server to read speech".into()));
         } else if let Err(e) = self.voice.start(wake) {
             self.notice = Some((false, e));
         } else {
@@ -1100,7 +1101,7 @@ impl App {
                     if st.loaded {
                         self.settings = None;
                         self.notice =
-                            Some((true, format!("foreman agent uses {} at {}", m.model, m.url)));
+                            Some((true, format!("native agent uses {} at {}", m.model, m.url)));
                     } else {
                         st.model = m;
                         st.loaded = true;
@@ -1115,7 +1116,7 @@ impl App {
                         }
                     }
                 }
-                self.agent_models.remove("foreman");
+                self.agent_models.remove("native");
                 if let Some(c) = &mut self.client {
                     c.overview();
                 }
@@ -1688,10 +1689,10 @@ mod tests {
     #[test]
     fn a_notification_link_names_its_chat() {
         let id = "ab0e0099-33d5-494c-bc8c-cbdc8ea44989";
-        let got = chat_in_link(&format!("foreman://open?session={id}&t=1"));
+        let got = chat_in_link(&format!("agentbench://open?session={id}&t=1"));
         assert_eq!(got.map(|i| i.to_string()).as_deref(), Some(id));
-        assert!(chat_in_link("foreman://pair?url=x&token=y").is_none());
-        assert!(chat_in_link("foreman://open?session=nope").is_none());
+        assert!(chat_in_link("agentbench://pair?url=x&token=y").is_none());
+        assert!(chat_in_link("agentbench://open?session=nope").is_none());
     }
 
     #[test]

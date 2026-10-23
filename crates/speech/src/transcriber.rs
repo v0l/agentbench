@@ -1,7 +1,7 @@
 //! A Whisper model on disc, fetched once and kept loaded between takes.
 
 use crate::whisper::{Files, Whisper, best_device};
-use foreman_core::speech_models::model;
+use agentbench_core::speech_models::model;
 use std::path::{Path, PathBuf};
 
 /// Where a download has got to, for a status line.

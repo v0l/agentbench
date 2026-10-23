@@ -83,7 +83,7 @@ pub fn init(dir: &Path) -> Result<(), String> {
     let commit = ["commit", "-q", "--allow-empty", "-m", "Initial commit"];
     if git(dir, &commit).is_err() {
         // No git identity configured on this machine.
-        let mut args = vec!["-c", "user.name=foreman", "-c", "user.email=foreman@localhost"];
+        let mut args = vec!["-c", "user.name=agentbench", "-c", "user.email=agentbench@localhost"];
         args.extend(commit);
         git(dir, &args)?;
     }

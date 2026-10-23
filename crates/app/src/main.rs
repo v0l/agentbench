@@ -1,19 +1,19 @@
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 fn main() -> std::process::ExitCode {
+    use agentbench_server::cli::{Cli, exit, logging, run};
     use clap::Parser;
-    use foreman_server::cli::{Cli, exit, logging, run};
     let cli = Cli::parse();
     if cli.command.is_none() {
-        return match foreman::run_native(cli.home) {
+        return match agentbench::run_native(cli.home) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("foreman: {e}");
+                eprintln!("agentbench: {e}");
                 std::process::ExitCode::FAILURE
             }
         };
     }
     logging();
-    exit(foreman::runtime().block_on(run(cli)))
+    exit(agentbench::runtime().block_on(run(cli)))
 }
 
 #[cfg(any(target_arch = "wasm32", target_os = "android"))]

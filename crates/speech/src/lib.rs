@@ -7,7 +7,7 @@
 mod whisper;
 pub use whisper::{Files, Whisper, best_device};
 
-pub use foreman_core::speech_models::{DEFAULT_MODEL, LOCAL_MODELS, ModelInfo, model};
+pub use agentbench_core::speech_models::{DEFAULT_MODEL, LOCAL_MODELS, ModelInfo, model};
 
 mod transcriber;
 pub use transcriber::{Progress, Transcriber};

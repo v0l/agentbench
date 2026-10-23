@@ -1,16 +1,16 @@
 use crate::projects;
 use crate::runner::Runner;
 use crate::store::StoreError;
+use agentbench_core::{
+    Answer, ApiError, Id, IssuePatch, IssueState, NewComment, NewIssue, NewProject, NewSession,
+    NewWorktree, Overview, SendMessage, SessionId,
+};
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use foreman_core::{
-    Answer, ApiError, Id, IssuePatch, IssueState, NewComment, NewIssue, NewProject, NewSession,
-    NewWorktree, Overview, SendMessage, SessionId,
-};
 use serde::Deserialize;
 use serde_json::json;
 use std::time::Duration;
@@ -68,7 +68,7 @@ async fn auth(State(api): State<Api>, headers: HeaderMap, req: Request, next: Ne
 
 /// Room for a message with every attachment it may carry, base64 encoded.
 const BODY_MAX: usize =
-    foreman_core::ATTACHMENTS_MAX * foreman_core::ATTACHMENT_MAX * 4 / 3 + (1 << 20);
+    agentbench_core::ATTACHMENTS_MAX * agentbench_core::ATTACHMENT_MAX * 4 / 3 + (1 << 20);
 
 pub fn router(api: Api) -> Router {
     let protected = Router::new()
@@ -121,8 +121,8 @@ async fn transcribe(
         }
     }
     let wav = wav.ok_or_else(|| bad("the form has no file"))?;
-    let (pcm, rate) = foreman_core::audio::read_wav(&wav).map_err(bad)?;
-    let pcm = foreman_core::audio::to_whisper_rate(&pcm, rate);
+    let (pcm, rate) = agentbench_core::audio::read_wav(&wav).map_err(bad)?;
+    let pcm = agentbench_core::audio::to_whisper_rate(&pcm, rate);
     let id = api.speech.pick(&asked);
     let started = std::time::Instant::now();
     let (text, on) = api
@@ -132,7 +132,7 @@ async fn transcribe(
         .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     tracing::info!(
         "read {:.1}s of speech with {id} on the {on} in {:.1}s",
-        pcm.len() as f32 / foreman_core::audio::SPEECH_RATE as f32,
+        pcm.len() as f32 / agentbench_core::audio::SPEECH_RATE as f32,
         started.elapsed().as_secs_f32()
     );
     Ok(Json(json!({ "text": text })))
@@ -181,12 +181,12 @@ async fn changes(State(api): State<Api>, Query(q): Query<Since>) -> Reply<serde_
     Ok(Json(json!({ "cursor": cursor, "changes": changes })))
 }
 
-async fn agents(State(api): State<Api>) -> Reply<Vec<foreman_core::AgentInfo>> {
+async fn agents(State(api): State<Api>) -> Reply<Vec<agentbench_core::AgentInfo>> {
     Ok(Json(api.runner.agents().iter().map(|a| a.info()).collect()))
 }
 
-fn level_masked(l: &crate::agent::native::Level) -> foreman_core::LevelSettings {
-    foreman_core::LevelSettings {
+fn level_masked(l: &crate::agent::native::Level) -> agentbench_core::LevelSettings {
+    agentbench_core::LevelSettings {
         url: l.url.clone(),
         model: l.model.clone(),
         key: String::new(),
@@ -194,8 +194,8 @@ fn level_masked(l: &crate::agent::native::Level) -> foreman_core::LevelSettings 
     }
 }
 
-fn masked(m: &crate::agent::native::Model) -> foreman_core::ModelSettings {
-    foreman_core::ModelSettings {
+fn masked(m: &crate::agent::native::Model) -> agentbench_core::ModelSettings {
+    agentbench_core::ModelSettings {
         url: m.url.clone(),
         model: m.model.clone(),
         key: String::new(),
@@ -213,7 +213,7 @@ fn masked(m: &crate::agent::native::Model) -> foreman_core::ModelSettings {
 /// has no key to keep.
 fn level_merged(
     old: &crate::agent::native::Level,
-    new: &foreman_core::LevelSettings,
+    new: &agentbench_core::LevelSettings,
 ) -> crate::agent::native::Level {
     let url = new.url.trim().to_string();
     let key = if url.is_empty() {
@@ -228,16 +228,16 @@ fn level_merged(
     crate::agent::native::Level { url, model: new.model.trim().to_string(), key }
 }
 
-async fn get_model(State(api): State<Api>) -> Reply<foreman_core::ModelSettings> {
-    let shared = api.model.as_ref().ok_or_else(|| bad("this server has no foreman agent"))?;
+async fn get_model(State(api): State<Api>) -> Reply<agentbench_core::ModelSettings> {
+    let shared = api.model.as_ref().ok_or_else(|| bad("this server has no native agent"))?;
     Ok(Json(masked(&shared.get())))
 }
 
 async fn put_model(
     State(api): State<Api>,
-    Json(new): Json<foreman_core::ModelSettings>,
-) -> Reply<foreman_core::ModelSettings> {
-    let shared = api.model.as_ref().ok_or_else(|| bad("this server has no foreman agent"))?;
+    Json(new): Json<agentbench_core::ModelSettings>,
+) -> Reply<agentbench_core::ModelSettings> {
+    let shared = api.model.as_ref().ok_or_else(|| bad("this server has no native agent"))?;
     let mut m = shared.get();
     m.url = new.url.trim().to_string();
     m.model = new.model.trim().to_string();
@@ -263,8 +263,8 @@ async fn put_model(
     Ok(Json(masked(&m)))
 }
 
-fn title_masked(t: &crate::titles::TitleModel) -> foreman_core::TitleSettings {
-    foreman_core::TitleSettings {
+fn title_masked(t: &crate::titles::TitleModel) -> agentbench_core::TitleSettings {
+    agentbench_core::TitleSettings {
         enabled: t.enabled,
         url: t.url.clone(),
         model: t.model.clone(),
@@ -296,14 +296,14 @@ async fn clear_cross(State(api): State<Api>) -> Result<StatusCode, Failure> {
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn get_title(State(api): State<Api>) -> Reply<foreman_core::TitleSettings> {
+async fn get_title(State(api): State<Api>) -> Reply<agentbench_core::TitleSettings> {
     Ok(Json(title_masked(&titles_of(&api)?.config())))
 }
 
 async fn put_title(
     State(api): State<Api>,
-    Json(new): Json<foreman_core::TitleSettings>,
-) -> Reply<foreman_core::TitleSettings> {
+    Json(new): Json<agentbench_core::TitleSettings>,
+) -> Reply<agentbench_core::TitleSettings> {
     let titles = titles_of(&api)?;
     let mut t = titles.config();
     t.enabled = new.enabled;
@@ -323,12 +323,12 @@ async fn put_title(
 
 async fn list_title_models(
     State(api): State<Api>,
-    Json(probe): Json<foreman_core::TitleSettings>,
+    Json(probe): Json<agentbench_core::TitleSettings>,
 ) -> Reply<Vec<String>> {
     let titles = titles_of(&api)?;
     let saved = titles.config();
     let key = if probe.key.trim().is_empty() && probe.has_key { saved.key } else { probe.key };
-    // Ask whichever server the title model would use: its own, else the foreman agent's.
+    // Ask whichever server the title model would use: its own, else the native agent's.
     let ask = crate::titles::TitleModel { enabled: true, url: probe.url, model: "-".into(), key };
     let target = ask.resolve(&titles.main()).ok_or_else(|| bad("no server to ask"))?;
     let url = target.url.trim().trim_end_matches('/').to_string();
@@ -343,7 +343,7 @@ async fn agent_models(State(api): State<Api>, Path(name): Path<String>) -> Reply
 
 async fn list_models(
     State(api): State<Api>,
-    Json(probe): Json<foreman_core::ModelSettings>,
+    Json(probe): Json<agentbench_core::ModelSettings>,
 ) -> Reply<Vec<String>> {
     let saved = api.model.as_ref().map(|m| m.get()).unwrap_or_default();
     let key = if probe.key.trim().is_empty() && probe.has_key { saved.key } else { probe.key };
@@ -352,14 +352,14 @@ async fn list_models(
     Ok(Json(list))
 }
 
-async fn list_projects(State(api): State<Api>) -> Reply<Vec<foreman_core::Project>> {
+async fn list_projects(State(api): State<Api>) -> Reply<Vec<agentbench_core::Project>> {
     Ok(Json(api.runner.store().projects()?))
 }
 
 async fn add_project(
     State(api): State<Api>,
     Json(new): Json<NewProject>,
-) -> Reply<foreman_core::Project> {
+) -> Reply<agentbench_core::Project> {
     let store = api.runner.store().clone();
     let project = tokio::task::spawn_blocking(move || {
         projects::add(
@@ -387,7 +387,7 @@ async fn delete_project(State(api): State<Api>, Path(id): Path<Id>) -> Result<St
 async fn sync_project(
     State(api): State<Api>,
     Path(id): Path<Id>,
-) -> Reply<Vec<foreman_core::Worktree>> {
+) -> Reply<Vec<agentbench_core::Worktree>> {
     let store = api.runner.store().clone();
     let moved = tokio::task::spawn_blocking(move || projects::sync(&store, id, None))
         .await
@@ -401,7 +401,7 @@ async fn sync_project(
 async fn list_worktrees(
     State(api): State<Api>,
     Path(id): Path<Id>,
-) -> Reply<Vec<foreman_core::Worktree>> {
+) -> Reply<Vec<agentbench_core::Worktree>> {
     api.runner.store().project(id)?;
     Ok(Json(api.runner.store().worktrees(Some(id))?))
 }
@@ -410,7 +410,7 @@ async fn add_worktree(
     State(api): State<Api>,
     Path(id): Path<Id>,
     Json(new): Json<NewWorktree>,
-) -> Reply<foreman_core::Worktree> {
+) -> Reply<agentbench_core::Worktree> {
     let store = api.runner.store().clone();
     let w = tokio::task::spawn_blocking(move || {
         projects::add_worktree(&store, id, &new.branch, new.base.as_deref())
@@ -449,18 +449,18 @@ async fn remove_worktree(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn issues(State(api): State<Api>) -> Reply<Vec<foreman_core::Issue>> {
+async fn issues(State(api): State<Api>) -> Reply<Vec<agentbench_core::Issue>> {
     Ok(Json(api.runner.store().issues()?))
 }
 
-async fn issue(State(api): State<Api>, Path(id): Path<Id>) -> Reply<foreman_core::Issue> {
+async fn issue(State(api): State<Api>, Path(id): Path<Id>) -> Reply<agentbench_core::Issue> {
     Ok(Json(api.runner.store().issue(id)?))
 }
 
 async fn add_issue(
     State(api): State<Api>,
     Json(new): Json<NewIssue>,
-) -> Reply<foreman_core::Issue> {
+) -> Reply<agentbench_core::Issue> {
     let issue = api.runner.store().add_issue(&new)?;
     changed(&api);
     Ok(Json(issue))
@@ -470,7 +470,7 @@ async fn update_issue(
     State(api): State<Api>,
     Path(id): Path<Id>,
     Json(patch): Json<IssuePatch>,
-) -> Reply<foreman_core::Issue> {
+) -> Reply<agentbench_core::Issue> {
     let issue = api.runner.store().update_issue(id, &patch)?;
     changed(&api);
     Ok(Json(issue))
@@ -482,7 +482,10 @@ async fn delete_issue(State(api): State<Api>, Path(id): Path<Id>) -> Result<Stat
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn comments(State(api): State<Api>, Path(id): Path<Id>) -> Reply<Vec<foreman_core::Comment>> {
+async fn comments(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+) -> Reply<Vec<agentbench_core::Comment>> {
     api.runner.store().issue(id)?;
     Ok(Json(api.runner.store().comments(id)?))
 }
@@ -491,24 +494,24 @@ async fn add_comment(
     State(api): State<Api>,
     Path(id): Path<Id>,
     Json(new): Json<NewComment>,
-) -> Reply<foreman_core::Comment> {
+) -> Reply<agentbench_core::Comment> {
     let c = api.runner.store().add_comment(id, &new)?;
     changed(&api);
     Ok(Json(c))
 }
 
-async fn sessions(State(api): State<Api>) -> Reply<Vec<foreman_core::Session>> {
+async fn sessions(State(api): State<Api>) -> Reply<Vec<agentbench_core::Session>> {
     Ok(Json(api.runner.store().sessions()?))
 }
 
 async fn session(
     State(api): State<Api>,
     Path(id): Path<SessionId>,
-) -> Reply<foreman_core::Session> {
+) -> Reply<agentbench_core::Session> {
     Ok(Json(api.runner.store().session(id)?))
 }
 
-async fn spawn(api: &Api, new: NewSession) -> Result<foreman_core::Session, Failure> {
+async fn spawn(api: &Api, new: NewSession) -> Result<agentbench_core::Session, Failure> {
     let runner = api.runner.clone();
     tokio::task::spawn_blocking(move || runner.start_session(new))
         .await
@@ -519,7 +522,7 @@ async fn spawn(api: &Api, new: NewSession) -> Result<foreman_core::Session, Fail
 async fn add_session(
     State(api): State<Api>,
     Json(new): Json<NewSession>,
-) -> Reply<foreman_core::Session> {
+) -> Reply<agentbench_core::Session> {
     Ok(Json(spawn(&api, new).await?))
 }
 
@@ -527,7 +530,7 @@ async fn start_issue(
     State(api): State<Api>,
     Path(id): Path<Id>,
     Json(mut new): Json<NewSession>,
-) -> Reply<foreman_core::Session> {
+) -> Reply<agentbench_core::Session> {
     let issue = api.runner.store().issue(id)?;
     new.issue_id = Some(id);
     new.project_id = issue.project_id;
@@ -562,7 +565,7 @@ async fn messages(
     State(api): State<Api>,
     Path(id): Path<SessionId>,
     Query(q): Query<After>,
-) -> Reply<Vec<foreman_core::Message>> {
+) -> Reply<Vec<agentbench_core::Message>> {
     api.runner.store().session(id)?;
     Ok(Json(api.runner.store().messages(id, q.after)?))
 }
@@ -770,7 +773,7 @@ mod tests {
         let said = msgs[1]["entry"]["text"].as_str().unwrap();
         assert!(said.contains("look at this"), "{said}");
         let path =
-            std::env::temp_dir().join("foreman").join(id.to_string()).join(format!("{aid}.png"));
+            std::env::temp_dir().join("agentbench").join(id.to_string()).join(format!("{aid}.png"));
         assert_eq!(
             std::fs::read(&path).unwrap(),
             png,
@@ -884,7 +887,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_foreman_model_is_set_live_and_its_key_never_read_back() {
+    async fn the_agentbench_model_is_set_live_and_its_key_never_read_back() {
         let f = fixture();
         let shared = crate::agent::native::Shared::new(crate::agent::native::Model::default());
         let api = Api { model: Some(shared.clone()), ..f.api.clone() };

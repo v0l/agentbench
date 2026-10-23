@@ -10,7 +10,9 @@ impl App {
                     status(ui, false, e);
                     hint(ui, "retrying every few seconds");
                 }
-                None if self.starting.is_some() => note(ui, "starting the foreman server", LEGEND),
+                None if self.starting.is_some() => {
+                    note(ui, "starting the agentbench server", LEGEND)
+                }
                 None => note(ui, "connecting", LEGEND),
             }
             return;

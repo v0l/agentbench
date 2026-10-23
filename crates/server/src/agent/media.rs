@@ -254,7 +254,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Result<Scratch, String> {
-        let dir = std::env::temp_dir().join(format!("foreman-media-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("agentbench-media-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         Ok(Scratch(dir))
     }

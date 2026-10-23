@@ -1,4 +1,6 @@
-use crate::{Config, DEFAULT_LISTEN, home, saved_model, serve_config, store::Store, token};
+use crate::{
+    Config, DEFAULT_LISTEN, home, home_file, saved_model, serve_config, store::Store, token,
+};
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -7,7 +9,7 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
-    #[arg(long, env = "FOREMAN_HOME")]
+    #[arg(long)]
     pub home: Option<PathBuf>,
     #[arg(long)]
     pub listen: Option<SocketAddr>,
@@ -44,7 +46,7 @@ pub fn exit(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("foreman: {e}");
+            eprintln!("agentbench: {e}");
             ExitCode::FAILURE
         }
     }
@@ -52,11 +54,11 @@ pub fn exit(result: Result<(), String>) -> ExitCode {
 
 pub async fn run(cli: Cli) -> Result<(), String> {
     let home = cli.home.unwrap_or_else(home);
-    let config = Config::load(&home.join("foreman.toml"))?;
-    let store = Store::open(&home.join("foreman.db")).map_err(|e| e.0)?;
+    let config = Config::load(&home_file(&home, "agentbench.toml", "foreman.toml"))?;
+    let store = Store::open(&home_file(&home, "agentbench.db", "foreman.db")).map_err(|e| e.0)?;
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
-            tracing::info!("foreman {} in {}", env!("CARGO_PKG_VERSION"), home.display());
+            tracing::info!("agentbench {} in {}", env!("CARGO_PKG_VERSION"), home.display());
             let listen = cli
                 .listen
                 .or(config.listen)

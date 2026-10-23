@@ -1,10 +1,10 @@
+use agentbench::App;
+use agentbench_core::{Entry, NewIssue};
+use agentbench_server::agent::JsonCommand;
+use agentbench_server::store::Store;
 use eframe::Storage as _;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use foreman::App;
-use foreman_core::{Entry, NewIssue};
-use foreman_server::agent::JsonCommand;
-use foreman_server::store::Store;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -56,7 +56,7 @@ fn rig() -> Rig {
     rig_with(Vec::new())
 }
 
-fn rig_with(extra: Vec<Box<dyn foreman_server::agent::Agent>>) -> Rig {
+fn rig_with(extra: Vec<Box<dyn agentbench_server::agent::Agent>>) -> Rig {
     rig_on("http://127.0.0.1:9/v1", extra)
 }
 
@@ -84,7 +84,7 @@ fn model_server(n: usize) -> String {
     format!("http://{addr}/v1")
 }
 
-fn rig_on(model_url: &str, extra: Vec<Box<dyn foreman_server::agent::Agent>>) -> Rig {
+fn rig_on(model_url: &str, extra: Vec<Box<dyn agentbench_server::agent::Agent>>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("demo");
     repo(&main);
@@ -92,7 +92,7 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn foreman_server::agent::Agent>>) ->
     store.set_setting("token", TOKEN).unwrap();
     worktree(&main, "request-log");
     worktree(&main, "fix-login");
-    let project = foreman_server::projects::add(&store, &main, None, false).unwrap();
+    let project = agentbench_server::projects::add(&store, &main, None, false).unwrap();
     store
         .add_issue(&NewIssue {
             project_id: project.id,
@@ -114,7 +114,7 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn foreman_server::agent::Agent>>) ->
         .unwrap();
     store.add_session(side.id, "echo", "#3 Fix the login loop", None, None).unwrap();
     let second = store.add_session(side.id, "echo", "review the fix", None, None).unwrap();
-    store.set_status(second.id, foreman_core::SessionStatus::Running).unwrap();
+    store.set_status(second.id, agentbench_core::SessionStatus::Running).unwrap();
     store
         .add_message(
             session.id,
@@ -150,19 +150,19 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn foreman_server::agent::Agent>>) ->
     drop(listener);
     let s = store.clone();
     rt.spawn(async move {
-        let config = foreman_server::Config {
-            model: foreman_server::agent::native::Model {
+        let config = agentbench_server::Config {
+            model: agentbench_server::agent::native::Model {
                 url: model_url.clone(),
                 model: "test-model".into(),
                 ..Default::default()
             },
             ..Default::default()
         };
-        let model = foreman_server::agent::native::Shared::new(config.model.clone());
-        let mut agents: Vec<Box<dyn foreman_server::agent::Agent>> = vec![Box::new(echo)];
-        agents.push(Box::new(foreman_server::agent::Native::shared(model.clone())));
+        let model = agentbench_server::agent::native::Shared::new(config.model.clone());
+        let mut agents: Vec<Box<dyn agentbench_server::agent::Agent>> = vec![Box::new(echo)];
+        agents.push(Box::new(agentbench_server::agent::Native::shared(model.clone())));
         agents.extend(extra);
-        foreman_server::serve_agents(s, agents, Some(model), addr, std::future::pending())
+        agentbench_server::serve_agents(s, agents, Some(model), addr, std::future::pending())
             .await
             .unwrap();
     });
@@ -210,7 +210,7 @@ fn until(h: &mut Harness<'_, App>, what: &str, ok: impl Fn(&Harness<'_, App>) ->
 }
 
 fn shot(h: &mut Harness<'_, App>, name: &str) {
-    if let Ok(dir) = std::env::var("FOREMAN_SHOTS") {
+    if let Ok(dir) = std::env::var("AGENTBENCH_SHOTS") {
         let img = h.render().expect("rendered");
         img.save(Path::new(&dir).join(format!("{name}.png"))).unwrap();
     }
@@ -246,7 +246,7 @@ fn the_status_line_shows_the_server_model_and_context() {
     rig.store
         .add_usage(
             session.id,
-            &foreman_core::Usage {
+            &agentbench_core::Usage {
                 input_tokens: 2_000,
                 cache_read_tokens: 6_000,
                 context: 84_000,
@@ -308,8 +308,8 @@ fn the_client_reaches_the_server() {
     let session =
         rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut c = foreman::client::Client::new(
-        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
         move || {
             let _ = tx.send(());
         },
@@ -318,8 +318,10 @@ fn the_client_reaches_the_server() {
     rx.recv_timeout(Duration::from_secs(5)).expect("a reply");
     let replies = c.poll();
     match &replies[0] {
-        foreman::client::Reply::Done(_) => {}
-        foreman::client::Reply::Failed(e) | foreman::client::Reply::Offline(e) => panic!("{e}"),
+        agentbench::client::Reply::Done(_) => {}
+        agentbench::client::Reply::Failed(e) | agentbench::client::Reply::Offline(e) => {
+            panic!("{e}")
+        }
         _ => panic!("odd reply"),
     }
 }
@@ -335,8 +337,8 @@ fn a_server_that_never_answers_is_offline_not_a_hang() {
         }
     });
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut c = foreman::client::Client::new(
-        foreman::client::Server { url, token: TOKEN.into() },
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url, token: TOKEN.into() },
         move || {
             let _ = tx.send(());
         },
@@ -347,7 +349,7 @@ fn a_server_that_never_answers_is_offline_not_a_hang() {
     rx.recv_timeout(Duration::from_secs(5)).expect("a reply, not a hang");
     assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
     match c.poll().pop() {
-        Some(foreman::client::Reply::Offline(_)) => {}
+        Some(agentbench::client::Reply::Offline(_)) => {}
         _ => panic!("expected the server to be called offline"),
     }
 }
@@ -376,9 +378,9 @@ fn the_window_starts_its_own_server_by_default() {
     let url = format!("http://{}", rig.url);
     let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(move |cc| {
         let url = url.clone();
-        let local = foreman::LocalServer {
+        let local = agentbench::LocalServer {
             start: Box::new(move || {
-                Ok(foreman::client::Server { url: url.clone(), token: TOKEN.into() })
+                Ok(agentbench::client::Server { url: url.clone(), token: TOKEN.into() })
             }),
         };
         App::with_local(&cc.egui_ctx, None, None, Some(local))
@@ -392,7 +394,7 @@ fn a_saved_remote_choice_is_kept() {
     let mut storage = Mem::default();
     storage.0.insert("remote".into(), "true".into());
     let h = Harness::builder().with_size([900.0, 600.0]).build_eframe(move |cc| {
-        let local = foreman::LocalServer { start: Box::new(|| Err("must not start".into())) };
+        let local = agentbench::LocalServer { start: Box::new(|| Err("must not start".into())) };
         App::with_local(&cc.egui_ctx, Some(&storage), None, Some(local))
     });
     assert!(!h.state().is_local());
@@ -400,8 +402,8 @@ fn a_saved_remote_choice_is_kept() {
 
 struct Lister;
 
-#[foreman_server::agent::async_trait]
-impl foreman_server::agent::Agent for Lister {
+#[agentbench_server::agent::async_trait]
+impl agentbench_server::agent::Agent for Lister {
     fn name(&self) -> &str {
         "lister"
     }
@@ -422,8 +424,8 @@ impl foreman_server::agent::Agent for Lister {
     }
     async fn run(
         &self,
-        _turn: &foreman_server::agent::Turn<'_>,
-        _io: &dyn foreman_server::agent::Io,
+        _turn: &agentbench_server::agent::Turn<'_>,
+        _io: &dyn agentbench_server::agent::Io,
     ) -> Result<(), String> {
         Ok(())
     }
@@ -448,8 +450,8 @@ fn a_new_chat_offers_a_dropdown_for_any_agent_that_lists_models() {
 
 struct Waiter;
 
-#[foreman_server::agent::async_trait]
-impl foreman_server::agent::Agent for Waiter {
+#[agentbench_server::agent::async_trait]
+impl agentbench_server::agent::Agent for Waiter {
     fn name(&self) -> &str {
         "waiter"
     }
@@ -467,24 +469,24 @@ impl foreman_server::agent::Agent for Waiter {
     }
     async fn run(
         &self,
-        _turn: &foreman_server::agent::Turn<'_>,
-        io: &dyn foreman_server::agent::Io,
+        _turn: &agentbench_server::agent::Turn<'_>,
+        io: &dyn agentbench_server::agent::Io,
     ) -> Result<(), String> {
-        let q = foreman_core::Question {
+        let q = agentbench_core::Question {
             text: "which licence?".into(),
             options: vec!["MIT".into(), "Apache-2.0".into()],
             ..Default::default()
         };
         let a = io.ask(q).await?;
-        io.emit(foreman_server::agent::Event::Text { delta: format!("going with {a}") });
+        io.emit(agentbench_server::agent::Event::Text { delta: format!("going with {a}") });
         Ok(())
     }
 }
 
 struct Planner;
 
-#[foreman_server::agent::async_trait]
-impl foreman_server::agent::Agent for Planner {
+#[agentbench_server::agent::async_trait]
+impl agentbench_server::agent::Agent for Planner {
     fn name(&self) -> &str {
         "planner"
     }
@@ -502,10 +504,10 @@ impl foreman_server::agent::Agent for Planner {
     }
     async fn run(
         &self,
-        _turn: &foreman_server::agent::Turn<'_>,
-        io: &dyn foreman_server::agent::Io,
+        _turn: &agentbench_server::agent::Turn<'_>,
+        io: &dyn agentbench_server::agent::Io,
     ) -> Result<(), String> {
-        let q = |text: &str, options: &[&str], multiple| foreman_core::Question {
+        let q = |text: &str, options: &[&str], multiple| agentbench_core::Question {
             text: text.into(),
             options: options.iter().map(|o| o.to_string()).collect(),
             multiple,
@@ -517,7 +519,9 @@ impl foreman_server::agent::Agent for Planner {
                 q("anything else?", &[], false),
             ])
             .await?;
-        io.emit(foreman_server::agent::Event::Text { delta: format!("plan: {}", a.join(" | ")) });
+        io.emit(agentbench_server::agent::Event::Text {
+            delta: format!("plan: {}", a.join(" | ")),
+        });
         Ok(())
     }
 }
@@ -528,11 +532,11 @@ fn several_questions_are_answered_together_with_multiple_choice() {
     let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    let mut c = foreman::client::Client::new(
-        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
         || {},
     );
-    c.add_session(&foreman_core::NewSession {
+    c.add_session(&agentbench_core::NewSession {
         project_id: project,
         agent: "planner".into(),
         prompt: Some("plan".into()),
@@ -540,9 +544,9 @@ fn several_questions_are_answered_together_with_multiple_choice() {
     });
     until(&mut h, "the waiting session", |h| {
         h.state().overview().is_some_and(|o| {
-            o.sessions
-                .iter()
-                .any(|s| s.agent == "planner" && s.status == foreman_core::SessionStatus::Waiting)
+            o.sessions.iter().any(|s| {
+                s.agent == "planner" && s.status == agentbench_core::SessionStatus::Waiting
+            })
         })
     });
     let s = h
@@ -601,11 +605,11 @@ fn a_question_is_answered_by_clicking_an_option() {
     let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    let mut c = foreman::client::Client::new(
-        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
         || {},
     );
-    c.add_session(&foreman_core::NewSession {
+    c.add_session(&agentbench_core::NewSession {
         project_id: project,
         agent: "waiter".into(),
         prompt: Some("pick".into()),
@@ -616,7 +620,7 @@ fn a_question_is_answered_by_clicking_an_option() {
         h.state().overview().is_some_and(|o| {
             o.sessions
                 .iter()
-                .any(|s| s.agent == "waiter" && s.status == foreman_core::SessionStatus::Waiting)
+                .any(|s| s.agent == "waiter" && s.status == agentbench_core::SessionStatus::Waiting)
         })
     });
     let s = h
@@ -654,10 +658,13 @@ fn the_header_counts_agents_by_status() {
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     shot(&mut h, "badge");
-    let counts = foreman::status_counts(&h.state().overview().unwrap().sessions);
+    let counts = agentbench::status_counts(&h.state().overview().unwrap().sessions);
     assert_eq!(
         counts,
-        vec![(foreman_core::SessionStatus::Idle, 2), (foreman_core::SessionStatus::Stopped, 1)]
+        vec![
+            (agentbench_core::SessionStatus::Idle, 2),
+            (agentbench_core::SessionStatus::Stopped, 1)
+        ]
     );
 }
 
@@ -688,7 +695,7 @@ fn the_buttons_on_an_issue_card_work() {
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    click(&mut h, 236.0, 20.0);
+    click(&mut h, 283.0, 20.0);
     h.run_steps(3);
     shot(&mut h, "issues-tab");
     click(&mut h, 1107.0, 170.0);
@@ -701,7 +708,7 @@ fn the_buttons_on_an_issue_card_work() {
 fn a_busy_transcript_reads_cleanly() {
     let rig = rig();
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
-    let s = rig.store.add_session(main.id, "foreman", "The current credit system isnt very good, there isnt a way for users to see what they paid", None, None).unwrap();
+    let s = rig.store.add_session(main.id, "native", "The current credit system isnt very good, there isnt a way for users to see what they paid", None, None).unwrap();
     let add = |e: Entry| {
         rig.store.add_message(s.id, &e).unwrap();
     };
@@ -802,7 +809,7 @@ fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
 fn a_bash_command_is_always_shown_whole_and_wrapped() {
     let rig = rig();
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
-    let s = rig.store.add_session(main.id, "foreman", "risky", None, None).unwrap();
+    let s = rig.store.add_session(main.id, "native", "risky", None, None).unwrap();
     let long = "cd /srv/app && rm -rf build/ dist/ node_modules/ && git clean -fdx -e keep.txt && \\\n  curl -fsSL https://example.com/install.sh | sudo bash -s -- --yes --prefix /usr/local --with-everything-enabled-and-then-some";
     rig.store.add_message(s.id, &Entry::user("clean it")).unwrap();
     rig.store
@@ -900,7 +907,7 @@ fn a_new_text_size_applies_on_save_and_is_kept() {
     until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
     until(&mut h, "the installed fonts", |h| h.query_all_by_label("choose font").count() == 2);
     let line = |h: &Harness<'_, App>| {
-        h.ctx.fonts_mut(|f| f.row_height(&egui::FontId::proportional(foreman::fonts::BASE)))
+        h.ctx.fonts_mut(|f| f.row_height(&egui::FontId::proportional(agentbench::fonts::BASE)))
     };
     let before = line(&h);
     h.state_mut().settings_set_text_size(16.0);
@@ -1054,11 +1061,11 @@ fn a_chat_can_start_in_the_home_folder_with_no_repo() {
     let o = h.state().overview().unwrap();
     assert!(o.projects.iter().any(|p| p.home && p.id == home.id), "the tree lists it");
 
-    let mut c = foreman::client::Client::new(
-        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
         || {},
     );
-    c.add_session(&foreman_core::NewSession {
+    c.add_session(&agentbench_core::NewSession {
         project_id: home.id,
         agent: "echo".into(),
         prompt: Some("parse this".into()),
@@ -1072,10 +1079,10 @@ fn a_chat_can_start_in_the_home_folder_with_no_repo() {
     }
     let s = rig.store.sessions().unwrap().into_iter().find(|s| s.project_id == home.id).unwrap();
     assert_eq!(s.cwd, home.path, "the agent starts in the home folder");
-    c.add_session(&foreman_core::NewSession {
+    c.add_session(&agentbench_core::NewSession {
         project_id: home.id,
         agent: "echo".into(),
-        place: foreman_core::Place::New { branch: "x".into() },
+        place: agentbench_core::Place::New { branch: "x".into() },
         ..Default::default()
     });
     h.run_steps(3);
@@ -1115,11 +1122,11 @@ fn new_chat_stays_blank_while_other_agents_work() {
     click(&mut h, 1220.0, 23.0);
     h.run_steps(3);
     assert_eq!(h.state().open(), None, "new chat starts blank");
-    let mut other = foreman::client::Client::new(
-        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+    let mut other = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
         || {},
     );
-    other.add_session(&foreman_core::NewSession {
+    other.add_session(&agentbench_core::NewSession {
         project_id: project,
         agent: "echo".into(),
         prompt: Some("someone else".into()),
@@ -1191,8 +1198,8 @@ fn a_new_chat_after_a_deleted_one_shows_none_of_its_messages() {
     h.state_mut().open_session(old.id, old.project_id);
     until(&mut h, "its transcript", |h| h.state().transcript_len(old.id) == 3);
 
-    let mut other = foreman::client::Client::new(
-        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+    let mut other = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
         || {},
     );
     other.delete_session(old.id);
@@ -1329,11 +1336,11 @@ fn escape_stops_the_agent_working_in_the_open_chat() {
     let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    let mut other = foreman::client::Client::new(
-        foreman::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+    let mut other = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
         || {},
     );
-    other.add_session(&foreman_core::NewSession {
+    other.add_session(&agentbench_core::NewSession {
         project_id: project,
         agent: "slow".into(),
         prompt: Some("take your time".into()),
@@ -1345,7 +1352,7 @@ fn escape_stops_the_agent_working_in_the_open_chat() {
             .unwrap()
             .into_iter()
             .find(|s| s.agent == "slow")
-            .filter(|s| s.status == foreman_core::SessionStatus::Running)
+            .filter(|s| s.status == agentbench_core::SessionStatus::Running)
     };
     let start = Instant::now();
     let session = loop {
@@ -1400,7 +1407,7 @@ fn the_speak_key_sits_in_the_composer_and_says_what_is_missing() {
     assert!(!h.state().listening(), "nothing was opened");
 }
 
-fn extra_chats(rig: &Rig, n: usize) -> Vec<foreman_core::Session> {
+fn extra_chats(rig: &Rig, n: usize) -> Vec<agentbench_core::Session> {
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
     (0..n)
         .map(|i| rig.store.add_session(main.id, "echo", &format!("extra {i}"), None, None).unwrap())
@@ -1409,7 +1416,7 @@ fn extra_chats(rig: &Rig, n: usize) -> Vec<foreman_core::Session> {
 
 #[test]
 fn opening_a_chat_replaces_the_focused_tile() {
-    use foreman::app::Grid;
+    use agentbench::app::Grid;
     let rig = rig();
     extra_chats(&rig, 3);
     let mut h = harness(rig.url.clone());
@@ -1446,7 +1453,7 @@ fn opening_a_chat_replaces_the_focused_tile() {
 
 #[test]
 fn the_six_tile_grid_shows_six_chats_and_is_remembered() {
-    use foreman::app::Grid;
+    use agentbench::app::Grid;
     let rig = rig();
     extra_chats(&rig, 4);
     let mut h = harness(rig.url.clone());
@@ -1470,7 +1477,7 @@ fn the_six_tile_grid_shows_six_chats_and_is_remembered() {
 
 #[test]
 fn clicking_a_chat_in_the_list_replaces_the_focused_tile() {
-    use foreman::app::Grid;
+    use agentbench::app::Grid;
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
@@ -1499,7 +1506,7 @@ fn clicking_a_chat_in_the_list_replaces_the_focused_tile() {
 
 #[test]
 fn closing_a_tiled_chat_leaves_its_tile_empty() {
-    use foreman::app::Grid;
+    use agentbench::app::Grid;
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
@@ -1519,7 +1526,7 @@ fn closing_a_tiled_chat_leaves_its_tile_empty() {
 
 #[test]
 fn the_grid_and_its_chats_are_remembered() {
-    use foreman::app::Grid;
+    use agentbench::app::Grid;
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
@@ -1544,10 +1551,10 @@ fn the_grid_and_its_chats_are_remembered() {
 
 #[test]
 fn long_markdown_wraps_inside_a_tile() {
-    use foreman::app::Grid;
+    use agentbench::app::Grid;
     let rig = rig();
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
-    let s = rig.store.add_session(main.id, "foreman", "a long answer", None, None).unwrap();
+    let s = rig.store.add_session(main.id, "native", "a long answer", None, None).unwrap();
     let long = "On the 4mm gap: if 4mm is fine for your saw, I can switch the plan back. At 380 deep it doesn't change the number of boards either way. Do you want the same cut list with the other gap?";
     let add = |e: Entry| {
         rig.store.add_message(s.id, &e).unwrap();
@@ -1579,7 +1586,7 @@ fn long_markdown_wraps_inside_a_tile() {
 fn markdown_sits_on_one_baseline_and_links_open() {
     let rig = rig();
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
-    let s = rig.store.add_session(main.id, "foreman", "markdown", None, None).unwrap();
+    let s = rig.store.add_session(main.id, "native", "markdown", None, None).unwrap();
     rig.store
         .add_message(
             s.id,
@@ -1597,7 +1604,7 @@ fn markdown_sits_on_one_baseline_and_links_open() {
 }
 
 /// A long chat: markdown, code blocks, tables, tool calls with long output and thinking.
-fn long_chat(rig: &Rig, turns: usize) -> foreman_core::Session {
+fn long_chat(rig: &Rig, turns: usize) -> agentbench_core::Session {
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
     let s = rig.store.add_session(main.id, "echo", "a very long chat", None, None).unwrap();
     let add = |e: Entry| {

@@ -8,12 +8,12 @@ pub enum Mode {
     Local,
     /// An OpenAI compatible `/v1/audio/transcriptions`.
     Server,
-    /// The foreman server this window is connected to, which reads speech with Whisper on its own
+    /// The agentbench server this window is connected to, which reads speech with Whisper on its own
     /// machine (on its GPU when it was built with CUDA). Needs no address or key of its own.
-    Foreman,
+    Agentbench,
 }
 
-pub use foreman_core::speech_models::{DEFAULT_MODEL, LOCAL_MODELS, model};
+pub use agentbench_core::speech_models::{DEFAULT_MODEL, LOCAL_MODELS, model};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
@@ -32,7 +32,7 @@ impl Default for Settings {
         Settings {
             mode: if !cfg!(local_speech) {
                 // A phone is better at listening than at reading: let the server do that.
-                Mode::Foreman
+                Mode::Agentbench
             } else {
                 Mode::Local
             },
@@ -53,7 +53,7 @@ impl Settings {
         match st.get_string("voice_mode").as_deref() {
             Some("local") if cfg!(local_speech) => s.mode = Mode::Local,
             Some("server") => s.mode = Mode::Server,
-            Some("foreman") => s.mode = Mode::Foreman,
+            Some("agentbench" | "foreman") => s.mode = Mode::Agentbench,
             _ => {}
         }
         if let Some(m) = st.get_string("voice_model").filter(|m| model(m).is_some()) {
@@ -71,7 +71,7 @@ impl Settings {
             match self.mode {
                 Mode::Local => "local",
                 Mode::Server => "server",
-                Mode::Foreman => "foreman",
+                Mode::Agentbench => "agentbench",
             }
             .into(),
         );
@@ -94,11 +94,11 @@ impl Settings {
         }
     }
 
-    /// These settings as a plain speech server, with `mode` Foreman turned into the connected
-    /// foreman server's own endpoint, token and the model picked here.
-    pub fn resolved(&self, foreman: Option<(&str, &str)>) -> Settings {
+    /// These settings as a plain speech server, with `mode` Agentbench turned into the connected
+    /// agentbench server's own endpoint, token and the model picked here.
+    pub fn resolved(&self, agentbench: Option<(&str, &str)>) -> Settings {
         let mut s = self.clone();
-        if let (Mode::Foreman, Some((url, token))) = (self.mode, foreman) {
+        if let (Mode::Agentbench, Some((url, token))) = (self.mode, agentbench) {
             s.mode = Mode::Server;
             s.url = format!("{}/v1", url.trim_end_matches('/'));
             s.key = token.to_string();

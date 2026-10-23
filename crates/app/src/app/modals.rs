@@ -20,13 +20,14 @@ impl App {
         };
         let state = scanner.state();
         if let Scan::Found(text) = &state {
-            let found = foreman_core::pairing::Pairing::parse(text);
+            let found = agentbench_core::pairing::Pairing::parse(text);
             self.scanner = None;
             self.scan_view = None;
             match found {
                 Some(p) => self.pair(ctx, p),
                 None => {
-                    self.notice = Some((false, "that code is not a foreman pairing code".into()))
+                    self.notice =
+                        Some((false, "that code is not an agentbench pairing code".into()))
                 }
             }
             return;
@@ -52,7 +53,7 @@ impl App {
                 match &state {
                     Scan::Failed(why) => status(ui, false, why),
                     Scan::Starting => hint(ui, "starting the camera"),
-                    _ => hint(ui, "Point the camera at the code in foreman's settings on your computer, under pair a phone."),
+                    _ => hint(ui, "Point the camera at the code in agentbench's settings on your computer, under pair a phone."),
                 }
                 if let Some(t) = &view {
                     ui.add_space(8.0);
@@ -232,7 +233,7 @@ impl App {
                 });
                 if s.place == PlaceChoice::New {
                     row_help(ui, "branch", "Made off the main checkout's branch, beside the repo in .worktrees.", |ui| {
-                        let hint_text = issue.as_ref().map(|i| format!("issue-{}-{}", i.id, foreman_core::branch_slug(&i.title))).unwrap_or("fix-login".into());
+                        let hint_text = issue.as_ref().map(|i| format!("issue-{}-{}", i.id, agentbench_core::branch_slug(&i.title))).unwrap_or("fix-login".into());
                         field(ui, &mut s.branch, &hint_text);
                     });
                 }
@@ -346,7 +347,7 @@ impl App {
         let (title, body, key) = match c {
             Confirm::Project(_, name) => (
                 format!("Remove {name}?"),
-                "Its issues, sessions and transcripts are deleted from foreman. The repository and its worktrees stay on disk.",
+                "Its issues, sessions and transcripts are deleted from agentbench. The repository and its worktrees stay on disk.",
                 "remove",
             ),
             Confirm::Worktree(_, name, missing) => (

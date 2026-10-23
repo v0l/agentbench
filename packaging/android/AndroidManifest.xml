@@ -2,7 +2,7 @@
 <!-- The app's manifest. cargo-apk cannot declare services or receivers or ship Kotlin, so
      packaging/android/build.sh builds the APK from this instead. Keep the permissions and the
      activity's settings in step with [package.metadata.android] in crates/app/Cargo.toml. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.v0l.foreman">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="io.v0l.agentbench">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
@@ -14,7 +14,7 @@
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
 
     <application
-        android:label="Foreman"
+        android:label="Agentbench"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:debuggable="@DEBUGGABLE@"
@@ -23,33 +23,33 @@
         android:usesCleartextTraffic="true">
 
         <activity
-            android:name="io.v0l.foreman.MainActivity"
+            android:name="io.v0l.agentbench.MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:configChanges="orientation|keyboardHidden|screenSize">
-            <meta-data android:name="android.app.lib_name" android:value="foreman"/>
+            <meta-data android:name="android.app.lib_name" android:value="agentbench"/>
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- foreman://pair?url=…&token=…, which the pairing code holds -->
+            <!-- agentbench://pair?url=…&token=…, which the pairing code holds -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="foreman" android:host="pair"/>
+                <data android:scheme="agentbench" android:host="pair"/>
             </intent-filter>
         </activity>
 
         <service
-            android:name="io.v0l.foreman.WatchService"
+            android:name="io.v0l.agentbench.WatchService"
             android:exported="false"
             android:foregroundServiceType="dataSync"/>
         <service
-            android:name="io.v0l.foreman.SyncJob"
+            android:name="io.v0l.agentbench.SyncJob"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE"/>
-        <receiver android:name="io.v0l.foreman.BootReceiver" android:exported="true">
+        <receiver android:name="io.v0l.agentbench.BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED"/>
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>

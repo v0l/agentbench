@@ -2,13 +2,13 @@
 //!
 //! `POST /v1/audio/transcriptions` takes what OpenAI's endpoint does, a multipart form with a
 //! WAV `file` and a `model`, behind the same token as the rest of the API, so anything that can
-//! use a speech server (foreman's own window and app included) can use this one. The model named
+//! use a speech server (agentbench's own window and app included) can use this one. The model named
 //! in the form is used when it is one of ours (`whisper-large-v3-turbo`, say); anything else, such
 //! as OpenAI's `whisper-1`, gets the server's default. A model is fetched from Hugging Face the
 //! first time it is asked for and stays loaded after, on the GPU when this build has CUDA and the
 //! machine has a card.
 
-use foreman_speech::{DEFAULT_MODEL, Transcriber, model};
+use agentbench_speech::{DEFAULT_MODEL, Transcriber, model};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]

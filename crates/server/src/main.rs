@@ -1,5 +1,5 @@
+use agentbench_server::cli::{Cli, exit, logging, run};
 use clap::Parser;
-use foreman_server::cli::{Cli, exit, logging, run};
 use std::process::ExitCode;
 
 #[tokio::main]

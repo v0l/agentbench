@@ -1,8 +1,8 @@
 use super::{Agent, Context, Event, Io, Turn, async_trait, brief, files, media};
+use agentbench_core::{Entry, Question, Usage};
 use egui_bench::agent::skillset;
 use egui_bench::agent::tools::{self, Spec, integer, object, string};
 use egui_bench::agent::workspace::Workspace;
-use foreman_core::{Entry, Question, Usage};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -47,8 +47,8 @@ pub struct Model {
 }
 
 /// One rung of the ladder. A level with no model is not set up. One with no
-/// server uses the foreman agent's, key and all; one with its own server never
-/// sends it the foreman key.
+/// server uses the native agent's, key and all; one with its own server never
+/// sends it the native agent's key.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Level {
     #[serde(default)]
@@ -60,7 +60,7 @@ pub struct Level {
 }
 
 fn default_compact_at() -> u64 {
-    foreman_core::DEFAULT_COMPACT_AT
+    agentbench_core::DEFAULT_COMPACT_AT
 }
 
 fn default_url() -> String {
@@ -111,7 +111,7 @@ impl Model {
     }
 
     /// The model for what a chat has saved: a level, else a model id on the
-    /// foreman agent's own server. An unset level is the agent's default.
+    /// native agent's own server. An unset level is the agent's default.
     pub fn choose(&self, choice: &str) -> Model {
         let choice = choice.trim();
         if choice.is_empty() {
@@ -120,7 +120,7 @@ impl Model {
         if let Some(m) = self.level(choice) {
             return m;
         }
-        if foreman_core::LEVELS.contains(&choice.to_lowercase().as_str()) {
+        if agentbench_core::LEVELS.contains(&choice.to_lowercase().as_str()) {
             return self.clone();
         }
         Model { model: choice.to_string(), ..self.clone() }
@@ -202,7 +202,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const FOREMAN_TOOLS: [&str; 16] = [
+pub const AGENTBENCH_TOOLS: [&str; 16] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -228,7 +228,7 @@ const WAIT_MAX: u64 = 3600;
 const OUTPUT_WAIT: u64 = 0;
 const OUTPUT_WAIT_MAX: u64 = 60;
 
-fn foreman_specs() -> Vec<Spec> {
+fn agentbench_specs() -> Vec<Spec> {
     let id = |about: &str| json!({ "type": "integer", "description": about });
     vec![
         Spec::new(
@@ -336,7 +336,7 @@ fn foreman_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "list_projects",
-            "List the projects foreman knows: id, name and path. start_session can start work in another one.",
+            "List the projects agentbench knows: id, name and path. start_session can start work in another one.",
             object(json!({}), &[]),
         ),
         Spec::new(
@@ -346,7 +346,7 @@ fn foreman_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "create_worktree",
-            "Make a new git worktree for a branch of this project, so work can go on in parallel without disturbing other checkouts. Foreman keeps track of it.",
+            "Make a new git worktree for a branch of this project, so work can go on in parallel without disturbing other checkouts. Agentbench keeps track of it.",
             object(
                 json!({
                     "branch": string("The branch; made if it does not exist"),
@@ -403,7 +403,7 @@ fn foreman_specs() -> Vec<Spec> {
              formatting and reading files; `medium` for the usual. Only levels the user has set up work.",
             object(
                 json!({
-                    "level": { "type": "string", "enum": foreman_core::LEVELS, "description": "low, medium or high" },
+                    "level": { "type": "string", "enum": agentbench_core::LEVELS, "description": "low, medium or high" },
                     "reason": string("Why, in a few words"),
                 }),
                 &["level"],
@@ -656,13 +656,13 @@ pub fn specs() -> Vec<Spec> {
     all.extend(job_specs());
     all.push(screenshot_spec());
     all.extend(web_specs());
-    all.extend(foreman_specs());
+    all.extend(agentbench_specs());
     all
 }
 
 /// The levels that have a model, lowest first.
 fn levels(base: &Model) -> Vec<&'static str> {
-    foreman_core::LEVELS.into_iter().filter(|l| base.level(l).is_some()).collect()
+    agentbench_core::LEVELS.into_iter().filter(|l| base.level(l).is_some()).collect()
 }
 
 fn tool_list(base: &Model) -> Value {
@@ -736,7 +736,7 @@ fn system(turn: &Turn, base: &Model) -> String {
 
 fn history(entries: &[Entry]) -> Vec<Value> {
     let mut out = Vec::new();
-    for e in foreman_core::since_summary(entries) {
+    for e in agentbench_core::since_summary(entries) {
         match e {
             Entry::Summary { text } => out.push(json!({
                 "role": "user",
@@ -830,11 +830,11 @@ struct Reply {
 #[async_trait]
 impl Agent for Native {
     fn name(&self) -> &str {
-        "foreman"
+        "native"
     }
 
     fn label(&self) -> &str {
-        "Foreman"
+        "Native"
     }
 
     fn available(&self) -> bool {
@@ -870,7 +870,7 @@ impl Agent for Native {
         let base = self.model.get();
         let mut model = base.choose(turn.model.unwrap_or_default());
         if model.model.trim().is_empty() {
-            return Err("pick a server and model for the foreman agent under settings".into());
+            return Err("pick a server and model for the native agent under settings".into());
         }
         let workspace = open_workspace(turn.cwd)?;
         let mut messages = vec![json!({ "role": "system", "content": system(turn, &base) })];
@@ -992,7 +992,7 @@ impl Agent for Native {
 /// says the model has, or a default when it does not say.
 async fn serving(model: &Model, probe: Duration) -> Usage {
     let window = window_of(model, probe).await;
-    Usage::serving(model.model.trim(), &foreman_core::host_of(&model.url), window)
+    Usage::serving(model.model.trim(), &agentbench_core::host_of(&model.url), window)
 }
 
 /// The windows already found, by server and model.
@@ -1007,7 +1007,7 @@ fn windows() -> &'static std::sync::Mutex<std::collections::HashMap<(String, Str
 /// An answer is kept for the model, but a server that could not be reached is asked again.
 async fn window_of(model: &Model, probe: Duration) -> u64 {
     if probe.is_zero() {
-        return foreman_core::DEFAULT_CONTEXT;
+        return agentbench_core::DEFAULT_CONTEXT;
     }
     let key = (model.url.trim().to_string(), model.model.trim().to_string());
     if let Some(n) = windows().lock().ok().and_then(|w| w.get(&key).copied()) {
@@ -1020,7 +1020,7 @@ async fn window_of(model: &Model, probe: Duration) -> u64 {
             }
             n
         }
-        _ => foreman_core::DEFAULT_CONTEXT,
+        _ => agentbench_core::DEFAULT_CONTEXT,
     }
 }
 
@@ -1384,7 +1384,7 @@ impl Native {
                     .collect();
                 Ok(format!("The user answered:\n{}", lines.join("\n")))
             }
-            n if FOREMAN_TOOLS.contains(&n) => io
+            n if AGENTBENCH_TOOLS.contains(&n) => io
                 .api()
                 .call(n, args, cx.session)
                 .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default()),
@@ -1736,7 +1736,7 @@ mod tests {
             &self,
             tool: &str,
             args: &Value,
-            session: foreman_core::SessionId,
+            session: agentbench_core::SessionId,
         ) -> Result<Value, String> {
             Ok(json!({ "tool": tool, "args": args, "session": session }))
         }
@@ -1822,7 +1822,7 @@ mod tests {
             vec![call(
                 "c1",
                 "edit_file",
-                json!({"path": "a.txt", "old": "world", "new": "foreman"}),
+                json!({"path": "a.txt", "old": "world", "new": "agentbench"}),
             )],
             vec![call("c2", "file_issue", json!({"title": "Follow up"}))],
             vec![
@@ -1834,7 +1834,10 @@ mod tests {
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
         run(&native, dir.path(), "change world", &io).await.unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "hello foreman\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "hello agentbench\n"
+        );
         let events = io.events();
         assert!(events.iter().any(
             |e| matches!(e, Event::ToolEnd { name, error: false, .. } if name == "edit_file")
@@ -1853,7 +1856,7 @@ mod tests {
 
         let first = asked.recv().unwrap();
         let system = first["messages"][0]["content"].as_str().unwrap();
-        assert!(system.contains("inside foreman"), "{system}");
+        assert!(system.contains("inside agentbench"), "{system}");
         let names: Vec<&str> = first["tools"]
             .as_array()
             .unwrap()
@@ -2054,7 +2057,7 @@ mod tests {
                 &self,
                 tool: &str,
                 _: &Value,
-                _: foreman_core::SessionId,
+                _: agentbench_core::SessionId,
             ) -> Result<Value, String> {
                 assert_eq!(tool, "session_status");
                 let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2084,7 +2087,7 @@ mod tests {
         let s = crate::store::Store::memory().unwrap();
         let (_, main) = crate::store::testing::project(&s, "/a");
         let other = s.add_project("other", "/b", Some("main"), None).unwrap();
-        let me = s.add_session(main.id, "foreman", "me", None, None).unwrap();
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
         let mut c = context();
         c.session = me.id;
         let api = Arc::new(crate::tools::StoreApi::new(s.clone()));
@@ -2113,7 +2116,7 @@ mod tests {
         let s2 = crate::store::Store::memory().unwrap();
         let (_, main2) = crate::store::testing::project(&s2, "/a");
         let other2 = s2.add_project("other", "/b", Some("main"), None).unwrap();
-        let me2 = s2.add_session(main2.id, "foreman", "me", None, None).unwrap();
+        let me2 = s2.add_session(main2.id, "native", "me", None, None).unwrap();
         c.session = me2.id;
         let api2 = Arc::new(crate::tools::StoreApi::new(s2.clone()));
         let io = TestIo::new(api2.clone());
@@ -2256,7 +2259,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let io = TestIo::new(Arc::new(FakeApi));
         let c = context();
-        let ok = bash(dir.path(), "pwd; echo $FOREMAN_SESSION", None, &c, &io).await.unwrap();
+        let ok = bash(dir.path(), "pwd; echo $AGENTBENCH_SESSION", None, &c, &io).await.unwrap();
         assert!(
             ok.contains(&dir.path().canonicalize().unwrap().display().to_string())
                 || ok.contains(&dir.path().display().to_string())
@@ -2336,11 +2339,11 @@ mod tests {
     async fn a_server_that_does_not_say_gets_the_default() {
         let url = json_server(vec![("/v1/models", r#"{"data":[{"id":"quiet"}]}"#)]);
         let got = window_of(&serving_at(url, "quiet"), Duration::from_secs(5)).await;
-        assert_eq!(got, foreman_core::DEFAULT_CONTEXT);
+        assert_eq!(got, agentbench_core::DEFAULT_CONTEXT);
         let got =
             window_of(&serving_at("http://127.0.0.1:1/v1".into(), "gone"), Duration::from_secs(5))
                 .await;
-        assert_eq!(got, foreman_core::DEFAULT_CONTEXT);
+        assert_eq!(got, agentbench_core::DEFAULT_CONTEXT);
     }
 
     #[tokio::test]
@@ -2372,7 +2375,7 @@ mod tests {
             vec![call(
                 "c1",
                 "edit",
-                json!({"path": "a.txt", "edits": [{"oldText": "world", "newText": "foreman"}]}),
+                json!({"path": "a.txt", "edits": [{"oldText": "world", "newText": "agentbench"}]}),
             )],
             vec![
                 json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"read_file","arguments":"{\"path\": "}}]}}]}),
@@ -2383,7 +2386,10 @@ mod tests {
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
         run(&native, dir.path(), "go", &io).await.unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "hello foreman\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "hello agentbench\n"
+        );
         let ends: Vec<(String, bool, String)> = io
             .events()
             .into_iter()
@@ -2393,7 +2399,7 @@ mod tests {
             })
             .collect();
         assert!(!ends[0].1, "pi's edit shape works: {}", ends[0].2);
-        assert!(ends[0].2.contains("+foreman"), "{}", ends[0].2);
+        assert!(ends[0].2.contains("+agentbench"), "{}", ends[0].2);
         assert!(ends[1].1 && ends[1].2.contains("not valid JSON"), "{}", ends[1].2);
         assert!(ends[2].1 && ends[2].2.contains("the tools are:"), "{}", ends[2].2);
         let _ = asked.recv();
@@ -2626,7 +2632,7 @@ mod tests {
         );
         assert!(m.level("medium").is_none());
         assert!(m.level("tiny").is_none());
-        // A server of its own without a key does not get the foreman key.
+        // A server of its own without a key does not get the native agent's key.
         let bare = Model {
             high: Level { url: "http://big/v1".into(), model: "x".into(), key: String::new() },
             ..m.clone()

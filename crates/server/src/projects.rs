@@ -1,6 +1,6 @@
 use crate::git;
 use crate::store::{SeenTree, Store, StoreError};
-use foreman_core::{Id, Project, Worktree};
+use agentbench_core::{Id, Project, Worktree};
 use std::path::{Path, PathBuf};
 
 fn err(e: String) -> StoreError {
@@ -225,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn worktrees_made_and_removed_through_foreman() {
+    fn worktrees_made_and_removed_through_agentbench() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("r");
         repo(&main);

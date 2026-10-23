@@ -9,10 +9,10 @@ mod android {
     use jni::{Env, jni_sig, jni_str};
 
     const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
-    const SERVICE: &str = "io.v0l.foreman.WatchService";
+    const SERVICE: &str = "io.v0l.agentbench.WatchService";
 
     fn prefs<'j>(env: &mut Env<'j>, ctx: &JObject<'j>) -> jni::errors::Result<JObject<'j>> {
-        let name = env.new_string("foreman-sync")?;
+        let name = env.new_string("agentbench-sync")?;
         env.call_method(
             ctx,
             jni_str!("getSharedPreferences"),

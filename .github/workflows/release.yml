@@ -80,7 +80,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --locked -p foreman -p foreman-server --target ${{ matrix.target }}
+        run: cargo build --release --locked -p agentbench -p agentbench-server --target ${{ matrix.target }}
 
       - name: Install cargo-deb
         if: runner.os == 'Linux'
@@ -97,13 +97,13 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ github.event.inputs.tag || github.ref_name }}"
-          name="foreman-${version}-${{ matrix.target }}"
+          name="agentbench-${version}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           bin_dir="target/${{ matrix.target }}/release"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "${bin_dir}/foreman.exe" "${bin_dir}/foreman-server.exe" "dist/${name}/"
+            cp "${bin_dir}/agentbench.exe" "${bin_dir}/agentbench-server.exe" "dist/${name}/"
           else
-            cp "${bin_dir}/foreman" "${bin_dir}/foreman-server" "dist/${name}/"
+            cp "${bin_dir}/agentbench" "${bin_dir}/agentbench-server" "dist/${name}/"
           fi
           cp README.md LICENSE "dist/${name}/"
           cd dist
@@ -119,11 +119,11 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ github.event.inputs.tag || github.ref_name }}"
-          cargo deb -p foreman \
+          cargo deb -p agentbench \
             --target ${{ matrix.target }} \
             --no-build \
             --deb-version "${version#v}" \
-            --output "dist/foreman-${version}-${{ matrix.target }}.deb"
+            --output "dist/agentbench-${version}-${{ matrix.target }}.deb"
 
       - name: Build .dmg
         if: runner.os == 'macOS'
@@ -131,20 +131,20 @@ jobs:
           set -euo pipefail
           version="${{ github.event.inputs.tag || github.ref_name }}"
           bin_dir="target/${{ matrix.target }}/release"
-          app="dmg/Foreman.app"
+          app="dmg/Agentbench.app"
           mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
           sed "s/__VERSION__/${version#v}/g" packaging/macos/Info.plist > "${app}/Contents/Info.plist"
           cp packaging/macos/icon.icns "${app}/Contents/Resources/"
-          cp "${bin_dir}/foreman" "${bin_dir}/foreman-server" "${app}/Contents/MacOS/"
+          cp "${bin_dir}/agentbench" "${bin_dir}/agentbench-server" "${app}/Contents/MacOS/"
           codesign --force --sign - "${app}"
           ln -s /Applications dmg/Applications
           cp README.md LICENSE dmg/
           hdiutil create \
-            -volname Foreman \
+            -volname Agentbench \
             -srcfolder dmg \
             -fs HFS+ \
             -format UDZO \
-            -ov "dist/foreman-${version}-${{ matrix.target }}.dmg"
+            -ov "dist/agentbench-${version}-${{ matrix.target }}.dmg"
 
       - name: Build .msi
         if: runner.os == 'Windows'
@@ -158,8 +158,8 @@ jobs:
             -pdbtype none \
             -d "Version=${msi_version}" \
             -d "BinDir=target/${{ matrix.target }}/release" \
-            -o "dist/foreman-${version}-${{ matrix.target }}.msi" \
-            packaging/windows/foreman.wxs
+            -o "dist/agentbench-${version}-${{ matrix.target }}.msi" \
+            packaging/windows/agentbench.wxs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -219,7 +219,7 @@ jobs:
         run: |
           mkdir -p dist
           tag="${{ github.event.inputs.tag || github.ref_name }}"
-          cp target/android/foreman.apk "dist/foreman-${tag}-android-arm64.apk"
+          cp target/android/agentbench.apk "dist/agentbench-${tag}-android-arm64.apk"
 
       - uses: actions/upload-artifact@v4
         with:

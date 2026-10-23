@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="t d">
-  <title id="t">Foreman</title>
+  <title id="t">Agentbench</title>
   <desc id="d">A smiling face in an amber hard hat.</desc>
   <rect width="64" height="64" rx="14" fill="#0B1014"/>
   <path d="M14 34C14 21 22 13 32 13S50 21 50 34Z" fill="#FFB020"/>

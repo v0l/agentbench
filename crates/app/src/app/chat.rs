@@ -210,7 +210,7 @@ impl App {
                     .map(|a| a.about.clone())
                     .unwrap_or_default();
                 let hint_text = match fresh.agent.as_str() {
-                    "foreman" => format!("model, {}", short_about(&default)),
+                    "native" => format!("model, {}", short_about(&default)),
                     _ => "model, the agent's default if empty".to_string(),
                 };
                 let list = self.agent_models.get(&fresh.agent);
@@ -438,7 +438,7 @@ impl App {
         if let Some((text, files)) =
             self.composer(ui, !missing, s.status.busy(), hint_text, Some(&s))
         {
-            let slash = files.is_empty().then(|| foreman_core::parse_slash(&text)).flatten();
+            let slash = files.is_empty().then(|| agentbench_core::parse_slash(&text)).flatten();
             match slash.map(|(c, _)| c.name) {
                 Some("new") => {
                     let tree = self.worktree(s.worktree_id).cloned();

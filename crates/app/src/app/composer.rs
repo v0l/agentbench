@@ -9,8 +9,8 @@ impl App {
             return;
         }
         let typed = typed.trim_start_matches('/').to_string();
-        let matches: Vec<&foreman_core::Slash> =
-            foreman_core::SLASH.iter().filter(|c| c.name.starts_with(&typed)).collect();
+        let matches: Vec<&agentbench_core::Slash> =
+            agentbench_core::SLASH.iter().filter(|c| c.name.starts_with(&typed)).collect();
         if matches.is_empty() {
             return;
         }
@@ -160,7 +160,7 @@ impl App {
         busy: bool,
         hint_text: &str,
         session: Option<&Session>,
-    ) -> Option<(String, Vec<foreman_core::Upload>)> {
+    ) -> Option<(String, Vec<agentbench_core::Upload>)> {
         // Files go to the focused tile only: the tray is shared, and it is the tile you are using.
         let top = ui.cursor().min.y;
         let files = self.focused && !self.tray.files.is_empty();

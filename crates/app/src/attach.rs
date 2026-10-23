@@ -1,8 +1,8 @@
 //! Files sent with a message: picked, dropped or pasted into the composer, then shown in the
 //! transcript. Reading, encoding and decoding all happen off the UI thread.
 
+use agentbench_core::{Attachment, SessionId, Upload};
 use base64::Engine;
-use foreman_core::{Attachment, SessionId, Upload};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -25,7 +25,7 @@ impl Pending {
     }
 
     pub fn is_image(&self) -> bool {
-        foreman_core::media_kind(&self.mime) == Some("image")
+        agentbench_core::media_kind(&self.mime) == Some("image")
     }
 }
 
@@ -46,9 +46,9 @@ pub struct Tray {
     pub files: Vec<Pending>,
     tx: Sender<Arrived>,
     rx: Receiver<Arrived>,
-    thumbs: HashMap<(SessionId, foreman_core::Id), Thumb>,
-    thumb_tx: Sender<((SessionId, foreman_core::Id), Option<egui::ColorImage>)>,
-    thumb_rx: Receiver<((SessionId, foreman_core::Id), Option<egui::ColorImage>)>,
+    thumbs: HashMap<(SessionId, agentbench_core::Id), Thumb>,
+    thumb_tx: Sender<((SessionId, agentbench_core::Id), Option<egui::ColorImage>)>,
+    thumb_rx: Receiver<((SessionId, agentbench_core::Id), Option<egui::ColorImage>)>,
 }
 
 impl Default for Tray {
@@ -73,10 +73,10 @@ impl Tray {
         for got in self.rx.try_iter().collect::<Vec<_>>() {
             match got {
                 Arrived::File { name, mime, data, preview } => {
-                    if self.files.len() >= foreman_core::ATTACHMENTS_MAX {
+                    if self.files.len() >= agentbench_core::ATTACHMENTS_MAX {
                         problem = Some(format!(
                             "at most {} files go with one message",
-                            foreman_core::ATTACHMENTS_MAX
+                            agentbench_core::ATTACHMENTS_MAX
                         ));
                         continue;
                     }
@@ -121,7 +121,7 @@ impl Tray {
         &mut self,
         session: SessionId,
         a: &Attachment,
-        fetch: impl FnOnce(Sender<((SessionId, foreman_core::Id), Option<egui::ColorImage>)>),
+        fetch: impl FnOnce(Sender<((SessionId, agentbench_core::Id), Option<egui::ColorImage>)>),
     ) -> &Thumb {
         let key = (session, a.id);
         let tx = self.thumb_tx.clone();
@@ -141,18 +141,18 @@ pub fn arrive(tx: Sender<Arrived>, ctx: egui::Context, name: String, data: Vec<u
 }
 
 fn check(name: String, data: Vec<u8>) -> Arrived {
-    if data.len() > foreman_core::ATTACHMENT_MAX {
+    if data.len() > agentbench_core::ATTACHMENT_MAX {
         return Arrived::Failed(format!(
             "{name} is over {} MB",
-            foreman_core::ATTACHMENT_MAX >> 20
+            agentbench_core::ATTACHMENT_MAX >> 20
         ));
     }
-    let mime = foreman_core::mime_for(&name)
+    let mime = agentbench_core::mime_for(&name)
         .map(str::to_string)
         .or_else(|| sniff(&data))
         .unwrap_or_else(|| "application/octet-stream".into());
     let preview =
-        (foreman_core::media_kind(&mime) == Some("image")).then(|| decode(&data)).flatten();
+        (agentbench_core::media_kind(&mime) == Some("image")).then(|| decode(&data)).flatten();
     Arrived::File { name, mime, data, preview }
 }
 
@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn a_file_too_big_is_refused() {
-        let big = vec![0u8; foreman_core::ATTACHMENT_MAX + 1];
+        let big = vec![0u8; agentbench_core::ATTACHMENT_MAX + 1];
         assert!(matches!(check("a.bin".into(), big), Arrived::Failed(e) if e.contains("MB")));
     }
 }

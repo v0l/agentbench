@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Foreman
+Name=Agentbench
 GenericName=Coding Agent Harness
 Comment=Projects, worktrees, agents and issues
-Exec=foreman
-Icon=foreman
-StartupWMClass=foreman
+Exec=agentbench
+Icon=agentbench
+StartupWMClass=agentbench
 Terminal=false
 Categories=Development;Utility;
 Keywords=agent;git;worktree;issues;

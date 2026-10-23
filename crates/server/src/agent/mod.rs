@@ -20,7 +20,7 @@ pub use pi::Pi;
 pub use process::{Cli, Launch};
 pub use tokio_util::sync::CancellationToken;
 
-use foreman_core::{AgentInfo, Entry, Question, SessionId, Usage};
+use agentbench_core::{AgentInfo, Entry, Question, SessionId, Usage};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -29,13 +29,13 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Debug)]
 pub struct Context {
     pub session: SessionId,
-    pub project_id: foreman_core::Id,
+    pub project_id: agentbench_core::Id,
     pub project: String,
     pub project_path: String,
     pub branch: Option<String>,
     /// A chat in the user's home folder, which belongs to no git repository.
     pub home: bool,
-    pub issue: Option<foreman_core::Id>,
+    pub issue: Option<agentbench_core::Id>,
     pub api_url: String,
     pub token: String,
     /// What was remembered about the project with `remember`: topic and note.
@@ -133,7 +133,7 @@ pub trait Agent: Send + Sync {
     fn steerable(&self) -> bool {
         false
     }
-    /// Once a chat's context is this many percent full, foreman summarises it and starts the
+    /// Once a chat's context is this many percent full, agentbench summarises it and starts the
     /// agent afresh. 0 for agents that manage their own context.
     fn compact_at(&self) -> u64 {
         0
@@ -201,7 +201,7 @@ pub fn brief(c: &Context) -> String {
         return home_brief(c);
     }
     let mut out = format!(
-        "You are running inside foreman, a harness that runs coding agents in git worktrees and keeps an issue tracker beside them. \
+        "You are running inside agentbench, a harness that runs coding agents in git worktrees and keeps an issue tracker beside them. \
          This is session {} in the project {} ({}).",
         c.session, c.project, c.project_path
     );
@@ -212,15 +212,15 @@ pub fn brief(c: &Context) -> String {
         out.push_str(&format!(" You were started on issue #{i}."));
     }
     out.push_str(&format!(
-        "\n\nThe foreman REST API is at {url} and needs the header `Authorization: Bearer $FOREMAN_TOKEN` \
-         (also in the environment as FOREMAN_URL, FOREMAN_TOKEN, FOREMAN_SESSION and FOREMAN_PROJECT). \
+        "\n\nThe agentbench REST API is at {url} and needs the header `Authorization: Bearer $AGENTBENCH_TOKEN` \
+         (also in the environment as AGENTBENCH_URL, AGENTBENCH_TOKEN, AGENTBENCH_SESSION and AGENTBENCH_PROJECT). \
          Use it to keep the tracker true:\n\
          - GET {url}/api/issues lists issues; filter by project_id {pid}.\n\
          - POST {url}/api/issues with {{\"project_id\": {pid}, \"title\", \"body\"}} files one when you find work that is out of scope.\n\
          - PATCH {url}/api/issues/ID with {{\"state\": \"review\"}} when you finish one, or \"done\" when it is merged.\n\
          - POST {url}/api/issues/ID/comments with {{\"body\"}} to leave a note for the user.\n\
          Other agents may be working in other worktrees of this project. Stay in your own worktree. \
-         When you need another worktree, create it with git worktree add beside the main checkout and foreman will pick it up.",
+         When you need another worktree, create it with git worktree add beside the main checkout and agentbench will pick it up.",
         url = c.api_url.trim_end_matches('/'),
         pid = c.project_id,
     ));
@@ -231,12 +231,12 @@ pub fn brief(c: &Context) -> String {
 /// do whatever the user asks.
 fn home_brief(c: &Context) -> String {
     format!(
-        "You are running inside foreman, a harness that runs agents and keeps an issue tracker beside them. \
+        "You are running inside agentbench, a harness that runs agents and keeps an issue tracker beside them. \
          This is session {session}, a general chat in the user's home folder ({path}). It is not tied to a git repository: \
          expect odd jobs such as parsing or converting files, running skills, looking things up or small scripts. \
          Work wherever the task is, and keep files you make out of the way unless the user wants them.\n\n\
-         The foreman REST API is at {url} and needs the header `Authorization: Bearer $FOREMAN_TOKEN` \
-         (also in the environment as FOREMAN_URL, FOREMAN_TOKEN and FOREMAN_SESSION). \
+         The agentbench REST API is at {url} and needs the header `Authorization: Bearer $AGENTBENCH_TOKEN` \
+         (also in the environment as AGENTBENCH_URL, AGENTBENCH_TOKEN and AGENTBENCH_SESSION). \
          It holds the user's projects and issues; use it only if asked to.",
         session = c.session,
         path = c.project_path,
@@ -246,16 +246,20 @@ fn home_brief(c: &Context) -> String {
 
 impl Context {
     pub fn env(&self) -> Vec<(String, String)> {
-        let mut env = vec![
-            ("FOREMAN_URL".to_string(), self.api_url.clone()),
-            ("FOREMAN_TOKEN".to_string(), self.token.clone()),
-            ("FOREMAN_SESSION".to_string(), self.session.to_string()),
-            ("FOREMAN_PROJECT".to_string(), self.project_id.to_string()),
+        let mut pairs = vec![
+            ("URL", self.api_url.clone()),
+            ("TOKEN", self.token.clone()),
+            ("SESSION", self.session.to_string()),
+            ("PROJECT", self.project_id.to_string()),
         ];
         if let Some(i) = self.issue {
-            env.push(("FOREMAN_ISSUE".to_string(), i.to_string()));
+            pairs.push(("ISSUE", i.to_string()));
         }
-        env
+        // Also under the old FOREMAN_ names, for scripts and skills written before the rename.
+        ["AGENTBENCH", "FOREMAN"]
+            .iter()
+            .flat_map(|p| pairs.iter().map(move |(k, v)| (format!("{p}_{k}"), v.clone())))
+            .collect()
     }
 }
 
@@ -402,7 +406,7 @@ mod tests {
     #[test]
     fn the_brief_names_the_session_and_the_api() {
         let b = brief(&context());
-        assert!(b.contains("inside foreman"));
+        assert!(b.contains("inside agentbench"));
         assert!(b.contains(&format!("session {} in the project demo", test_session())));
         assert!(b.contains("http://127.0.0.1:7420/api/issues"));
         assert!(b.contains("branch main"));
@@ -422,11 +426,11 @@ mod tests {
         let files = [Attached {
             name: "shot.png".into(),
             mime: "image/png".into(),
-            path: PathBuf::from("/tmp/foreman/x/1.png"),
+            path: PathBuf::from("/tmp/agentbench/x/1.png"),
         }];
         let p = with_files("look", &files);
         assert!(p.starts_with("look\n\nAttached files"), "{p}");
-        assert!(p.contains("- shot.png (image/png): /tmp/foreman/x/1.png"), "{p}");
+        assert!(p.contains("- shot.png (image/png): /tmp/agentbench/x/1.png"), "{p}");
         assert_eq!(with_files("look", &[]), "look");
     }
 }

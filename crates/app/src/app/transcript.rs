@@ -219,7 +219,7 @@ impl App {
         &mut self,
         ui: &mut Ui,
         session: SessionId,
-        files: &[foreman_core::Attachment],
+        files: &[agentbench_core::Attachment],
     ) {
         let client = self.client.as_ref();
         let ctx = ui.ctx().clone();

@@ -1,4 +1,4 @@
-package io.v0l.foreman
+package io.v0l.agentbench
 
 import android.app.ActivityManager
 import android.app.Notification
@@ -15,7 +15,7 @@ import java.net.URL
 
 /** What the app tells the background work: which server, with what token, and whether to watch. */
 class Config(ctx: Context) {
-    private val prefs = ctx.applicationContext.getSharedPreferences("foreman-sync", Context.MODE_PRIVATE)
+    private val prefs = ctx.applicationContext.getSharedPreferences("agentbench-sync", Context.MODE_PRIVATE)
     val on get() = prefs.getBoolean("on", false)
     val url get() = prefs.getString("url", "").orEmpty().trim().trimEnd('/')
     val token get() = prefs.getString("token", "").orEmpty().trim()
@@ -69,7 +69,7 @@ object Watcher {
         )
         nm.createNotificationChannel(
             NotificationChannel(SERVICE, "Watching", NotificationManager.IMPORTANCE_MIN).apply {
-                description = "Shown while foreman keeps an eye on your agents. Hide it here."
+                description = "Shown while agentbench keeps an eye on your agents. Hide it here."
             }
         )
     }
@@ -102,7 +102,7 @@ object Watcher {
             val nid = id.hashCode()
             // Take down an alert once the chat has moved on from needing you.
             if (was != status && (was == "waiting" || was == "failed")) nm.cancel(nid)
-            if (was != status) android.util.Log.i("foreman", "$id: $was -> $status (alerting: $show)")
+            if (was != status) android.util.Log.i("agentbench", "$id: $was -> $status (alerting: $show)")
             if (!show || was == status) continue
             val project = projects[s.optLong("project_id")].orEmpty()
             val title = s.optString("title").ifBlank { "chat" }
@@ -125,7 +125,7 @@ object Watcher {
     private fun notify(ctx: Context, channel: String, id: Int, title: String, text: String, session: String) {
         // The time makes each tap a new link, so opening the same chat twice still counts.
         val open = Intent(ctx, MainActivity::class.java).apply {
-            data = Uri.parse("foreman://open?session=$session&t=${System.currentTimeMillis()}")
+            data = Uri.parse("agentbench://open?session=$session&t=${System.currentTimeMillis()}")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         val tap = PendingIntent.getActivity(ctx, id, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)

@@ -1,7 +1,7 @@
 use crate::agent::Api;
 use crate::runner::Runner;
 use crate::store::Store;
-use foreman_core::{
+use agentbench_core::{
     Entry, Id, IssuePatch, IssueState, NewComment, NewIssue, NewSession, Place, SessionId,
 };
 use serde_json::{Value, json};
@@ -104,7 +104,7 @@ fn labels(args: &Value) -> Result<Option<Vec<String>>, String> {
     }
 }
 
-fn issue_json(i: &foreman_core::Issue) -> Value {
+fn issue_json(i: &agentbench_core::Issue) -> Value {
     json!({
         "id": i.id, "title": i.title, "state": i.state, "body": i.body,
         "labels": i.labels, "priority": i.priority,
@@ -124,8 +124,8 @@ impl StoreApi {
     /// Whether `me` may look at and message `other`: same project, or one it started.
     fn reaches(
         &self,
-        me: &foreman_core::Session,
-        other: &foreman_core::Session,
+        me: &agentbench_core::Session,
+        other: &agentbench_core::Session,
     ) -> Result<(), String> {
         let child =
             self.children.lock().unwrap_or_else(|e| e.into_inner()).contains(&(me.id, other.id));
@@ -152,7 +152,7 @@ impl StoreApi {
     }
 
     /// The project a tool call names by id or by name.
-    fn find_project(&self, v: &Value) -> Result<foreman_core::Project, String> {
+    fn find_project(&self, v: &Value) -> Result<agentbench_core::Project, String> {
         let projects = self.store.projects().map_err(|e| e.0)?;
         let by_name =
             |n: &str| projects.iter().find(|p| p.name.eq_ignore_ascii_case(n.trim())).cloned();
@@ -175,7 +175,7 @@ impl Api for StoreApi {
         let s = &self.store;
         let me = s.session(session).map_err(|e| e.0)?;
         let project = me.project_id;
-        let own = |issue: Id| -> Result<foreman_core::Issue, String> {
+        let own = |issue: Id| -> Result<agentbench_core::Issue, String> {
             let i = s.issue(issue).map_err(|e| e.0)?;
             if i.project_id != project {
                 return Err(format!("issue #{issue} belongs to another project"));
@@ -368,7 +368,7 @@ impl Api for StoreApi {
                         }
                     }
                 };
-                let own = |issue: Id| -> Result<foreman_core::Issue, String> {
+                let own = |issue: Id| -> Result<agentbench_core::Issue, String> {
                     let i = s.issue(issue).map_err(|e| e.0)?;
                     if i.project_id != project {
                         return Err(format!("issue #{issue} belongs to another project"));
@@ -524,7 +524,7 @@ impl Api for StoreApi {
                 self.touched();
                 json!({ "model": model })
             }
-            other => return Err(format!("no foreman tool called {other}")),
+            other => return Err(format!("no agentbench tool called {other}")),
         };
         if matches!(
             tool,
@@ -554,13 +554,13 @@ fn desktop_notice(title: &str, message: &str) {
             let script = format!(
                 "display notification {:?} with title {:?}",
                 message.replace('"', "'"),
-                format!("foreman: {title}").replace('"', "'")
+                format!("agentbench: {title}").replace('"', "'")
             );
             quiet(Command::new("osascript").args(["-e", &script]));
         } else if cfg!(target_os = "linux") {
             quiet(Command::new("notify-send").args([
-                "--app-name=foreman",
-                &format!("foreman: {title}"),
+                "--app-name=agentbench",
+                &format!("agentbench: {title}"),
                 message,
             ]));
         }
@@ -598,7 +598,7 @@ mod tests {
         let s = Store::memory().unwrap();
         let (p, main) = crate::store::testing::project(&s, "/a");
         let (q, other_main) = crate::store::testing::project(&s, "/b");
-        let me = s.add_session(main.id, "foreman", "me", None, None).unwrap();
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
         let elsewhere = s.add_session(other_main.id, "pi", "them", None, None).unwrap();
         let theirs = s
             .add_issue(&NewIssue {
@@ -625,7 +625,7 @@ mod tests {
         );
 
         api.call("comment_on_issue", &json!({"id": fid, "body": "ready"}), me.id).unwrap();
-        assert_eq!(s.comments(fid).unwrap()[0].author, format!("foreman (session {})", me.id));
+        assert_eq!(s.comments(fid).unwrap()[0].author, format!("native (session {})", me.id));
 
         let sessions = api.call("list_sessions", &json!({}), me.id).unwrap();
         assert_eq!(sessions.as_array().unwrap().len(), 1);
@@ -637,7 +637,7 @@ mod tests {
     fn issues_carry_comments_labels_and_priority() {
         let s = Store::memory().unwrap();
         let (_, main) = crate::store::testing::project(&s, "/a");
-        let me = s.add_session(main.id, "foreman", "me", None, None).unwrap();
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
         let api = StoreApi::new(s.clone());
         let made = api
             .call(
@@ -663,8 +663,8 @@ mod tests {
         let s = Store::memory().unwrap();
         let (_, main) = crate::store::testing::project(&s, "/a");
         let (_, other) = crate::store::testing::project(&s, "/b");
-        let me = s.add_session(main.id, "foreman", "me", None, None).unwrap();
-        let them = s.add_session(other.id, "foreman", "them", None, None).unwrap();
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let them = s.add_session(other.id, "native", "them", None, None).unwrap();
         let api = StoreApi::new(s.clone());
         api.call("remember", &json!({"topic": "tests", "note": "cargo test"}), me.id).unwrap();
         api.call("remember", &json!({"topic": "tests", "note": "cargo test --all"}), me.id)
@@ -685,7 +685,7 @@ mod tests {
         let s = Store::memory().unwrap();
         let (_, main) = crate::store::testing::project(&s, "/a");
         let (_, other) = crate::store::testing::project(&s, "/b");
-        let me = s.add_session(main.id, "foreman", "me", None, None).unwrap();
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
         let mate = s.add_session(main.id, "pi", "mate", None, None).unwrap();
         let away = s.add_session(other.id, "pi", "away", None, None).unwrap();
         s.add_message(mate.id, &Entry::Assistant { text: "finished".into() }).unwrap();
@@ -707,7 +707,7 @@ mod tests {
     fn notify_user_leaves_a_notice_in_the_chat() {
         let s = Store::memory().unwrap();
         let (_, main) = crate::store::testing::project(&s, "/a");
-        let me = s.add_session(main.id, "foreman", "me", None, None).unwrap();
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
         let api = StoreApi::new(s.clone());
         api.call("notify_user", &json!({"message": "blocked on a key"}), me.id).unwrap();
         let last = s.messages(me.id, 0).unwrap().pop().unwrap().entry;
@@ -723,7 +723,7 @@ mod tests {
         let s = Store::memory().unwrap();
         let p = crate::projects::add(&s, &main, None, false).unwrap();
         let me =
-            s.add_session(s.main_worktree(p.id).unwrap().id, "foreman", "me", None, None).unwrap();
+            s.add_session(s.main_worktree(p.id).unwrap().id, "native", "me", None, None).unwrap();
         let api = StoreApi::new(s.clone());
         let made = api.call("create_worktree", &json!({"branch": "feature-x"}), me.id).unwrap();
         assert_eq!(made["branch"], "feature-x");

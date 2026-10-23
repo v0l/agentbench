@@ -83,7 +83,7 @@ impl App {
 
     pub(super) fn header_title(&self, ui: &mut Ui) {
         ui.label(
-            egui::RichText::new("FOREMAN")
+            egui::RichText::new("AGENTBENCH")
                 .font(legend_font(17.0))
                 .color(VALUE)
                 .extra_letter_spacing(2.5),

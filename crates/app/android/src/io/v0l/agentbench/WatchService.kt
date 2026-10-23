@@ -1,4 +1,4 @@
-package io.v0l.foreman
+package io.v0l.agentbench
 
 import android.app.Notification
 import android.app.Service
@@ -33,7 +33,7 @@ class WatchService : Service() {
         schedule(this)
         if (!running) {
             running = true
-            Thread(::loop, "foreman-watch").start()
+            Thread(::loop, "agentbench-watch").start()
         }
         return START_STICKY
     }
@@ -86,7 +86,7 @@ class WatchService : Service() {
                         .build()
                 )
             } catch (e: Exception) {
-                android.util.Log.w("foreman", "could not schedule the periodic sync", e)
+                android.util.Log.w("agentbench", "could not schedule the periodic sync", e)
             }
         }
     }

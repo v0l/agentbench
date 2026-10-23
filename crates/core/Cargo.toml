@@ -1,6 +1,6 @@
 [package]
-name = "foreman-core"
-description = "Wire types shared by the foreman server and its clients"
+name = "agentbench-core"
+description = "Wire types shared by the agentbench server and its clients"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

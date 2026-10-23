@@ -282,8 +282,10 @@ pub(super) fn short_path(path: &str) -> String {
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
 }
 
-/// The chat a `foreman://open?session=…` link names, as a notification's tap carries.
+/// The chat a `agentbench://open?session=…` link names, as a notification's tap carries.
 pub(super) fn chat_in_link(link: &str) -> Option<SessionId> {
-    let query = link.trim().strip_prefix("foreman://open?")?;
+    let link = link.trim();
+    let query =
+        link.strip_prefix("agentbench://open?").or_else(|| link.strip_prefix("foreman://open?"))?;
     query.split('&').find_map(|kv| kv.strip_prefix("session=")).and_then(|v| v.parse().ok())
 }

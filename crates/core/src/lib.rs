@@ -441,7 +441,7 @@ pub struct ModelSettings {
     #[serde(default = "default_compact_at")]
     pub compact_at: u64,
     /// The models the agent and the user can switch a chat to. Anything left
-    /// empty in one uses the foreman agent's own setting.
+    /// empty in one uses the native agent's own setting.
     #[serde(default)]
     pub low: LevelSettings,
     #[serde(default)]
@@ -482,7 +482,7 @@ fn default_compact_at() -> u64 {
 /// The names a chat's model can take besides a plain model id.
 pub const LEVELS: [&str; 3] = ["low", "medium", "high"];
 
-/// The small model that names chats. Anything left empty uses the foreman
+/// The small model that names chats. Anything left empty uses the agentbench
 /// agent's own setting, and the key is never read back, only whether one is set.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TitleSettings {

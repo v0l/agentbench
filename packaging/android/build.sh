@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build the Android APK: the Rust app through cargo-apk, then the Kotlin background service,
-# the manifest and the signature on top. Output: target/android/foreman.apk
+# the manifest and the signature on top. Output: target/android/agentbench.apk
 #
 #   ANDROID_HOME   the SDK (default ~/Android/Sdk)
 #   ANDROID_NDK_ROOT   the NDK (default: the newest under $ANDROID_HOME/ndk)
-#   KOTLIN_HOME    a kotlinc install (default: downloaded to ~/.cache/foreman-android)
+#   KOTLIN_HOME    a kotlinc install (default: downloaded to ~/.cache/agentbench-android)
 #   KEYSTORE / KEYSTORE_PASS / KEY_PASS / KEY_ALIAS   to sign a release; the debug key is used
 #                  otherwise. KEY_PASS defaults to KEYSTORE_PASS.
 #   RELEASE=1      a release build: not debuggable, built with --release
@@ -18,7 +18,7 @@ export ANDROID_NDK_HOME=$ANDROID_NDK_ROOT
 BT=$(ls -d "$SDK"/build-tools/* | sort -V | tail -1)
 JAR=$(ls -d "$SDK"/platforms/android-3[4-9]* "$SDK"/platforms/android-34 2>/dev/null | sort -V | tail -1)/android.jar
 KOTLIN_VERSION=2.4.21
-KOTLIN_HOME=${KOTLIN_HOME:-$HOME/.cache/foreman-android/kotlinc}
+KOTLIN_HOME=${KOTLIN_HOME:-$HOME/.cache/agentbench-android/kotlinc}
 OUT=$ROOT/target/android
 APP=crates/app
 
@@ -47,18 +47,18 @@ if [ -n "${RELEASE:-}" ]; then
     trap 'rm -f "$TMPKEY"' EXIT
     export CARGO_APK_RELEASE_KEYSTORE=$TMPKEY CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
 fi
-cargo apk build --lib -p foreman $FLAG
-LIB=$ROOT/target/$PROFILE/apk/lib/arm64-v8a/libforeman.so
-[ -f "$LIB" ] || LIB=$(find "$ROOT/target" -path "*apk/lib/arm64-v8a/libforeman.so" | head -1)
+cargo apk build --lib -p agentbench $FLAG
+LIB=$ROOT/target/$PROFILE/apk/lib/arm64-v8a/libagentbench.so
+[ -f "$LIB" ] || LIB=$(find "$ROOT/target" -path "*apk/lib/arm64-v8a/libagentbench.so" | head -1)
 
 rm -rf "$OUT"; mkdir -p "$OUT/res" "$OUT/dex"
 
 echo "== kotlin"
-"$KOTLIN_HOME/bin/kotlinc" -nowarn -jvm-target 17 -cp "$JAR" -d "$OUT/classes.jar" $APP/android/src/io/v0l/foreman/*.kt
+"$KOTLIN_HOME/bin/kotlinc" -nowarn -jvm-target 17 -cp "$JAR" -d "$OUT/classes.jar" $APP/android/src/io/v0l/agentbench/*.kt
 "$BT/d8" --min-api 26 --lib "$JAR" --output "$OUT/dex" "$OUT/classes.jar" "$KOTLIN_HOME/lib/kotlin-stdlib.jar"
 
 echo "== resources and manifest"
-VERSION=$(cargo pkgid -p foreman | sed 's/.*[#@]//')
+VERSION=$(cargo pkgid -p agentbench | sed 's/.*[#@]//')
 # cargo-apk derives a version code from the crate version; keep that as the base so builds from
 # either path upgrade one another, and add the commit count so each build is newer than the last.
 BASE=$(grep -o 'versionCode="[0-9]*"' "$(dirname "$LIB")/../../AndroidManifest.xml" | grep -o '[0-9]*')
@@ -76,16 +76,16 @@ out, lib = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(f"{out}/base.apk", "a") as z:
     z.write(f"{out}/dex/classes.dex", "classes.dex", zipfile.ZIP_DEFLATED)
     # Stored, so Android maps the library straight from the APK (extractNativeLibs=false).
-    z.write(lib, "lib/arm64-v8a/libforeman.so", zipfile.ZIP_STORED)
+    z.write(lib, "lib/arm64-v8a/libagentbench.so", zipfile.ZIP_STORED)
 PY
 "$BT/zipalign" -f -p 4 "$OUT/base.apk" "$OUT/aligned.apk"
 if [ -n "${KEYSTORE:-}" ]; then
     "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass "pass:${KEYSTORE_PASS:?}" \
         --key-pass "pass:${KEY_PASS:-$KEYSTORE_PASS}" \
-        ${KEY_ALIAS:+--ks-key-alias "$KEY_ALIAS"} --out "$OUT/foreman.apk" "$OUT/aligned.apk"
+        ${KEY_ALIAS:+--ks-key-alias "$KEY_ALIAS"} --out "$OUT/agentbench.apk" "$OUT/aligned.apk"
 else
     "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android \
-        --key-pass pass:android --out "$OUT/foreman.apk" "$OUT/aligned.apk"
+        --key-pass pass:android --out "$OUT/agentbench.apk" "$OUT/aligned.apk"
 fi
-rm -f "$OUT/foreman.apk.idsig"
-echo "built $OUT/foreman.apk"
+rm -f "$OUT/agentbench.apk.idsig"
+echo "built $OUT/agentbench.apk"

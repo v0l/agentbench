@@ -3,7 +3,7 @@ use crate::agent::{
 };
 use crate::store::{Store, StoreError};
 use crate::titles::Titles;
-use foreman_core::{
+use agentbench_core::{
     Attachment, Entry, Id, NewSession, Place, Question, Session, SessionId, SessionStatus, Upload,
     branch_slug, issue_prompt,
 };
@@ -188,7 +188,7 @@ impl Runner {
             .or_else(|| issue.as_ref().map(|i| format!("#{} {}", i.id, i.title)));
         let stand_in = chosen.is_none();
         let title = chosen
-            .or_else(|| new.prompt.as_deref().map(|p| foreman_core::short_title(p, TITLE_MAX)))
+            .or_else(|| new.prompt.as_deref().map(|p| agentbench_core::short_title(p, TITLE_MAX)))
             .unwrap_or_else(|| {
                 if project.home {
                     format!("{} in ~", agent.label())
@@ -276,14 +276,14 @@ impl Runner {
     ) -> Result<(), StoreError> {
         let text = text.trim();
         if uploads.is_empty()
-            && let Some((cmd, arg)) = foreman_core::parse_slash(text)
+            && let Some((cmd, arg)) = agentbench_core::parse_slash(text)
         {
             return self.command(session, cmd.name, arg);
         }
-        if uploads.len() > foreman_core::ATTACHMENTS_MAX {
+        if uploads.len() > agentbench_core::ATTACHMENTS_MAX {
             return Err(StoreError(format!(
                 "at most {} files go with one message",
-                foreman_core::ATTACHMENTS_MAX
+                agentbench_core::ATTACHMENTS_MAX
             )));
         }
         let decoded = uploads
@@ -293,11 +293,11 @@ impl Runner {
                 let data = base64::engine::general_purpose::STANDARD
                     .decode(u.data.trim())
                     .map_err(|e| StoreError(format!("{} is not base64: {e}", u.name)))?;
-                if data.len() > foreman_core::ATTACHMENT_MAX {
+                if data.len() > agentbench_core::ATTACHMENT_MAX {
                     return Err(StoreError(format!(
                         "{} is over {} MB",
                         u.name,
-                        foreman_core::ATTACHMENT_MAX >> 20
+                        agentbench_core::ATTACHMENT_MAX >> 20
                     )));
                 }
                 Ok((u, data))
@@ -311,7 +311,7 @@ impl Runner {
             let name = file_name(&u.name);
             let mime = Some(u.mime.trim())
                 .filter(|m| !m.is_empty())
-                .or_else(|| foreman_core::mime_for(&name))
+                .or_else(|| agentbench_core::mime_for(&name))
                 .unwrap_or("application/octet-stream");
             attachments.push(self.store.add_attachment(session.id, &name, mime, &data)?);
         }
@@ -324,7 +324,7 @@ impl Runner {
 
     /// The files of a message, written to a folder of this session's so an agent can read them.
     fn materialise(&self, session: SessionId, attachments: &[Attachment]) -> Vec<Attached> {
-        let dir = std::env::temp_dir().join("foreman").join(session.to_string());
+        let dir = std::env::temp_dir().join("agentbench").join(session.to_string());
         let _ = std::fs::create_dir_all(&dir);
         attachments
             .iter()
@@ -370,13 +370,17 @@ impl Runner {
             }
             "title" => {
                 if !arg.is_empty() {
-                    self.store.set_title(session.id, &foreman_core::short_title(arg, 80), true)?;
+                    self.store.set_title(
+                        session.id,
+                        &agentbench_core::short_title(arg, 80),
+                        true,
+                    )?;
                     self.changed.notify_waiters();
                     return Ok(());
                 }
                 if self.titles.as_ref().and_then(|t| t.target()).is_none() {
                     return Err(StoreError(
-                        "no title model: set one under [title_model] in foreman.toml, or give a title: /title my title".into(),
+                        "no title model: set one under [title_model] in agentbench.toml, or give a title: /title my title".into(),
                     ));
                 }
                 self.retitle(session.id, true);
@@ -903,7 +907,7 @@ impl Io for Sink {
 mod tests {
     use super::*;
     use crate::agent::JsonCommand;
-    use foreman_core::Usage;
+    use agentbench_core::Usage;
 
     fn script_agent(name: &str, script: &str) -> Box<dyn Agent> {
         Box::new(JsonCommand {
@@ -943,7 +947,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_turn_streams_into_the_store() {
-        let script = r#"read p; echo '{"session":"abc"}'; echo "{\"text\":\"got $p in $FOREMAN_SESSION\"}"; echo '{"in":7}'"#;
+        let script = r#"read p; echo '{"session":"abc"}'; echo "{\"text\":\"got $p in $AGENTBENCH_SESSION\"}"; echo '{"in":7}'"#;
         let (runner, s) = setup(script_agent("echo", script));
         runner.send(&s, "hello").unwrap();
         let done = wait_idle(&runner, s.id).await;
@@ -1011,7 +1015,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrupt_kills_the_whole_process_group() {
-        let marker = format!("/tmp/foreman-test-{}", uuid::Uuid::new_v4());
+        let marker = format!("/tmp/agentbench-test-{}", uuid::Uuid::new_v4());
         let script =
             format!(r#"echo '{{"text":"working"}}'; (sleep 30; touch {marker}) & sleep 30"#);
         let (runner, s) = setup(script_agent("slow", &script));
@@ -1347,7 +1351,7 @@ mod tests {
             self.0.lock().unwrap().push((
                 turn.prompt.to_string(),
                 turn.model.map(str::to_string),
-                foreman_core::since_summary(turn.history).len(),
+                agentbench_core::since_summary(turn.history).len(),
             ));
             io.emit(Event::Started { agent_session: "s1".into() });
             let reply = if turn.prompt.starts_with("Summarise") { "We said hello." } else { "ok" };
@@ -1647,7 +1651,7 @@ mod tests {
         let tree = store.main_worktree(p.id).unwrap();
         let lead = store.add_session(tree.id, "echo", "lead", None, None).unwrap();
         let issue = store
-            .add_issue(&foreman_core::NewIssue {
+            .add_issue(&agentbench_core::NewIssue {
                 project_id: p.id,
                 title: "Fix the thing".into(),
                 ..Default::default()
@@ -1666,7 +1670,7 @@ mod tests {
             wired.call("start_session", &serde_json::json!({"issue": issue.id}), lead.id).unwrap();
         let child: SessionId = out["session"].as_str().unwrap().parse().unwrap();
         assert!(out["worktree"].as_str().unwrap().starts_with("issue-"), "{out}");
-        assert_eq!(store.issue(issue.id).unwrap().state, foreman_core::IssueState::Doing);
+        assert_eq!(store.issue(issue.id).unwrap().state, agentbench_core::IssueState::Doing);
         wait_idle(&runner, child).await;
         let status = wired
             .call("session_status", &serde_json::json!({"id": child.to_string()}), lead.id)

@@ -17,7 +17,7 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .thread_name("foreman-bg")
+            .thread_name("agentbench-bg")
             .build()
             .expect("tokio runtime")
     })
@@ -47,7 +47,7 @@ pub fn spawn_blocking(work: impl FnOnce() + 'static) {
 pub fn local_server(home: Option<std::path::PathBuf>) -> LocalServer {
     LocalServer {
         start: Box::new(move || {
-            let local = foreman_server::local::Local::open(home.clone())?;
+            let local = agentbench_server::local::Local::open(home.clone())?;
             let me = std::env::current_exe().map_err(|e| e.to_string())?;
             local.ensure(&me, &["serve"])?;
             Ok(client::Server { url: local.url(), token: local.token.clone() })
@@ -57,23 +57,36 @@ pub fn local_server(home: Option<std::path::PathBuf>) -> LocalServer {
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn run_native(home: Option<std::path::PathBuf>) -> eframe::Result<()> {
+    keep_old_settings();
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([420.0, 480.0])
-        .with_title("foreman")
-        .with_app_id("foreman")
+        .with_title("agentbench")
+        .with_app_id("agentbench")
         .with_icon(
             eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png"))
                 .unwrap_or_default(),
         );
     let opts = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
-        "foreman",
+        "agentbench",
         opts,
         Box::new(move |cc| {
             Ok(Box::new(App::with_local(&cc.egui_ctx, cc.storage, None, Some(local_server(home)))))
         }),
     )
+}
+
+/// The window's own settings used to be kept in a folder named for the old app name. Copy them to
+/// the new one the first time, so the server address, fonts and tiles survive the rename.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+fn keep_old_settings() {
+    let data = agentbench_server::data_dir();
+    let (old, new) =
+        (data.join("foreman").join("app.ron"), data.join("agentbench").join("app.ron"));
+    if old.is_file() && !new.exists() && std::fs::create_dir_all(data.join("agentbench")).is_ok() {
+        let _ = std::fs::copy(old, new);
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -88,7 +101,7 @@ fn android_main(app: android_activity::AndroidApp) {
     let opts =
         eframe::NativeOptions { android_app: Some(app), persistence_path, ..Default::default() };
     let _ = eframe::run_native(
-        "foreman",
+        "agentbench",
         opts,
         Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx, cc.storage, None)))),
     );
@@ -100,8 +113,8 @@ pub async fn start() -> Result<(), wasm_bindgen::JsValue> {
     use wasm_bindgen::JsCast;
     let document = web_sys::window().and_then(|w| w.document()).ok_or("no document")?;
     let canvas = document
-        .get_element_by_id("foreman")
-        .ok_or("no canvas with id foreman")?
+        .get_element_by_id("agentbench")
+        .ok_or("no canvas with id agentbench")?
         .dyn_into::<web_sys::HtmlCanvasElement>()?;
     let origin = web_sys::window().and_then(|w| w.location().origin().ok());
     eframe::WebRunner::new()

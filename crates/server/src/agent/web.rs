@@ -26,7 +26,7 @@ const SAVE_BYTES: usize = 200_000_000;
 const PAGE_CHARS: usize = 20_000;
 const PAGE_MAX: usize = 100_000;
 const BROWSER: &str =
-    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0 foreman";
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0 agentbench";
 
 const QUERY: [&str; 3] = ["query", "q", "search"];
 const URL: [&str; 3] = ["url", "uri", "link"];

@@ -46,10 +46,40 @@ pub fn local_url(listen: SocketAddr) -> String {
     }
 }
 
+/// An environment variable under its current name, else under the name it had when the app was
+/// called foreman: `AGENTBENCH_HOME`, else `FOREMAN_HOME`.
+pub fn env_var(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(format!("AGENTBENCH_{name}"))
+        .or_else(|| std::env::var_os(format!("FOREMAN_{name}")))
+}
+
+/// Where the database, token and models live. An install made when the app was called foreman
+/// keeps using its `foreman` folder until that is renamed.
 pub fn home() -> PathBuf {
-    std::env::var_os("FOREMAN_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("foreman"))
+    if let Some(dir) = env_var("HOME") {
+        return PathBuf::from(dir);
+    }
+    home_in(&data_dir())
+}
+
+/// The user's data folder, where the home folder and the window's settings sit side by side.
+pub fn data_dir() -> PathBuf {
+    dirs::data_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The home folder under a data folder. The window keeps its own settings in a folder of the same
+/// name, so it is the database that says whether the old folder is still the one in use.
+pub fn home_in(data: &Path) -> PathBuf {
+    let (new, old) = (data.join("agentbench"), data.join("foreman"));
+    let has_db = |d: &Path| d.join("agentbench.db").exists() || d.join("foreman.db").exists();
+    if !has_db(&new) && has_db(&old) { old } else { new }
+}
+
+/// A file in the home folder: `name`, unless only the `legacy` one from before the rename exists.
+pub fn home_file(home: &Path, name: &str, legacy: &str) -> PathBuf {
+    let new = home.join(name);
+    let old = home.join(legacy);
+    if !new.exists() && old.exists() { old } else { new }
 }
 
 impl Config {
@@ -69,7 +99,7 @@ impl Config {
         self.agents_with_titles(model, None)
     }
 
-    /// The agents, with the foreman agent answering web page prompts using `titles`.
+    /// The agents, with the native agent answering web page prompts using `titles`.
     pub fn agents_with_titles(
         &self,
         model: agent::native::Shared,
@@ -120,7 +150,7 @@ pub fn saved_model(store: &store::Store, fallback: &agent::native::Model) -> age
         .unwrap_or_else(|| fallback.clone())
 }
 
-/// The title model last saved from the window, else the one in `foreman.toml`.
+/// The title model last saved from the window, else the one in `agentbench.toml`.
 pub fn saved_title_model(
     store: &store::Store,
     fallback: &titles::TitleModel,
@@ -177,16 +207,16 @@ async fn serve_inner(
 ) -> Result<(), String> {
     let stale = store.reset_running().map_err(|e| e.0)?;
     if stale > 0 {
-        tracing::info!("{stale} sessions were running when foreman last stopped");
+        tracing::info!("{stale} sessions were running when agentbench last stopped");
     }
     if let Some(dir) = dirs::home_dir() {
         // A home folder that is a project itself is left alone.
         let _ = projects::ensure_home(&store, &dir);
     }
     let token = token(&store).map_err(|e| e.0)?;
-    // The model a speech request gets when it names none of ours: set it with FOREMAN_SPEECH_MODEL.
-    let speech_model = std::env::var("FOREMAN_SPEECH_MODEL")
-        .ok()
+    // The model a speech request gets when it names none of ours: set it with AGENTBENCH_SPEECH_MODEL.
+    let speech_model = env_var("SPEECH_MODEL")
+        .and_then(|v| v.into_string().ok())
         .or_else(|| store.setting("speech_model").ok().flatten())
         .unwrap_or_else(|| "whisper-large-v3-turbo".into());
     let mut runner = runner::Runner::new(store, agents);
@@ -241,7 +271,28 @@ mod tests {
         assert_eq!(c.listen, Some("0.0.0.0:9000".parse().unwrap()));
         let agents = c.agents();
         let names: Vec<_> = agents.iter().map(|a| a.name()).collect();
-        assert_eq!(names, ["foreman", "pi", "claude", "aider", "codex"]);
+        assert_eq!(names, ["native", "pi", "claude", "aider", "codex"]);
+    }
+
+    #[test]
+    fn an_install_from_before_the_rename_keeps_its_folder_and_files() {
+        let data = tempfile::tempdir().unwrap();
+        assert_eq!(home_in(data.path()), data.path().join("agentbench"), "a fresh install");
+        let old = data.path().join("foreman");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("app.ron"), "x").unwrap();
+        assert_eq!(home_in(data.path()), data.path().join("agentbench"), "no database there");
+        std::fs::write(old.join("foreman.db"), "x").unwrap();
+        std::fs::write(old.join("foreman.toml"), "x").unwrap();
+        assert_eq!(home_in(data.path()), old, "the old database is still in use");
+        // The window makes the new folder for its settings; the server must not follow it there.
+        std::fs::create_dir_all(data.path().join("agentbench")).unwrap();
+        std::fs::write(data.path().join("agentbench/app.ron"), "x").unwrap();
+        assert_eq!(home_in(data.path()), old);
+        assert_eq!(home_file(&old, "agentbench.db", "foreman.db"), old.join("foreman.db"));
+        assert_eq!(home_file(&old, "agentbench.toml", "foreman.toml"), old.join("foreman.toml"));
+        std::fs::write(old.join("agentbench.db"), "x").unwrap();
+        assert_eq!(home_file(&old, "agentbench.db", "foreman.db"), old.join("agentbench.db"));
     }
 
     #[test]

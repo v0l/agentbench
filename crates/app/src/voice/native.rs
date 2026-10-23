@@ -48,7 +48,7 @@ struct Take {
 }
 
 #[cfg(local_speech)]
-type Loaded = Arc<Mutex<Option<foreman_speech::Transcriber>>>;
+type Loaded = Arc<Mutex<Option<agentbench_speech::Transcriber>>>;
 #[cfg(not(local_speech))]
 type Loaded = ();
 
@@ -229,14 +229,14 @@ impl Voice {
         let settings = settings.clone();
         let loaded = self.loaded.clone();
         std::thread::Builder::new()
-            .name("foreman-speech".into())
+            .name("agentbench-speech".into())
             .spawn(move || {
                 let quiet = partial.is_some();
                 let said = match settings.mode {
                     Mode::Local => read_locally(&settings, &pcm, &tx, &wake, &loaded, quiet),
                     Mode::Server => read_on_server(&settings, &pcm),
                     // `Settings::resolved` turns this into a server before a take is read.
-                    Mode::Foreman => Err("not connected to a foreman server".to_string()),
+                    Mode::Agentbench => Err("not connected to an agentbench server".to_string()),
                 };
                 match partial {
                     Some((id, busy)) => {
@@ -288,7 +288,7 @@ impl Voice {
     pub fn installed(model: &str) -> bool {
         #[cfg(local_speech)]
         {
-            foreman_speech::Transcriber::new(models_dir()).installed(model)
+            agentbench_speech::Transcriber::new(models_dir()).installed(model)
         }
         #[cfg(not(local_speech))]
         {
@@ -300,7 +300,7 @@ impl Voice {
 
 #[cfg(local_speech)]
 fn models_dir() -> std::path::PathBuf {
-    foreman_server::home().join("models")
+    agentbench_server::home().join("models")
 }
 
 /// Open the default microphone and start collecting mono samples.
@@ -353,7 +353,7 @@ fn open() -> Result<Take, String> {
 }
 
 fn tracing_free_warn(e: &str) {
-    eprintln!("foreman: microphone stream error: {e}");
+    eprintln!("agentbench: microphone stream error: {e}");
 }
 
 /// One callback's worth of samples, mixed to mono and appended until the take is as long as allowed.
@@ -402,7 +402,7 @@ fn read_locally(
     quiet: bool,
 ) -> Result<String, String> {
     let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
-    let t = slot.get_or_insert_with(|| foreman_speech::Transcriber::new(models_dir()));
+    let t = slot.get_or_insert_with(|| agentbench_speech::Transcriber::new(models_dir()));
     if !t.installed(&settings.model) {
         crate::runtime().block_on(t.download(&crate::client::http(), &settings.model, |p| {
             let of = if p.total_mb > 0 { format!(" of {} MB", p.total_mb) } else { String::new() };
@@ -572,16 +572,16 @@ mod tests {
         assert_eq!(heard.lock().unwrap().len(), 3);
     }
 
-    /// Needs a model on disc: `FOREMAN_TEST_MODEL=~/.local/share/waveshark/models/whisper-base.en`
-    /// and a recording: `FOREMAN_TEST_WAV=said.wav` (16 bit mono). Prints what it read.
+    /// Needs a model on disc: `AGENTBENCH_TEST_MODEL=~/.local/share/waveshark/models/whisper-base.en`
+    /// and a recording: `AGENTBENCH_TEST_WAV=said.wav` (16 bit mono). Prints what it read.
     #[cfg(local_speech)]
     #[test]
     #[ignore = "needs a downloaded model and a recording"]
     fn whisper_reads_a_recording() {
         let (Some(dir), Some(wav)) =
-            (std::env::var_os("FOREMAN_TEST_MODEL"), std::env::var_os("FOREMAN_TEST_WAV"))
+            (std::env::var_os("AGENTBENCH_TEST_MODEL"), std::env::var_os("AGENTBENCH_TEST_WAV"))
         else {
-            panic!("set FOREMAN_TEST_MODEL and FOREMAN_TEST_WAV");
+            panic!("set AGENTBENCH_TEST_MODEL and AGENTBENCH_TEST_WAV");
         };
         let bytes = std::fs::read(wav).unwrap();
         let rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
@@ -590,9 +590,9 @@ mod tests {
             .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
             .collect();
         let pcm = super::super::to_whisper_rate(&pcm, rate);
-        let files = foreman_speech::Files::in_dir(std::path::Path::new(&dir)).unwrap();
-        let (device, on) = foreman_speech::best_device();
-        let mut w = foreman_speech::Whisper::load(&files, device).unwrap();
+        let files = agentbench_speech::Files::in_dir(std::path::Path::new(&dir)).unwrap();
+        let (device, on) = agentbench_speech::best_device();
+        let mut w = agentbench_speech::Whisper::load(&files, device).unwrap();
         let t = std::time::Instant::now();
         let said = w.transcribe(&pcm).unwrap();
         println!(

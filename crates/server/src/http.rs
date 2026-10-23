@@ -14,7 +14,7 @@ fn tls() -> rustls::ClientConfig {
 pub fn builder() -> reqwest::ClientBuilder {
     let b = reqwest::Client::builder()
         .tls_backend_preconfigured(tls())
-        .user_agent(format!("foreman/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("agentbench/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .pool_idle_timeout(Duration::from_secs(30))
         .tcp_keepalive(Duration::from_secs(15))

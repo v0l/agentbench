@@ -1,4 +1,4 @@
-package io.v0l.foreman
+package io.v0l.agentbench
 
 import android.app.NativeActivity
 import android.content.Intent

@@ -1,4 +1,4 @@
-//! The Whisper models foreman can read speech with.
+//! The Whisper models agentbench can read speech with.
 
 /// One model somebody can pick: id, Hugging Face repository, label, download size in MB.
 pub type ModelInfo = (&'static str, &'static str, &'static str, u32);

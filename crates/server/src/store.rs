@@ -1,4 +1,4 @@
-use foreman_core::{
+use agentbench_core::{
     Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue, Project,
     Session, SessionId, SessionStatus, Usage, Worktree,
 };
@@ -161,6 +161,7 @@ CREATE TABLE notes (
 );
 "#,
     "ALTER TABLE projects ADD COLUMN home INTEGER NOT NULL DEFAULT 0;",
+    "UPDATE sessions SET agent = 'native' WHERE agent = 'agentbench';",
 ];
 
 #[derive(Debug)]
@@ -886,13 +887,13 @@ impl Store {
         name: &str,
         mime: &str,
         data: &[u8],
-    ) -> Result<foreman_core::Attachment> {
+    ) -> Result<agentbench_core::Attachment> {
         let db = self.db();
         db.execute(
             "INSERT INTO attachments (session_id, name, mime, data, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![session_id, name, mime, data, now()],
         )?;
-        Ok(foreman_core::Attachment {
+        Ok(agentbench_core::Attachment {
             id: db.last_insert_rowid(),
             name: name.to_string(),
             mime: mime.to_string(),
@@ -901,12 +902,12 @@ impl Store {
     }
 
     /// An attachment and its bytes.
-    pub fn attachment(&self, id: Id) -> Result<(foreman_core::Attachment, Vec<u8>)> {
+    pub fn attachment(&self, id: Id) -> Result<(agentbench_core::Attachment, Vec<u8>)> {
         self.db()
             .query_row("SELECT name, mime, data FROM attachments WHERE id = ?1", [id], |r| {
                 let data: Vec<u8> = r.get("data")?;
                 Ok((
-                    foreman_core::Attachment {
+                    agentbench_core::Attachment {
                         id,
                         name: r.get("name")?,
                         mime: r.get("mime")?,
@@ -924,7 +925,7 @@ impl Store {
         &self,
         session: SessionId,
         id: Id,
-    ) -> Result<(foreman_core::Attachment, Vec<u8>)> {
+    ) -> Result<(agentbench_core::Attachment, Vec<u8>)> {
         let (a, data) = self.attachment(id)?;
         let owner: SessionId =
             self.db().query_row("SELECT session_id FROM attachments WHERE id = ?1", [id], |r| {

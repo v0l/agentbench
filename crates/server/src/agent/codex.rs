@@ -1,5 +1,5 @@
 use super::{Cli, Decoder, Event, Launch, Turn, parse, str_at, u64_at};
-use foreman_core::Usage;
+use agentbench_core::Usage;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 

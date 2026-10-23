@@ -5,7 +5,7 @@
 //! looked with `bash_output`, and stops it with `bash_kill`. Each session sees only its own jobs.
 //! A job outlives the turn that started it and dies with the server.
 
-use foreman_core::SessionId;
+use agentbench_core::SessionId;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::ExitStatus;

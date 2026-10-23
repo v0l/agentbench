@@ -1,4 +1,4 @@
-use crate::{Config, DEFAULT_LISTEN, home, store::Store, token};
+use crate::{Config, DEFAULT_LISTEN, home, home_file, store::Store, token};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,8 +14,9 @@ pub struct Local {
 impl Local {
     pub fn open(home_dir: Option<PathBuf>) -> Result<Local, String> {
         let home = home_dir.unwrap_or_else(home);
-        let config = Config::load(&home.join("foreman.toml"))?;
-        let store = Store::open(&home.join("foreman.db")).map_err(|e| e.0)?;
+        let config = Config::load(&home_file(&home, "agentbench.toml", "foreman.toml"))?;
+        let store =
+            Store::open(&home_file(&home, "agentbench.db", "foreman.db")).map_err(|e| e.0)?;
         let token = token(&store).map_err(|e| e.0)?;
         let listen = config
             .listen
@@ -57,7 +58,11 @@ impl Local {
             .map_err(|e| format!("{}: {e}", self.log_path().display()))?;
         let err = log.try_clone().map_err(|e| e.to_string())?;
         let mut cmd = Command::new(program);
-        cmd.args(args).env("FOREMAN_HOME", &self.home).stdin(Stdio::null()).stdout(log).stderr(err);
+        cmd.args(args)
+            .env("AGENTBENCH_HOME", &self.home)
+            .stdin(Stdio::null())
+            .stdout(log)
+            .stderr(err);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -93,7 +98,7 @@ impl Local {
             let tail = std::fs::read_to_string(self.log_path()).unwrap_or_default();
             let tail: Vec<&str> = tail.lines().rev().take(3).collect();
             Err(format!(
-                "the foreman server did not come up on {}: {}",
+                "the agentbench server did not come up on {}: {}",
                 self.listen,
                 tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
             ))
@@ -106,7 +111,7 @@ mod tests {
     use super::*;
 
     fn local(dir: &Path, listen: &str) -> Local {
-        std::fs::write(dir.join("foreman.toml"), format!("listen = \"{listen}\"\n")).unwrap();
+        std::fs::write(dir.join("agentbench.toml"), format!("listen = \"{listen}\"\n")).unwrap();
         Local::open(Some(dir.to_path_buf())).unwrap()
     }
 

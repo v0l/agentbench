@@ -29,9 +29,9 @@ mod stub;
 pub use stub::Voice;
 
 /// What Whisper was trained on, and what a server is sent.
-pub const RATE: u32 = foreman_core::audio::SPEECH_RATE;
+pub const RATE: u32 = agentbench_core::audio::SPEECH_RATE;
 
-pub use foreman_core::audio::{read_wav, to_whisper_rate, wav_bytes};
+pub use agentbench_core::audio::{read_wav, to_whisper_rate, wav_bytes};
 
 /// Longest take. A forgotten microphone should end, and ten minutes of speech is already more than
 /// anyone dictates into a chat box.

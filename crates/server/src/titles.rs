@@ -1,12 +1,12 @@
 //! Names a chat from what was said in it, with a small, fast model.
 //!
 //! The model is any OpenAI compatible server (ollama, llama.cpp, vllm). Set it
-//! under `[title_model]` in `foreman.toml`; every field left out falls back to
-//! the foreman agent's own model, so a bare install titles chats with the model
+//! under `[title_model]` in `agentbench.toml`; every field left out falls back to
+//! the native agent's own model, so a bare install titles chats with the model
 //! it already has.
 
 use crate::agent::native::Shared;
-use foreman_core::Entry;
+use agentbench_core::Entry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
@@ -56,8 +56,8 @@ impl Default for TitleModel {
     }
 }
 
-/// Where to send a request: the title model, with the foreman model filling in
-/// whatever was not set. The key is only borrowed from the foreman model when
+/// Where to send a request: the title model, with the native agent's model filling in
+/// whatever was not set. The key is only borrowed from the native agent's model when
 /// the server is too, so it never goes to a server it was not given for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
@@ -84,8 +84,8 @@ pub struct Titles {
 }
 
 impl TitleModel {
-    /// Where requests go: this model, with the foreman model filling in whatever
-    /// was not set. The foreman key is only borrowed when the server is borrowed
+    /// Where requests go: this model, with the native agent's model filling in whatever
+    /// was not set. The native agent's key is only borrowed when the server is borrowed
     /// too, so it never goes to a server it was not given for.
     pub fn resolve(&self, main: &crate::agent::native::Model) -> Option<Target> {
         if !self.enabled {
@@ -176,7 +176,7 @@ fn clip(text: &str, max: usize) -> String {
 pub fn transcript(entries: &[Entry]) -> String {
     let mut out = String::new();
     let mut replied = false;
-    for e in foreman_core::since_summary(entries) {
+    for e in agentbench_core::since_summary(entries) {
         let line = match e {
             Entry::User { text, .. } => format!("Person: {}", clip(text, USER_CLIP)),
             Entry::Assistant { text } if !text.trim().is_empty() => {
@@ -283,7 +283,7 @@ pub fn clean(raw: &str) -> Option<String> {
     if line.is_empty() {
         return None;
     }
-    Some(foreman_core::short_title(&line, TITLE_MAX))
+    Some(agentbench_core::short_title(&line, TITLE_MAX))
 }
 
 #[cfg(test)]

@@ -124,6 +124,107 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agentbench"
+version = "0.1.2"
+dependencies = [
+ "agentbench-core",
+ "agentbench-server",
+ "agentbench-speech",
+ "android-activity",
+ "android_logger",
+ "arboard",
+ "base64 0.23.1",
+ "clap",
+ "cpal",
+ "eframe",
+ "egui",
+ "egui-qr",
+ "egui_bench",
+ "egui_kittest",
+ "fontdb",
+ "image",
+ "jni",
+ "log",
+ "ndk-context",
+ "ndk-sys",
+ "qrcode",
+ "reqwest",
+ "rfd",
+ "rqrr",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+ "webpki-roots",
+ "winresource",
+]
+
+[[package]]
+name = "agentbench-core"
+version = "0.1.2"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "agentbench-server"
+version = "0.1.2"
+dependencies = [
+ "agentbench-core",
+ "agentbench-speech",
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "clap",
+ "dirs",
+ "egui_bench",
+ "futures-util",
+ "getrandom 0.3.4",
+ "http-body-util",
+ "ignore",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "rustls",
+ "scraper",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml 0.9.12+spec-1.1.0",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "webpki-roots",
+]
+
+[[package]]
+name = "agentbench-speech"
+version = "0.1.2"
+dependencies = [
+ "agentbench-core",
+ "byteorder",
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
+ "reqwest",
+ "serde_json",
+ "tokenizers",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2051,107 +2152,6 @@ name = "foreign-types-shared"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
-
-[[package]]
-name = "foreman"
-version = "0.1.2"
-dependencies = [
- "android-activity",
- "android_logger",
- "arboard",
- "base64 0.23.1",
- "clap",
- "cpal",
- "eframe",
- "egui",
- "egui-qr",
- "egui_bench",
- "egui_kittest",
- "fontdb",
- "foreman-core",
- "foreman-server",
- "foreman-speech",
- "image",
- "jni",
- "log",
- "ndk-context",
- "ndk-sys",
- "qrcode",
- "reqwest",
- "rfd",
- "rqrr",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
- "webpki-roots",
- "winresource",
-]
-
-[[package]]
-name = "foreman-core"
-version = "0.1.2"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "foreman-server"
-version = "0.1.2"
-dependencies = [
- "async-trait",
- "axum",
- "base64 0.23.1",
- "clap",
- "dirs",
- "egui_bench",
- "foreman-core",
- "foreman-speech",
- "futures-util",
- "getrandom 0.3.4",
- "http-body-util",
- "ignore",
- "regex",
- "reqwest",
- "rusqlite",
- "rustls",
- "scraper",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml 0.9.12+spec-1.1.0",
- "tower",
- "tower-http 0.7.1",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "webpki-roots",
-]
-
-[[package]]
-name = "foreman-speech"
-version = "0.1.2"
-dependencies = [
- "byteorder",
- "candle-core",
- "candle-nn",
- "candle-transformers",
- "foreman-core",
- "reqwest",
- "serde_json",
- "tokenizers",
-]
 
 [[package]]
 name = "form_urlencoded"

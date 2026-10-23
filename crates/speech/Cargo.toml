@@ -1,6 +1,6 @@
 [package]
-name = "foreman-speech"
-description = "Whisper through candle: the speech models foreman can read audio with, here or on a server"
+name = "agentbench-speech"
+description = "Whisper through candle: the speech models agentbench can read audio with, here or on a server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ repository.workspace = true
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
 [dependencies]
-foreman-core.workspace = true
+agentbench-core.workspace = true
 serde_json.workspace = true
 candle-core = "0.11"
 candle-nn = "0.11"

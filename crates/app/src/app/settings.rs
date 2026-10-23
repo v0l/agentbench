@@ -26,13 +26,13 @@ impl App {
             face: self.face.clone(),
             agent_error: None,
             asking_agent,
-            model: foreman_core::ModelSettings {
+            model: agentbench_core::ModelSettings {
                 url: String::new(),
                 model: String::new(),
                 key: String::new(),
                 has_key: false,
                 steps: 0,
-                compact_at: foreman_core::DEFAULT_COMPACT_AT,
+                compact_at: agentbench_core::DEFAULT_COMPACT_AT,
                 low: Default::default(),
                 medium: Default::default(),
                 high: Default::default(),
@@ -40,7 +40,7 @@ impl App {
             loaded: false,
             models: None,
             asking: false,
-            title: foreman_core::TitleSettings {
+            title: agentbench_core::TitleSettings {
                 enabled: true,
                 url: String::new(),
                 model: String::new(),
@@ -82,7 +82,7 @@ impl App {
         let has_local = self.local.is_some();
         let installed = self.installed.clone();
         let scanning = self.font_scan.is_some();
-        let main_list = self.agent_models.get("foreman").cloned();
+        let main_list = self.agent_models.get("native").cloned();
         let m = egui::Modal::new(egui::Id::new("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -143,9 +143,9 @@ impl App {
                 } else if !can_close && st.place == Where::Remote {
                     hint(ui, "Connect to a server to set up its agents.");
                 } else if let Some(e) = &st.agent_error {
-                    section(ui, "foreman agent", "set on the server", |ui| status(ui, false, e));
+                    section(ui, "native agent", "set on the server", |ui| status(ui, false, e));
                 } else if !st.loaded {
-                    section(ui, "foreman agent", "set on the server", |ui| {
+                    section(ui, "native agent", "set on the server", |ui| {
                         hint(ui, if st.asking_agent { "asking the server" } else { "connect to a server to set up its agents" });
                     });
                 } else if st.page == Page::Agent {
@@ -203,7 +203,7 @@ impl App {
                     row_help(
                         ui,
                         "compact at",
-                        "Summarise a chat and start it afresh once its context is this full, in percent. 0 never does. Only the foreman agent needs this; the others manage their own.",
+                        "Summarise a chat and start it afresh once its context is this full, in percent. 0 never does. Only the native agent needs this; the others manage their own.",
                         |ui| {
                             ui.add(egui::DragValue::new(&mut st.model.compact_at).range(0..=100).suffix("%"));
                         },
@@ -215,7 +215,7 @@ impl App {
                     }
                 });
                 ui.add_space(8.0);
-                hint(ui, "Saved on the server and used by every new turn of the foreman agent. Other agents keep their own settings.");
+                hint(ui, "Saved on the server and used by every new turn of the native agent. Other agents keep their own settings.");
                 ui.add_space(14.0);
                 section(
                     ui,
@@ -236,7 +236,7 @@ impl App {
                             row_help(
                                 ui,
                                 "  server",
-                                "Empty uses the foreman agent's server and key. A server of its own never gets the foreman key.",
+                                "Empty uses the native agent's server and key. A server of its own never gets the native agent's key.",
                                 |ui| {
                                     field(ui, &mut level.url, &own);
                                 },
@@ -268,9 +268,9 @@ impl App {
                             row_help(
                                 ui,
                                 "address",
-                                "Empty uses the foreman agent's server above. Any OpenAI compatible endpoint works, so a small one beside the big one is ideal.",
+                                "Empty uses the native agent's server above. Any OpenAI compatible endpoint works, so a small one beside the big one is ideal.",
                                 |ui| {
-                                    let r = field(ui, &mut st.title.url, "same as the foreman agent");
+                                    let r = field(ui, &mut st.title.url, "same as the native agent");
                                     if r.changed() {
                                         st.title_models = None;
                                     }
@@ -282,7 +282,7 @@ impl App {
                             let explain = if st.title.has_key {
                                 "Sent as a bearer token. A key is saved; leave this empty to keep it."
                             } else {
-                                "Only sent to the address above. Empty uses the foreman agent's key when the address is empty too."
+                                "Only sent to the address above. Empty uses the native agent's key when the address is empty too."
                             };
                             row_help(ui, "key", explain, |ui| {
                                 let r = secret(ui, &mut st.title.key);
@@ -301,7 +301,7 @@ impl App {
                                         .clicked();
                                 }
                                 _ => {
-                                    field_then(ui, &mut st.title.model, "same as the foreman agent", 130.0, |ui| {
+                                    field_then(ui, &mut st.title.model, "same as the native agent", 130.0, |ui| {
                                         probe_title = ui
                                             .add(Key::new(if st.title_asking { "asking" } else { "list models" }).outline(VALUE).enabled(!st.title_asking))
                                             .clicked();
@@ -405,7 +405,7 @@ impl App {
 }
 
 pub(super) fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
-    section(ui, "server", "where foreman runs its agents", |ui| {
+    section(ui, "server", "where agentbench runs its agents", |ui| {
         if has_local {
             segments(
                 ui,
@@ -417,7 +417,7 @@ pub(super) fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
         match st.place {
             Where::Local => note(
                 ui,
-                "Foreman starts its server in the background on this machine and keeps it running after the window closes, so agents carry on working.",
+                "Agentbench starts its server in the background on this machine and keeps it running after the window closes, so agents carry on working.",
                 LEGEND,
             ),
             Where::Remote => {
@@ -433,7 +433,7 @@ pub(super) fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
                     }
                     hint(
                         ui,
-                        "Scan the code in foreman's settings on your computer, under pair a phone.",
+                        "Scan the code in agentbench's settings on your computer, under pair a phone.",
                     );
                     ui.add_space(6.0);
                 }
@@ -445,14 +445,14 @@ pub(super) fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
                         let r = field(ui, &mut st.url, "https://foreman.example.com");
                         // A pairing link pasted here fills in the address and the token.
                         if r.changed()
-                            && let Some(p) = foreman_core::pairing::Pairing::parse(&st.url)
+                            && let Some(p) = agentbench_core::pairing::Pairing::parse(&st.url)
                         {
                             st.url = p.url;
                             st.token = p.token;
                         }
                     },
                 );
-                row_help(ui, "token", "Printed by `foreman token` on that machine.", |ui| {
+                row_help(ui, "token", "Printed by `agentbench token` on that machine.", |ui| {
                     secret(ui, &mut st.token);
                 });
             }
@@ -486,7 +486,7 @@ pub(super) fn pair_section(ui: &mut Ui, st: &mut Settings) {
                 ui.add_space(6.0);
                 hint(
                     ui,
-                    "Scan it with the phone's camera and open it in foreman. The code holds the server's token, so keep it to yourself.",
+                    "Scan it with the phone's camera and open it in agentbench. The code holds the server's token, so keep it to yourself.",
                 );
             }
             None if st.pair_token.is_empty() => {
@@ -499,7 +499,7 @@ pub(super) fn pair_section(ui: &mut Ui, st: &mut Settings) {
 
 /// What the pairing code says: the external address, or the connected server's when that one is
 /// not just this machine, with the connected server's token.
-pub(super) fn pairing_of(st: &Settings) -> Option<foreman_core::pairing::Pairing> {
+pub(super) fn pairing_of(st: &Settings) -> Option<agentbench_core::pairing::Pairing> {
     let given = st.external.trim();
     let url = if !given.is_empty() {
         given.to_string()
@@ -509,11 +509,11 @@ pub(super) fn pairing_of(st: &Settings) -> Option<foreman_core::pairing::Pairing
         return None;
     };
     (!st.pair_token.trim().is_empty() && !url.is_empty())
-        .then(|| foreman_core::pairing::Pairing { url, token: st.pair_token.trim().to_string() })
+        .then(|| agentbench_core::pairing::Pairing { url, token: st.pair_token.trim().to_string() })
 }
 
 pub(super) fn is_loopback(url: &str) -> bool {
-    let host = foreman_core::host_of(url);
+    let host = agentbench_core::host_of(url);
     let host = host.rsplit_once(':').map_or(host.as_str(), |(h, _)| h);
     host.is_empty() || matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1" | "0.0.0.0")
 }
@@ -521,8 +521,10 @@ pub(super) fn is_loopback(url: &str) -> bool {
 pub(super) fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
     use crate::voice::{LOCAL_MODELS, Mode, Voice};
     section(ui, "voice input", "kept on this device", |ui| {
-        let mut options =
-            vec![(Mode::Foreman, "foreman server", None), (Mode::Server, "other server", None)];
+        let mut options = vec![
+            (Mode::Agentbench, "agentbench server", None),
+            (Mode::Server, "other server", None),
+        ];
         if cfg!(local_speech) {
             options.insert(0, (Mode::Local, "this device", None));
         }
@@ -533,7 +535,7 @@ pub(super) fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
                 row_help(
                     ui,
                     "model",
-                    "Whisper, run by foreman on this device. Downloaded the first time you speak.",
+                    "Whisper, run by agentbench on this device. Downloaded the first time you speak.",
                     |ui| {
                         choice_fit(
                             ui,
@@ -547,11 +549,11 @@ pub(super) fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
                     },
                 );
             }
-            Mode::Foreman => {
+            Mode::Agentbench => {
                 row_help(
                     ui,
                     "model",
-                    "The model the foreman server reads with. It downloads it the first time, and runs it on its GPU when it was built with CUDA.",
+                    "The model the agentbench server reads with. It downloads it the first time, and runs it on its GPU when it was built with CUDA.",
                     |ui| {
                         choice_fit(
                             ui,
@@ -565,7 +567,7 @@ pub(super) fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
                 );
                 hint(
                     ui,
-                    "Speech is sent to the foreman server you are connected to, with the same token. Nothing leaves your network unless that server does.",
+                    "Speech is sent to the agentbench server you are connected to, with the same token. Nothing leaves your network unless that server does.",
                 );
             }
             Mode::Server => {

@@ -1,5 +1,5 @@
 [package]
-name = "foreman-server"
+name = "agentbench-server"
 description = "Agent meta-harness: a SQLite issue tracker that runs coding agents, behind a small REST API"
 version.workspace = true
 edition.workspace = true
@@ -7,15 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 
 [lib]
-name = "foreman_server"
+name = "agentbench_server"
 
 [features]
 # Read speech on an NVIDIA card when there is one; the CUDA runtime is loaded only if present.
-cuda = ["foreman-speech/cuda"]
+cuda = ["agentbench-speech/cuda"]
 
 [dependencies]
-foreman-core = { workspace = true, features = ["rusqlite"] }
-foreman-speech.workspace = true
+agentbench-core = { workspace = true, features = ["rusqlite"] }
+agentbench-speech.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 axum = { version = "0.8", features = ["multipart"] }
@@ -49,5 +49,5 @@ tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 [[bin]]
-name = "foreman-server"
+name = "agentbench-server"
 path = "src/main.rs"

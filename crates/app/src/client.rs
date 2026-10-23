@@ -1,4 +1,4 @@
-use foreman_core::{
+use agentbench_core::{
     Comment, Id, IssuePatch, Message, NewComment, NewIssue, NewProject, NewSession, NewWorktree,
     Overview, SendMessage, SessionId,
 };
@@ -28,9 +28,9 @@ impl Server {
 
 pub enum Reply {
     Overview(Overview),
-    Started(foreman_core::Session),
-    Model(foreman_core::ModelSettings),
-    Title(foreman_core::TitleSettings),
+    Started(agentbench_core::Session),
+    Model(agentbench_core::ModelSettings),
+    Title(agentbench_core::TitleSettings),
     TitleModels(Result<Vec<String>, String>),
     Models(Result<Vec<String>, String>),
     AgentModels(String, Result<Vec<String>, String>),
@@ -300,14 +300,14 @@ impl Client {
         &mut self,
         session: SessionId,
         text: &str,
-        attachments: Vec<foreman_core::Upload>,
+        attachments: Vec<agentbench_core::Upload>,
     ) {
         let body = SendMessage { text: text.to_string(), attachments };
         self.act(Method::POST, &format!("/api/sessions/{session}/messages"), Some(&body), "");
     }
 
     pub fn answer(&mut self, session: SessionId, question: &str, answers: &[String]) {
-        let body = foreman_core::Answer {
+        let body = agentbench_core::Answer {
             question: question.to_string(),
             answer: answers.join(", "),
             answers: answers.to_vec(),
@@ -320,7 +320,7 @@ impl Client {
         self.send(req, Reply::Model);
     }
 
-    pub fn set_model(&mut self, m: &foreman_core::ModelSettings) {
+    pub fn set_model(&mut self, m: &agentbench_core::ModelSettings) {
         let req = self.request(Method::PUT, "/api/settings/model", Self::json(m));
         self.send(req, Reply::Model);
     }
@@ -330,17 +330,17 @@ impl Client {
         self.send(req, Reply::Title);
     }
 
-    pub fn set_title(&mut self, t: &foreman_core::TitleSettings) {
+    pub fn set_title(&mut self, t: &agentbench_core::TitleSettings) {
         let req = self.request(Method::PUT, "/api/settings/title", Self::json(t));
         self.send(req, Reply::Title);
     }
 
-    pub fn title_models(&mut self, t: &foreman_core::TitleSettings) {
+    pub fn title_models(&mut self, t: &agentbench_core::TitleSettings) {
         let req = self.request(Method::POST, "/api/settings/title/models", Self::json(t));
         self.fetch_models(req, Reply::TitleModels);
     }
 
-    pub fn models(&mut self, m: &foreman_core::ModelSettings) {
+    pub fn models(&mut self, m: &agentbench_core::ModelSettings) {
         let req = self.request(Method::POST, "/api/settings/models", Self::json(m));
         self.fetch_models(req, Reply::Models);
     }

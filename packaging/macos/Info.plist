@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Foreman</string>
+	<string>Agentbench</string>
 	<key>CFBundleDisplayName</key>
-	<string>Foreman</string>
+	<string>Agentbench</string>
 	<key>CFBundleIdentifier</key>
-	<string>io.v0l.foreman</string>
+	<string>io.v0l.agentbench</string>
 	<key>CFBundleExecutable</key>
-	<string>foreman</string>
+	<string>agentbench</string>
 	<key>CFBundleIconFile</key>
 	<string>icon</string>
 	<key>CFBundlePackageType</key>
@@ -21,7 +21,7 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Foreman listens while you press speak, to turn what you say into a message.</string>
+	<string>Agentbench listens while you press speak, to turn what you say into a message.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
