@@ -20,7 +20,7 @@ const TREE_INDENT: f32 = 16.0;
 const TAB_TITLE: usize = 32;
 const TREE_X: f32 = 5.0;
 /// The most tiles any grid has.
-const SLOTS: usize = 4;
+const SLOTS: usize = 6;
 /// The space between tiles of the grid.
 const TILE_GAP: f32 = 8.0;
 
@@ -41,10 +41,12 @@ pub enum Grid {
     Rows,
     /// Four chats, two by two.
     Quad,
+    /// Six chats, three across and two down.
+    Six,
 }
 
 impl Grid {
-    pub const ALL: [Grid; 4] = [Grid::Single, Grid::Columns, Grid::Rows, Grid::Quad];
+    pub const ALL: [Grid; 5] = [Grid::Single, Grid::Columns, Grid::Rows, Grid::Quad, Grid::Six];
 
     /// Columns and rows.
     pub fn dims(self) -> (usize, usize) {
@@ -53,6 +55,7 @@ impl Grid {
             Grid::Columns => (2, 1),
             Grid::Rows => (1, 2),
             Grid::Quad => (2, 2),
+            Grid::Six => (3, 2),
         }
     }
 
@@ -68,6 +71,7 @@ impl Grid {
             Grid::Columns => "2x1",
             Grid::Rows => "1x2",
             Grid::Quad => "2x2",
+            Grid::Six => "3x2",
         }
     }
 
@@ -81,6 +85,7 @@ impl Grid {
             Grid::Columns => "two chats side by side",
             Grid::Rows => "two chats, one above the other",
             Grid::Quad => "four chats in a grid",
+            Grid::Six => "six chats, three across and two down",
         }
     }
 }
@@ -4102,7 +4107,7 @@ mod tests {
     #[test]
     fn grids_know_their_size() {
         let sizes: Vec<usize> = Grid::ALL.iter().map(|g| g.slots()).collect();
-        assert_eq!(sizes, vec![1, 2, 2, 4]);
+        assert_eq!(sizes, vec![1, 2, 2, 4, 6]);
         for g in Grid::ALL {
             assert_eq!(Grid::from_key(g.key()), Some(g));
         }

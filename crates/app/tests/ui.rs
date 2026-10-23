@@ -1224,6 +1224,30 @@ fn opening_a_chat_replaces_the_focused_tile() {
 }
 
 #[test]
+fn the_six_tile_grid_shows_six_chats_and_is_remembered() {
+    use foreman::app::Grid;
+    let rig = rig();
+    extra_chats(&rig, 4);
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_grid(Grid::Six);
+    h.run_steps(2);
+    let all = rig.store.sessions().unwrap();
+    assert_eq!(all.len(), 7);
+    let pid = all[0].project_id;
+    for (i, s) in all.iter().take(6).enumerate() {
+        h.state_mut().focus_tile(i);
+        h.state_mut().open_session(s.id, pid);
+        h.run_steps(2);
+    }
+    for (i, s) in all.iter().take(6).enumerate() {
+        assert_eq!(h.state().tile_chat(i), Some(s.id), "tile {i}");
+    }
+    h.run_steps(3);
+    shot(&mut h, "six");
+}
+
+#[test]
 fn clicking_a_chat_in_the_list_replaces_the_focused_tile() {
     use foreman::app::Grid;
     let rig = rig();

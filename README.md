@@ -52,8 +52,8 @@ Data lives in `$FOREMAN_HOME` (default `~/.local/share/foreman`):
 
 ## Watching several chats
 
-The four keys beside **settings** tile the chat area: one chat, two side by side, two
-stacked, or a 2x2 grid. Click in a tile to focus it (it gets the bright border), then click
+The five keys beside **settings** tile the chat area: one chat, two side by side, two
+stacked, a 2x2 grid or a 3x2 grid. Click in a tile to focus it (it gets the bright border), then click
 a chat in the list and it replaces what that tile shows; the other tiles stay put. Clicking
 a chat that is already on screen just focuses its tile. The focused tile is the one that
 gets dropped or pasted files and that **new chat** fills. Each tile has its own draft.
