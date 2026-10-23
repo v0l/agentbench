@@ -110,6 +110,9 @@ name = "android.permission.RECORD_AUDIO"
 [[package.metadata.android.uses_permission]]
 name = "android.permission.CAMERA"
 
+[[package.metadata.android.uses_permission]]
+name = "android.permission.POST_NOTIFICATIONS"
+
 # Scanning the pairing code needs a camera, but a tablet without one can still type the address.
 [[package.metadata.android.feature]]
 name = "android.hardware.camera"
