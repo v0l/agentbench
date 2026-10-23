@@ -1,6 +1,6 @@
 //! Platforms with no microphone to open here: the browser and Android.
 
-use super::Settings;
+use super::{Said, Settings};
 
 #[derive(Default)]
 pub struct Voice {
@@ -31,7 +31,8 @@ impl Voice {
     }
     pub fn cancel(&mut self) {}
     pub fn finish(&mut self, _: &Settings, _: impl Fn() + Send + Sync + 'static) {}
-    pub fn poll(&mut self) -> Vec<Result<String, String>> {
+    pub fn tick(&mut self, _: &Settings, _: impl Fn() + Send + Sync + Clone + 'static) {}
+    pub fn poll(&mut self) -> Vec<Said> {
         Vec::new()
     }
     pub fn installed(_: &str) -> bool {

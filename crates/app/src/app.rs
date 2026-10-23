@@ -287,6 +287,9 @@ pub struct App {
     drawing: Option<Tile>,
     /// The tile whose speak key started the take in progress; the words go to its draft.
     speaking_in: Option<Tile>,
+    /// The words the voice has put at the end of that draft so far, so the next reading can
+    /// replace them rather than add to them.
+    spoken: String,
 }
 
 impl App {
@@ -374,6 +377,7 @@ impl App {
             refocus: None,
             drawing: None,
             speaking_in: None,
+            spoken: String::new(),
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
         };
         if !app.remote {
@@ -524,16 +528,83 @@ impl App {
         }
     }
 
-    /// Put what was said into the draft of the tile whose speak key was pressed. The draft on
-    /// screen belongs to whichever tile is being drawn, and none is when this runs.
-    pub fn add_speech(&mut self, text: &str) {
-        let tile = self.speaking_in.take().unwrap_or(Tile::New);
+    /// The draft of the tile whose speak key was pressed. The draft on screen belongs to
+    /// whichever tile is being drawn, and none is when speech arrives.
+    fn speech_draft(&mut self) -> (Tile, &mut String) {
+        let tile = self.speaking_in.unwrap_or(Tile::New);
         let draft = match tile {
             Tile::Chat(s) => &mut self.panes.entry(s).or_default().draft,
             Tile::New => &mut self.new_pane.draft,
         };
+        (tile, draft)
+    }
+
+    /// Put what was said at the end of the draft, in place of what an earlier reading of the same
+    /// take put there. `last` ends the take.
+    pub fn add_speech(&mut self, text: &str, last: bool) {
+        let spoken = std::mem::take(&mut self.spoken);
+        let (tile, draft) = self.speech_draft();
+        if !spoken.is_empty() && draft.ends_with(&spoken) {
+            draft.truncate(draft.len() - spoken.len());
+        }
+        let before = draft.len();
         crate::voice::append(draft, text);
+        let added = draft[before..].to_string();
         self.refocus = Some(tile);
+        if last {
+            self.speaking_in = None;
+        } else {
+            self.spoken = added;
+        }
+    }
+
+    /// Take back what a take wrote into the draft, because it came to nothing.
+    fn drop_speech(&mut self) {
+        let spoken = std::mem::take(&mut self.spoken);
+        if !spoken.is_empty() {
+            let (_, draft) = self.speech_draft();
+            if draft.ends_with(&spoken) {
+                draft.truncate(draft.len() - spoken.len());
+            }
+        }
+        self.speaking_in = None;
+    }
+
+    /// Whether `speak` is under way, for tests.
+    pub fn speaking(&self) -> bool {
+        self.voice.busy()
+    }
+
+    /// The hotkey: start listening in the tile in use, or finish the take now.
+    fn toggle_speech(&mut self, ctx: &egui::Context) {
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        };
+        if self.voice.listening() {
+            self.voice.finish(&self.speech, wake);
+            return;
+        }
+        let tile = match self.session {
+            Some(s) => Tile::Chat(s),
+            None if self.fresh.is_some() => Tile::New,
+            None => return,
+        };
+        self.begin_speech(tile, wake);
+    }
+
+    fn begin_speech(&mut self, tile: Tile, wake: impl Fn() + Send + Sync + 'static) {
+        if self.voice.busy() {
+            return;
+        }
+        if let Some(p) = self.speech.problem() {
+            self.notice = Some((false, p.into()));
+        } else if let Err(e) = self.voice.start(wake) {
+            self.notice = Some((false, e));
+        } else {
+            self.speaking_in = Some(tile);
+            self.spoken.clear();
+        }
     }
 
     /// The draft of the chat `session`, as the tile shows it.
@@ -891,15 +962,26 @@ impl App {
         if let Some(problem) = self.tray.poll(ctx) {
             self.notice = Some((false, problem));
         }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::M)) {
+            self.toggle_speech(ctx);
+        }
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        };
+        self.voice.tick(&self.speech, wake);
         for said in self.voice.poll() {
             match said {
-                Ok(text) if text.trim().is_empty() => {
+                crate::voice::Said::Partial(text) => self.add_speech(&text, false),
+                crate::voice::Said::Final(text) if text.trim().is_empty() => {
+                    self.drop_speech();
                     self.notice = Some((false, "no speech was heard".into()));
                 }
-                Ok(text) => {
-                    self.add_speech(&text);
+                crate::voice::Said::Final(text) => self.add_speech(&text, true),
+                crate::voice::Said::Failed(e) => {
+                    self.drop_speech();
+                    self.notice = Some((false, e));
                 }
-                Err(e) => self.notice = Some((false, e)),
             }
         }
         if self.voice.busy() {
@@ -2367,22 +2449,19 @@ impl App {
             key.clone().on_hover_text(format!("listening on {}", self.voice.device()));
         } else if !reading {
             key.clone()
-                .on_hover_text("speak instead of typing; the words are added to the message");
+                .on_hover_text("speak instead of typing (Ctrl+M); it stops when you go quiet");
         }
         if key.clicked() {
             if listening {
                 self.voice.finish(&self.speech, wake);
-            } else if let Some(p) = self.speech.problem() {
-                self.notice = Some((false, p.into()));
-            } else if let Err(e) = self.voice.start(wake) {
-                self.notice = Some((false, e));
-            } else {
-                self.speaking_in = self.drawing;
+            } else if let Some(tile) = self.drawing {
+                self.begin_speech(tile, wake);
             }
         }
         // Escape on a listening composer throws the take away instead of reading it.
         if listening && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.voice.cancel();
+            self.drop_speech();
         }
     }
 
@@ -3235,7 +3314,8 @@ impl App {
     /// Escape stops the agent working in the open chat. Dialogs, pickers and menus take the
     /// key first to close themselves, so this only sees an Escape nothing else wanted.
     fn escape_stops_agent(&mut self, ctx: &egui::Context) {
-        if egui::Popup::is_any_open(ctx) {
+        // Escape while the microphone is open throws the take away, and only that.
+        if egui::Popup::is_any_open(ctx) || self.voice.listening() {
             return;
         }
         let Some(s) = self.current_session().filter(|s| s.status.busy()).map(|s| s.id) else {
@@ -3881,10 +3961,28 @@ mod tests {
         );
         app.panes.entry(a).or_default().draft = "first".into();
         app.speaking_in = Some(Tile::Chat(b));
-        app.add_speech(" hello there ");
+        app.add_speech(" hello there ", true);
         assert_eq!(app.draft_of(b), "hello there");
         assert_eq!(app.draft_of(a), "first");
         assert_eq!(app.refocus, Some(Tile::Chat(b)));
+    }
+
+    #[test]
+    fn each_reading_of_a_take_replaces_the_one_before() {
+        let mut app = App::new(&egui::Context::default(), None, None);
+        let a = "00000000-0000-0000-0000-000000000001".parse::<SessionId>().unwrap();
+        app.panes.entry(a).or_default().draft = "fix".into();
+        app.speaking_in = Some(Tile::Chat(a));
+        app.add_speech("the bug", false);
+        assert_eq!(app.draft_of(a), "fix the bug");
+        app.add_speech("the bug in the parser", false);
+        assert_eq!(app.draft_of(a), "fix the bug in the parser");
+        app.add_speech("the bug in the parser please", true);
+        assert_eq!(app.draft_of(a), "fix the bug in the parser please");
+        app.speaking_in = Some(Tile::Chat(a));
+        app.add_speech("again", false);
+        app.drop_speech();
+        assert_eq!(app.draft_of(a), "fix the bug in the parser please");
     }
 
     #[test]
