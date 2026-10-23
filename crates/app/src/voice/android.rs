@@ -39,8 +39,13 @@ pub(crate) fn with_activity<R>(
 
 /// Whether the user has let this app use the microphone.
 pub fn microphone_allowed() -> bool {
+    allowed(PERMISSION)
+}
+
+/// Whether the user has granted a permission.
+pub fn allowed(permission: &'static str) -> bool {
     with_activity(|env, activity| {
-        let name = env.new_string(PERMISSION)?;
+        let name = env.new_string(permission)?;
         env.call_method(
             activity,
             jni_str!("checkSelfPermission"),
@@ -55,9 +60,14 @@ pub fn microphone_allowed() -> bool {
 /// Open the system dialog that asks for the microphone. The answer arrives later; the next press
 /// of the speak key finds out what it was.
 pub fn ask_for_microphone() -> Result<(), String> {
+    ask(PERMISSION)
+}
+
+/// Open the system dialog that asks for a permission.
+pub fn ask(permission: &'static str) -> Result<(), String> {
     with_activity(|env, activity| {
         let string = env.find_class(jni_str!("java/lang/String"))?;
-        let name = env.new_string(PERMISSION)?;
+        let name = env.new_string(permission)?;
         let list = env.new_object_array(1, &string, &name)?;
         env.call_method(
             activity,

@@ -3,8 +3,8 @@ pub mod attach;
 pub mod client;
 pub mod fonts;
 mod form;
-mod pair;
 mod picker;
+pub mod scan;
 mod system;
 pub mod voice;
 

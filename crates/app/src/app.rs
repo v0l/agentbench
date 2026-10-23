@@ -1,3 +1,4 @@
+use crate::scan::Scan;
 use crate::client::{Client, Reply, Server};
 use crate::fonts::{self, Installed, Typeface};
 use crate::form::{field, field_then, prose, prose_id, secret};
@@ -222,6 +223,8 @@ struct Settings {
     token: String,
     /// The address a phone reaches this server at, for the pairing code.
     external: String,
+    /// Set by the scan key, for the window to open the camera.
+    scan: bool,
     /// The token of the server this window is connected to, which the code carries.
     pair_token: String,
     /// The address of the connected server, used for the code when no other is given.
@@ -281,6 +284,9 @@ pub struct App {
     drawer: bool,
     /// The last link the app was opened with, so it is paired with once.
     last_link: Option<String>,
+    /// The camera, while a pairing code is being scanned.
+    scanner: Option<crate::scan::Scanner>,
+    scan_view: Option<egui::TextureHandle>,
     /// How tall the on screen keyboard is, which the window is not resized for.
     keyboard: f32,
     link_checked: Instant,
@@ -381,6 +387,8 @@ impl App {
             narrow: false,
             drawer: false,
             last_link: None,
+            scanner: None,
+            scan_view: None,
             keyboard: 0.0,
             link_checked: Instant::now() - Duration::from_secs(5),
             slots: {
@@ -1323,6 +1331,7 @@ impl App {
             url,
             token,
             external: self.external.clone(),
+            scan: false,
             pair_token: self.client.as_ref().map(|c| c.server.token.clone()).unwrap_or_default(),
             pair_url: self.client.as_ref().map(|c| c.server.url.clone()).unwrap_or_default(),
             face: self.face.clone(),
@@ -1608,6 +1617,10 @@ impl App {
             close = true;
         }
         save |= std::mem::take(&mut self.save_requested);
+        if std::mem::take(&mut st.scan) {
+            let ctx = ctx.clone();
+            self.scanner = Some(crate::scan::Scanner::start(move || ctx.request_repaint()));
+        }
         if probe {
             st.asking = true;
             if let Some(c) = &mut self.client {
@@ -3256,6 +3269,65 @@ impl App {
         self.worktree_modal(ctx);
         self.confirm_modal(ctx);
         self.settings_modal(ctx);
+        self.scan_modal(ctx);
+    }
+
+    /// The camera, looking for a pairing code. Pairs and closes itself when it reads one.
+    fn scan_modal(&mut self, ctx: &egui::Context) {
+        let Some(scanner) = &self.scanner else {
+            return;
+        };
+        let state = scanner.state();
+        if let Scan::Found(text) = &state {
+            let found = foreman_core::pairing::Pairing::parse(text);
+            self.scanner = None;
+            self.scan_view = None;
+            match found {
+                Some(p) => self.pair(ctx, p),
+                None => self.notice = Some((false, "that code is not a foreman pairing code".into())),
+            }
+            return;
+        }
+        if let Some((grey, w, h)) = scanner.preview() {
+            let (grey, w, h) = crate::scan::upright(&grey, w, h);
+            let image = egui::ColorImage::from_gray([w, h], &grey);
+            match &mut self.scan_view {
+                Some(t) => t.set(image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.scan_view =
+                        Some(ctx.load_texture("scan", image, egui::TextureOptions::LINEAR))
+                }
+            }
+        }
+        let mut close = false;
+        let view = self.scan_view.clone();
+        let m = egui::Modal::new(egui::Id::new("scan"))
+            .backdrop_color(egui::Color32::from_black_alpha(200))
+            .show(ctx, |ui| {
+                ui.set_width(modal_width(ctx, 420.0));
+                modal_title(ui, "Scan the code");
+                match &state {
+                    Scan::Failed(why) => status(ui, false, why),
+                    Scan::Starting => hint(ui, "starting the camera"),
+                    _ => hint(ui, "Point the camera at the code in foreman's settings on your computer, under pair a phone."),
+                }
+                if let Some(t) = &view {
+                    ui.add_space(8.0);
+                    let width = ui.available_width();
+                    let size = t.size_vec2();
+                    ui.add(egui::Image::new(egui::load::SizedTexture::new(t.id(), size)).fit_to_exact_size(Vec2::new(width, width * size.y / size.x.max(1.0))));
+                }
+                ui.add_space(8.0);
+                if ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked() {
+                    close = true;
+                }
+            });
+        if m.should_close() || close {
+            self.scanner = None;
+            self.scan_view = None;
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
     }
 
     fn add_project_modal(&mut self, ctx: &egui::Context) {
@@ -3852,6 +3924,17 @@ fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
                 LEGEND,
             ),
             Where::Remote => {
+                if crate::scan::available() {
+                    let key = ui.add(Key::new("scan a code").solid(READOUT).min_width(ui.available_width()));
+                    key.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "scan a code")
+                    });
+                    if key.clicked() {
+                        st.scan = true;
+                    }
+                    hint(ui, "Scan the code in foreman's settings on your computer, under pair a phone.");
+                    ui.add_space(6.0);
+                }
                 row_help(
                     ui,
                     "address",
@@ -3890,7 +3973,13 @@ fn pair_section(ui: &mut Ui, st: &mut Settings) {
             Some(p) => {
                 ui.add_space(8.0);
                 ui.vertical_centered(|ui| {
-                    crate::pair::show(ui, &p.link(), 220.0_f32.min(ui.available_width()));
+                    let side = 220.0_f32.min(ui.available_width());
+                    ui.allocate_ui(Vec2::splat(side), |ui| {
+                        // A white card with room round the code, as scanners need.
+                        if let Ok(code) = egui_qr::QrCodeWidget::from_data(p.link().as_bytes()) {
+                            ui.add(code.quiet_zone(3.0));
+                        }
+                    });
                 });
                 ui.add_space(6.0);
                 hint(
