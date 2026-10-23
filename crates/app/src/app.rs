@@ -2761,33 +2761,34 @@ impl App {
         });
     }
 
-    /// A chat's header on a phone: what and where on the first row, with the stop and close keys,
-    /// then the model and thinking keys and the token counts on a second.
+    /// A chat's header on a phone, on one row: the status, the project and worktree as chips like
+    /// the status box's, and the stop and close keys. Model and tokens are in the status line.
     fn phone_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
-        self.tile_header(ui, s, tree);
-        ui.add_space(2.0);
+        let project = self.project_name(s.project_id);
         ui.horizontal(|ui| {
-            if ui
-                .add(Key::new("model").outline(VALUE))
-                .on_hover_text("switch this chat to another model: low, medium, high or an id")
-                .clicked()
-            {
-                self.draft = "/model ".into();
-            }
-            if toggle(ui, "thinking", self.thinking).clicked() {
-                self.thinking = !self.thinking;
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                Line::new()
-                    .measured(format!(
-                        "{} in",
-                        tokens(s.usage.input_tokens + s.usage.cache_read_tokens)
-                    ))
-                    .size(11.0)
-                    .gap(8.0)
-                    .measured(format!("{} out", tokens(s.usage.output_tokens)))
-                    .size(11.0)
-                    .show(ui);
+                if ui
+                    .add(Key::new("close").outline(FAULT))
+                    .on_hover_text("stop it and delete this chat")
+                    .clicked()
+                {
+                    self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
+                }
+                if s.status.busy()
+                    && ui.add(Key::new("stop").outline(FAULT)).clicked()
+                    && let Some(c) = &mut self.client
+                {
+                    c.interrupt(s.id);
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let (_, word) = status_look(s.status);
+                    lamp(ui, word, s.status != SessionStatus::Stopped, s.status == SessionStatus::Failed);
+                    chip(ui, &project, READOUT, true).on_hover_text(&s.title);
+                    if let Some(w) = tree {
+                        chip(ui, &w.label(), VALUE, false);
+                    }
+                });
             });
         });
     }
