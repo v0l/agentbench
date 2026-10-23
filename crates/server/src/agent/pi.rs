@@ -205,6 +205,13 @@ impl PiDecoder {
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0),
                 turns: 1,
+                context: match u64_at(u, "totalTokens") {
+                    0 => u64_at(u, "input") + u64_at(u, "cacheRead") + u64_at(u, "cacheWrite"),
+                    n => n.saturating_sub(u64_at(u, "output")),
+                },
+                model: str_at(m, "model").unwrap_or_default().to_string(),
+                host: str_at(m, "provider").unwrap_or_default().to_string(),
+                ..Usage::default()
             }));
         }
         if str_at(m, "stopReason") == Some("error") {

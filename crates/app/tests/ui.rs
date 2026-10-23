@@ -234,6 +234,33 @@ fn the_tree_issues_and_a_transcript() {
     click(&mut h, 760.0, 2000.0);
 }
 
+#[test]
+fn the_status_line_shows_the_server_model_and_context() {
+    let rig = rig();
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    rig.store
+        .add_usage(
+            session.id,
+            &foreman_core::Usage {
+                input_tokens: 2_000,
+                cache_read_tokens: 6_000,
+                context: 84_000,
+                window: 128_000,
+                model: "qwen3-coder".into(),
+                host: "gpu.lan:11434".into(),
+                turns: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    shot(&mut h, "status-line");
+}
+
 fn click(h: &mut Harness<'_, App>, x: f32, y: f32) {
     let pos = egui::pos2(x, y);
     h.event(egui::Event::PointerMoved(pos));

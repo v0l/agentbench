@@ -185,13 +185,26 @@ pub struct Session {
     pub updated_at: i64,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cost_usd: f64,
     pub turns: u64,
+    /// Tokens the conversation takes up as of the agent's latest request. Unlike the
+    /// counts above this is not a total: a newer reading replaces it. 0 when unknown.
+    #[serde(default)]
+    pub context: u64,
+    /// Tokens the model can hold at once. 0 when the agent cannot say.
+    #[serde(default)]
+    pub window: u64,
+    /// The model the agent last used, as the server resolved it. Empty when unknown.
+    #[serde(default)]
+    pub model: String,
+    /// The host of the server that model runs on. Empty for agents that keep that to themselves.
+    #[serde(default)]
+    pub host: String,
 }
 
 impl Usage {
@@ -201,6 +214,41 @@ impl Usage {
         self.cache_read_tokens += other.cache_read_tokens;
         self.cost_usd += other.cost_usd;
         self.turns += other.turns;
+        if other.context > 0 {
+            self.context = other.context;
+        }
+        if other.window > 0 {
+            self.window = other.window;
+        }
+        if !other.model.is_empty() {
+            self.model = other.model.clone();
+            self.host = other.host.clone();
+        }
+    }
+
+    /// A reading of the model in use, to merge in with `add`.
+    pub fn serving(model: &str, host: &str, window: u64) -> Usage {
+        Usage { model: model.into(), host: host.into(), window, ..Usage::default() }
+    }
+
+    /// How full the context is, 0.0 to 1.0 and a little beyond when it has overflowed.
+    /// None until both the size and the window are known.
+    pub fn fill(&self) -> Option<f64> {
+        (self.context > 0 && self.window > 0).then(|| self.context as f64 / self.window as f64)
+    }
+
+    /// The share of the input that came from the prompt cache, 0.0 to 1.0.
+    pub fn cache_hit(&self) -> Option<f64> {
+        let all = self.input_tokens + self.cache_read_tokens;
+        (all > 0 && self.cache_read_tokens > 0).then(|| self.cache_read_tokens as f64 / all as f64)
+    }
+
+    /// Whether the context has reached `percent` of the window. Never when `percent` is 0
+    /// or the window is unknown.
+    pub fn past(&self, percent: u64) -> bool {
+        percent > 0
+            && self.window > 0
+            && self.context.saturating_mul(100) >= self.window.saturating_mul(percent)
     }
 }
 
@@ -384,6 +432,12 @@ pub struct ModelSettings {
     pub has_key: bool,
     #[serde(default)]
     pub steps: usize,
+    /// Tokens the foreman agent's model holds at once, for models that do not say.
+    #[serde(default = "default_context")]
+    pub context: u64,
+    /// Compact a chat once its context is this many percent full. 0 turns it off.
+    #[serde(default = "default_compact_at")]
+    pub compact_at: u64,
     /// The models the agent and the user can switch a chat to. Anything left
     /// empty in one uses the foreman agent's own setting.
     #[serde(default)]
@@ -406,6 +460,27 @@ pub struct LevelSettings {
     pub key: String,
     #[serde(default)]
     pub has_key: bool,
+    /// Tokens this model holds at once. 0 uses the foreman agent's.
+    #[serde(default)]
+    pub context: u64,
+}
+
+/// The host part of a server address: `http://user@gpu.lan:11434/v1` is `gpu.lan:11434`.
+pub fn host_of(url: &str) -> String {
+    let rest = url.trim().split_once("://").map_or(url.trim(), |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    authority.rsplit('@').next().unwrap_or_default().to_string()
+}
+
+pub const DEFAULT_CONTEXT: u64 = 128_000;
+pub const DEFAULT_COMPACT_AT: u64 = 80;
+
+fn default_context() -> u64 {
+    DEFAULT_CONTEXT
+}
+
+fn default_compact_at() -> u64 {
+    DEFAULT_COMPACT_AT
 }
 
 /// The names a chat's model can take besides a plain model id.
@@ -696,6 +771,39 @@ mod tests {
         );
         assert!(parse_slash("/nope").is_none());
         assert!(parse_slash("not a command").is_none());
+    }
+
+    #[test]
+    fn context_is_the_latest_reading_not_a_total() {
+        let mut u = Usage::default();
+        u.add(&Usage { input_tokens: 10, context: 1000, window: 4000, ..Default::default() });
+        u.add(&Usage { input_tokens: 10, context: 2500, ..Default::default() });
+        assert_eq!((u.input_tokens, u.context, u.window), (20, 2500, 4000));
+        // A turn that cannot say keeps the last reading.
+        u.add(&Usage { input_tokens: 5, ..Default::default() });
+        assert_eq!(u.context, 2500);
+        assert_eq!(u.fill(), Some(0.625));
+        assert!(u.past(60) && !u.past(70) && !u.past(0));
+        assert!(!Usage { context: 9, ..Default::default() }.past(1), "no window, no verdict");
+    }
+
+    #[test]
+    fn the_host_is_what_the_address_names() {
+        assert_eq!(host_of("http://gpu.lan:11434/v1"), "gpu.lan:11434");
+        assert_eq!(host_of(" https://u:p@api.example.com/v1/chat/completions "), "api.example.com");
+        assert_eq!(host_of("localhost:8080/v1"), "localhost:8080");
+        assert_eq!(host_of(""), "");
+    }
+
+    #[test]
+    fn the_cache_hit_is_its_share_of_the_input() {
+        let u = Usage { input_tokens: 25, cache_read_tokens: 75, ..Default::default() };
+        assert_eq!(u.cache_hit(), Some(0.75));
+        assert_eq!(Usage { input_tokens: 25, ..Default::default() }.cache_hit(), None);
+        // Saved before these fields existed.
+        let old: Usage = serde_json::from_str(r#"{"input_tokens":1,"output_tokens":2,"cache_read_tokens":0,"cost_usd":0.0,"turns":1}"#).unwrap();
+        assert_eq!((old.context, old.window), (0, 0));
+        assert_eq!(old.model, "");
     }
 
     #[test]

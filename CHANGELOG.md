@@ -24,6 +24,20 @@ All notable changes to Foreman are listed here. The format follows
   - `get_issue` reads an issue with its comments, and `file_issue` and `update_issue` take labels, priority and state.
   - `list_worktrees` and `create_worktree`, `todo_write` (drawn as a checklist in the chat), `screenshot` (headless Chrome, Chromium or Edge), `notify_user`, and `remember` / `recall` for per-project notes that open every later session.
 
+- A status line under each chat's header: the server and model the agent is using, how full its
+  context is against the model's window (amber from 60%, red from 80%), and how much of the input
+  the prompt cache served. Each agent reports what it can: `claude` and `pi` name their model, `pi`
+  its provider, `claude` and `codex` the window, and the `foreman` agent its server and model,
+  following `/model` and `switch_model` as they change.
+- Auto-compact for the `foreman` agent: once a chat's context passes **compact at** (80% by
+  default, 0 to turn it off) foreman summarises it and starts the agent afresh from the summary,
+  as `/compact` does. Set the model's **context** size, and one per model level, under settings,
+  since servers rarely report it. `pi`, `claude` and `codex` compact themselves.
+
+### Fixed
+- A worktree that was deleted from disk no longer keeps its **gone** marker after you delete its
+  last chat. The marker stays only while a chat there still needs reading.
+
 ## [0.1.1] - 2026-10-23
 
 ### Changed

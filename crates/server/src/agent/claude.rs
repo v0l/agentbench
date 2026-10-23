@@ -73,6 +73,10 @@ impl Cli for Claude {
 struct ClaudeDecoder {
     tools: HashMap<String, String>,
     texted: bool,
+    /// The model the session reported, and what the last request sent it. The result's own
+    /// usage adds up every request of the turn, which says nothing about how full the chat is.
+    model: String,
+    context: u64,
 }
 
 impl Decoder for ClaudeDecoder {
@@ -81,21 +85,39 @@ impl Decoder for ClaudeDecoder {
             return vec![];
         };
         match str_at(&v, "type").unwrap_or_default() {
-            "system" if str_at(&v, "subtype") == Some("init") => str_at(&v, "session_id")
-                .map(|id| vec![Event::Started { agent_session: id.to_string() }])
-                .unwrap_or_default(),
+            "system" if str_at(&v, "subtype") == Some("init") => {
+                let mut out = Vec::new();
+                self.model = str_at(&v, "model").unwrap_or_default().to_string();
+                if let Some(id) = str_at(&v, "session_id") {
+                    out.push(Event::Started { agent_session: id.to_string() });
+                }
+                if !self.model.is_empty() {
+                    out.push(Event::Usage(Usage::serving(&self.model, "", 0)));
+                }
+                out
+            }
             "assistant" => self.assistant(&v),
             "user" => self.tool_results(&v),
             "result" => {
                 let mut out = Vec::new();
                 if let Some(u) = v.get("usage") {
+                    // The window is on the entry for the model that ran.
+                    let window = v
+                        .get("modelUsage")
+                        .and_then(Value::as_object)
+                        .and_then(|m| m.get(&self.model).or_else(|| m.values().next()))
+                        .map(|m| u64_at(m, "contextWindow"))
+                        .unwrap_or(0);
                     out.push(Event::Usage(Usage {
+                        context: self.context,
+                        window,
                         input_tokens: u64_at(u, "input_tokens")
                             + u64_at(u, "cache_creation_input_tokens"),
                         output_tokens: u64_at(u, "output_tokens"),
                         cache_read_tokens: u64_at(u, "cache_read_input_tokens"),
                         cost_usd: v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
                         turns: 1,
+                        ..Usage::default()
                     }));
                 }
                 if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
@@ -121,6 +143,14 @@ impl ClaudeDecoder {
         else {
             return vec![];
         };
+        if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+            let all = u64_at(u, "input_tokens")
+                + u64_at(u, "cache_creation_input_tokens")
+                + u64_at(u, "cache_read_input_tokens");
+            if all > 0 {
+                self.context = all;
+            }
+        }
         let api_error = v.get("error").is_some_and(|e| !e.is_null());
         let mut out = Vec::new();
         for b in blocks {
