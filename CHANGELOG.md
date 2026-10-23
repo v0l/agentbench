@@ -6,6 +6,8 @@ All notable changes to Foreman are listed here. The format follows
 
 ## [Unreleased]
 
+- A bash command is always shown whole and wrapped under the tool's name, whether the row is open or not, since it is the riskiest thing an agent does. It used to be cut to one line.
+
 ### Fixed
 - Long chats are much faster to draw, most of all on a phone. Only the messages in view (and a
   screenful either side) are laid out; the others are given the height they were last measured at,

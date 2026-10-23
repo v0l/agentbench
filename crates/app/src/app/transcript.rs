@@ -272,6 +272,9 @@ impl App {
         let open_id = egui::Id::new(("tool-open", id));
         let mut open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(error);
         let body = tool_body(name, input);
+        // A shell command is the riskiest thing an agent does, so it is always shown whole and
+        // wrapped, open or not, rather than cut to one line.
+        let command = shell_command(input);
         let rail = if error {
             FAULT
         } else if output.is_none() {
@@ -290,8 +293,10 @@ impl App {
                         "▸"
                     };
                     ui.label(egui::RichText::new(mark).font(mono(11.0)).color(tint));
-                    let mut line = Line::new().legend(name).size(10.0).tint(tint).gap(8.0);
-                    line = line.value(tool_summary(name, input)).size(11.0).tint(VALUE);
+                    let mut line = Line::new().legend(name).size(10.0).tint(tint);
+                    if command.is_none() {
+                        line = line.gap(8.0).value(tool_summary(name, input)).size(11.0).tint(VALUE);
+                    }
                     if !state.is_empty() {
                         line = line.gap(10.0).legend(state).size(9.5).tint(tint);
                     }
@@ -304,6 +309,18 @@ impl App {
             }
             if head.clicked() {
                 open = !open;
+            }
+            if let Some(c) = command {
+                ui.horizontal(|ui| {
+                    // Under the tool's name, not its marker.
+                    ui.add_space(16.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("$ {c}")).font(mono(11.0)).color(VALUE),
+                        )
+                        .wrap(),
+                    );
+                });
             }
             if !open {
                 if let Some(out) = output.filter(|o| !o.trim().is_empty()) {
@@ -339,10 +356,16 @@ impl App {
     }
 }
 
+/// The shell command a tool call runs, if it runs one: bash, and the other agents' versions of it.
+pub(super) fn shell_command(input: &serde_json::Value) -> Option<&str> {
+    input.get("command").and_then(|v| v.as_str()).filter(|c| !c.trim().is_empty())
+}
+
 pub(super) fn tool_body(name: &str, input: &serde_json::Value) -> Option<String> {
     let pick = |k: &str| input.get(k).and_then(|v| v.as_str());
-    if let Some(c) = pick("command") {
-        return (c.lines().count() > 1 || c.len() > 120).then(|| format!("$ {c}"));
+    // A command is drawn whole by the row itself, not as an extra block when it is open.
+    if shell_command(input).is_some() {
+        return None;
     }
     match name {
         "todo_write" => {
