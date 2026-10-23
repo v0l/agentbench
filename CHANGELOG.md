@@ -57,6 +57,8 @@ All notable changes to Foreman are listed here. The format follows
 - The main tabs read **agents** and **issues**, not the open chat's title.
 
 ### Fixed
+
+- Android: the app kept nothing between launches, so the paired server was forgotten. Its settings are now saved in the app's private files.
 - A long draft scrolls inside the composer instead of growing it until the send, speak and attach keys are pushed out of the window.
 - A long speech model name no longer pushes the dropdown and its help icon out of the settings dialog.
 - Pasting or attaching a picture no longer takes the cursor out of the composer.
