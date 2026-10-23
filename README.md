@@ -19,7 +19,7 @@ its REST API, so it can sit on another machine.
 ## Install
 
 Download a `.deb`, `.msi`, `.dmg` or archive for your platform from the
-[releases](https://github.com/v0l/foreman/releases). Each release lists its
+[releases](https://github.com/v0l/agentbench/releases). Each release lists its
 changes in [CHANGELOG.md](CHANGELOG.md).
 
 ## Run

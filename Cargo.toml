@@ -7,7 +7,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 license = "GPL-3.0-only"
-repository = "https://github.com/v0l/foreman"
+repository = "https://github.com/v0l/agentbench"
 
 [workspace.dependencies]
 agentbench-core = { path = "crates/core" }

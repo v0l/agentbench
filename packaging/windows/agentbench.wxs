@@ -14,7 +14,7 @@
     <Icon Id="AppIcon" SourceFile="packaging\windows\icon.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/v0l/foreman" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/v0l/agentbench" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Agentbench">

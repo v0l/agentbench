@@ -1573,6 +1573,12 @@ fn long_markdown_wraps_inside_a_tile() {
         ),
     });
     add(Entry::Assistant { text: format!("{long}\n\n- {long}\n- {long}") });
+    // A table and more text after it in one message: the text must keep wrapping.
+    add(Entry::Assistant {
+        text: format!(
+            "Done.\n\n| repo | tag | what |\n|---|---|---|\n| foreman | `v0.2.0` | {long} |\n\n- **Builds:** {long}\n- **Name:** {long} with `code`\n\n{long}"
+        ),
+    });
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().set_grid(Grid::Quad);
