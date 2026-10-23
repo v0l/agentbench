@@ -1,10 +1,12 @@
 # Changelog
 
-All notable changes to Agentbench (called Foreman until 0.1.3) are listed here. The format follows
+All notable changes to Agentbench (called Foreman before 0.2.0) are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-10-23
 
 ### Changed
 - **Foreman is now Agentbench.** The binaries are `agentbench` and `agentbench-server`, the crates `agentbench-*`, the settings `AGENTBENCH_*`, the config and database `agentbench.toml` and `agentbench.db`, the link scheme `agentbench://`, and the Android package `io.v0l.agentbench`. The built-in agent, which shared the app's name, is now called **native** (existing chats are moved to it).
