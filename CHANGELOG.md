@@ -6,6 +6,11 @@ All notable changes to Foreman are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-23
+
+### Changed
+- The icon is a face in a hard hat.
+
 ## [0.1.0] - 2026-10-22
 
 First release.
