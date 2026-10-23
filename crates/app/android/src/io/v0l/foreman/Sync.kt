@@ -107,9 +107,9 @@ object Watcher {
             val project = projects[s.optLong("project_id")].orEmpty()
             val title = s.optString("title").ifBlank { "chat" }
             when {
-                status == "waiting" -> notify(ctx, ATTENTION, nid, "$project needs you", title)
-                status == "failed" -> notify(ctx, ATTENTION, nid, "$project failed", title)
-                status == "idle" && was == "running" -> notify(ctx, DONE, nid, "$project finished", title)
+                status == "waiting" -> notify(ctx, ATTENTION, nid, "$project needs you", title, id)
+                status == "failed" -> notify(ctx, ATTENTION, nid, "$project failed", title, id)
+                status == "idle" && was == "running" -> notify(ctx, DONE, nid, "$project finished", title, id)
             }
         }
         cfg.known = now.toString()
@@ -122,8 +122,10 @@ object Watcher {
             ctx, ctx.resources.getIdentifier("ic_stat", "drawable", ctx.packageName)
         )
 
-    private fun notify(ctx: Context, channel: String, id: Int, title: String, text: String) {
-        val open = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.apply {
+    private fun notify(ctx: Context, channel: String, id: Int, title: String, text: String, session: String) {
+        // The time makes each tap a new link, so opening the same chat twice still counts.
+        val open = Intent(ctx, MainActivity::class.java).apply {
+            data = Uri.parse("foreman://open?session=$session&t=${System.currentTimeMillis()}")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         val tap = PendingIntent.getActivity(ctx, id, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)

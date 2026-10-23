@@ -23,7 +23,7 @@
         android:usesCleartextTraffic="true">
 
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="io.v0l.foreman.MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:configChanges="orientation|keyboardHidden|screenSize">

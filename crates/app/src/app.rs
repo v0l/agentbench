@@ -287,6 +287,8 @@ pub struct App {
     drawer: bool,
     /// The last link the app was opened with, so it is paired with once.
     last_link: Option<String>,
+    /// A chat a tapped notification asked for, shown once the overview is loaded.
+    open_pending: Option<SessionId>,
     /// The camera, while a pairing code is being scanned.
     scanner: Option<crate::scan::Scanner>,
     scan_view: Option<egui::TextureHandle>,
@@ -392,6 +394,7 @@ impl App {
             narrow: false,
             drawer: false,
             last_link: None,
+            open_pending: None,
             scanner: None,
             scan_view: None,
             keyboard: 0.0,
@@ -566,6 +569,24 @@ impl App {
         self.last_link = Some(text.clone());
         if let Some(p) = foreman_core::pairing::Pairing::parse(&text) {
             self.pair(ctx, p);
+        } else if let Some(id) = chat_in_link(&text) {
+            // A tapped notification: show that chat once the overview has it.
+            self.open_pending = Some(id);
+        }
+    }
+
+    /// Opens the chat a notification named, when the server's chats are known.
+    fn open_pending_chat(&mut self) {
+        let Some(id) = self.open_pending else {
+            return;
+        };
+        let Some(o) = &self.overview else {
+            return;
+        };
+        let found = o.sessions.iter().find(|s| s.id == id).map(|s| s.project_id);
+        self.open_pending = None;
+        if let Some(project) = found {
+            self.open_session(id, project);
         }
     }
 
@@ -1098,6 +1119,7 @@ impl App {
         if cfg!(target_os = "android") && self.link_checked.elapsed() > Duration::from_secs(1) {
             self.link_checked = Instant::now();
             self.open_launch_link(ctx);
+            self.open_pending_chat();
             ctx.request_repaint_after(Duration::from_secs(1));
         }
         if let Some(found) = self.font_scan.as_ref().and_then(|rx| rx.try_recv().ok()) {
@@ -4544,6 +4566,15 @@ mod tests {
     }
 
     #[test]
+    fn a_notification_link_names_its_chat() {
+        let id = "ab0e0099-33d5-494c-bc8c-cbdc8ea44989";
+        let got = chat_in_link(&format!("foreman://open?session={id}&t=1"));
+        assert_eq!(got.map(|i| i.to_string()).as_deref(), Some(id));
+        assert!(chat_in_link("foreman://pair?url=x&token=y").is_none());
+        assert!(chat_in_link("foreman://open?session=nope").is_none());
+    }
+
+    #[test]
     fn status_counts_skip_empty_statuses_and_lead_with_attention() {
         let s = |status| Session {
             id: SessionId::default(),
@@ -4669,6 +4700,15 @@ mod tests {
         assert_eq!(short_path("/home/k/git/snort"), "git/snort");
         assert_eq!(short_path("snort/"), "snort");
     }
+}
+
+/// The chat a `foreman://open?session=…` link names, as a notification's tap carries.
+fn chat_in_link(link: &str) -> Option<SessionId> {
+    let query = link.trim().strip_prefix("foreman://open?")?;
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("session="))
+        .and_then(|v| v.parse().ok())
 }
 
 /// A dialog's width: what it wants, but never wider than the screen less a margin.

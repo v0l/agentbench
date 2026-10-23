@@ -62,6 +62,7 @@ All notable changes to Foreman are listed here. The format follows
   server is away, and restarts after a reboot; a 15 minute job looks as well when the system stops
   the service. Turn it off with settings → general → chats → alerts. The Android build is now
   `packaging/android/build.sh`, which adds the Kotlin service (compiled with kotlinc, no Gradle).
+- Android: tapping a notification opens the chat it is about.
 - Android: a launcher icon.
 
 ### Fixed
