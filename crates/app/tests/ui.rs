@@ -792,7 +792,7 @@ fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
     // Picking a chat closes it too, and opens the chat.
     h.get_by_label("projects").click();
     h.run_steps(3);
-    click(&mut h, 100.0, 97.0);
+    click(&mut h, 100.0, 129.0);
     h.run_steps(3);
     assert!(!h.state().drawer_open(), "picking a chat closes the drawer");
     assert!(h.state().open().is_some(), "and opens it");

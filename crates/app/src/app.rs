@@ -1231,12 +1231,12 @@ impl App {
                 });
             });
             ui.add_space(4.0);
-            let w = ui.available_width();
-            ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
-            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                self.key_file_issue(ui);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.header_badges(ui));
+                // The tabs take what the file issue key leaves, so the key stays on screen.
+                let key = 118.0;
+                let w = (ui.available_width() - key - ui.spacing().item_spacing.x).max(120.0);
+                ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.key_file_issue(ui));
             });
         } else {
             ui.horizontal(|ui| {
@@ -1280,6 +1280,12 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(width - 16.0);
                 ui.set_height(screen.height() - top - 16.0);
+                // The fleet's status, which has no room in a phone's header.
+                let row = Vec2::new(ui.available_width(), 22.0);
+                ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Center), |ui| {
+                    self.header_badges(ui);
+                });
+                ui.add_space(4.0);
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     self.side(ui);
