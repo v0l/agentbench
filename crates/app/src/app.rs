@@ -1362,7 +1362,7 @@ impl App {
             .filter(|_| self.remote)
             .map(|c| (c.server.url.clone(), c.server.token.clone()))
             .unwrap_or_default();
-        let asking_agent = self.client.is_some();
+        let asking_agent = self.client.is_some() && !cfg!(target_os = "android");
         self.settings = Some(Settings {
             page: Page::General,
             speech: self.speech.clone(),
@@ -1403,7 +1403,10 @@ impl App {
             title_models: None,
             title_asking: false,
         });
-        if let Some(c) = &mut self.client {
+        // The agent's settings are not shown on a phone, so they are not asked for.
+        if !cfg!(target_os = "android")
+            && let Some(c) = &mut self.client
+        {
             c.model();
         }
     }
@@ -1437,12 +1440,18 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(modal_width(ctx, 540.0));
                 modal_title(ui, "Settings");
-                let pages = [
-                    (Page::General, "general"),
-                    (Page::Speech, "speech"),
-                    (Page::Agent, "agent"),
-                    (Page::Titles, "titles"),
-                ];
+                // The agent and the chat titles are set up on the server's own machine; a phone
+                // only needs to know where the server is and how it should look and sound.
+                let pages = if cfg!(target_os = "android") {
+                    vec![(Page::General, "general"), (Page::Speech, "voice")]
+                } else {
+                    vec![
+                        (Page::General, "general"),
+                        (Page::Speech, "speech"),
+                        (Page::Agent, "agent"),
+                        (Page::Titles, "titles"),
+                    ]
+                };
                 tabs(ui, &mut st.page, &pages);
                 // One height for every page, so the dialog does not jump as you move between them.
                 let body_h = (ctx.content_rect().height() - 260.0).clamp(240.0, 520.0);
@@ -4158,7 +4167,7 @@ fn appearance_section(ui: &mut Ui, face: &mut Typeface, installed: &Installed, s
             );
         } else if scanning {
             hint(ui, "looking for installed fonts");
-        } else {
+        } else if !cfg!(target_os = "android") {
             hint(ui, "This platform does not list its fonts, so the text keeps the built in ones.");
         }
         row_help(ui, "text size", "Scales every piece of text in the window.", |ui| {
