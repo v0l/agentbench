@@ -2373,7 +2373,15 @@ impl App {
             ui.add_space(4.0);
         }
         let compact = self.compact;
-        let edit = prose(ui, &mut self.draft, hint_text, if compact { 2 } else { 3 });
+        // While this tile's speech is being listened to or read, the words are written into the
+        // draft for it, so typing or sending now would be overwritten or cut the take short.
+        let speaking =
+            self.voice.busy() && self.speaking_in.is_some() && self.speaking_in == self.drawing;
+        let edit = ui
+            .add_enabled_ui(!speaking, |ui| {
+                prose(ui, &mut self.draft, hint_text, if compact { 2 } else { 3 })
+            })
+            .inner;
         if self.refocus.is_some() && self.refocus == self.drawing {
             self.refocus = None;
             edit.request_focus();
@@ -2402,7 +2410,7 @@ impl App {
             hint(ui, tip);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let sending = self.focused && !self.tray.files.is_empty();
-                let can = ready && (!self.draft.trim().is_empty() || sending);
+                let can = ready && !speaking && (!self.draft.trim().is_empty() || sending);
                 let label = if busy { "steer" } else { "send" };
                 let width = if compact { 64.0 } else { 100.0 };
                 if (ui.add(Key::new(label).solid(READOUT).enabled(can).min_width(width)).clicked()
