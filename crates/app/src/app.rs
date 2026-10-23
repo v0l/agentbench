@@ -275,20 +275,50 @@ struct Transcript {
     heights: Heights,
 }
 
-/// Measured heights of transcript entries, valid for one width and one look of the entries.
+/// Heights of transcript entries. `of` holds what was measured for the current width and look.
+/// When those change, the old heights (scaled to the new width) become `guess`: good enough to
+/// leave room for entries out of sight, so a resize lays out only what is on screen.
 #[derive(Default)]
 struct Heights {
     key: (u32, u32, u32),
+    width: f32,
     of: HashMap<Id, f32>,
+    guess: HashMap<Id, f32>,
 }
 
 impl Heights {
-    /// Forget every height unless they were measured for this width and look.
-    fn keep_for(&mut self, key: (u32, u32, u32)) {
-        if self.key != key {
-            self.key = key;
-            self.of.clear();
+    /// Move to a new width and look: measured heights turn into guesses.
+    fn keep_for(&mut self, key: (u32, u32, u32), width: f32) {
+        if self.key == key {
+            return;
         }
+        // Text wraps about in proportion to the width; a different text size or font changes
+        // heights in ways not worth guessing, but a stale guess is still better than none.
+        let scale = if self.width > 0.0 && width > 0.0 { self.width / width } else { 1.0 };
+        let old = std::mem::take(&mut self.of);
+        for h in self.guess.values_mut() {
+            *h *= scale;
+        }
+        for (id, h) in old {
+            self.guess.insert(id, h * scale);
+        }
+        self.key = key;
+        self.width = width;
+    }
+
+    /// The height of an entry, measured if possible, else guessed.
+    fn known(&self, id: Id) -> Option<f32> {
+        self.of.get(&id).or_else(|| self.guess.get(&id)).copied()
+    }
+
+    fn measured(&mut self, id: Id, h: f32) {
+        self.of.insert(id, h);
+        self.guess.remove(&id);
+    }
+
+    fn forget(&mut self, id: Id) {
+        self.of.remove(&id);
+        self.guess.remove(&id);
     }
 }
 
@@ -1025,7 +1055,7 @@ impl App {
                 t.loading = false;
                 for m in msgs {
                     t.last = t.last.max(m.id);
-                    t.heights.of.remove(&m.id);
+                    t.heights.forget(m.id);
                     match t.messages.iter_mut().rev().find(|x| x.id == m.id) {
                         Some(x) => *x = m,
                         None => t.messages.push(m),

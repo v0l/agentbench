@@ -8,11 +8,13 @@ All notable changes to Foreman are listed here. The format follows
 
 ### Fixed
 - Long chats are much faster to draw, most of all on a phone. Only the messages in view (and a
-  screenful either side) are laid out; the others are given the height they were last measured at,
-  and heights are measured again when the width, text size, thinking switch or fonts change. The
-  transcript is no longer cloned every frame, and the markdown cache is only swept when it has
-  grown large. A 400-message chat took about 6 to 7 ms to draw when idle and 14 to 16 ms while
-  scrolling on a desktop, and 6.5 / 16 ms in the phone layout; it now takes 0.2 ms and 0.4 ms.
+  screenful either side) are laid out; the others are given the height they were last measured at.
+  Resizing the window or changing the text size keeps the old heights, scaled to the new width, as
+  a guess for what is out of sight, so only the visible messages are laid out again and resizing
+  is near-instant. The transcript is no longer cloned every frame, and the markdown cache is only
+  swept when it has grown large. A 400-message chat took 7 ms to draw when idle, 16 ms while
+  scrolling and 16 ms while resizing, on a desktop and in the phone layout; it now takes 0.1 ms,
+  0.4 ms and 0.4 ms. Opening a long chat still lays every message out once (about 20 ms).
 
 ### Changed
 - Settings are split into four tabs: general, speech, agent and titles.

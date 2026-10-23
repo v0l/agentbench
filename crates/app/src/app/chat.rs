@@ -417,7 +417,7 @@ impl App {
                     ui.available_width().to_bits(),
                     self.thinking as u32 | (self.face.size.to_bits() << 1),
                     self.fonts_loaded,
-                ));
+                ), ui.available_width());
                 let visible = ui.clip_rect().expand2(Vec2::new(0.0, OVERSCAN));
                 for m in &messages {
                     // Each entry gets a ui of the column's width, clipped to it, so one with
@@ -428,7 +428,7 @@ impl App {
                     );
                     // An entry that was measured and is out of sight is not laid out, only
                     // given the room it took.
-                    if let Some(h) = heights.of.get(&m.id).copied()
+                    if let Some(h) = heights.known(m.id)
                         && !(egui::Rect::from_min_size(column.min, Vec2::new(column.width(), h)))
                             .intersects(visible)
                     {
@@ -452,7 +452,7 @@ impl App {
                     self.entry(&mut one, m, s.id);
                     let used = one.min_rect();
                     let h = (used.bottom().max(column.top()) - column.top()).max(0.0);
-                    heights.of.insert(m.id, h);
+                    heights.measured(m.id, h);
                     ui.allocate_rect(
                         egui::Rect::from_min_max(
                             column.min,
