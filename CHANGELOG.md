@@ -6,7 +6,7 @@ All notable changes to Foreman are listed here. The format follows
 
 ## [Unreleased]
 
-- A built-in **home** project for chats that belong to no git repository: parse files, run skills, odd jobs. It sits last in the project list with a "new chat in ~" row, and its chats start in your home folder with a shorter brief (no branches or worktrees). It is made by the server at startup, cannot be removed, is never scanned for worktrees, and issues cannot be filed against it.
+- A built-in **chats** project, first in the list, for chats that belong to no git repository: parse files, run skills, odd jobs. It has a "new chat in ~" row, and its chats start in your home folder with a shorter brief (no branches or worktrees). It is made by the server at startup, cannot be removed, is never scanned for worktrees, and issues cannot be filed against it.
 
 - A bash command is always shown whole and wrapped under the tool's name, whether the row is open or not, since it is the riskiest thing an agent does. It used to be cut to one line.
 
