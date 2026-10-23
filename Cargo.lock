@@ -1592,6 +1592,8 @@ dependencies = [
 [[package]]
 name = "egui-qr"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5154e9e74c628f259bbe0f2be952f851313f04c8c8932bd18692d8cc97a4001"
 dependencies = [
  "egui",
  "qrcode",
