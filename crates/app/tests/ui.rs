@@ -1353,3 +1353,24 @@ fn long_markdown_wraps_inside_a_tile() {
     h.run_steps(6);
     shot(&mut h, "tile-wrap");
 }
+
+#[test]
+fn markdown_sits_on_one_baseline_and_links_open() {
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "foreman", "markdown", None, None).unwrap();
+    rig.store
+        .add_message(
+            s.id,
+            &Entry::Assistant {
+                text: "Plain text with `inline code` in the middle, and a **bold** word.\n\nSee https://example.com/docs and [the guide](https://example.com/guide).\n\n- first `item` here\n- second item\n\n1. numbered `one`\n2. numbered two\n\n```rust\nfn main() {}\n```\n\n> quoted `code` text\n"
+                    .into(),
+            },
+        )
+        .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, main.project_id);
+    h.run_steps(6);
+    shot(&mut h, "markdown-baseline");
+}

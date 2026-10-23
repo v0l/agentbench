@@ -20,3 +20,8 @@ lto = "thin"
 
 [profile.dev]
 opt-level = 1
+
+# egui_bench 0.5.5 puts code on the text's baseline and links plain addresses; drop this once it
+# is published.
+[patch.crates-io]
+egui_bench = { path = "/home/kieran/git/egui_bench" }
