@@ -1627,9 +1627,9 @@ dependencies = [
 
 [[package]]
 name = "egui_bench"
-version = "0.5.4"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2f3ef265abfbad7b9f98dbe6a9900c09e9a8e56784b0989de540ea963946b6b"
+checksum = "4d5e33cdd74fa4bc579989080843cfdbe4b0534267127a5b8135252751da0f1b"
 dependencies = [
  "dirs",
  "egui",
