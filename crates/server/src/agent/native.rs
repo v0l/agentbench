@@ -668,12 +668,15 @@ fn levels(base: &Model) -> Vec<&'static str> {
     agentbench_core::LEVELS.into_iter().filter(|l| base.level(l).is_some()).collect()
 }
 
-fn tool_list(base: &Model) -> Value {
+fn offered(base: &Model) -> Vec<Spec> {
     let any = !levels(base).is_empty();
+    specs().into_iter().filter(|t| any || t.name != "switch_model").collect()
+}
+
+fn tool_list(base: &Model) -> Value {
     Value::Array(
-        specs()
+        offered(base)
             .into_iter()
-            .filter(|t| any || t.name != "switch_model")
             .map(|t| {
                 json!({
                     "type": "function",
@@ -684,6 +687,37 @@ fn tool_list(base: &Model) -> Value {
     )
 }
 
+fn tool_section(tools: &[Spec]) -> String {
+    let mut out = String::from("<tools>\n");
+    for t in tools {
+        out.push_str(&format!(
+            "<tool name=\"{}\">\n<description>{}</description>\n",
+            t.name, t.about
+        ));
+        let required: Vec<&str> = t.schema["required"]
+            .as_array()
+            .map(|r| r.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if let Some(props) = t.schema["properties"].as_object() {
+            for (name, prop) in props {
+                let kind = prop["type"].as_str().unwrap_or("any");
+                let need = if required.contains(&name.as_str()) { "required" } else { "optional" };
+                let about = prop["description"].as_str().unwrap_or("");
+                out.push_str(&format!(
+                    "<arg name=\"{name}\" type=\"{kind}\" {need}>{about}</arg>\n"
+                ));
+            }
+        }
+        out.push_str("</tool>\n");
+    }
+    out.push_str("</tools>\n\n");
+    out
+}
+
+fn section(tag: &str, body: &str) -> String {
+    format!("<{tag}>\n{}\n</{tag}>\n\n", body.trim())
+}
+
 fn instructions(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("AGENTS.md")).ok()?;
     let text = text.trim();
@@ -692,31 +726,21 @@ fn instructions(dir: &Path) -> Option<String> {
 
 fn system(turn: &Turn, base: &Model) -> String {
     let skills = skillset::discover(&skillset::roots(turn.cwd), &[]);
-    let mut out = format!(
-        "You are a coding agent working in {}. Read before you change, change what was asked, and check your work by building and testing.\n\n",
-        turn.cwd.display()
-    );
+    let mut out = format!("Working directory: {}\n\n", turn.cwd.display());
     out.push_str(&brief(turn.context));
-    out.push_str(
-        "\n\nYour own tools reach the tracker directly: list_issues, get_issue, file_issue, update_issue, comment_on_issue, \
-         list_sessions, read_session, session_status, list_worktrees, create_worktree. Prefer them to the REST API. \
-         ask_user waits for the user's answer, and notify_user tells them something when they may not be watching.\n\n\
-         To hand work to another agent, start_session gives it an issue or a prompt, and it runs on its own; \
-         wait_for_session waits for it, read_session shows what it did and send_message steers it. \
-         remember keeps a note about the project for every later session, and recall reads the notes. \
-         For work of three or more steps keep a checklist with todo_write.\n\n",
-    );
+    out.push_str("\n\nPrefer the tracker tools to the REST API. Write markdown, and put code in fenced blocks.\n\n");
     if !turn.context.notes.is_empty() {
-        out.push_str("What was remembered about this project:\n");
+        let mut notes = String::new();
         for (topic, note) in &turn.context.notes {
-            out.push_str(&format!("- {topic}: {}\n", note.trim().replace('\n', "\n  ")));
+            notes.push_str(&format!("- {topic}: {}\n", note.trim().replace('\n', "\n  ")));
         }
-        out.push('\n');
+        out.push_str(&section("project_notes", &notes));
     }
     if let Some(text) = dirs::home_dir().and_then(|h| instructions(&h.join(".agents"))) {
-        out.push_str("The user's standing instructions, read from ~/.agents/AGENTS.md:\n\n");
-        out.push_str(&text);
-        out.push_str("\n\n");
+        out.push_str(&section("user_instructions", &text));
+    }
+    if let Some(text) = instructions(turn.cwd) {
+        out.push_str(&section("project_instructions", &text));
     }
     let levels = levels(base);
     if !levels.is_empty() {
@@ -726,28 +750,9 @@ fn system(turn: &Turn, base: &Model) -> String {
             levels.join(", ")
         ));
     }
-    out.push_str(
-        "- Work in the worktree with list_files, read_file, search_files, write_file and edit_file. Paths are relative to it, and \
-         absolute paths reach any file on this machine, so you may work on other apps and files when asked. \
-         Read a file before you edit it.\n\
-         - To understand code without reading raw files, use the language server tools: code_outline breaks a file or folder into its \
-         modules, structs, enums and functions; code_find gets a unit by exact name (`Config::load`) with its source and every unit that \
-         uses it; code_diagnostics lists the errors in a file. After you write or edit a file, the language server's errors in it come back \
-         as a message from the harness. Languages are detected from the project (Cargo.toml, go.mod, package.json...); where the server is not installed, use search_files.\n\
-         - read_file also shows you pictures, plays sound files and shows video as frames, so use it to look at screenshots, \
-         images, recordings and clips instead of saying you cannot.\n\
-         - bash runs commands in the worktree as the user. With background it starts a dev server, watcher or long build and \
-         answers at once; bash_output reads its output and bash_kill stops it.\n\
-         - screenshot takes a picture of a web page or HTML file so you can look at the UI you built.\n\
-         - web_search finds pages and web_fetch reads one as markdown, or downloads a file with save_to, or with prompt gives you just the answer to a question about a long page. Fetch before you \
-         answer from memory about anything recent, and say where a fact came from.\n\
-         - Before writing a file format you were not taught, load its skill with load_skill.\n\
-         - Write markdown, and put code in fenced blocks.\n",
-    );
+    out.push_str(&tool_section(&offered(base)));
     if !skills.is_empty() {
-        out.push_str("\nSkills you can load:\n");
-        out.push_str(&skillset::listing(&skills));
-        out.push('\n');
+        out.push_str(&section("skills", &skillset::listing(&skills)));
     }
     out
 }
@@ -2275,7 +2280,39 @@ mod tests {
         };
         native.run(&turn, &io).await.unwrap();
         let system = asked.recv().unwrap()["messages"][0]["content"].as_str().unwrap().to_string();
+        assert!(system.contains("<project_notes>"), "{system}");
         assert!(system.contains("- tests: run cargo test"), "{system}");
+    }
+
+    #[tokio::test]
+    async fn the_system_prompt_wraps_the_tools_and_the_project_instructions_in_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Use tabs here.\n").unwrap();
+        let (url, asked) = stub(vec![vec![say("hi")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let c = context();
+        let turn = Turn {
+            prompt: "x",
+            files: &[],
+            cwd: dir.path(),
+            model: None,
+            resume: None,
+            history: &[],
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        let system = asked.recv().unwrap()["messages"][0]["content"].as_str().unwrap().to_string();
+        assert!(
+            system.contains("<project_instructions>\nUse tabs here.\n</project_instructions>"),
+            "{system}"
+        );
+        assert!(system.contains("<tool name=\"read_file\">"), "{system}");
+        assert!(
+            system.contains("<arg name=\"path\" type=\"string\" required>A path, relative to the worktree or absolute</arg>"),
+            "{system}"
+        );
+        assert!(system.contains("<arg name=\"offset\" type=\"integer\" optional>"), "{system}");
     }
 
     #[test]
