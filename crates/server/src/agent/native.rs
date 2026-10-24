@@ -687,28 +687,49 @@ fn tool_list(base: &Model) -> Value {
     )
 }
 
+fn arg_kind(prop: &Value) -> String {
+    match prop["type"].as_str() {
+        Some("array") => match prop["items"]["type"].as_str() {
+            Some(item) => format!("array of {item}"),
+            None => "array".into(),
+        },
+        Some(kind) => kind.into(),
+        None => "any".into(),
+    }
+}
+
+fn args(schema: &Value) -> String {
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut out = String::new();
+    let Some(props) = schema["properties"].as_object() else {
+        return out;
+    };
+    for (name, prop) in props {
+        let need = if required.contains(&name.as_str()) { "required" } else { "optional" };
+        let about = prop["description"].as_str().unwrap_or("");
+        let inner = if prop["type"] == "array" { args(&prop["items"]) } else { args(prop) };
+        out.push_str(&format!(
+            "<arg name=\"{name}\" type=\"{}\" {need}>{about}{}{}</arg>\n",
+            arg_kind(prop),
+            if inner.is_empty() { "" } else { "\n" },
+            inner
+        ));
+    }
+    out
+}
+
 fn tool_section(tools: &[Spec]) -> String {
     let mut out = String::from("<tools>\n");
     for t in tools {
         out.push_str(&format!(
-            "<tool name=\"{}\">\n<description>{}</description>\n",
-            t.name, t.about
+            "<tool name=\"{}\">\n<description>{}</description>\n{}</tool>\n",
+            t.name,
+            t.about,
+            args(&t.schema)
         ));
-        let required: Vec<&str> = t.schema["required"]
-            .as_array()
-            .map(|r| r.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        if let Some(props) = t.schema["properties"].as_object() {
-            for (name, prop) in props {
-                let kind = prop["type"].as_str().unwrap_or("any");
-                let need = if required.contains(&name.as_str()) { "required" } else { "optional" };
-                let about = prop["description"].as_str().unwrap_or("");
-                out.push_str(&format!(
-                    "<arg name=\"{name}\" type=\"{kind}\" {need}>{about}</arg>\n"
-                ));
-            }
-        }
-        out.push_str("</tool>\n");
     }
     out.push_str("</tools>\n\n");
     out
@@ -724,7 +745,7 @@ fn instructions(dir: &Path) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-fn system(turn: &Turn, base: &Model) -> String {
+pub fn system(turn: &Turn, base: &Model) -> String {
     let skills = skillset::discover(&skillset::roots(turn.cwd), &[]);
     let mut out = format!("Working directory: {}\n\n", turn.cwd.display());
     out.push_str(&brief(turn.context));
@@ -2313,6 +2334,12 @@ mod tests {
             "{system}"
         );
         assert!(system.contains("<arg name=\"offset\" type=\"integer\" optional>"), "{system}");
+        assert!(
+            system.contains(
+                "<arg name=\"edits\" type=\"array of object\" required>\n<arg name=\"newText\""
+            ),
+            "{system}"
+        );
     }
 
     #[test]
