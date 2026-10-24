@@ -687,52 +687,21 @@ fn tool_list(base: &Model) -> Value {
     )
 }
 
-fn arg_kind(prop: &Value) -> String {
-    match prop["type"].as_str() {
-        Some("array") => match prop["items"]["type"].as_str() {
-            Some(item) => format!("array of {item}"),
-            None => "array".into(),
-        },
-        Some(kind) => kind.into(),
-        None => "any".into(),
-    }
-}
+const SUMMARY_CHARS: usize = 100;
 
-fn args(schema: &Value) -> String {
-    let required: Vec<&str> = schema["required"]
-        .as_array()
-        .map(|r| r.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    let mut out = String::new();
-    let Some(props) = schema["properties"].as_object() else {
-        return out;
-    };
-    for (name, prop) in props {
-        let need = if required.contains(&name.as_str()) { "required" } else { "optional" };
-        let about = prop["description"].as_str().unwrap_or("");
-        let inner = if prop["type"] == "array" { args(&prop["items"]) } else { args(prop) };
-        out.push_str(&format!(
-            "<arg name=\"{name}\" type=\"{}\" {need}>{about}{}{}</arg>\n",
-            arg_kind(prop),
-            if inner.is_empty() { "" } else { "\n" },
-            inner
-        ));
+fn summary(about: &str) -> String {
+    let one = about.split_whitespace().collect::<Vec<_>>().join(" ");
+    let first = one.split_once(". ").map_or(one.as_str(), |(head, _)| head).trim_end_matches('.');
+    match first.char_indices().nth(SUMMARY_CHARS) {
+        Some((i, _)) => format!("{}...", first[..i].trim_end()),
+        None => first.to_string(),
     }
-    out
 }
 
 fn tool_section(tools: &[Spec]) -> String {
-    let mut out = String::from("<tools>\n");
-    for t in tools {
-        out.push_str(&format!(
-            "<tool name=\"{}\">\n<description>{}</description>\n{}</tool>\n",
-            t.name,
-            t.about,
-            args(&t.schema)
-        ));
-    }
-    out.push_str("</tools>\n\n");
-    out
+    let lines: Vec<String> =
+        tools.iter().map(|t| format!("- {}: {}", t.name, summary(&t.about))).collect();
+    section("tools", &lines.join("\n"))
 }
 
 fn section(tag: &str, body: &str) -> String {
@@ -2328,18 +2297,8 @@ mod tests {
             system.contains("<project_instructions>\nUse tabs here.\n</project_instructions>"),
             "{system}"
         );
-        assert!(system.contains("<tool name=\"read_file\">"), "{system}");
-        assert!(
-            system.contains("<arg name=\"path\" type=\"string\" required>A path, relative to the worktree or absolute</arg>"),
-            "{system}"
-        );
-        assert!(system.contains("<arg name=\"offset\" type=\"integer\" optional>"), "{system}");
-        assert!(
-            system.contains(
-                "<arg name=\"edits\" type=\"array of object\" required>\n<arg name=\"newText\""
-            ),
-            "{system}"
-        );
+        assert!(system.contains("- read_file: Read a file on this machine\n"), "{system}");
+        assert!(!system.contains("<arg "), "{system}");
     }
 
     #[test]
