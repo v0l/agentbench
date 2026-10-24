@@ -464,6 +464,19 @@ pub struct AgentInfo {
     pub about: String,
 }
 
+/// Where the server's speech models run, for the settings page. Devices are "GPU" or "CPU".
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AudioStatus {
+    /// What a model loaded now would run on.
+    pub device: String,
+    /// What the speech to text model is running on, once it has been used.
+    #[serde(default)]
+    pub reading_on: Option<String>,
+    /// What the text to speech model is running on, once it has been used.
+    #[serde(default)]
+    pub speaking_on: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelSettings {
     pub url: String,

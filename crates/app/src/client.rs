@@ -31,6 +31,8 @@ pub enum Reply {
     Started(agentbench_core::Session),
     Model(agentbench_core::ModelSettings),
     Title(agentbench_core::TitleSettings),
+    /// Where the server runs its speech models. `None` when the server is too old to say.
+    Audio(Option<agentbench_core::AudioStatus>),
     TitleModels(Result<Vec<String>, String>),
     Models(Result<Vec<String>, String>),
     AgentModels(String, Result<Vec<String>, String>),
@@ -323,6 +325,16 @@ impl Client {
     pub fn set_model(&mut self, m: &agentbench_core::ModelSettings) {
         let req = self.request(Method::PUT, "/api/settings/model", Self::json(m));
         self.send(req, Reply::Model);
+    }
+
+    /// Ask the server where its speech models run. A server too old to have the endpoint gets
+    /// `Audio(None)` back rather than an error in the status bar.
+    pub fn audio_status(&mut self) {
+        let req = self.request(Method::GET, "/v1/audio/status", None);
+        self.dispatch(req, |res| match res {
+            Ok(bytes) => Reply::Audio(serde_json::from_slice(&bytes).ok()),
+            Err(_) => Reply::Audio(None),
+        });
     }
 
     pub fn title(&mut self) {

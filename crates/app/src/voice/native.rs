@@ -299,6 +299,19 @@ impl Voice {
 }
 
 #[cfg(local_speech)]
+/// What this window's own Whisper runs on, `GPU` or `CPU`. Opening the card to find out takes a
+/// moment, so it is found out once.
+#[cfg(local_speech)]
+pub fn local_device() -> String {
+    static DEVICE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    DEVICE.get_or_init(|| egui_bench::speech::best_device().1).to_string()
+}
+
+#[cfg(not(local_speech))]
+pub fn local_device() -> String {
+    "not in this build".into()
+}
+
 fn models_dir() -> std::path::PathBuf {
     agentbench_server::home().join("models")
 }

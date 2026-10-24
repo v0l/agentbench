@@ -18,6 +18,8 @@ pub struct Speech {
     default: Arc<Mutex<String>>,
     /// Models being fetched, so two requests for one do not download it twice.
     fetching: Arc<tokio::sync::Mutex<()>>,
+    /// What the model last used ran on, `GPU` or `CPU`.
+    on: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for Speech {
@@ -33,7 +35,13 @@ impl Speech {
             inner: Arc::new(Mutex::new(Transcriber::new(models))),
             default: Arc::new(Mutex::new(default.to_string())),
             fetching: Arc::new(tokio::sync::Mutex::new(())),
+            on: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// What the model runs on, once it has been used.
+    pub fn on(&self) -> Option<String> {
+        self.on.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn set_default(&self, id: &str) {
@@ -77,10 +85,12 @@ impl Speech {
             }
         }
         let inner = self.inner.clone();
+        let seen = self.on.clone();
         let id = id.to_string();
         tokio::task::spawn_blocking(move || {
             let mut t = inner.lock().unwrap_or_else(|e| e.into_inner());
             let on = t.load(&id)?;
+            *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(on.to_string());
             t.transcribe(&pcm).map(|text| (text, on))
         })
         .await

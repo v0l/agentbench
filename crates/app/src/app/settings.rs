@@ -50,7 +50,11 @@ impl App {
             title_loaded: false,
             title_models: None,
             title_asking: false,
+            audio: None,
         });
+        if let Some(c) = &mut self.client {
+            c.audio_status();
+        }
         // The agent's settings are not shown on a phone, so they are not asked for.
         if !cfg!(target_os = "android")
             && let Some(c) = &mut self.client
@@ -140,6 +144,8 @@ impl App {
                     });
                 } else if st.page == Page::Speech {
                     speech_section(ui, &mut st.speech);
+                    ui.add_space(8.0);
+                    speech_devices(ui, &st.speech, st.audio.as_ref(), can_close);
                 } else if !can_close && st.place == Where::Remote {
                     hint(ui, "Connect to a server to set up its agents.");
                 } else if let Some(e) = &st.agent_error {
@@ -713,4 +719,51 @@ pub(super) fn model_input(
             field(ui, value, hint_text);
         }
     }
+}
+
+/// Where speech runs, on the voice page: the server's models, and this device's Whisper.
+fn speech_devices(
+    ui: &mut Ui,
+    sp: &crate::voice::Settings,
+    server: Option<&Option<agentbench_core::AudioStatus>>,
+    connected: bool,
+) {
+    section(ui, "runs on", "GPU is a graphics card, CPU the processor", |ui| {
+        let server_line = match (connected, server) {
+            (false, _) => "not connected".to_string(),
+            (true, None) => "asking".to_string(),
+            (true, Some(None)) => {
+                "this server is too old to say: update it to read aloud".to_string()
+            }
+            (true, Some(Some(a))) => {
+                let used = |on: &Option<String>| match on {
+                    Some(d) => d.clone(),
+                    None => format!("{} when first used", a.device),
+                };
+                format!(
+                    "read aloud on {}, voice input on {}",
+                    used(&a.speaking_on),
+                    used(&a.reading_on)
+                )
+            }
+        };
+        row_help(
+            ui,
+            "server",
+            "The agentbench server. Kokoro reads replies aloud and Whisper reads voice input there. With no card, or a build without CUDA, they run on the processor, which is several times slower.",
+            |ui| {
+                Line::new().value(server_line).size(12.0).show(ui);
+            },
+        );
+        if cfg!(local_speech) && sp.mode == crate::voice::Mode::Local {
+            row_help(
+                ui,
+                "this device",
+                "Whisper for voice input, run by this window. A build with the cuda feature uses the card.",
+                |ui| {
+                    Line::new().value(crate::voice::local_device()).size(12.0).show(ui);
+                },
+            );
+        }
+    });
 }

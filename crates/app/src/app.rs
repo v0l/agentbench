@@ -256,6 +256,8 @@ struct Settings {
     title_loaded: bool,
     title_models: Option<Result<Vec<String>, String>>,
     title_asking: bool,
+    /// Where the server runs speech: `None` until it answers, `Some(None)` when it cannot say.
+    audio: Option<Option<agentbench_core::AudioStatus>>,
 }
 
 enum Confirm {
@@ -697,6 +699,11 @@ impl App {
     /// Whether the project list is open over a narrow window.
     pub fn drawer_open(&self) -> bool {
         self.drawer
+    }
+
+    /// The device the server says its speech runs on, once the settings dialog has asked.
+    pub fn settings_audio_device(&self) -> Option<String> {
+        self.settings.as_ref()?.audio.clone()?.map(|a| a.device)
     }
 
     pub fn settings_loaded(&self) -> Option<bool> {
@@ -1165,6 +1172,11 @@ impl App {
                         st.model.model = l.first().cloned().unwrap_or_default();
                     }
                     st.models = Some(list);
+                }
+            }
+            Reply::Audio(a) => {
+                if let Some(st) = &mut self.settings {
+                    st.audio = Some(a);
                 }
             }
             Reply::Title(t) => {

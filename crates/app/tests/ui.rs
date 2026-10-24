@@ -1000,6 +1000,21 @@ fn a_new_text_size_applies_on_save_and_is_kept() {
 }
 
 #[test]
+fn the_voice_page_says_where_speech_runs() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("settings").click();
+    h.run_steps(2);
+    h.state_mut().settings_page("speech");
+    until(&mut h, "the server's devices", |h| h.state().settings_audio_device().is_some());
+    h.run_steps(3);
+    shot(&mut h, "settings-devices");
+    let device = h.state().settings_audio_device().unwrap();
+    assert!(device == "GPU" || device == "CPU", "{device}");
+}
+
+#[test]
 fn the_title_model_is_set_in_the_settings_and_saved_on_the_server() {
     let rig = rig();
     let mut h = harness(rig.url.clone());

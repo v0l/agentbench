@@ -99,6 +99,7 @@ pub fn router(api: Api) -> Router {
         .route("/v1/audio/transcriptions", post(transcribe))
         .route("/v1/audio/speech", post(speak))
         .route("/v1/audio/voices", get(voices))
+        .route("/v1/audio/status", get(audio_status))
         .route("/api/sessions/{id}/attachments/{file}", get(attachment))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
         .layer(middleware::from_fn_with_state(api.clone(), auth));
@@ -146,10 +147,20 @@ struct SpeechRequest {
     input: String,
     #[serde(default)]
     voice: String,
+    /// `pcm` streams raw 16 bit little endian mono samples as each sentence is made; anything
+    /// else is one WAV when all of it is made.
+    #[serde(default)]
+    response_format: String,
+}
+
+fn pcm_bytes(samples: &[f32]) -> Vec<u8> {
+    samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect()
 }
 
 /// OpenAI's text to speech, answered with Kokoro on this machine. Takes `{"input": "...",
-/// "voice": "af_heart"}` and answers a 16 bit mono WAV, whatever `response_format` asks for.
+/// "voice": "af_heart"}` and answers a 16 bit mono WAV. With `"response_format": "pcm"` it
+/// answers raw samples instead, a sentence at a time as they are made, with the rate in the
+/// `x-sample-rate` header, so the first words can be played while the rest are still coming.
 async fn speak(
     State(api): State<Api>,
     Json(req): Json<SpeechRequest>,
@@ -166,6 +177,43 @@ async fn speak(
     }
     let voice = api.voice.pick(&req.voice);
     let started = std::time::Instant::now();
+    if req.response_format.eq_ignore_ascii_case("pcm") {
+        let (first, rx) = api
+            .voice
+            .stream(&voice, text.to_string())
+            .await
+            .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        tracing::info!(
+            "streaming speech with {voice} on the {}: first sentence in {:.1}s",
+            first.on,
+            started.elapsed().as_secs_f32()
+        );
+        let rate = first.rate;
+        let head = futures_util::stream::once(std::future::ready(Ok::<_, std::io::Error>(
+            axum::body::Bytes::from(pcm_bytes(&first.samples)),
+        )));
+        let rest = futures_util::stream::unfold(rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(Ok(said)) => Some((Ok(axum::body::Bytes::from(pcm_bytes(&said.samples))), rx)),
+                // A failure part way ends the stream early; the headers are long gone.
+                Some(Err(e)) => {
+                    tracing::warn!("speech stopped part way: {e}");
+                    None
+                }
+                None => None,
+            }
+        });
+        use futures_util::StreamExt;
+        return Ok((
+            [
+                (axum::http::header::CONTENT_TYPE, "audio/L16".to_string()),
+                (axum::http::HeaderName::from_static("x-sample-rate"), rate.to_string()),
+                (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+            ],
+            axum::body::Body::from_stream(head.chain(rest)),
+        )
+            .into_response());
+    }
     let said = api
         .voice
         .say(&voice, text.to_string())
@@ -179,6 +227,17 @@ async fn speak(
     );
     let wav = egui_bench::voice::audio::wav_bytes(&said.samples, said.rate);
     Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], wav).into_response())
+}
+
+/// Where the speech models run: the device a model loaded now would use, and what each is using
+/// once it has been used.
+async fn audio_status(State(api): State<Api>) -> Json<agentbench_core::AudioStatus> {
+    let device = tokio::task::spawn_blocking(crate::voice::Voice::device).await.unwrap_or_default();
+    Json(agentbench_core::AudioStatus {
+        device,
+        reading_on: api.speech.on(),
+        speaking_on: api.voice.on(),
+    })
 }
 
 /// The voices this server can speak in: `{"voices": [{"id", "label", "installed"}]}`.
@@ -807,6 +866,17 @@ mod tests {
         let long = json!({"input": "a".repeat(crate::voice::INPUT_MAX + 1)});
         let (code, _) = call(&f.app, "POST", "/v1/audio/speech", Some(long), Some("secret")).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "too long");
+    }
+
+    #[tokio::test]
+    async fn the_audio_status_names_a_device_behind_the_token() {
+        let f = fixture();
+        let (code, _) = call(&f.app, "GET", "/v1/audio/status", None, None).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        let (code, v) = call(&f.app, "GET", "/v1/audio/status", None, Some("secret")).await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(matches!(v["device"].as_str(), Some("GPU" | "CPU")), "{v}");
+        assert!(v["speaking_on"].is_null() && v["reading_on"].is_null(), "nothing has run yet");
     }
 
     #[tokio::test]

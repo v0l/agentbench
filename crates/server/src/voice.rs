@@ -19,6 +19,13 @@ pub struct Voice {
     inner: Arc<Mutex<Speaker>>,
     /// One download at a time, so two requests for a voice do not fetch it twice.
     fetching: Arc<tokio::sync::Mutex<()>>,
+    /// What the voice last ran on, `GPU` or `CPU`, once it has been used.
+    on: Arc<Mutex<Option<String>>>,
+}
+
+/// `CUDA` and `Metal` are both a graphics card to somebody reading a settings page.
+fn plain(device: &str) -> String {
+    if device.eq_ignore_ascii_case("cpu") { "CPU".into() } else { "GPU".into() }
 }
 
 impl Default for Voice {
@@ -32,7 +39,26 @@ impl Voice {
         Voice {
             inner: Arc::new(Mutex::new(Speaker::new(dir))),
             fetching: Arc::new(tokio::sync::Mutex::new(())),
+            on: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// What the voice runs on, once it has been used.
+    pub fn on(&self) -> Option<String> {
+        self.on.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// What a voice loaded now would run on: the card when this build has CUDA and the machine
+    /// has one that works, else the processor.
+    pub fn device() -> String {
+        static DEVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        DEVICE
+            .get_or_init(|| {
+                plain(&egui_bench::speech::speak::device_label(
+                    &egui_bench::speech::speak::best_device(),
+                ))
+            })
+            .clone()
     }
 
     fn speaker(&self) -> std::sync::MutexGuard<'_, Speaker> {
@@ -62,32 +88,78 @@ impl Voice {
         out
     }
 
+    /// Fetch what `voice` needs if it is not on this machine yet.
+    async fn ensure(&self, voice: &str) -> Result<(), String> {
+        if self.speaker().installed(voice) {
+            return Ok(());
+        }
+        let _one_at_a_time = self.fetching.lock().await;
+        if self.speaker().installed(voice) {
+            return Ok(());
+        }
+        tracing::info!("fetching the voice {voice}");
+        let dir = self.speaker().dir().to_path_buf();
+        let name = voice.to_string();
+        tokio::task::spawn_blocking(move || {
+            Speaker::new(dir).download(&name, &|p| {
+                tracing::info!("downloading {}: {} of {} MB", p.name, p.got_mb, p.total_mb)
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     /// Say `text` in `voice`, fetching and loading it first if need be.
     pub async fn say(&self, voice: &str, text: String) -> Result<Said, String> {
-        if !self.speaker().installed(voice) {
-            let _one_at_a_time = self.fetching.lock().await;
-            if !self.speaker().installed(voice) {
-                tracing::info!("fetching the voice {voice}");
-                let dir = self.speaker().dir().to_path_buf();
-                let name = voice.to_string();
-                tokio::task::spawn_blocking(move || {
-                    Speaker::new(dir).download(&name, &|p| {
-                        tracing::info!("downloading {}: {} of {} MB", p.name, p.got_mb, p.total_mb)
-                    })
-                })
-                .await
-                .map_err(|e| e.to_string())??;
-            }
-        }
-        let inner = self.inner.clone();
+        self.ensure(voice).await?;
+        let (inner, seen) = (self.inner.clone(), self.on.clone());
         let voice = voice.to_string();
         tokio::task::spawn_blocking(move || {
             let mut s = inner.lock().unwrap_or_else(|e| e.into_inner());
-            s.load(&voice)?;
+            let on = plain(&s.load(&voice)?);
+            *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(on);
             s.say(&text)
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+
+    /// Say `text` a sentence at a time. The first sentence is made before this returns, so a
+    /// voice that cannot be fetched or loaded is an error here and not a stream that ends at
+    /// once; the rest arrive on the receiver as they are made. Dropping the receiver stops the
+    /// work after the sentence in hand.
+    pub async fn stream(
+        &self,
+        voice: &str,
+        text: String,
+    ) -> Result<(Said, tokio::sync::mpsc::Receiver<Result<Said, String>>), String> {
+        self.ensure(voice).await?;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let (inner, seen) = (self.inner.clone(), self.on.clone());
+        let voice = voice.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut s = inner.lock().unwrap_or_else(|e| e.into_inner());
+            match s.load(&voice) {
+                Ok(on) => *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(plain(&on)),
+                Err(e) => {
+                    let _ = tx.blocking_send(Err(e));
+                    return;
+                }
+            }
+            // One sentence to a piece, so the first sound does not wait on the rest.
+            for piece in egui_bench::voice::audio::chunks(&text, 1) {
+                let said = s.say(&piece);
+                let failed = said.is_err();
+                if tx.blocking_send(said).is_err() || failed {
+                    return;
+                }
+            }
+        });
+        match rx.recv().await {
+            Some(Ok(first)) => Ok((first, rx)),
+            Some(Err(e)) => Err(e),
+            None => Err("there was nothing to say".into()),
+        }
     }
 }
 

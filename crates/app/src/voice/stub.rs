@@ -69,3 +69,7 @@ impl Reader {
         Vec::new()
     }
 }
+
+pub fn local_device() -> String {
+    "not in this build".into()
+}
