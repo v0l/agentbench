@@ -38,11 +38,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # CUDA is in the x86_64 builds, as in waveshark. The patched candle in the root manifest
+        # CUDA is in the x86_64 builds, as in waveshark, and Metal in the Mac one. The patched candle in the root manifest
         # loads the CUDA libraries at run time, so these still start on a machine with no card and
         # run speech on the CPU there; with a card and the CUDA 12 runtime, Whisper and Kokoro run
         # on the GPU. The toolkit is needed to build the kernels, not to run them. No CUDA on the
-        # arm boards (no aarch64 toolkit to build with) or on a Mac (Metal instead).
+        # arm boards (no aarch64 toolkit to build with), and Metal on a Mac instead.
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
@@ -56,8 +56,11 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
-            features: ''
-          - os: windows-latest
+            # The Apple GPU through Metal, which every Apple Silicon Mac has.
+            features: --features metal
+          # 2022 and not latest: CUDA 12.8's nvcc refuses a Visual Studio newer than 2022, which
+          # windows-latest now has. Waveshark pins it for the same reason.
+          - os: windows-2022
             target: x86_64-pc-windows-msvc
             archive: zip
             features: --features cuda

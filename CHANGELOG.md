@@ -6,6 +6,15 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-24
+
+### Added
+- The Mac release build runs voice input and read aloud on the Apple GPU through Metal (feature `metal`, from egui_bench 0.6.1). On an M1 Pro, Kokoro makes 7.3 s of speech in 2.3 s, against 3.4 s on the processor.
+- The native agent reads the standing instructions in `~/.agents/AGENTS.md`.
+
+### Fixed
+- The Windows release build with CUDA: it is built on Windows Server 2022, since CUDA 12.8 refuses the newer Visual Studio on the latest runner. 0.3.1 has no release because of this.
+
 ## [0.3.1] - 2026-10-24
 
 ### Changed
