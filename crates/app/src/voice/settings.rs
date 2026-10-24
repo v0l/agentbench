@@ -13,9 +13,7 @@ pub enum Mode {
     Agentbench,
 }
 
-pub use agentbench_core::speech_models::{
-    DEFAULT_MODEL, DEFAULT_VOICE, LOCAL_MODELS, VOICES, model,
-};
+pub use egui_bench::voice::models::{DEFAULT_MODEL, DEFAULT_VOICE, LOCAL_MODELS, VOICES, model};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {

@@ -11,6 +11,7 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 - The server has a text to speech endpoint like the one for speech to text: `POST /v1/audio/speech` takes OpenAI's `{"input", "voice"}` and answers a WAV, and `GET /v1/audio/voices` lists the voices. Both need the token, so a phone or another window can use a remote server. The model (about 330 MB) and each voice are fetched from Hugging Face the first time, into `models/kokoro` in the data folder (an existing folder from waveshark can be copied or linked there), and stay loaded, on the GPU when the server was built with CUDA.
 
 ### Changed
+- Speech to text and text to speech now live in `egui_bench` 0.6 (`voice` for the helpers and an OpenAI audio client, feature `speech` for the Whisper and Kokoro models), so the other bench apps can use them. The `agentbench-speech` crate is gone, and so are the audio helpers in `agentbench-core`. Nothing changes for you.
 - Voice input waits for 3 seconds of silence before it ends a take, up from 1, so a pause to think does not cut you off.
 
 ### Added

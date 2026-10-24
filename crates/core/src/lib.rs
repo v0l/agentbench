@@ -1,6 +1,4 @@
-pub mod audio;
 pub mod pairing;
-pub mod speech_models;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

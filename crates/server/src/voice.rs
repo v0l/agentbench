@@ -7,8 +7,8 @@
 //! the default. The model and a voice are fetched from Hugging Face the first time they are
 //! asked for and stay loaded after, on the GPU when this build has CUDA and the machine has one.
 
-use agentbench_speech::speak::{DEFAULT_VOICE, VOICES};
-use agentbench_speech::{Said, Speaker};
+use egui_bench::speech::speak::{DEFAULT_VOICE, VOICES};
+use egui_bench::speech::{Said, Speaker};
 use std::sync::{Arc, Mutex};
 
 /// The most text spoken in one request. A reply that long is read in pieces by the window.
@@ -69,11 +69,14 @@ impl Voice {
             if !self.speaker().installed(voice) {
                 tracing::info!("fetching the voice {voice}");
                 let dir = self.speaker().dir().to_path_buf();
-                Speaker::new(dir)
-                    .download(crate::http::client(), voice, |p| {
+                let name = voice.to_string();
+                tokio::task::spawn_blocking(move || {
+                    Speaker::new(dir).download(&name, &|p| {
                         tracing::info!("downloading {}: {} of {} MB", p.name, p.got_mb, p.total_mb)
                     })
-                    .await?;
+                })
+                .await
+                .map_err(|e| e.to_string())??;
             }
         }
         let inner = self.inner.clone();

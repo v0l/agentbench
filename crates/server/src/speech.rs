@@ -8,7 +8,7 @@
 //! first time it is asked for and stays loaded after, on the GPU when this build has CUDA and the
 //! machine has a card.
 
-use agentbench_speech::{DEFAULT_MODEL, Transcriber, model};
+use egui_bench::speech::{DEFAULT_MODEL, Transcriber, model};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -66,11 +66,14 @@ impl Speech {
                 let models =
                     dir.and_then(|d| d.parent().map(|p| p.to_path_buf())).unwrap_or_default();
                 tracing::info!("fetching the speech model {id}");
-                Transcriber::new(models)
-                    .download(crate::http::client(), id, |p| {
+                let id = id.to_string();
+                tokio::task::spawn_blocking(move || {
+                    Transcriber::new(models).download(&id, &|p| {
                         tracing::info!("downloading {}: {} of {} MB", p.name, p.got_mb, p.total_mb)
                     })
-                    .await?;
+                })
+                .await
+                .map_err(|e| e.to_string())??;
             }
         }
         let inner = self.inner.clone();

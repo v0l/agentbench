@@ -48,7 +48,7 @@ struct Take {
 }
 
 #[cfg(local_speech)]
-type Loaded = Arc<Mutex<Option<agentbench_speech::Transcriber>>>;
+type Loaded = Arc<Mutex<Option<egui_bench::speech::Transcriber>>>;
 #[cfg(not(local_speech))]
 type Loaded = ();
 
@@ -288,7 +288,7 @@ impl Voice {
     pub fn installed(model: &str) -> bool {
         #[cfg(local_speech)]
         {
-            agentbench_speech::Transcriber::new(models_dir()).installed(model)
+            egui_bench::speech::Transcriber::new(models_dir()).installed(model)
         }
         #[cfg(not(local_speech))]
         {
@@ -402,13 +402,13 @@ fn read_locally(
     quiet: bool,
 ) -> Result<String, String> {
     let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
-    let t = slot.get_or_insert_with(|| agentbench_speech::Transcriber::new(models_dir()));
+    let t = slot.get_or_insert_with(|| egui_bench::speech::Transcriber::new(models_dir()));
     if !t.installed(&settings.model) {
-        crate::runtime().block_on(t.download(&crate::client::http(), &settings.model, |p| {
+        t.download(&settings.model, &|p| {
             let of = if p.total_mb > 0 { format!(" of {} MB", p.total_mb) } else { String::new() };
             let _ = tx.send(Event::Status(format!("downloading {}: {} MB{of}", p.name, p.got_mb)));
             wake();
-        }))?;
+        })?;
     }
     let _ = tx.send(Event::Status("loading the speech model".into()));
     wake();
@@ -590,9 +590,9 @@ mod tests {
             .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
             .collect();
         let pcm = super::super::to_whisper_rate(&pcm, rate);
-        let files = agentbench_speech::Files::in_dir(std::path::Path::new(&dir)).unwrap();
-        let (device, on) = agentbench_speech::best_device();
-        let mut w = agentbench_speech::Whisper::load(&files, device).unwrap();
+        let files = egui_bench::speech::Files::in_dir(std::path::Path::new(&dir)).unwrap();
+        let (device, on) = egui_bench::speech::best_device();
+        let mut w = egui_bench::speech::Whisper::load(&files, device).unwrap();
         let t = std::time::Instant::now();
         let said = w.transcribe(&pcm).unwrap();
         println!(

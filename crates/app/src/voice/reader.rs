@@ -62,7 +62,7 @@ impl Reader {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), String> {
         self.stop();
-        let text = agentbench_core::audio::speakable(markdown);
+        let text = egui_bench::voice::audio::speakable(markdown);
         if text.is_empty() {
             return Err("there is nothing to read in that".into());
         }
@@ -108,10 +108,10 @@ async fn produce(
     errors: &Sender<String>,
     wake: &(dyn Fn() + Send + Sync),
 ) {
-    let mut pieces = agentbench_core::audio::chunks(text, REST);
+    let mut pieces = egui_bench::voice::audio::chunks(text, REST);
     if let Some(first) = pieces.first().filter(|p| p.len() > FIRST * 2).cloned() {
         // Say a short opening on its own, so the wait for the first sound is short.
-        let cut = agentbench_core::audio::chunks(&first, FIRST);
+        let cut = egui_bench::voice::audio::chunks(&first, FIRST);
         pieces.splice(0..1, cut);
     }
     for piece in pieces {
@@ -123,7 +123,7 @@ async fn produce(
                 if shared.stop.load(Ordering::Relaxed) {
                     return;
                 }
-                let pcm = agentbench_core::audio::resample(&pcm, from_rate, rate);
+                let pcm = egui_bench::voice::audio::resample(&pcm, from_rate, rate);
                 shared.queue.lock().unwrap_or_else(|e| e.into_inner()).extend(pcm);
                 wake();
             }
@@ -166,7 +166,7 @@ pub async fn fetch(from: &Source, text: &str) -> Result<(Vec<f32>, u32), String>
             .unwrap_or_else(|| String::from_utf8_lossy(&bytes).trim().to_string());
         return Err(format!("the server could not read that aloud: {status}: {said}"));
     }
-    agentbench_core::audio::read_wav(&bytes)
+    egui_bench::voice::audio::read_wav(&bytes)
 }
 
 /// Open the default sound output and start it pulling from the queue. Returns the stream and the
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn a_sentence_is_posted_with_the_token_and_the_wav_comes_back() {
-        let wav = agentbench_core::audio::wav_bytes(&[0.0, 0.25, -0.25, 0.5], 24_000);
+        let wav = egui_bench::voice::audio::wav_bytes(&[0.0, 0.25, -0.25, 0.5], 24_000);
         let (url, sent) = serve("200 OK", wav);
         let from = Source { url, token: "secret".into(), voice: "af_bella".into() };
         let (pcm, rate) = crate::runtime().block_on(fetch(&from, "Hello there.")).unwrap();
