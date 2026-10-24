@@ -732,14 +732,6 @@ pub fn system(turn: &Turn, base: &Model) -> String {
     if let Some(text) = instructions(turn.cwd) {
         out.push_str(&section("project_instructions", &text));
     }
-    let levels = levels(base);
-    if !levels.is_empty() {
-        out.push_str(&format!(
-            "switch_model moves you to another model for the rest of this chat ({} are set up). Go up when you are stuck \
-             or the problem is hard, and down for mechanical work.\n\n",
-            levels.join(", ")
-        ));
-    }
     out.push_str(&tool_section(&offered(base)));
     if !skills.is_empty() {
         out.push_str(&section("skills", &skillset::listing(&skills)));
