@@ -258,6 +258,8 @@ struct Settings {
     title_asking: bool,
     /// Where the server runs speech: `None` until it answers, `Some(None)` when it cannot say.
     audio: Option<Option<agentbench_core::AudioStatus>>,
+    /// The voices the server reads aloud in: `None` until it answers.
+    voices: Option<Option<Vec<(String, String)>>>,
 }
 
 enum Confirm {
@@ -702,6 +704,11 @@ impl App {
     }
 
     /// The device the server says its speech runs on, once the settings dialog has asked.
+    /// The voices the settings dialog was told about, once the server has answered.
+    pub fn settings_voices(&self) -> Option<Option<Vec<(String, String)>>> {
+        self.settings.as_ref()?.voices.clone()
+    }
+
     pub fn settings_audio_device(&self) -> Option<String> {
         self.settings.as_ref()?.audio.clone()?.map(|a| a.device)
     }
@@ -1172,6 +1179,11 @@ impl App {
                         st.model.model = l.first().cloned().unwrap_or_default();
                     }
                     st.models = Some(list);
+                }
+            }
+            Reply::Voices(v) => {
+                if let Some(st) = &mut self.settings {
+                    st.voices = Some(v);
                 }
             }
             Reply::Audio(a) => {

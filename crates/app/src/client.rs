@@ -33,6 +33,8 @@ pub enum Reply {
     Title(agentbench_core::TitleSettings),
     /// Where the server runs its speech models. `None` when the server is too old to say.
     Audio(Option<agentbench_core::AudioStatus>),
+    /// The voices the server reads aloud in, as (id, label). `None` when it cannot say.
+    Voices(Option<Vec<(String, String)>>),
     TitleModels(Result<Vec<String>, String>),
     Models(Result<Vec<String>, String>),
     AgentModels(String, Result<Vec<String>, String>),
@@ -334,6 +336,29 @@ impl Client {
         self.dispatch(req, |res| match res {
             Ok(bytes) => Reply::Audio(serde_json::from_slice(&bytes).ok()),
             Err(_) => Reply::Audio(None),
+        });
+    }
+
+    /// Ask the server which voices it reads aloud in.
+    pub fn voices(&mut self) {
+        let req = self.request(Method::GET, "/v1/audio/voices", None);
+        self.dispatch(req, |res| {
+            let list = res
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|v| {
+                    v["voices"].as_array().map(|a| {
+                        a.iter()
+                            .filter_map(|v| {
+                                Some((
+                                    v["id"].as_str()?.to_string(),
+                                    v["label"].as_str()?.to_string(),
+                                ))
+                            })
+                            .collect()
+                    })
+                });
+            Reply::Voices(list)
         });
     }
 

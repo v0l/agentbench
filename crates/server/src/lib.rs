@@ -192,7 +192,18 @@ pub async fn serve_config(
     let speech = speech::Speech::new(home().join("models"), &speech_model(&store));
     let agents =
         config.agents_with_speech(model.clone(), Some(titles.clone()), Some(speech.clone()));
-    serve_inner(store, agents, Some(model), Some(titles), Some(speech), listen, web, shutdown).await
+    let voice = voice::Voice::default();
+    serve_inner(
+        store,
+        agents,
+        Some(model),
+        Some(titles),
+        Some((speech, voice)),
+        listen,
+        web,
+        shutdown,
+    )
+    .await
 }
 
 /// The model a speech request gets when it names none of ours: set it with
@@ -214,14 +225,19 @@ pub async fn serve_with(
     serve_inner(store, agents, None, None, None, listen, web, shutdown).await
 }
 
+/// Serve with these agents, keeping downloaded models in `models` rather than the data folder:
+/// what a test uses, so it never writes into the user's own.
 pub async fn serve_agents(
     store: store::Store,
     agents: Vec<Box<dyn Agent>>,
     model: Option<agent::native::Shared>,
     listen: SocketAddr,
+    models: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    serve_inner(store, agents, model, None, None, listen, None, shutdown).await
+    let speech = speech::Speech::new(models.clone(), &speech_model(&store));
+    let voice = voice::Voice::new(models.join("phonon"));
+    serve_inner(store, agents, model, None, Some((speech, voice)), listen, None, shutdown).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -230,7 +246,7 @@ async fn serve_inner(
     agents: Vec<Box<dyn Agent>>,
     model: Option<agent::native::Shared>,
     titles: Option<titles::Titles>,
-    speech: Option<speech::Speech>,
+    speech: Option<(speech::Speech, voice::Voice)>,
     listen: SocketAddr,
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -244,8 +260,9 @@ async fn serve_inner(
         let _ = projects::ensure_home(&store, &dir);
     }
     let token = token(&store).map_err(|e| e.0)?;
-    let speech =
-        speech.unwrap_or_else(|| speech::Speech::new(home().join("models"), &speech_model(&store)));
+    let (speech, voice) = speech.unwrap_or_else(|| {
+        (speech::Speech::new(home().join("models"), &speech_model(&store)), voice::Voice::default())
+    });
     let mut runner = runner::Runner::new(store, agents);
     let titles = titles.or_else(|| {
         model
@@ -257,7 +274,6 @@ async fn serve_inner(
     }
     *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
         runner::Base { url: local_url(listen), token: token.clone() };
-    let voice = voice::Voice::default();
     let api = api::Api { runner, token, model, speech, voice };
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     let listener =

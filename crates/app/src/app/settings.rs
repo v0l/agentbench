@@ -51,9 +51,11 @@ impl App {
             title_models: None,
             title_asking: false,
             audio: None,
+            voices: None,
         });
         if let Some(c) = &mut self.client {
             c.audio_status();
+            c.voices();
         }
         // The agent's settings are not shown on a phone, so they are not asked for.
         if !cfg!(target_os = "android")
@@ -143,7 +145,7 @@ impl App {
                         });
                     });
                 } else if st.page == Page::Speech {
-                    speech_section(ui, &mut st.speech);
+                    speech_section(ui, &mut st.speech, st.voices.as_ref());
                     ui.add_space(8.0);
                     speech_devices(ui, &st.speech, st.audio.as_ref(), can_close);
                 } else if !can_close && st.place == Where::Remote {
@@ -524,7 +526,11 @@ pub(super) fn is_loopback(url: &str) -> bool {
     host.is_empty() || matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1" | "0.0.0.0")
 }
 
-pub(super) fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
+pub(super) fn speech_section(
+    ui: &mut Ui,
+    sp: &mut crate::voice::Settings,
+    voices: Option<&Option<Vec<(String, String)>>>,
+) {
     use crate::voice::{LOCAL_MODELS, Mode, Voice};
     section(ui, "voice input", "kept on this device", |ui| {
         let mut options = vec![
@@ -607,16 +613,20 @@ pub(super) fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
         row_help(
             ui,
             "voice",
-            "Kokoro, run by the agentbench server. It downloads the voice the first time you press read aloud, about 330 MB for the first.",
-            |ui| {
-                choice_fit(
-                    ui,
-                    "reply-voice",
-                    &mut sp.reply_voice,
-                    crate::voice::VOICES
-                        .iter()
-                        .map(|v| (v.id.to_string(), format!("{}, grade {}", v.label, v.grade))),
-                );
+            "Phonon, run by the agentbench server. It downloads the model the first time you press read aloud, about 100 MB.",
+            |ui| match voices {
+                Some(Some(list)) if !list.is_empty() => {
+                    choice_fit(ui, "reply-voice", &mut sp.reply_voice, list.iter().cloned());
+                }
+                Some(_) => {
+                    Line::new()
+                        .value("this server lists no voices: update it to read aloud")
+                        .size(12.0)
+                        .show(ui);
+                }
+                None => {
+                    Line::new().value("asking the server").size(12.0).show(ui);
+                }
             },
         );
     });

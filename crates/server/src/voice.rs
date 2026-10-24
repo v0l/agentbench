@@ -1,46 +1,54 @@
 //! Text to speech for windows and phones that have no voice of their own.
 //!
 //! `POST /v1/audio/speech` takes what OpenAI's endpoint does, a JSON body with `input` and
-//! optionally `voice`, `model` and `speed`, behind the same token as the rest of the API, and
-//! answers a 16 bit mono WAV. `GET /v1/audio/voices` lists the voices. The voice named is used
-//! when it is a Kokoro voice (`af_heart`, say); anything else, such as OpenAI's `alloy`, gets
-//! the default. The model and a voice are fetched from Hugging Face the first time they are
-//! asked for and stay loaded after, on the GPU when this build has CUDA and the machine has one.
+//! optionally `voice`, behind the same token as the rest of the API, and answers a 16 bit mono
+//! WAV, or with `"response_format": "pcm"` raw samples streamed as each frame is made.
+//! `GET /v1/audio/voices` lists the voices. Phonon says it (`gradium/phonon-31m-en`, through
+//! candle); the voice named is used when it is one of its voices (`Hadley`, say), and anything
+//! else, such as OpenAI's `alloy`, gets the default. The model, about 100 MB, and each voice are
+//! fetched from Hugging Face the first time they are asked for and stay loaded after, on the
+//! GPU when this build has CUDA or Metal and the machine has one.
 
-use egui_bench::speech::speak::{DEFAULT_VOICE, VOICES};
-use egui_bench::speech::{Said, Speaker};
+use egui_bench::speech::Voicer;
+use egui_bench::speech::phonon::voices::Voice as Spoken;
 use std::sync::{Arc, Mutex};
 
-/// The most text spoken in one request. A reply that long is read in pieces by the window.
+/// The most text spoken in one request.
 pub const INPUT_MAX: usize = 20_000;
+
+/// What a whole reading came out as.
+pub struct Said {
+    pub samples: Vec<f32>,
+    pub rate: u32,
+    pub on: String,
+}
 
 #[derive(Clone)]
 pub struct Voice {
-    inner: Arc<Mutex<Speaker>>,
-    /// One download at a time, so two requests for a voice do not fetch it twice.
+    inner: Arc<Mutex<Voicer>>,
+    /// One download at a time, so two requests do not fetch the same file twice.
     fetching: Arc<tokio::sync::Mutex<()>>,
     /// What the voice last ran on, `GPU` or `CPU`, once it has been used.
     on: Arc<Mutex<Option<String>>>,
 }
 
-/// `CUDA` and `Metal` are both a graphics card to somebody reading a settings page.
-fn plain(device: &str) -> String {
-    if device.eq_ignore_ascii_case("cpu") { "CPU".into() } else { "GPU".into() }
-}
-
 impl Default for Voice {
     fn default() -> Self {
-        Voice::new(crate::home().join("models").join("kokoro"))
+        Voice::new(crate::home().join("models").join("phonon"))
     }
 }
 
 impl Voice {
     pub fn new(dir: std::path::PathBuf) -> Voice {
         Voice {
-            inner: Arc::new(Mutex::new(Speaker::new(dir))),
+            inner: Arc::new(Mutex::new(Voicer::new(dir))),
             fetching: Arc::new(tokio::sync::Mutex::new(())),
             on: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn voicer(&self) -> std::sync::MutexGuard<'_, Voicer> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// What the voice runs on, once it has been used.
@@ -48,118 +56,116 @@ impl Voice {
         self.on.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    /// What a voice loaded now would run on: the card when this build has CUDA and the machine
-    /// has one that works, else the processor.
+    /// What a model loaded now would run on.
     pub fn device() -> String {
-        static DEVICE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        DEVICE
-            .get_or_init(|| {
-                plain(&egui_bench::speech::speak::device_label(
-                    &egui_bench::speech::speak::best_device(),
-                ))
-            })
-            .clone()
+        static DEVICE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+        DEVICE.get_or_init(|| egui_bench::speech::best_device().1).to_string()
     }
 
-    fn speaker(&self) -> std::sync::MutexGuard<'_, Speaker> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    /// The voice a request for `asked` is spoken in: that one if it is listed, else the default.
+    /// `None` until the catalogue has been fetched.
+    pub fn pick(&self, asked: &str) -> Option<Spoken> {
+        self.voicer().pick(asked)
     }
 
-    /// The voice a request for `asked` is spoken in: a voice we know, else the default.
-    pub fn pick(&self, asked: &str) -> String {
-        let asked = Speaker::pick(asked);
-        let known =
-            VOICES.iter().any(|v| v.id == asked) || self.speaker().voices().contains(&asked);
-        if known { asked } else { DEFAULT_VOICE.to_string() }
+    /// Fetch the catalogue if it is not here yet: a few kilobytes, so a voice picker has
+    /// something to show before the first reading.
+    pub async fn catalogue(&self) -> Result<(), String> {
+        if !self.voicer().voices().is_empty() {
+            return Ok(());
+        }
+        let _one = self.fetching.lock().await;
+        self.blocking(|v| v.fetch_catalogue()).await
     }
 
-    /// Every voice offered, and whether it is on this machine yet.
+    /// Every voice offered: id (its name), label, and whether it is on this machine yet.
     pub fn list(&self) -> Vec<(String, String, bool)> {
-        let have = self.speaker().voices();
-        let mut out: Vec<(String, String, bool)> = VOICES
-            .iter()
-            .map(|v| (v.id.to_string(), v.label.to_string(), have.contains(&v.id.to_string())))
-            .collect();
-        for id in have {
-            if !out.iter().any(|(i, _, _)| *i == id) {
-                out.push((id.clone(), id, true));
+        let v = self.voicer();
+        let dir = v.dir().to_path_buf();
+        v.voices()
+            .into_iter()
+            .map(|s| {
+                let here = egui_bench::speech::phonon::voices::voice_path(&dir, &s).is_file();
+                (s.name.clone(), s.label(), here)
+            })
+            .collect()
+    }
+
+    async fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut Voicer) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            work(&mut inner.lock().unwrap_or_else(|e| e.into_inner()))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    /// Fetch the model, the catalogue and the voice asked for, if they are not here yet, and
+    /// load the model. Returns the voice it will speak in.
+    pub async fn ready(&self, asked: &str) -> Result<Spoken, String> {
+        if !self.voicer().installed() {
+            let _one = self.fetching.lock().await;
+            if !self.voicer().installed() {
+                tracing::info!("fetching the Phonon voice model");
+                self.blocking(|v| {
+                    v.download(&|p| {
+                        tracing::info!("downloading {}: {} of {} MB", p.name, p.got_mb, p.total_mb)
+                    })
+                })
+                .await?;
             }
         }
-        out
+        let voice = self.pick(asked).ok_or("the voice catalogue lists no English voices")?;
+        {
+            let _one = self.fetching.lock().await;
+            let v = voice.clone();
+            self.blocking(move |s| s.fetch_voice(&v, &|_| {}).map(drop)).await?;
+        }
+        let on = self.blocking(|v| v.load()).await?;
+        let shown = if on == "CPU" { "CPU" } else { "GPU" };
+        *self.on.lock().unwrap_or_else(|e| e.into_inner()) = Some(shown.to_string());
+        Ok(voice)
     }
 
-    /// Fetch what `voice` needs if it is not on this machine yet.
-    async fn ensure(&self, voice: &str) -> Result<(), String> {
-        if self.speaker().installed(voice) {
-            return Ok(());
-        }
-        let _one_at_a_time = self.fetching.lock().await;
-        if self.speaker().installed(voice) {
-            return Ok(());
-        }
-        tracing::info!("fetching the voice {voice}");
-        let dir = self.speaker().dir().to_path_buf();
-        let name = voice.to_string();
-        tokio::task::spawn_blocking(move || {
-            Speaker::new(dir).download(&name, &|p| {
-                tracing::info!("downloading {}: {} of {} MB", p.name, p.got_mb, p.total_mb)
-            })
-        })
-        .await
-        .map_err(|e| e.to_string())?
-    }
-
-    /// Say `text` in `voice`, fetching and loading it first if need be.
+    /// Say `text` in `voice`, all of it, then return the samples.
     pub async fn say(&self, voice: &str, text: String) -> Result<Said, String> {
-        self.ensure(voice).await?;
-        let (inner, seen) = (self.inner.clone(), self.on.clone());
-        let voice = voice.to_string();
-        tokio::task::spawn_blocking(move || {
-            let mut s = inner.lock().unwrap_or_else(|e| e.into_inner());
-            let on = plain(&s.load(&voice)?);
-            *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(on);
-            s.say(&text)
+        let spoken = self.ready(voice).await?;
+        let on = self.on().unwrap_or_default();
+        self.blocking(move |v| {
+            let mut samples = Vec::new();
+            v.say(&text, &spoken, |c| {
+                samples.extend_from_slice(c);
+                true
+            })?;
+            Ok(Said { samples, rate: v.sample_rate(), on })
         })
         .await
-        .map_err(|e| e.to_string())?
     }
 
-    /// Say `text` a sentence at a time. The first sentence is made before this returns, so a
-    /// voice that cannot be fetched or loaded is an error here and not a stream that ends at
-    /// once; the rest arrive on the receiver as they are made. Dropping the receiver stops the
-    /// work after the sentence in hand.
+    /// Say `text` in `voice` a frame at a time: the receiver gets each frame's samples as it is
+    /// made. Fetching and loading happen before this returns, so a voice that cannot be had is
+    /// an error here and not a stream that ends at once. Dropping the receiver stops the work
+    /// after the frame in hand. Returns the sample rate and what it runs on.
     pub async fn stream(
         &self,
         voice: &str,
         text: String,
-    ) -> Result<(Said, tokio::sync::mpsc::Receiver<Result<Said, String>>), String> {
-        self.ensure(voice).await?;
-        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-        let (inner, seen) = (self.inner.clone(), self.on.clone());
-        let voice = voice.to_string();
+    ) -> Result<(u32, String, tokio::sync::mpsc::Receiver<Result<Vec<f32>, String>>), String> {
+        let spoken = self.ready(voice).await?;
+        let rate = self.voicer().sample_rate();
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
-            let mut s = inner.lock().unwrap_or_else(|e| e.into_inner());
-            match s.load(&voice) {
-                Ok(on) => *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(plain(&on)),
-                Err(e) => {
-                    let _ = tx.blocking_send(Err(e));
-                    return;
-                }
-            }
-            // One sentence to a piece, so the first sound does not wait on the rest.
-            for piece in egui_bench::voice::audio::chunks(&text, 1) {
-                let said = s.say(&piece);
-                let failed = said.is_err();
-                if tx.blocking_send(said).is_err() || failed {
-                    return;
-                }
+            let mut v = inner.lock().unwrap_or_else(|e| e.into_inner());
+            let said = v.say(&text, &spoken, |c| tx.blocking_send(Ok(c.to_vec())).is_ok());
+            if let Err(e) = said {
+                let _ = tx.blocking_send(Err(e));
             }
         });
-        match rx.recv().await {
-            Some(Ok(first)) => Ok((first, rx)),
-            Some(Err(e)) => Err(e),
-            None => Err("there was nothing to say".into()),
-        }
+        Ok((rate, self.on().unwrap_or_default(), rx))
     }
 }
 
@@ -167,27 +173,36 @@ impl Voice {
 mod tests {
     use super::*;
 
+    fn catalogue(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join("voices.jsonl"),
+            r#"{"filename": "voices/a.safetensors", "name": "Hadley", "voice_id": "a", "language": "en", "locale": "en-us", "gender": "female"}
+{"filename": "voices/b.safetensors", "name": "Alfie", "voice_id": "b", "language": "en", "locale": "en-gb", "gender": "male"}
+"#,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn a_voice_we_do_not_know_gets_the_default() {
         let dir = tempfile::tempdir().unwrap();
         let v = Voice::new(dir.path().to_path_buf());
-        assert_eq!(v.pick("af_bella"), "af_bella");
-        assert_eq!(v.pick("alloy"), DEFAULT_VOICE, "OpenAI's names are not ours");
-        assert_eq!(v.pick(""), DEFAULT_VOICE);
-        assert_eq!(v.pick("../../etc/passwd"), DEFAULT_VOICE, "no paths");
-        std::fs::create_dir_all(dir.path().join("voices")).unwrap();
-        std::fs::write(dir.path().join("voices/bf_custom.bin"), "x").unwrap();
-        assert_eq!(v.pick("bf_custom"), "bf_custom", "a voice put there by hand");
+        assert!(v.pick("Hadley").is_none(), "no catalogue yet");
+        catalogue(dir.path());
+        assert_eq!(v.pick("alfie").unwrap().name, "Alfie", "names match whatever the case");
+        assert_eq!(v.pick("alloy").unwrap().name, "Hadley", "OpenAI's names are not ours");
+        assert_eq!(v.pick("").unwrap().name, "Hadley");
+        assert_eq!(v.pick("../../etc/passwd").unwrap().name, "Hadley", "no paths");
     }
 
     #[test]
     fn the_list_says_which_voices_are_on_disc() {
         let dir = tempfile::tempdir().unwrap();
+        catalogue(dir.path());
         std::fs::create_dir_all(dir.path().join("voices")).unwrap();
-        std::fs::write(dir.path().join("voices/af_bella.bin"), "x").unwrap();
+        std::fs::write(dir.path().join("voices/b.safetensors"), "x").unwrap();
         let list = Voice::new(dir.path().to_path_buf()).list();
-        assert_eq!(list[0].0, DEFAULT_VOICE);
-        assert!(!list[0].2);
-        assert!(list.iter().any(|(id, _, have)| id == "af_bella" && *have));
+        assert_eq!(list[0], ("Hadley".to_string(), "Hadley, American".to_string(), false));
+        assert_eq!(list[1], ("Alfie".to_string(), "Alfie, British man".to_string(), true));
     }
 }

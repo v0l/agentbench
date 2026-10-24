@@ -149,6 +149,7 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn agentbench_server::agent::Agent>>)
     let addr = listener.local_addr().unwrap();
     drop(listener);
     let s = store.clone();
+    let models = dir.path().join("models");
     rt.spawn(async move {
         let config = agentbench_server::Config {
             model: agentbench_server::agent::native::Model {
@@ -162,9 +163,16 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn agentbench_server::agent::Agent>>)
         let mut agents: Vec<Box<dyn agentbench_server::agent::Agent>> = vec![Box::new(echo)];
         agents.push(Box::new(agentbench_server::agent::Native::shared(model.clone())));
         agents.extend(extra);
-        agentbench_server::serve_agents(s, agents, Some(model), addr, std::future::pending())
-            .await
-            .unwrap();
+        agentbench_server::serve_agents(
+            s,
+            agents,
+            Some(model),
+            addr,
+            models,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
     });
     std::thread::sleep(Duration::from_millis(200));
     Rig { url: addr.to_string(), store, _dir: dir, _rt: rt }
@@ -1012,6 +1020,8 @@ fn the_voice_page_says_where_speech_runs() {
     shot(&mut h, "settings-devices");
     let device = h.state().settings_audio_device().unwrap();
     assert!(device == "GPU" || device == "CPU", "{device}");
+    until(&mut h, "the server's voices", |h| h.state().settings_voices().is_some());
+    assert!(h.state().settings_voices().unwrap().is_some(), "the server answered with a list");
 }
 
 #[test]

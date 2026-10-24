@@ -13,7 +13,7 @@
 //! microphone to open (the browser) get `stub`, which says so.
 
 mod settings;
-pub use settings::{LOCAL_MODELS, Mode, Settings, VOICES};
+pub use settings::{LOCAL_MODELS, Mode, Settings};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

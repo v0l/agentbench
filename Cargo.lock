@@ -1749,9 +1749,9 @@ dependencies = [
 
 [[package]]
 name = "egui_bench"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0c8c8bec420aab3306963528efd3c4959771203526d333ea488f35b3ad36201"
+checksum = "89cd15152f67e4e748adf757e4bba014204feef70b1b0a63a713c7ab08a57c45"
 dependencies = [
  "byteorder",
  "candle-core",
@@ -1760,6 +1760,8 @@ dependencies = [
  "dirs",
  "egui",
  "pulldown-cmark",
+ "rand",
+ "rand_distr",
  "serde",
  "serde_json",
  "tokenizers",

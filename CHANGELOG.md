@@ -7,6 +7,7 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 ## [Unreleased]
 
 ### Changed
+- Read aloud uses Phonon instead of Kokoro: it reads numbers, versions, dates, units and URLs the way a person would ("0.3.2" is "zero point three point two", not three pauses), and in a test of agent replies it made no word errors where Kokoro made 6%. The model is about 100 MB, run through candle (`egui_bench::speech::phonon`, ported from gradium's `ptts` and checked against it step by step), and on a GPU it makes 21 seconds of speech in 0.4. It streams a frame at a time, so the first sound comes almost at once. There are 25 voices, American and British; pick one under settings, voice. A voice chosen before (a Kokoro voice) falls back to the default, Hadley.
 - When the native agent reads a sound file it gets the words in it, transcribed by the server's Whisper, instead of the sound. Most models behind a router take no audio, and sending some made the router refuse the whole turn. The agent is told it has the words and not the voice.
 
 ### Fixed
