@@ -684,6 +684,12 @@ fn tool_list(base: &Model) -> Value {
     )
 }
 
+fn instructions(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("AGENTS.md")).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 fn system(turn: &Turn, base: &Model) -> String {
     let skills = skillset::discover(&skillset::roots(turn.cwd), &[]);
     let mut out = format!(
@@ -706,6 +712,11 @@ fn system(turn: &Turn, base: &Model) -> String {
             out.push_str(&format!("- {topic}: {}\n", note.trim().replace('\n', "\n  ")));
         }
         out.push('\n');
+    }
+    if let Some(text) = dirs::home_dir().and_then(|h| instructions(&h.join(".agents"))) {
+        out.push_str("The user's standing instructions, read from ~/.agents/AGENTS.md:\n\n");
+        out.push_str(&text);
+        out.push_str("\n\n");
     }
     let levels = levels(base);
     if !levels.is_empty() {
@@ -2265,6 +2276,16 @@ mod tests {
         native.run(&turn, &io).await.unwrap();
         let system = asked.recv().unwrap()["messages"][0]["content"].as_str().unwrap().to_string();
         assert!(system.contains("- tests: run cargo test"), "{system}");
+    }
+
+    #[test]
+    fn standing_instructions_come_from_agents_md_when_it_has_text() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(instructions(dir.path()), None);
+        std::fs::write(dir.path().join("AGENTS.md"), "  \n").unwrap();
+        assert_eq!(instructions(dir.path()), None);
+        std::fs::write(dir.path().join("AGENTS.md"), "\nTest on the Mac.\n").unwrap();
+        assert_eq!(instructions(dir.path()).as_deref(), Some("Test on the Mac."));
     }
 
     #[tokio::test]

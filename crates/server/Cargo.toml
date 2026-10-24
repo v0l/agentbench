@@ -12,6 +12,8 @@ name = "agentbench_server"
 [features]
 # Read speech on an NVIDIA card when there is one; the CUDA runtime is loaded only if present.
 cuda = ["egui_bench/speech-cuda"]
+# Read speech on the Apple GPU through Metal. Builds for macOS only.
+metal = ["egui_bench/speech-metal"]
 
 [dependencies]
 agentbench-core = { workspace = true, features = ["rusqlite"] }
@@ -24,7 +26,7 @@ tower-http = { version = "0.7", features = ["cors", "fs"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.3"
-egui_bench = { version = "0.6.0", default-features = false, features = ["agent", "speech"] }
+egui_bench = { version = "0.6.1", default-features = false, features = ["agent", "speech"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "1"
