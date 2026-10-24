@@ -32,5 +32,3 @@ candle-core = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9be
 candle-kernels = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
 candle-nn = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
 candle-transformers = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
-# TEMPORARY: egui_bench 0.6.0 (voice and speech) is not published yet. Remove this line once it is.
-egui_bench = { path = "/home/kieran/git/.worktrees/egui_bench-speech" }
