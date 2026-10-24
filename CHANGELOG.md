@@ -6,6 +6,8 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-24
+
 ### Changed
 - The window and the phone take the speech models and the read-aloud voices from the agentbench server (`GET /v1/audio/models` and `/v1/audio/voices`) instead of a list built into the app, so a model or voice added to the server shows up without a new app release. A choice the app has never heard of is kept. This device's own Whisper still offers only the models it can run.
 - Read aloud uses Phonon instead of Kokoro: it reads numbers, versions, dates, units and URLs the way a person would ("0.3.2" is "zero point three point two", not three pauses), and in a test of agent replies it made no word errors where Kokoro made 6%. The model is about 100 MB, run through candle (`egui_bench::speech::phonon`, ported from gradium's `ptts` and checked against it step by step), and on a GPU it makes 21 seconds of speech in 0.4. It streams a frame at a time, so the first sound comes almost at once. There are 25 voices, American and British; pick one under settings, voice. A voice chosen before (a Kokoro voice) falls back to the default, Hadley.
