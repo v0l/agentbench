@@ -1645,6 +1645,9 @@ where
                 Some("[DONE]") => done = true,
                 Some(data) => {
                     if let Ok(v) = serde_json::from_str::<Value>(data) {
+                        if let Some(e) = stream_error(&v) {
+                            return Err(Failure::Fatal(e));
+                        }
                         take(&v, &mut reply, io);
                     }
                 }
@@ -1655,9 +1658,25 @@ where
     if let Some(data) = sse_data(&String::from_utf8_lossy(&pending))
         && let Ok(v) = serde_json::from_str::<Value>(data)
     {
+        if let Some(e) = stream_error(&v) {
+            return Err(Failure::Fatal(e));
+        }
         take(&v, &mut reply, io);
     }
     Ok(reply)
+}
+
+/// A refusal sent as an event of a stream that had already answered 200, as routers do when the
+/// model behind them turns the request down: `{"error": {"message": ...}}` or `{"error": "..."}`.
+fn stream_error(v: &Value) -> Option<String> {
+    let e = v.get("error").filter(|e| !e.is_null())?;
+    let text = e
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| e.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| e.to_string());
+    Some(format!("the model server refused the request: {text}"))
 }
 
 fn sse_data(line: &str) -> Option<&str> {
@@ -2590,6 +2609,23 @@ mod tests {
             .count();
         assert_eq!(notices, 2);
         assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "hello")));
+    }
+
+    /// The real trigger: a router answers 200 and then sends its refusal as the first event of
+    /// the stream, as yalr does for audio sent to a model that takes none ("Anthropic does not
+    /// accept audio input"). It used to read as an empty reply, so the turn ended in silence.
+    #[tokio::test]
+    async fn an_error_sent_inside_the_stream_fails_the_turn_with_its_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let refusal = json!({"error": {
+            "message": "Provider error: Unsupported by provider: Anthropic does not accept audio input",
+            "type": "router_error"
+        }});
+        let (url, _) = stub(vec![vec![refusal]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let e = run(&native, dir.path(), "listen to this", &io).await.unwrap_err();
+        assert!(e.contains("does not accept audio input"), "{e}");
     }
 
     #[tokio::test]
