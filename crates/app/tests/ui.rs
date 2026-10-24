@@ -1688,6 +1688,20 @@ fn markdown_sits_on_one_baseline_and_links_open() {
     shot(&mut h, "markdown-baseline");
 }
 
+#[test]
+fn a_reply_has_a_read_aloud_link() {
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "native", "reply", None, None).unwrap();
+    rig.store.add_message(s.id, &Entry::Assistant { text: "The build passed.".into() }).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, main.project_id);
+    h.run_steps(6);
+    shot(&mut h, "read-aloud");
+    assert!(h.query_by_label_contains("read aloud").is_some(), "the link sits under the reply");
+}
+
 /// A long chat: markdown, code blocks, tables, tool calls with long output and thinking.
 fn long_chat(rig: &Rig, turns: usize) -> agentbench_core::Session {
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();

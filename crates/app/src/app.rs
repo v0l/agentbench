@@ -388,6 +388,9 @@ pub struct App {
     tray: crate::attach::Tray,
     voice: crate::voice::Voice,
     speech: crate::voice::Settings,
+    /// Reading a reply aloud, and the message being read.
+    reader: crate::voice::Reader,
+    reading: Option<Id>,
     /// Models on the server the native agent is saved to use. None until asked.
     agent_models: HashMap<String, Result<Vec<String>, String>>,
     asking_models: HashSet<String>,
@@ -500,6 +503,8 @@ impl App {
             save_requested: false,
             tray: crate::attach::Tray::default(),
             voice: Default::default(),
+            reader: Default::default(),
+            reading: None,
             speech: crate::voice::Settings::load(storage),
             agent_models: HashMap::new(),
             asking_models: HashSet::new(),
@@ -831,6 +836,38 @@ impl App {
     fn speech_now(&self) -> crate::voice::Settings {
         let server = self.client.as_ref().map(|c| (c.server.url.as_str(), c.server.token.as_str()));
         self.speech.resolved(server)
+    }
+
+    /// Read a reply aloud with the connected server's voice, or stop if that reply is being read.
+    pub(super) fn toggle_reading(&mut self, ctx: &egui::Context, id: Id, text: &str) {
+        if self.reading == Some(id) && self.reader.busy() {
+            self.reader.stop();
+            self.reading = None;
+            return;
+        }
+        let Some(c) = &self.client else {
+            self.notice =
+                Some((false, "not connected to an agentbench server to read aloud".into()));
+            return;
+        };
+        let from = crate::voice::Source {
+            url: c.server.base(),
+            token: c.server.token.clone(),
+            voice: self.speech.reply_voice.clone(),
+        };
+        let ctx = ctx.clone();
+        match self.reader.start(text, from, move || ctx.request_repaint()) {
+            Ok(()) => self.reading = Some(id),
+            Err(e) => {
+                self.reading = None;
+                self.notice = Some((false, e));
+            }
+        }
+    }
+
+    /// Whether the reply with this message id is being read aloud.
+    pub(super) fn is_reading(&self, id: Id) -> bool {
+        self.reading == Some(id) && self.reader.busy()
     }
 
     /// The hotkey: start listening in the tile in use, or finish the take now.
@@ -1223,6 +1260,12 @@ impl App {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
         };
+        for e in self.reader.tick() {
+            self.notice = Some((false, e));
+        }
+        if !self.reader.busy() {
+            self.reading = None;
+        }
         let speech = self.speech_now();
         self.voice.tick(&speech, wake);
         for said in self.voice.poll() {

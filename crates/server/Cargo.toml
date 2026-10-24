@@ -11,11 +11,10 @@ name = "agentbench_server"
 
 [features]
 # Read speech on an NVIDIA card when there is one; the CUDA runtime is loaded only if present.
-cuda = ["agentbench-speech/cuda"]
+cuda = ["egui_bench/speech-cuda"]
 
 [dependencies]
 agentbench-core = { workspace = true, features = ["rusqlite"] }
-agentbench-speech.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 axum = { version = "0.8", features = ["multipart"] }
@@ -25,7 +24,7 @@ tower-http = { version = "0.7", features = ["cors", "fs"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.3"
-egui_bench = { version = "0.5.6", default-features = false, features = ["agent"] }
+egui_bench = { version = "0.6.0", default-features = false, features = ["agent", "speech"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "1"

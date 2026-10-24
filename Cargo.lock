@@ -129,7 +129,6 @@ version = "0.2.0"
 dependencies = [
  "agentbench-core",
  "agentbench-server",
- "agentbench-speech",
  "android-activity",
  "android_logger",
  "arboard",
@@ -179,7 +178,6 @@ name = "agentbench-server"
 version = "0.2.0"
 dependencies = [
  "agentbench-core",
- "agentbench-speech",
  "async-trait",
  "axum",
  "base64 0.23.1",
@@ -208,20 +206,6 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
-]
-
-[[package]]
-name = "agentbench-speech"
-version = "0.2.0"
-dependencies = [
- "agentbench-core",
- "byteorder",
- "candle-core",
- "candle-nn",
- "candle-transformers",
- "reqwest",
- "serde_json",
- "tokenizers",
 ]
 
 [[package]]
@@ -1745,15 +1729,21 @@ dependencies = [
 
 [[package]]
 name = "egui_bench"
-version = "0.5.6"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e85bfc20b87d5990edd12928b4d34d845f718a006071822ae63b7ba59bfad464"
+checksum = "f27379125a88effa52a1785d45610ba90be94a6bfdc3f26e94f3212be8775a02"
 dependencies = [
+ "byteorder",
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
  "dirs",
  "egui",
  "pulldown-cmark",
  "serde",
  "serde_json",
+ "tokenizers",
+ "tracing",
  "ureq",
  "web-time",
 ]

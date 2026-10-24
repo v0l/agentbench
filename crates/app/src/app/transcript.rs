@@ -150,12 +150,20 @@ impl App {
                 ui.add_space(4.0);
             }
             Entry::Assistant { text } => {
+                let mut read = false;
+                let reading = self.is_reading(m.id);
                 egui::Frame::NONE
                     .inner_margin(Margin { left: 13, right: 8, top: 2, bottom: 2 })
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         markdown::show(ui, &mut self.markdown, text, m.id as usize);
+                        if !cfg!(target_arch = "wasm32") && text.trim().len() > 1 {
+                            read = read_link(ui, reading).clicked();
+                        }
                     });
+                if read {
+                    self.toggle_reading(ui.ctx(), m.id, text);
+                }
             }
             Entry::Thinking { text } => {
                 if !self.thinking {
