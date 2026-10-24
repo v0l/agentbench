@@ -18,7 +18,8 @@ pub use egui_bench::voice::models::{DEFAULT_MODEL, LOCAL_MODELS, model};
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
     pub mode: Mode,
-    /// A `LOCAL_MODELS` id.
+    /// The model to read speech with: one the agentbench server lists, or a `LOCAL_MODELS` id
+    /// when it is read here.
     pub model: String,
     /// The server's base URL, ending in `/v1` for most.
     pub url: String,
@@ -49,6 +50,11 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// The model this device's own Whisper reads with: the one picked, if it is one it has.
+    pub fn local_model(&self) -> &str {
+        if model(&self.model).is_some() { &self.model } else { DEFAULT_MODEL }
+    }
+
     pub fn load(storage: Option<&dyn eframe::Storage>) -> Settings {
         let mut s = Settings::default();
         let Some(st) = storage else {
@@ -60,7 +66,9 @@ impl Settings {
             Some("agentbench" | "foreman") => s.mode = Mode::Agentbench,
             _ => {}
         }
-        if let Some(m) = st.get_string("voice_model").filter(|m| model(m).is_some()) {
+        // Kept as saved, even when this build does not know it: the server lists its own models
+        // and reads with any of them. This device's Whisper falls back to the default instead.
+        if let Some(m) = st.get_string("voice_model").filter(|m| !m.trim().is_empty()) {
             s.model = m;
         }
         s.url = st.get_string("voice_url").unwrap_or_default();
@@ -139,6 +147,39 @@ mod tests {
         assert_eq!(s.endpoint(), "http://localhost:8000/v1/audio/transcriptions");
         s.url = "http://h/v1/audio/transcriptions".into();
         assert_eq!(s.endpoint(), "http://h/v1/audio/transcriptions");
+    }
+
+    #[derive(Default)]
+    struct Mem(std::collections::HashMap<String, String>);
+    impl eframe::Storage for Mem {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.into(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    /// The server lists its own models and voices, and a phone must keep one it picked from that
+    /// list even when its own build has never heard of it: a new model on the server must not
+    /// need a new release of the app.
+    #[test]
+    fn a_model_and_voice_only_the_server_knows_are_kept() {
+        let mut m = Mem::default();
+        let picked = Settings {
+            mode: Mode::Agentbench,
+            model: "parakeet-tdt-0.6b".into(),
+            reply_voice: "Alfie".into(),
+            ..Default::default()
+        };
+        picked.save(&mut m);
+        let back = Settings::load(Some(&m));
+        assert_eq!(back.model, "parakeet-tdt-0.6b");
+        assert_eq!(back.reply_voice, "Alfie");
     }
 
     #[test]

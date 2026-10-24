@@ -1022,6 +1022,12 @@ fn the_voice_page_says_where_speech_runs() {
     assert!(device == "GPU" || device == "CPU", "{device}");
     until(&mut h, "the server's voices", |h| h.state().settings_voices().is_some());
     assert!(h.state().settings_voices().unwrap().is_some(), "the server answered with a list");
+    until(&mut h, "the server's speech models", |h| h.state().settings_speech_models().is_some());
+    let models = h.state().settings_speech_models().unwrap().expect("the server lists its models");
+    h.state_mut().settings_use_server_speech();
+    h.run_steps(3);
+    shot(&mut h, "settings-server-speech");
+    assert!(models.iter().any(|(id, label)| id == "whisper-large-v3-turbo" && label.contains("MB")), "{models:?}");
 }
 
 #[test]

@@ -35,6 +35,8 @@ pub enum Reply {
     Audio(Option<agentbench_core::AudioStatus>),
     /// The voices the server reads aloud in, as (id, label). `None` when it cannot say.
     Voices(Option<Vec<(String, String)>>),
+    /// The models the server reads speech with, as (id, label). `None` when it cannot say.
+    SpeechModels(Option<Vec<(String, String)>>),
     TitleModels(Result<Vec<String>, String>),
     Models(Result<Vec<String>, String>),
     AgentModels(String, Result<Vec<String>, String>),
@@ -336,6 +338,35 @@ impl Client {
         self.dispatch(req, |res| match res {
             Ok(bytes) => Reply::Audio(serde_json::from_slice(&bytes).ok()),
             Err(_) => Reply::Audio(None),
+        });
+    }
+
+    /// Ask the server which models it reads speech with. Each label carries its size, and says
+    /// when the server has it already.
+    pub fn speech_models(&mut self) {
+        let req = self.request(Method::GET, "/v1/audio/models", None);
+        self.dispatch(req, |res| {
+            let list = res
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|v| {
+                    v["data"].as_array().map(|a| {
+                        a.iter()
+                            .filter_map(|m| {
+                                let id = m["id"].as_str()?.to_string();
+                                let mut label = m["label"].as_str().unwrap_or(&id).to_string();
+                                if let Some(mb) = m["size_mb"].as_u64() {
+                                    label.push_str(&format!(", {mb} MB"));
+                                }
+                                if m["installed"].as_bool() == Some(true) {
+                                    label.push_str(", on the server");
+                                }
+                                Some((id, label))
+                            })
+                            .collect()
+                    })
+                });
+            Reply::SpeechModels(list)
         });
     }
 

@@ -52,10 +52,12 @@ impl App {
             title_asking: false,
             audio: None,
             voices: None,
+            speech_models: None,
         });
         if let Some(c) = &mut self.client {
             c.audio_status();
             c.voices();
+            c.speech_models();
         }
         // The agent's settings are not shown on a phone, so they are not asked for.
         if !cfg!(target_os = "android")
@@ -145,7 +147,7 @@ impl App {
                         });
                     });
                 } else if st.page == Page::Speech {
-                    speech_section(ui, &mut st.speech, st.voices.as_ref());
+                    speech_section(ui, &mut st.speech, st.voices.as_ref(), st.speech_models.as_ref());
                     ui.add_space(8.0);
                     speech_devices(ui, &st.speech, st.audio.as_ref(), can_close);
                 } else if !can_close && st.place == Where::Remote {
@@ -530,6 +532,7 @@ pub(super) fn speech_section(
     ui: &mut Ui,
     sp: &mut crate::voice::Settings,
     voices: Option<&Option<Vec<(String, String)>>>,
+    server_models: Option<&Option<Vec<(String, String)>>>,
 ) {
     use crate::voice::{LOCAL_MODELS, Mode, Voice};
     section(ui, "voice input", "kept on this device", |ui| {
@@ -544,6 +547,11 @@ pub(super) fn speech_section(
         ui.add_space(8.0);
         match sp.mode {
             Mode::Local => {
+                // A model picked from the server's list that this device does not have is shown as
+                // the one it would actually read with.
+                if sp.model != sp.local_model() {
+                    sp.model = sp.local_model().to_string();
+                }
                 row_help(
                     ui,
                     "model",
@@ -566,15 +574,29 @@ pub(super) fn speech_section(
                     ui,
                     "model",
                     "The model the agentbench server reads with. It downloads it the first time, and runs it on its GPU when it was built with CUDA.",
-                    |ui| {
-                        choice_fit(
-                            ui,
-                            "speech-model-server",
-                            &mut sp.model,
-                            LOCAL_MODELS
-                                .iter()
-                                .map(|m| (m.0.to_string(), format!("{}, {} MB", m.2, m.3))),
-                        );
+                    |ui| match server_models {
+                        Some(Some(list)) if !list.is_empty() => {
+                            choice_fit(
+                                ui,
+                                "speech-model-server",
+                                &mut sp.model,
+                                list.iter().cloned(),
+                            );
+                        }
+                        // An older server that cannot list them still reads with any of these.
+                        Some(_) => {
+                            choice_fit(
+                                ui,
+                                "speech-model-server",
+                                &mut sp.model,
+                                LOCAL_MODELS
+                                    .iter()
+                                    .map(|m| (m.0.to_string(), format!("{}, {} MB", m.2, m.3))),
+                            );
+                        }
+                        None => {
+                            Line::new().value("asking the server").size(12.0).show(ui);
+                        }
                     },
                 );
                 hint(

@@ -416,8 +416,9 @@ fn read_locally(
 ) -> Result<String, String> {
     let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
     let t = slot.get_or_insert_with(|| egui_bench::speech::Transcriber::new(models_dir()));
-    if !t.installed(&settings.model) {
-        t.download(&settings.model, &|p| {
+    let id = settings.local_model();
+    if !t.installed(id) {
+        t.download(id, &|p| {
             let of = if p.total_mb > 0 { format!(" of {} MB", p.total_mb) } else { String::new() };
             let _ = tx.send(Event::Status(format!("downloading {}: {} MB{of}", p.name, p.got_mb)));
             wake();
@@ -425,7 +426,7 @@ fn read_locally(
     }
     let _ = tx.send(Event::Status("loading the speech model".into()));
     wake();
-    t.load(&settings.model)?;
+    t.load(id)?;
     if !quiet {
         let _ = tx.send(Event::Status("reading".into()));
         wake();

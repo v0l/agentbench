@@ -99,6 +99,7 @@ pub fn router(api: Api) -> Router {
         .route("/v1/audio/transcriptions", post(transcribe))
         .route("/v1/audio/speech", post(speak))
         .route("/v1/audio/voices", get(voices))
+        .route("/v1/audio/models", get(speech_models))
         .route("/v1/audio/status", get(audio_status))
         .route("/api/sessions/{id}/attachments/{file}", get(attachment))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
@@ -234,6 +235,20 @@ async fn audio_status(State(api): State<Api>) -> Json<agentbench_core::AudioStat
         reading_on: api.speech.on(),
         speaking_on: api.voice.on(),
     })
+}
+
+/// The speech to text models this server reads with, in OpenAI's `/v1/models` shape plus what a
+/// picker needs: `{"data": [{"id", "label", "size_mb", "installed", "default"}]}`.
+async fn speech_models(State(api): State<Api>) -> Json<serde_json::Value> {
+    let data: Vec<_> = api
+        .speech
+        .list()
+        .into_iter()
+        .map(|(id, label, size_mb, installed, default)| {
+            json!({ "id": id, "object": "model", "label": label, "size_mb": size_mb, "installed": installed, "default": default })
+        })
+        .collect();
+    Json(json!({ "object": "list", "data": data }))
 }
 
 /// The voices this server can speak in: `{"voices": [{"id", "label", "installed"}]}`.
@@ -876,6 +891,19 @@ mod tests {
         assert_eq!(code, StatusCode::OK);
         assert!(matches!(v["device"].as_str(), Some("GPU" | "CPU")), "{v}");
         assert!(v["speaking_on"].is_null() && v["reading_on"].is_null(), "nothing has run yet");
+    }
+
+    #[tokio::test]
+    async fn the_speech_models_are_listed_behind_the_token() {
+        let f = fixture();
+        let (code, _) = call(&f.app, "GET", "/v1/audio/models", None, None).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        let (code, v) = call(&f.app, "GET", "/v1/audio/models", None, Some("secret")).await;
+        assert_eq!(code, StatusCode::OK);
+        let data = v["data"].as_array().unwrap();
+        assert!(!data.is_empty());
+        assert_eq!(data.iter().filter(|m| m["default"] == true).count(), 1, "one default");
+        assert!(data.iter().all(|m| m["id"].is_string() && m["installed"].is_boolean()), "{v}");
     }
 
     #[tokio::test]

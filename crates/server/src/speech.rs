@@ -50,6 +50,17 @@ impl Speech {
         }
     }
 
+    /// Every model this server can read with: id, label, download size in MB, whether it is on
+    /// this machine yet, and whether it is the default.
+    pub fn list(&self) -> Vec<(String, String, u32, bool, bool)> {
+        let default = self.default.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let t = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        egui_bench::speech::LOCAL_MODELS
+            .iter()
+            .map(|m| (m.0.to_string(), m.2.to_string(), m.3, t.installed(m.0), m.0 == default))
+            .collect()
+    }
+
     /// The model a request for `asked` runs on.
     pub fn pick(&self, asked: &str) -> String {
         let asked = asked.trim();

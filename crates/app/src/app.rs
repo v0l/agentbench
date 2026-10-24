@@ -260,6 +260,8 @@ struct Settings {
     audio: Option<Option<agentbench_core::AudioStatus>>,
     /// The voices the server reads aloud in: `None` until it answers.
     voices: Option<Option<Vec<(String, String)>>>,
+    /// The models the server reads speech with: `None` until it answers.
+    speech_models: Option<Option<Vec<(String, String)>>>,
 }
 
 enum Confirm {
@@ -704,6 +706,11 @@ impl App {
     }
 
     /// The device the server says its speech runs on, once the settings dialog has asked.
+    /// The speech models the settings dialog was told about, once the server has answered.
+    pub fn settings_speech_models(&self) -> Option<Option<Vec<(String, String)>>> {
+        self.settings.as_ref()?.speech_models.clone()
+    }
+
     /// The voices the settings dialog was told about, once the server has answered.
     pub fn settings_voices(&self) -> Option<Option<Vec<(String, String)>>> {
         self.settings.as_ref()?.voices.clone()
@@ -743,6 +750,13 @@ impl App {
     }
 
     /// Pick the model voice input runs locally.
+    /// Read speech on the agentbench server, as a phone does.
+    pub fn settings_use_server_speech(&mut self) {
+        if let Some(st) = &mut self.settings {
+            st.speech.mode = crate::voice::Mode::Agentbench;
+        }
+    }
+
     pub fn settings_set_speech_model(&mut self, id: &str) {
         if let Some(st) = &mut self.settings {
             st.speech.model = id.into();
@@ -1179,6 +1193,11 @@ impl App {
                         st.model.model = l.first().cloned().unwrap_or_default();
                     }
                     st.models = Some(list);
+                }
+            }
+            Reply::SpeechModels(m) => {
+                if let Some(st) = &mut self.settings {
+                    st.speech_models = Some(m);
                 }
             }
             Reply::Voices(v) => {
