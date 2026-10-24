@@ -210,6 +210,42 @@ pub struct Usage {
     /// The host of the server that model runs on. Empty for agents that keep that to themselves.
     #[serde(default)]
     pub host: String,
+    /// The language servers behind the agent's code tools, as they were last seen. Like `context`
+    /// this is a reading, not a total: a newer one replaces it.
+    #[serde(default)]
+    pub lsp: Vec<Lsp>,
+}
+
+/// How far a language server has got.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LspHealth {
+    /// The project uses the language and the server is installed, but nothing has needed it yet.
+    #[default]
+    Idle,
+    Starting,
+    /// Running, and still reading the project; answers may be incomplete.
+    Indexing,
+    Ready,
+    /// The project uses the language and the server is not installed.
+    Missing,
+    /// It would not start, or it stopped.
+    Failed,
+}
+
+/// One language server of a project.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Lsp {
+    /// The language: `rust`, `go`, `typescript`.
+    pub name: String,
+    /// The folder it runs in, relative to the project; `.` for the top.
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default)]
+    pub health: LspHealth,
+    /// Why it is missing or failed, or how to install it.
+    #[serde(default)]
+    pub detail: String,
 }
 
 impl Usage {
@@ -228,6 +264,9 @@ impl Usage {
         if !other.model.is_empty() {
             self.model = other.model.clone();
             self.host = other.host.clone();
+        }
+        if !other.lsp.is_empty() {
+            self.lsp = other.lsp.clone();
         }
     }
 

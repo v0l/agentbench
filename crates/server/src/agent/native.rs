@@ -165,6 +165,8 @@ pub struct Native {
     pub titles: Option<crate::titles::Titles>,
     /// Commands the agents left running with `bash` and `background`.
     pub jobs: super::jobs::Jobs,
+    /// Language servers, for the `code_*` tools and the errors shown after an edit.
+    pub code: std::sync::Arc<super::code::Code>,
 }
 
 /// How long the model server may stay silent before a request is given up and sent again.
@@ -656,6 +658,7 @@ pub fn specs() -> Vec<Spec> {
     all.extend(job_specs());
     all.push(screenshot_spec());
     all.extend(web_specs());
+    all.extend(super::code::specs());
     all.extend(agentbench_specs());
     all
 }
@@ -716,6 +719,10 @@ fn system(turn: &Turn, base: &Model) -> String {
         "- Work in the worktree with list_files, read_file, search_files, write_file and edit_file. Paths are relative to it, and \
          absolute paths reach any file on this machine, so you may work on other apps and files when asked. \
          Read a file before you edit it.\n\
+         - To understand code without reading raw files, use the language server tools: code_outline breaks a file or folder into its \
+         modules, structs, enums and functions; code_find gets a unit by exact name (`Config::load`) with its source and every unit that \
+         uses it; code_diagnostics lists the errors in a file. After you write or edit a file, the language server's errors in it come back \
+         as a message from the harness. Languages are detected from the project (Cargo.toml, go.mod, package.json...); where the server is not installed, use search_files.\n\
          - read_file also shows you pictures, plays sound files and shows video as frames, so use it to look at screenshots, \
          images, recordings and clips instead of saying you cannot.\n\
          - bash runs commands in the worktree as the user. With background it starts a dev server, watcher or long build and \
@@ -877,7 +884,14 @@ impl Agent for Native {
         messages.extend(history(turn.history));
         messages.push(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(&base);
+        let mut broken: std::collections::HashSet<std::path::PathBuf> = Default::default();
         io.emit(Event::Usage(serving(&model, self.patience.probe).await));
+        if !turn.context.home {
+            let lsp = self.code.status(workspace.root());
+            if !lsp.is_empty() {
+                io.emit(Event::Usage(Usage { lsp, ..Usage::default() }));
+            }
+        }
         for _ in 0..model.steps.max(1) {
             if io.stopped() {
                 return Err("stopped".into());
@@ -902,6 +916,7 @@ impl Agent for Native {
             }
             messages.push(message);
             let mut attached: Vec<Value> = Vec::new();
+            let mut edited: Vec<std::path::PathBuf> = Vec::new();
             for call in &reply.calls {
                 let parsed = files::args(&call.args);
                 let input = parsed.clone().unwrap_or(Value::String(call.args.clone()));
@@ -942,6 +957,13 @@ impl Agent for Native {
                         _ => self.tool(name, &args, &workspace, turn.context, io).await,
                     },
                 };
+                if result.is_ok()
+                    && matches!(name, "write_file" | "edit_file")
+                    && let Some(p) = files::text(&input, &files::PATH)
+                    && let Ok(p) = workspace.resolve(p)
+                {
+                    edited.push(p);
+                }
                 let (output, error) = match &result {
                     Ok(o) => (o.clone(), false),
                     Err(e) => (e.clone(), true),
@@ -967,6 +989,20 @@ impl Agent for Native {
                 })];
                 content.extend(attached);
                 messages.push(json!({ "role": "user", "content": content }));
+            }
+            // What the language server makes of the files just changed goes in as a message from
+            // the harness, so the model sees its own errors without asking.
+            if !edited.is_empty() {
+                let reports = self
+                    .watched(
+                        self.code.after_edit(&edited, workspace.root(), io.stop()),
+                        workspace.root(),
+                        io,
+                    )
+                    .await;
+                if let Some(note) = super::code::render(&reports, workspace.root(), &mut broken) {
+                    messages.push(json!({ "role": self.code.role(), "content": note }));
+                }
             }
             let mut steered = false;
             while let Some(steer) = io.steer() {
@@ -1302,6 +1338,36 @@ fn backoff(attempt: u32) -> Duration {
 }
 
 impl Native {
+    /// Wait for something that may start or wait on a language server, and while it does tell the
+    /// chat how the servers are getting on, so the status line shows "indexing" while it lasts.
+    async fn watched<T>(
+        &self,
+        work: impl std::future::Future<Output = T>,
+        root: &Path,
+        io: &dyn Io,
+    ) -> T {
+        let mut last = self.code.status(root);
+        let mut work = std::pin::pin!(work);
+        let mut tick = tokio::time::interval(Duration::from_millis(700));
+        tick.tick().await;
+        let out = loop {
+            tokio::select! {
+                out = &mut work => break out,
+                _ = tick.tick() => self.report_lsp(root, &mut last, io),
+            }
+        };
+        self.report_lsp(root, &mut last, io);
+        out
+    }
+
+    fn report_lsp(&self, root: &Path, last: &mut Vec<agentbench_core::Lsp>, io: &dyn Io) {
+        let now = self.code.status(root);
+        if now != *last && !now.is_empty() {
+            io.emit(Event::Usage(Usage { lsp: now.clone(), ..Usage::default() }));
+            *last = now;
+        }
+    }
+
     async fn tool(
         &self,
         name: &str,
@@ -1352,6 +1418,9 @@ impl Native {
                     io,
                 )
                 .await
+            }
+            n if super::code::TOOLS.contains(&n) => {
+                self.watched(self.code.run(n, args, ws, io.stop()), ws.root(), io).await
             }
             "web_search" => super::web::search(args, io.stop()).await,
             "web_fetch" => super::web::fetch(args, ws, self.titles.as_ref(), io.stop()).await,
@@ -1812,6 +1881,52 @@ mod tests {
             context: &c,
         };
         native.run(&turn, io).await
+    }
+
+    /// Needs rust-analyzer; skipped where it is not installed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn errors_from_the_language_server_follow_an_edit_in_the_configured_role() {
+        if super::super::resolve(Path::new("rust-analyzer")).is_none() {
+            eprintln!("rust-analyzer is not installed; skipping");
+            return;
+        }
+        for role in ["user", "developer"] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("src")).unwrap();
+            std::fs::write(
+                dir.path().join("Cargo.toml"),
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("src/lib.rs"), "pub fn one() -> u32 {\n    1\n}\n")
+                .unwrap();
+            let (url, asked) = stub(vec![
+                vec![call(
+                    "c1",
+                    "edit_file",
+                    json!({"path": "src/lib.rs", "old": "    1\n", "new": "    \"one\"\n"}),
+                )],
+                vec![say("fixing")],
+            ]);
+            let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+            native.code = Arc::new(super::super::code::Code::new(super::super::code::Settings {
+                role: role.into(),
+                ..Default::default()
+            }));
+            let io = TestIo::new(Arc::new(FakeApi));
+            run(&native, dir.path(), "break it", &io).await.unwrap();
+            let _first = asked.recv().unwrap();
+            let second = asked.recv().unwrap();
+            let last = second["messages"].as_array().unwrap().last().unwrap().clone();
+            assert_eq!(last["role"], role, "{last}");
+            let text = last["content"].as_str().unwrap();
+            assert!(
+                text.contains("<language-server-diagnostics>")
+                    && text.contains("src/lib.rs:2:5")
+                    && text.contains("E0308"),
+                "{text}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -241,6 +241,29 @@ fn the_tree_issues_and_a_transcript() {
 #[test]
 fn the_status_line_shows_the_server_model_and_context() {
     let rig = rig();
+    let session = give_usage(&rig);
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    shot(&mut h, "status-line");
+}
+
+#[test]
+fn on_a_phone_the_status_line_keeps_the_model_context_and_language_servers() {
+    let rig = rig();
+    let session = give_usage(&rig);
+    let mut h = harness_at(rig.url.clone(), [450.0, 1000.0]);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(3);
+    shot(&mut h, "status-line-phone");
+    h.get_by_label("send");
+}
+
+/// Give the "say hello" chat a model, a context and three language servers in different states.
+fn give_usage(rig: &Rig) -> agentbench_core::Session {
     let session =
         rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     rig.store
@@ -254,15 +277,30 @@ fn the_status_line_shows_the_server_model_and_context() {
                 model: "qwen3-coder".into(),
                 host: "gpu.lan:11434".into(),
                 turns: 1,
+                lsp: vec![
+                    lsp("rust", ".", agentbench_core::LspHealth::Ready, ""),
+                    lsp("typescript", "web", agentbench_core::LspHealth::Indexing, ""),
+                    lsp(
+                        "go",
+                        ".",
+                        agentbench_core::LspHealth::Missing,
+                        "go install golang.org/x/tools/gopls@latest",
+                    ),
+                ],
                 ..Default::default()
             },
         )
         .unwrap();
-    let mut h = harness(rig.url.clone());
-    until(&mut h, "the overview", |h| h.state().overview().is_some());
-    h.state_mut().open_session(session.id, session.project_id);
-    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
-    shot(&mut h, "status-line");
+    session
+}
+
+fn lsp(
+    name: &str,
+    dir: &str,
+    health: agentbench_core::LspHealth,
+    detail: &str,
+) -> agentbench_core::Lsp {
+    agentbench_core::Lsp { name: name.into(), dir: dir.into(), health, detail: detail.into() }
 }
 
 fn click(h: &mut Harness<'_, App>, x: f32, y: f32) {

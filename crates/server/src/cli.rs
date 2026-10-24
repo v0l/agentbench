@@ -27,6 +27,11 @@ pub enum Command {
         rotate: bool,
     },
     Agents,
+    /// Show which languages are found in a folder, and whether a language server is installed.
+    Code {
+        /// The project folder, default the current one.
+        path: Option<PathBuf>,
+    },
     Add {
         path: PathBuf,
         #[arg(long)]
@@ -79,6 +84,31 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Command::Add { path, name } => {
             let p = crate::projects::add(&store, &path, name.as_deref(), false).map_err(|e| e.0)?;
             println!("{} {}", p.name, p.path);
+            Ok(())
+        }
+        Command::Code { path } => {
+            let dir = path.unwrap_or_else(|| PathBuf::from("."));
+            let dir = std::fs::canonicalize(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            let code = crate::agent::code::Code::new(config.code.clone());
+            let found = code.report(&dir);
+            if found.is_empty() {
+                println!("no language recognised in {}", dir.display());
+            }
+            for (spec, at, ok) in found {
+                let at = at.strip_prefix(&dir).unwrap_or(&at);
+                let at =
+                    if at.as_os_str().is_empty() { ".".into() } else { at.display().to_string() };
+                println!(
+                    "{:<14} {:<28} {}",
+                    spec.name,
+                    at,
+                    if ok {
+                        format!("ready ({})", spec.command)
+                    } else {
+                        format!("missing: {}", spec.install)
+                    }
+                );
+            }
             Ok(())
         }
         Command::Agents => {

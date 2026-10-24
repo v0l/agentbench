@@ -201,6 +201,11 @@ impl App {
             self.draft = trimmed;
         }
         let mut out = None;
+        // A phone has no room beside the keys, so the status line gets a row of its own.
+        if narrow && let Some(session) = session {
+            let (lean, short) = status_form(compact, narrow);
+            status_line(ui, session, lean, short);
+        }
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let sending = self.focused && !self.tray.files.is_empty();
@@ -228,7 +233,7 @@ impl App {
                     }
                 }
                 // Whatever room the keys leave holds the agent's status line.
-                if let Some(session) = session {
+                if let Some(session) = session.filter(|_| !narrow) {
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                         let (lean, short) = status_form(compact, narrow);
                         status_line(ui, session, lean, short);
@@ -308,14 +313,48 @@ pub(super) fn status_form(tile: bool, narrow: bool) -> (bool, bool) {
     (tile || narrow, narrow)
 }
 
+/// How much of the status line is written. Each step is shorter than the one before it.
+#[derive(Clone, Copy)]
+struct Fields {
+    server: bool,
+    cache: bool,
+    /// The word after a language server's name (`indexing`), as well as its colour.
+    words: bool,
+}
+
 /// `lean` leaves out the server and the cache, for a tile or a small window; `short` also writes
-/// the tags as `m` and `c`, for a phone, which has no room for the words.
+/// the tags as `m` and `c`, for a phone, which has no room for the words. Whatever is left is
+/// written in the richest form that fits: the cache goes first, then the server, then the words
+/// after the language servers, so the model, the context and the servers are always there.
 pub(super) fn status_line(ui: &mut Ui, s: &Session, lean: bool, short: bool) {
+    let room = ui.available_width();
+    let steps = [
+        Fields { server: !lean, cache: !lean, words: !lean },
+        Fields { server: !lean, cache: false, words: !lean },
+        Fields { server: false, cache: false, words: !lean },
+        Fields { server: false, cache: false, words: false },
+    ];
+    let mut chosen = steps[steps.len() - 1];
+    for f in steps {
+        if build(s, f, short).0.0.measure(ui).x <= room {
+            chosen = f;
+            break;
+        }
+    }
+    let (line, tip) = build(s, chosen, short);
+    if let Some(line) = line.into_option() {
+        let r = ui.scope(|ui| line.elided(ui)).inner;
+        r.on_hover_text(tip);
+    }
+}
+
+/// The status line written with `f`, and its hover text, which always has everything.
+fn build(s: &Session, f: Fields, short: bool) -> (Built, String) {
     let u = &s.usage;
     let model = if !u.model.is_empty() { Some(u.model.as_str()) } else { s.model.as_deref() };
     let mut line = Line::new();
     let mut any = false;
-    if !u.host.is_empty() && !lean {
+    if !u.host.is_empty() && f.server {
         line = line.legend("server").gap(6.0).value(&u.host).size(11.0);
         any = true;
     }
@@ -349,23 +388,94 @@ pub(super) fn status_line(ui: &mut Ui, s: &Session, lean: bool, short: bool) {
         }
         any = true;
     }
-    if let Some(hit) = u.cache_hit().filter(|_| !lean) {
+    let langs = lsp_summary(&u.lsp);
+    if !langs.is_empty() {
+        line = if any { line.gap(if short { 10.0 } else { 14.0 }) } else { line };
+        line = line.legend(if short { "l" } else { "lsp" });
+        for (i, (name, health, _)) in langs.iter().enumerate() {
+            let first = if short { 4.0 } else { 6.0 };
+            line = line.gap(if i == 0 { first } else { 8.0 });
+            let (tint, word) = lsp_look(*health);
+            line = line.value(name).tint(tint).size(11.0);
+            if f.words && !word.is_empty() {
+                line = line.gap(3.0).note(word).size(11.0);
+            }
+        }
+        any = true;
+    }
+    if let Some(hit) = u.cache_hit().filter(|_| f.cache) {
         line = if any { line.gap(14.0) } else { line };
         line = line.legend("cache").gap(6.0).measured(format!("{:.0}%", hit * 100.0)).size(11.0);
         any = true;
     }
-    if !any {
-        return;
-    }
-    let r = ui.scope(|ui| line.elided(ui)).inner;
-    r.on_hover_text(format!(
-        "{}{}{}",
+    let tip = format!(
+        "{}{}{}{}",
         if u.host.is_empty() { String::new() } else { format!("server {}\n", u.host) },
         model.map(|m| format!("model {m}\n")).unwrap_or_default(),
         match (u.context, u.window) {
             (0, _) => "context not reported yet".to_string(),
             (c, 0) => format!("{c} tokens of context; the window is not known"),
             (c, w) => format!("{c} of {w} tokens of context"),
+        },
+        langs.iter().map(|(_, _, tip)| format!("\n{tip}")).collect::<String>(),
+    );
+    (Built(line, any), tip)
+}
+
+/// A status line, and whether it has anything in it.
+struct Built(Line, bool);
+
+impl Built {
+    fn into_option(self) -> Option<Line> {
+        self.1.then_some(self.0)
+    }
+}
+
+/// The language servers as the status line lists them: one entry for each language, however many
+/// folders it runs in, with its worst state and what to say on hover.
+pub(super) fn lsp_summary(all: &[Lsp]) -> Vec<(String, LspHealth, String)> {
+    let rank = |h: LspHealth| match h {
+        LspHealth::Failed => 5,
+        LspHealth::Missing => 4,
+        LspHealth::Indexing => 3,
+        LspHealth::Starting => 2,
+        LspHealth::Idle => 1,
+        LspHealth::Ready => 0,
+    };
+    let mut out: Vec<(String, LspHealth, String)> = Vec::new();
+    for l in all {
+        let (_, word) = lsp_look(l.health);
+        let place =
+            if l.dir.is_empty() || l.dir == "." { String::new() } else { format!(" in {}", l.dir) };
+        let word = match l.health {
+            LspHealth::Ready => "ready".to_string(),
+            LspHealth::Idle => "not started yet".to_string(),
+            _ if l.detail.is_empty() => word.trim().to_string(),
+            _ => format!("{}: {}", word.trim(), l.detail),
+        };
+        let line = format!("lsp {}{place}: {word}", l.name);
+        match out.iter_mut().find(|(n, _, _)| *n == l.name) {
+            Some((_, h, tip)) => {
+                if rank(l.health) > rank(*h) {
+                    *h = l.health;
+                }
+                tip.push('\n');
+                tip.push_str(&line);
+            }
+            None => out.push((l.name.clone(), l.health, line)),
         }
-    ));
+    }
+    out
+}
+
+/// The colour a language server is drawn in, and the word after its name when there is room.
+pub(super) fn lsp_look(h: LspHealth) -> (egui::Color32, &'static str) {
+    match h {
+        LspHealth::Ready => (OK, ""),
+        LspHealth::Starting => (WARN, "starting"),
+        LspHealth::Indexing => (WARN, "indexing"),
+        LspHealth::Idle => (VALUE, ""),
+        LspHealth::Missing => (LEGEND, "missing"),
+        LspHealth::Failed => (FAULT, "failed"),
+    }
 }

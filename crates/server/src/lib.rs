@@ -32,6 +32,9 @@ pub struct Config {
     pub model: agent::native::Model,
     #[serde(default)]
     pub title_model: titles::TitleModel,
+    /// Language servers behind the `code_*` tools, and the errors put in front of the model.
+    #[serde(default)]
+    pub code: agent::code::Settings,
     #[serde(default, rename = "agent")]
     pub agents: Vec<JsonCommand>,
 }
@@ -107,6 +110,7 @@ impl Config {
     ) -> Vec<Box<dyn Agent>> {
         let mut native = agent::Native::shared(model);
         native.titles = titles;
+        native.code = std::sync::Arc::new(agent::code::Code::new(self.code.clone()));
         let mut all: Vec<Box<dyn Agent>> = vec![
             Box::new(native),
             Box::new(agent::Pi::new(self.pi.clone().unwrap_or_else(|| "pi".into()))),

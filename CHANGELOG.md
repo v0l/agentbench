@@ -7,6 +7,8 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 ## [Unreleased]
 
 ### Added
+- **Code tools** for the native agent, built on language servers (Rust, Go, TypeScript/JavaScript, Python, C/C++, Zig, Dart and Lua out of the box, any other from `[[code.lsp]]` in `agentbench.toml`). The languages a project uses are detected from its `Cargo.toml`, `go.mod`, `package.json` and the like, and each server runs from the outermost folder that language was found in, so a repo with a Go backend and a web frontend gets both. `agentbench-server code [folder]` shows what was found and what is missing. `code_outline` breaks a file or folder into its units, `code_find` gets a function, struct, enum or other unit by exact name with its source and every unit that uses it, and `code_diagnostics` lists a file's errors. After the agent edits a file, the server's errors in it are added to the chat as a message from the harness, so it sees them without building.
+- The chat's status line lists the project's language servers, each in its own colour: green when ready, amber while starting or indexing, grey when not installed, red when it failed. Hover for the folder each runs in and, for a missing one, the command that installs it. The server is shown first, then the model and context, so a narrow line drops the cache and the server name before it drops these.
 - The agent's current checklist is pinned above a chat, so what it is working on shows without reading the transcript. Click its header to fold it; it starts folded on a phone or in a tile. Claude's `TodoWrite` is drawn too.
 
 ## [0.2.0] - 2026-10-23

@@ -130,6 +130,75 @@ output_tokens = "/usage/output"
 The pointers are JSON pointers into each line. `{prompt}` in `args` passes the
 prompt as an argument instead of stdin.
 
+### Code tools
+
+The native agent can read code by its units instead of by raw text, through whatever
+language servers are installed:
+
+- `code_outline` breaks a file (or the top level of a folder) into modules, structs,
+  enums, traits and functions, with the lines each covers.
+- `code_find` takes an exact name (`Config::load`, `Shape::area`, optionally `kind`)
+  and answers with the signature, location, source, and **every unit that uses it**.
+  A name that matches nothing lists the names that contain it.
+- `code_diagnostics` lists what the server reports for a file.
+
+After the agent writes or edits a file, the server's *errors* in it are added to the
+conversation as a message from the harness, without the agent asking (and once more
+when they are fixed). `role = "developer"` sends it with the `developer` role that
+OpenAI's API has for this; the default is `user`, which every server accepts.
+
+Nothing is specific to a language, and nothing needs configuring. When the agent first
+uses a code tool, the project is scanned (four levels down, skipping `target`,
+`node_modules` and the like) for the files that give a language away, and each
+language gets a server run from the outermost folder it was found in. A Rust
+workspace is one server, not one per crate; a repo with a Go backend and a
+`frontend/` gets one of each, each in its own folder.
+
+| Language | Server | Found by |
+| --- | --- | --- |
+| Rust | `rust-analyzer` | `Cargo.toml` |
+| Go | `gopls` | `go.mod`, `go.work` |
+| TypeScript, JavaScript | `typescript-language-server` | `tsconfig.json`, `package.json`, `jsconfig.json` |
+| Python | `pyright-langserver`, else `pylsp` | `pyproject.toml`, `setup.py`, `requirements.txt` |
+| C, C++ | `clangd` | `compile_commands.json`, `CMakeLists.txt`, `compile_flags.txt` |
+| Zig | `zls` | `build.zig` |
+| Dart, Flutter | `dart language-server` | `pubspec.yaml` |
+| Lua | `lua-language-server` | `.luarc.json` |
+
+A server is looked for in the project's `node_modules/.bin`, on `PATH`, then in
+`~/.cargo/bin`, `~/go/bin`, `~/.local/bin`, nvm's node folders and the like, since
+a service started by systemd has a short `PATH`. A language whose server is missing
+is reported with the command to install it, to the agent, on the chat's status line
+(`LSP rust typescript indexing go missing`, hover for the detail), and in:
+
+```
+$ agentbench-server code ~/git/hub
+go             .                            missing: go install golang.org/x/tools/gopls@latest
+typescript     frontend                     missing: npm install -g typescript-language-server typescript
+```
+
+Add or replace any server in `agentbench.toml`:
+
+```toml
+[code]
+diagnostics = true   # show errors after an edit
+role = "user"        # or "developer"
+
+[[code.lsp]]
+name = "ruby"
+command = "solargraph"
+args = ["stdio"]
+extensions = ["rb"]         # files it serves
+markers = ["Gemfile"]       # files that show a project uses it; none means every project
+install = "gem install solargraph"
+# language = "ruby"         # the language id sent to it, default the name
+# ids = { erb = "erb" }     # language id by extension
+# options = { }             # initializationOptions
+```
+
+A server starts the first time it is needed, one per project folder, and stops after
+twenty idle minutes. An empty `command` turns a built-in one off.
+
 ## Attachments
 
 Drop files on the chat, paste a picture with ctrl+v, or use **attach**. Up to 8

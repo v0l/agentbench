@@ -1,8 +1,10 @@
 mod claude;
+pub mod code;
 mod codex;
 mod command;
 pub mod files;
 mod jobs;
+pub mod lsp;
 pub mod media;
 pub mod native;
 mod pi;

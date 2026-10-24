@@ -4,9 +4,9 @@ use crate::form::{field, field_then, prose, prose_id, secret};
 use crate::picker::ModelPicker;
 use crate::scan::Scan;
 use agentbench_core::{
-    Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue, NewProject,
-    NewSession, NewWorktree, Overview, Place, Question, Session, SessionId, SessionStatus,
-    Worktree,
+    Comment, Entry, Id, Issue, IssuePatch, IssueState, Lsp, LspHealth, Message, NewComment,
+    NewIssue, NewProject, NewSession, NewWorktree, Overview, Place, Question, Session, SessionId,
+    SessionStatus, Worktree,
 };
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
@@ -1731,6 +1731,56 @@ mod tests {
         assert_eq!(got.map(|i| i.to_string()).as_deref(), Some(id));
         assert!(chat_in_link("agentbench://pair?url=x&token=y").is_none());
         assert!(chat_in_link("agentbench://open?session=nope").is_none());
+    }
+
+    #[test]
+    fn language_servers_are_listed_once_each_in_their_worst_state() {
+        use super::composer::lsp_summary;
+        let l = |name: &str, dir: &str, health, detail: &str| Lsp {
+            name: name.into(),
+            dir: dir.into(),
+            health,
+            detail: detail.into(),
+        };
+        let all = [
+            l("rust", ".", LspHealth::Ready, ""),
+            l("typescript", "web", LspHealth::Ready, ""),
+            l("typescript", "docs", LspHealth::Indexing, ""),
+            l("go", ".", LspHealth::Missing, "go install gopls"),
+        ];
+        let sum = lsp_summary(&all);
+        let names: Vec<_> = sum.iter().map(|(n, h, _)| (n.as_str(), *h)).collect();
+        assert_eq!(
+            names,
+            [
+                ("rust", LspHealth::Ready),
+                ("typescript", LspHealth::Indexing),
+                ("go", LspHealth::Missing)
+            ]
+        );
+        assert_eq!(sum[0].2, "lsp rust: ready");
+        assert_eq!(sum[1].2, "lsp typescript in web: ready\nlsp typescript in docs: indexing");
+        assert_eq!(sum[2].2, "lsp go: missing: go install gopls");
+        assert!(lsp_summary(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_usage_stored_before_language_servers_still_reads() {
+        let old = r#"{"input_tokens":1,"output_tokens":2,"cache_read_tokens":0,"cost_usd":0.0,"turns":1}"#;
+        let u: agentbench_core::Usage = serde_json::from_str(old).unwrap();
+        assert!(u.lsp.is_empty());
+        let mut total = u.clone();
+        total.add(&agentbench_core::Usage {
+            lsp: vec![Lsp { name: "rust".into(), health: LspHealth::Ready, ..Lsp::default() }],
+            ..Default::default()
+        });
+        assert_eq!(total.lsp.len(), 1);
+        // a reading that says nothing about servers leaves the last one
+        total.add(&agentbench_core::Usage { context: 5, ..Default::default() });
+        assert_eq!(total.lsp.len(), 1);
+        let back: agentbench_core::Usage =
+            serde_json::from_str(&serde_json::to_string(&total).unwrap()).unwrap();
+        assert_eq!(back.lsp[0].health, LspHealth::Ready);
     }
 
     #[test]
