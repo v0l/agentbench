@@ -10,6 +10,7 @@ pub mod speech;
 pub mod store;
 pub mod titles;
 pub mod tools;
+pub mod voice;
 
 use agent::{Agent, JsonCommand};
 use serde::Deserialize;
@@ -231,7 +232,8 @@ async fn serve_inner(
     *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
         runner::Base { url: local_url(listen), token: token.clone() };
     let speech = speech::Speech::new(home().join("models"), &speech_model);
-    let api = api::Api { runner, token, model, speech };
+    let voice = voice::Voice::default();
+    let api = api::Api { runner, token, model, speech, voice };
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     let listener =
         tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;

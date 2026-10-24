@@ -28,6 +28,25 @@ pub fn to_whisper_rate(pcm: &[f32], from: u32) -> Vec<f32> {
     out
 }
 
+/// Mono samples at `from` Hz to `to` Hz, by linear interpolation. For playing speech on a sound
+/// card that wants another rate, where the other way round (`to_whisper_rate`) is for reading it.
+pub fn resample(pcm: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if from == to || pcm.is_empty() || from == 0 || to == 0 {
+        return pcm.to_vec();
+    }
+    let out_len = (pcm.len() as u64 * to as u64 / from as u64) as usize;
+    let step = from as f64 / to as f64;
+    (0..out_len)
+        .map(|i| {
+            let at = i as f64 * step;
+            let lo = (at as usize).min(pcm.len() - 1);
+            let hi = (lo + 1).min(pcm.len() - 1);
+            let t = (at - lo as f64) as f32;
+            pcm[lo] * (1.0 - t) + pcm[hi] * t
+        })
+        .collect()
+}
+
 /// 16 bit mono WAV, which every transcription server takes.
 pub fn wav_bytes(pcm: &[f32], rate: u32) -> Vec<u8> {
     let data = (pcm.len() * 2) as u32;
@@ -106,6 +125,17 @@ pub fn read_wav(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resampling_keeps_the_length_in_seconds_and_the_shape() {
+        let one_second: Vec<f32> = (0..24_000).map(|i| (i as f32 / 24_000.0).sin()).collect();
+        let up = resample(&one_second, 24_000, 48_000);
+        assert_eq!(up.len(), 48_000);
+        assert!((up[24_000] - one_second[12_000]).abs() < 1e-3);
+        assert_eq!(resample(&one_second, 24_000, 24_000), one_second);
+        assert!(resample(&[], 24_000, 48_000).is_empty());
+        assert_eq!(resample(&[0.5], 24_000, 48_000).len(), 2, "one sample does not panic");
+    }
+
     use super::*;
 
     #[test]
@@ -169,5 +199,125 @@ mod tests {
     fn something_that_is_not_a_wav_is_refused() {
         assert!(read_wav(b"hello there, I am not audio").is_err());
         assert!(read_wav(b"RIFF\0\0\0\0WAVE").is_err());
+    }
+}
+
+/// A chat reply as it should be read aloud: markdown marks dropped, links read as their words,
+/// code blocks and URLs left out, since spelling those out is noise.
+pub fn speakable(markdown: &str) -> String {
+    let mut out = String::new();
+    let mut in_code = false;
+    for line in markdown.lines() {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            in_code = !in_code;
+            if in_code {
+                out.push_str("Code omitted.\n");
+            }
+            continue;
+        }
+        if in_code
+            || line.is_empty()
+            || line.chars().all(|c| matches!(c, '-' | '=' | '*' | '_' | '|' | ' '))
+        {
+            continue;
+        }
+        let line = line.trim_start_matches('#').trim_start_matches('>').trim();
+        let line = line
+            .strip_prefix("- ")
+            .or_else(|| line.strip_prefix("* "))
+            .or_else(|| line.strip_prefix("+ "))
+            .unwrap_or(line);
+        let mut text = String::new();
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '`' | '*' | '_' | '~' | '|' => {}
+                '[' => {
+                    // [words](address): keep the words.
+                    let mut words = String::new();
+                    for w in chars.by_ref() {
+                        if w == ']' {
+                            break;
+                        }
+                        words.push(w);
+                    }
+                    if chars.peek() == Some(&'(') {
+                        for w in chars.by_ref() {
+                            if w == ')' {
+                                break;
+                            }
+                        }
+                    }
+                    text.push_str(&words);
+                }
+                c => text.push(c),
+            }
+        }
+        let text: Vec<&str> = text
+            .split_whitespace()
+            .filter(|w| !(w.starts_with("http://") || w.starts_with("https://")))
+            .collect();
+        if text.is_empty() {
+            continue;
+        }
+        out.push_str(&text.join(" "));
+        // A line is a pause: give it the full stop a sentence would have.
+        if !out.ends_with(['.', '!', '?', ':']) {
+            out.push('.');
+        }
+        out.push('\n');
+    }
+    out.trim().to_string()
+}
+
+/// `text` in pieces of about `target` characters, split where a person would breathe, so the first
+/// piece can be spoken while the rest are still being made.
+pub fn chunks(text: &str, target: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut sentence = String::new();
+    for c in text.chars() {
+        sentence.push(c);
+        if matches!(c, '.' | '!' | '?' | '\n') && sentence.trim().len() > 1 {
+            if !current.is_empty() && current.len() + sentence.len() > target {
+                out.push(std::mem::take(&mut current).trim().to_string());
+            }
+            current.push_str(&sentence);
+            sentence.clear();
+        }
+    }
+    current.push_str(&sentence);
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out
+}
+
+#[cfg(test)]
+mod speech_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_is_read_as_words() {
+        let md = "# Done\n\nI fixed **three** things:\n\n- the `config` loader\n- see [the docs](https://x.org/a)\n\n```rust\nlet x = 1;\n```\n\nOpen https://example.com now";
+        let said = speakable(md);
+        assert_eq!(
+            said,
+            "Done.\nI fixed three things:\nthe config loader.\nsee the docs.\nCode omitted.\nOpen now."
+        );
+        assert_eq!(speakable("---\n\n"), "");
+    }
+
+    #[test]
+    fn long_text_is_cut_at_sentences_and_nothing_is_lost() {
+        let text = "One two three. Four five six. Seven eight nine. Ten.";
+        let parts = chunks(text, 20);
+        assert_eq!(parts, ["One two three.", "Four five six.", "Seven eight nine.", "Ten."]);
+        assert_eq!(chunks(text, 1000), [text]);
+        assert_eq!(chunks("no stop", 10), ["no stop"]);
+        assert!(chunks("  ", 10).is_empty());
+        let one_long = "word ".repeat(100);
+        assert_eq!(chunks(&one_long, 20).len(), 1, "a sentence is never cut in the middle");
     }
 }

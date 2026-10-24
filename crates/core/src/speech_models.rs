@@ -40,6 +40,38 @@ pub const LOCAL_MODELS: &[ModelInfo] = &[
     ("whisper-large-v3", "openai/whisper-large-v3", "large v3, multilingual (most accurate)", 6170),
 ];
 
+/// A voice the server can speak in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Voice {
+    /// The published name, which is also the file fetched.
+    pub id: &'static str,
+    pub label: &'static str,
+    /// The publisher's overall grade for the voice, A best.
+    pub grade: &'static str,
+}
+
+/// Every voice offered, best graded first within each accent.
+pub const VOICES: &[Voice] = &[
+    Voice { id: "af_heart", label: "Heart, American", grade: "A" },
+    Voice { id: "af_bella", label: "Bella, American", grade: "A-" },
+    Voice { id: "af_nicole", label: "Nicole, American", grade: "B-" },
+    Voice { id: "af_aoede", label: "Aoede, American", grade: "C+" },
+    Voice { id: "af_kore", label: "Kore, American", grade: "C+" },
+    Voice { id: "af_sarah", label: "Sarah, American", grade: "C+" },
+    Voice { id: "am_fenrir", label: "Fenrir, American man", grade: "C+" },
+    Voice { id: "am_michael", label: "Michael, American man", grade: "C+" },
+    Voice { id: "am_puck", label: "Puck, American man", grade: "C+" },
+    Voice { id: "am_echo", label: "Echo, American man", grade: "D" },
+    Voice { id: "bf_emma", label: "Emma, British", grade: "B-" },
+    Voice { id: "bf_isabella", label: "Isabella, British", grade: "C" },
+    Voice { id: "bm_fable", label: "Fable, British man", grade: "C" },
+    Voice { id: "bm_george", label: "George, British man", grade: "C" },
+    Voice { id: "bm_lewis", label: "Lewis, British man", grade: "D+" },
+];
+
+/// The voice used when nobody picks one: the best graded of them.
+pub const DEFAULT_VOICE: &str = "af_heart";
+
 /// The model used when none is chosen.
 pub const DEFAULT_MODEL: &str = "whisper-base.en";
 

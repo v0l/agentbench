@@ -220,8 +220,10 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "reqwest",
+ "serde",
  "serde_json",
  "tokenizers",
+ "tracing",
 ]
 
 [[package]]

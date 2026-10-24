@@ -13,12 +13,17 @@
 //! microphone to open (the browser) get `stub`, which says so.
 
 mod settings;
-pub use settings::{LOCAL_MODELS, Mode, Settings};
+pub use settings::{LOCAL_MODELS, Mode, Settings, VOICES};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::Voice;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod reader;
+#[cfg(not(target_arch = "wasm32"))]
+pub use reader::{Reader, Source};
 
 #[cfg(target_os = "android")]
 pub(crate) mod android;
@@ -26,7 +31,7 @@ pub(crate) mod android;
 #[cfg(target_arch = "wasm32")]
 mod stub;
 #[cfg(target_arch = "wasm32")]
-pub use stub::Voice;
+pub use stub::{Reader, Source, Voice};
 
 /// What Whisper was trained on, and what a server is sent.
 pub const RATE: u32 = agentbench_core::audio::SPEECH_RATE;
@@ -44,9 +49,9 @@ pub const MIN_SECONDS: f32 = 0.4;
 /// Quietest peak that can be speech. A muted or unplugged microphone records exact silence.
 pub const MIN_PEAK: f32 = 0.005;
 
-/// Silence that ends a take. Long enough for the pause between two sentences, short enough that
-/// dictation does not wait on you.
-pub const HANG_SECONDS: f32 = 1.0;
+/// Silence that ends a take. Long enough to stop and think between sentences without the take
+/// ending under you.
+pub const HANG_SECONDS: f32 = 3.0;
 
 /// How much new speech is heard between one partial reading starting and the next being allowed.
 pub const PARTIAL_SECONDS: usize = 2;
@@ -183,7 +188,7 @@ mod tests {
         assert_eq!(e.feed(&take), Heard::Waiting);
         take.extend(tone(1.0, 0.3));
         assert_eq!(e.feed(&take), Heard::Speaking);
-        take.extend(tone(0.5, 0.002));
+        take.extend(tone(2.5, 0.002));
         assert_eq!(e.feed(&take), Heard::Pause);
         take.extend(tone(0.7, 0.002));
         assert_eq!(e.feed(&take), Heard::Done);
@@ -192,7 +197,7 @@ mod tests {
     #[test]
     fn a_gap_between_words_does_not_end_the_take() {
         let mut take = tone(1.0, 0.3);
-        take.extend(tone(0.6, 0.002));
+        take.extend(tone(2.5, 0.002));
         take.extend(tone(1.0, 0.3));
         let mut e = Endpoint::new(RATE);
         assert_eq!(e.feed(&take), Heard::Speaking);

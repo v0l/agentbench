@@ -14,7 +14,9 @@ cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
 [dependencies]
 agentbench-core.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+tracing = "0.1"
 candle-core = "0.11"
 candle-nn = "0.11"
 candle-transformers = "0.11"

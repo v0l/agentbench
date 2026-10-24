@@ -13,7 +13,9 @@ pub enum Mode {
     Agentbench,
 }
 
-pub use agentbench_core::speech_models::{DEFAULT_MODEL, LOCAL_MODELS, model};
+pub use agentbench_core::speech_models::{
+    DEFAULT_MODEL, DEFAULT_VOICE, LOCAL_MODELS, VOICES, model,
+};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
@@ -25,6 +27,8 @@ pub struct Settings {
     pub key: String,
     /// Sent as `model`. Servers that serve one model ignore it, OpenAI wants `whisper-1`.
     pub server_model: String,
+    /// The voice replies are read aloud in, a `VOICES` id. The agentbench server speaks them.
+    pub reply_voice: String,
 }
 
 impl Default for Settings {
@@ -40,6 +44,7 @@ impl Default for Settings {
             url: String::new(),
             key: String::new(),
             server_model: String::new(),
+            reply_voice: DEFAULT_VOICE.into(),
         }
     }
 }
@@ -62,6 +67,9 @@ impl Settings {
         s.url = st.get_string("voice_url").unwrap_or_default();
         s.key = st.get_string("voice_key").unwrap_or_default();
         s.server_model = st.get_string("voice_server_model").unwrap_or_default();
+        if let Some(v) = st.get_string("voice_reply").filter(|v| VOICES.iter().any(|x| x.id == v)) {
+            s.reply_voice = v;
+        }
         s
     }
 
@@ -79,6 +87,7 @@ impl Settings {
         st.set_string("voice_url", self.url.clone());
         st.set_string("voice_key", self.key.clone());
         st.set_string("voice_server_model", self.server_model.clone());
+        st.set_string("voice_reply", self.reply_voice.clone());
     }
 
     /// What is missing before speech can be read, or `None` when it can.

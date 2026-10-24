@@ -7,6 +7,13 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 ## [Unreleased]
 
 ### Added
+- **Read aloud.** Every reply has a "read aloud" link under it. The agentbench server says it with Kokoro, a voice model ported from waveshark's `tts` crate, and the window plays it as it arrives, a sentence at a time, so the first words come quickly. Press the link again to stop. Markdown is read as words: links as their text, code blocks and URLs left out. Pick the voice under settings, voice, read aloud. It is not available in the browser build.
+- The server has a text to speech endpoint like the one for speech to text: `POST /v1/audio/speech` takes OpenAI's `{"input", "voice"}` and answers a WAV, and `GET /v1/audio/voices` lists the voices. Both need the token, so a phone or another window can use a remote server. The model (about 330 MB) and each voice are fetched from Hugging Face the first time, into `models/kokoro` in the data folder (an existing folder from waveshark can be copied or linked there), and stay loaded, on the GPU when the server was built with CUDA.
+
+### Changed
+- Voice input waits for 3 seconds of silence before it ends a take, up from 1, so a pause to think does not cut you off.
+
+### Added
 - The agent's current checklist is pinned above a chat, so what it is working on shows without reading the transcript. Click its header to fold it; it starts folded on a phone or in a tile. Claude's `TodoWrite` is drawn too.
 
 ## [0.2.0] - 2026-10-23

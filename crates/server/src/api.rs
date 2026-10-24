@@ -23,6 +23,7 @@ pub struct Api {
     pub token: String,
     pub model: Option<crate::agent::native::Shared>,
     pub speech: crate::speech::Speech,
+    pub voice: crate::voice::Voice,
 }
 
 pub struct Failure(StatusCode, String);
@@ -96,6 +97,8 @@ pub fn router(api: Api) -> Router {
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route("/api/sessions/{id}/answer", post(answer))
         .route("/v1/audio/transcriptions", post(transcribe))
+        .route("/v1/audio/speech", post(speak))
+        .route("/v1/audio/voices", get(voices))
         .route("/api/sessions/{id}/attachments/{file}", get(attachment))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
         .layer(middleware::from_fn_with_state(api.clone(), auth));
@@ -136,6 +139,57 @@ async fn transcribe(
         started.elapsed().as_secs_f32()
     );
     Ok(Json(json!({ "text": text })))
+}
+
+#[derive(Deserialize)]
+struct SpeechRequest {
+    input: String,
+    #[serde(default)]
+    voice: String,
+}
+
+/// OpenAI's text to speech, answered with Kokoro on this machine. Takes `{"input": "...",
+/// "voice": "af_heart"}` and answers a 16 bit mono WAV, whatever `response_format` asks for.
+async fn speak(
+    State(api): State<Api>,
+    Json(req): Json<SpeechRequest>,
+) -> Result<Response, Failure> {
+    let text = req.input.trim();
+    if text.is_empty() {
+        return Err(bad("there is nothing to say"));
+    }
+    if text.len() > crate::voice::INPUT_MAX {
+        return Err(bad(format!(
+            "too long to say in one go: {} characters at most",
+            crate::voice::INPUT_MAX
+        )));
+    }
+    let voice = api.voice.pick(&req.voice);
+    let started = std::time::Instant::now();
+    let said = api
+        .voice
+        .say(&voice, text.to_string())
+        .await
+        .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    tracing::info!(
+        "said {:.1}s with {voice} on the {} in {:.1}s",
+        said.samples.len() as f32 / said.rate as f32,
+        said.on,
+        started.elapsed().as_secs_f32()
+    );
+    let wav = agentbench_core::audio::wav_bytes(&said.samples, said.rate);
+    Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], wav).into_response())
+}
+
+/// The voices this server can speak in: `{"voices": [{"id", "label", "installed"}]}`.
+async fn voices(State(api): State<Api>) -> Json<serde_json::Value> {
+    let list: Vec<_> = api
+        .voice
+        .list()
+        .into_iter()
+        .map(|(id, label, installed)| json!({ "id": id, "label": label, "installed": installed }))
+        .collect();
+    Json(json!({ "voices": list }))
 }
 
 fn changed(api: &Api) {
@@ -683,6 +737,7 @@ mod tests {
             token: "secret".into(),
             model: None,
             speech: Default::default(),
+            voice: Default::default(),
         };
         Fixture { app: router(api.clone()), api, _dir: dir, repo: repo_path }
     }
@@ -738,6 +793,31 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("session {sid} never settled");
+    }
+
+    #[tokio::test]
+    async fn speech_needs_the_token_and_something_to_say() {
+        let f = fixture();
+        let body = json!({"input": "hello", "voice": "af_heart"});
+        let (code, _) = call(&f.app, "POST", "/v1/audio/speech", Some(body), None).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        let blank = json!({"input": "   "});
+        let (code, _) = call(&f.app, "POST", "/v1/audio/speech", Some(blank), Some("secret")).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "nothing to say");
+        let long = json!({"input": "a".repeat(crate::voice::INPUT_MAX + 1)});
+        let (code, _) = call(&f.app, "POST", "/v1/audio/speech", Some(long), Some("secret")).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "too long");
+    }
+
+    #[tokio::test]
+    async fn the_voices_are_listed_behind_the_token() {
+        let f = fixture();
+        let (code, _) = call(&f.app, "GET", "/v1/audio/voices", None, None).await;
+        assert_eq!(code, StatusCode::UNAUTHORIZED);
+        let (code, v) = call(&f.app, "GET", "/v1/audio/voices", None, Some("secret")).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(v["voices"][0]["id"], "af_heart");
+        assert!(v["voices"][0]["installed"].is_boolean());
     }
 
     #[tokio::test]
@@ -1145,6 +1225,7 @@ mod tests {
             token: "secret".into(),
             model: None,
             speech: Default::default(),
+            voice: Default::default(),
         };
         let app = router(api.clone());
         let (_, sess) = call(

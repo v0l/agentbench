@@ -597,6 +597,24 @@ pub(super) fn speech_section(ui: &mut Ui, sp: &mut crate::voice::Settings) {
         }
     });
     ui.add_space(8.0);
+    section(ui, "read aloud", "the agentbench server speaks replies", |ui| {
+        row_help(
+            ui,
+            "voice",
+            "Kokoro, run by the agentbench server. It downloads the voice the first time you press read aloud, about 330 MB for the first.",
+            |ui| {
+                choice_fit(
+                    ui,
+                    "reply-voice",
+                    &mut sp.reply_voice,
+                    crate::voice::VOICES
+                        .iter()
+                        .map(|v| (v.id.to_string(), format!("{}, grade {}", v.label, v.grade))),
+                );
+            },
+        );
+    });
+    ui.add_space(8.0);
     hint(
         ui,
         "The speak key beside send records from the default microphone until you press it again, then adds what you said to the message. Nothing is sent until you send it.",

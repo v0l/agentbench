@@ -1,15 +1,9 @@
 //! A Whisper model on disc, fetched once and kept loaded between takes.
 
+use crate::download::Progress;
 use crate::whisper::{Files, Whisper, best_device};
 use agentbench_core::speech_models::model;
 use std::path::{Path, PathBuf};
-
-/// Where a download has got to, for a status line.
-pub struct Progress<'a> {
-    pub name: &'a str,
-    pub got_mb: u64,
-    pub total_mb: u64,
-}
 
 const FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 
@@ -85,39 +79,10 @@ async fn fetch(
     dir: &Path,
     progress: impl Fn(Progress<'_>),
 ) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let name = repo.rsplit('/').next().unwrap_or(repo);
     for file in FILES {
-        let target = dir.join(file);
-        if target.exists() {
-            continue;
-        }
         let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
-        let mut resp = http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("{url}: {e}"))?
-            .error_for_status()
-            .map_err(|e| format!("{url}: {e}"))?;
-        let total = resp.content_length().unwrap_or(0);
-        // Written beside the target and renamed, so a download that stops half way is not
-        // taken for a model.
-        let part = dir.join(format!("{file}.part"));
-        let mut out =
-            std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
-        let (mut got, mut shown) = (0u64, 0u64);
-        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("{url}: {e}"))? {
-            std::io::Write::write_all(&mut out, &chunk)
-                .map_err(|e| format!("{}: {e}", part.display()))?;
-            got += chunk.len() as u64;
-            if got - shown > 1 << 20 || got == total {
-                shown = got;
-                progress(Progress { name, got_mb: got >> 20, total_mb: total >> 20 });
-            }
-        }
-        drop(out);
-        std::fs::rename(&part, &target).map_err(|e| format!("{}: {e}", target.display()))?;
+        crate::download::get(http, &url, &dir.join(file), name, &progress).await?;
     }
     Ok(())
 }

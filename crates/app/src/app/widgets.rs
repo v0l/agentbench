@@ -289,3 +289,21 @@ pub(super) fn chat_in_link(link: &str) -> Option<SessionId> {
         link.strip_prefix("agentbench://open?").or_else(|| link.strip_prefix("foreman://open?"))?;
     query.split('&').find_map(|kv| kv.strip_prefix("session=")).and_then(|v| v.parse().ok())
 }
+
+/// The small "read aloud" link under a reply, which becomes "stop" while that reply is read.
+pub(super) fn read_link(ui: &mut Ui, reading: bool) -> egui::Response {
+    let (label, tint) =
+        if reading { ("■ stop reading", READOUT) } else { ("▶ read aloud", LEGEND) };
+    let r = ui.add(
+        egui::Label::new(egui::RichText::new(label).font(legend_font(10.0)).color(tint))
+            .sense(egui::Sense::click()),
+    );
+    let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if r.hovered() {
+        ui.painter().line_segment(
+            [r.rect.left_bottom(), r.rect.right_bottom()],
+            egui::Stroke::new(1.0, tint),
+        );
+    }
+    r.on_hover_text("read this reply aloud with the server's voice")
+}
