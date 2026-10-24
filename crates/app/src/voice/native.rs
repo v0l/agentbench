@@ -298,7 +298,6 @@ impl Voice {
     }
 }
 
-#[cfg(local_speech)]
 /// What this window's own Whisper runs on, `GPU` or `CPU`. Opening the card to find out takes a
 /// moment, so it is found out once.
 #[cfg(local_speech)]
@@ -312,6 +311,7 @@ pub fn local_device() -> String {
     "not in this build".into()
 }
 
+#[cfg(local_speech)]
 fn models_dir() -> std::path::PathBuf {
     agentbench_server::home().join("models")
 }

@@ -38,19 +38,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # CUDA is in the x86_64 builds, as in waveshark. The patched candle in the root manifest
+        # loads the CUDA libraries at run time, so these still start on a machine with no card and
+        # run speech on the CPU there; with a card and the CUDA 12 runtime, Whisper and Kokoro run
+        # on the GPU. The toolkit is needed to build the kernels, not to run them. No CUDA on the
+        # arm boards (no aarch64 toolkit to build with) or on a Mac (Metal instead).
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
+            features: --features cuda
+            cuda: '12.8.1'
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
+            features: ''
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
+            features: ''
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+            features: --features cuda
+            cuda: '12.8.1'
     steps:
       # A manual run builds the branch it was started on, under the version it was given. Only a
       # pushed tag checks out a tag.
@@ -71,16 +82,50 @@ jobs:
             libwayland-dev \
             libasound2-dev
 
+      # The toolkit, where the job builds for a card, set up as waveshark's is. Network on Linux
+      # installs only the packages named; the Windows installer takes component names instead.
+      # The runner has no card, so the compute capability is given: 8.0 is Ampere, and PTX for it
+      # is finished by the driver on anything since. Not 7.5: candle's shim for pre-Ampere half
+      # precision collides with the same functions in CUDA 12.8's own headers.
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        if: matrix.cuda && runner.os == 'Linux'
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "cccl", "crt", "nvrtc-dev", "driver-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev", "libcurand-dev"]'
+          log-file-suffix: '${{ matrix.target }}.txt'
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        if: matrix.cuda && runner.os == 'Windows'
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: local
+          # Windows names differ from Linux's and the installer refuses the whole list over one it
+          # does not know: there is no cccl package here, its headers come with nvcc, and
+          # nvrtc_dev has an underscore.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "curand", "curand_dev", "nvrtc", "nvrtc_dev", "visual_studio_integration"]'
+          log-file-suffix: '${{ matrix.target }}.txt'
+      - name: Compute capability for the kernels
+        if: matrix.cuda
+        shell: bash
+        run: echo "CUDA_COMPUTE_CAP=80" >> "$GITHUB_ENV"
+      # nvcc drives cl.exe, which the runner has but does not put on the PATH until a developer
+      # shell is opened.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: matrix.cuda && runner.os == 'Windows'
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-${{ matrix.cuda || 'cpu' }}
 
+      # The window and the server both get the cuda feature: the window runs voice input on this
+      # machine, the server reads it and speaks replies for every window and phone.
       - name: Build
-        run: cargo build --release --locked -p agentbench -p agentbench-server --target ${{ matrix.target }}
+        run: cargo build --release --locked -p agentbench -p agentbench-server --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: Install cargo-deb
         if: runner.os == 'Linux'

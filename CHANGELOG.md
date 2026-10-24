@@ -6,6 +6,14 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-24
+
+### Changed
+- The Linux x86_64 and Windows release builds have CUDA in them, as waveshark's do: on a machine with an NVIDIA card and the CUDA 12 runtime, voice input and read aloud run on the GPU. They still start, and run speech on the CPU, on a machine with no card. The arm and Mac builds are unchanged.
+
+### Fixed
+- The Android app builds again: 0.3.0 has no APK because of this.
+
 ## [0.3.0] - 2026-10-24
 
 ### Added
