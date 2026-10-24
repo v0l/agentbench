@@ -183,7 +183,8 @@ pub fn builtin() -> Vec<ServerSpec> {
         // the agent's own cargo runs keep the build folder; the server gets its own
         "cargo": { "targetDir": true },
         "checkOnSave": false,
-        "workspace": { "symbol": { "search": { "limit": 2048 } } },
+        // by default it searches only types; functions and methods need this
+        "workspace": { "symbol": { "search": { "limit": 2048, "kind": "all_symbols" } } },
     }));
     let mut ts = spec(
         "typescript",
@@ -1506,6 +1507,13 @@ mod tests {
         assert_eq!(all.iter().filter(|s| s.name == "rust").count(), 1);
         assert!(find("zig").serves(Path::new("a/b.zig")));
         assert!(!find("go").serves(Path::new("main.go")), "an empty command switches a server off");
+    }
+
+    #[test]
+    fn rust_analyzer_is_asked_for_functions_as_well_as_types() {
+        let rust = builtin().into_iter().find(|s| s.name == "rust").unwrap();
+        let kind = rust.options.unwrap().pointer("/workspace/symbol/search/kind").cloned();
+        assert_eq!(kind, Some(json!("all_symbols")));
     }
 
     #[test]
