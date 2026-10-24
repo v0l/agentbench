@@ -149,6 +149,39 @@ fn image(file: &Path, shown: &str, bytes: u64) -> Result<Media, String> {
     Ok(Media { parts: vec![label(format!("{shown}:")), picture(mime, &data)], note })
 }
 
+/// A sound file as 16 kHz mono samples, the first `AUDIO_SECONDS` at most: what Whisper reads.
+/// A WAV is read here; anything else goes through ffmpeg.
+pub fn samples(file: &Path, shown: &str) -> Result<Vec<f32>, String> {
+    use egui_bench::voice::audio::{SPEECH_RATE, read_wav, to_whisper_rate};
+    let cut = |pcm: Vec<f32>| -> Vec<f32> {
+        pcm.into_iter().take((AUDIO_SECONDS * SPEECH_RATE) as usize).collect()
+    };
+    if ext(file) == "wav"
+        && let Ok(bytes) = fs::read(file)
+        && let Ok((pcm, rate)) = read_wav(&bytes)
+    {
+        return Ok(cut(to_whisper_rate(&pcm, rate)));
+    }
+    let scratch = Scratch::new()?;
+    let out = scratch.file("audio.wav");
+    let seconds = AUDIO_SECONDS.to_string();
+    let rate = SPEECH_RATE.to_string();
+    ffmpeg(
+        &["-i".as_ref(), file.as_os_str()],
+        &["-vn", "-t", &seconds, "-ac", "1", "-ar", &rate, "-c:a", "pcm_s16le"],
+        &out,
+        shown,
+    )?;
+    let bytes = fs::read(&out).map_err(|e| format!("{shown}: {e}"))?;
+    let (pcm, rate) = read_wav(&bytes).map_err(|e| format!("{shown}: {e}"))?;
+    Ok(cut(to_whisper_rate(&pcm, rate)))
+}
+
+/// Whether `read_file` on this path is a sound file, and so could be read as words instead.
+pub fn is_audio(args: &Value) -> bool {
+    files::text(args, &files::PATH).and_then(kind) == Some(Kind::Audio)
+}
+
 fn audio(file: &Path, shown: &str, bytes: u64) -> Result<Media, String> {
     let ext = ext(file);
     let (data, format, converted) = if matches!(ext.as_str(), "wav" | "mp3") && bytes <= AUDIO_MAX {

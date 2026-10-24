@@ -6,6 +6,12 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 
 ## [Unreleased]
 
+### Changed
+- When the native agent reads a sound file it gets the words in it, transcribed by the server's Whisper, instead of the sound. Most models behind a router take no audio, and sending some made the router refuse the whole turn. The agent is told it has the words and not the voice.
+
+### Fixed
+- A turn that the model server refused part way, with an error sent inside a stream that had already started, now ends with that error instead of in silence.
+
 ## [0.3.2] - 2026-10-24
 
 ### Added

@@ -167,6 +167,9 @@ pub struct Native {
     pub jobs: super::jobs::Jobs,
     /// Language servers, for the `code_*` tools and the errors shown after an edit.
     pub code: std::sync::Arc<super::code::Code>,
+    /// Whisper, for a sound file `read_file` is asked for: the model gets the words, since most
+    /// models behind a router take no audio and refuse the turn if they are sent some.
+    pub speech: Option<crate::speech::Speech>,
 }
 
 /// How long the model server may stay silent before a request is given up and sent again.
@@ -537,7 +540,7 @@ fn file_specs() -> Vec<Spec> {
         "read_file",
         "Read a file on this machine. Relative paths start in the worktree, absolute paths reach anywhere. A text file is read with a line budget, in pages: the answer says \
          which offset to ask for next. A picture (png, jpg, gif, webp, bmp, tiff and more) is shown to you. \
-         A sound file (wav, mp3, flac, ogg, m4a and more) is played to you. A video is shown as frames \
+         A sound file (wav, mp3, flac, ogg, m4a and more) is transcribed with Whisper and you get the words, not the voice. A video is shown as frames \
          sampled evenly through it; `frames` sets how many, 8 by default.",
         object(
             json!({
@@ -931,6 +934,10 @@ impl Agent for Native {
                             switch(&base, &mut model, &args, turn.context, io, self.patience.probe)
                                 .await
                         }
+                        "read_file" if media::is_audio(&args) && self.speech.is_some() => {
+                            let speech = self.speech.clone().unwrap_or_default();
+                            transcribe(&workspace, &args, &speech).await
+                        }
                         "read_file" => {
                             let found = {
                                 let (ws, args) = (workspace.clone(), args.clone());
@@ -1131,6 +1138,33 @@ async fn ask_window(url: &str, key: &str, model: &str) -> Option<u64> {
     }
     let shown: Value = req.send().await.ok()?.error_for_status().ok()?.json().await.ok()?;
     ollama_window(&shown)
+}
+
+/// A sound file read as the words in it, with Whisper. The model is told it is a transcript, so it
+/// knows it has the words and not the voice.
+async fn transcribe(
+    ws: &Workspace,
+    args: &Value,
+    speech: &crate::speech::Speech,
+) -> Result<String, String> {
+    let path = files::text(args, &files::PATH).ok_or("missing `path`")?.to_string();
+    let file = ws.resolve_for(&path, egui_bench::agent::grants::Access::Read)?;
+    let shown = ws.shown(&file);
+    let pcm = {
+        let (file, shown) = (file.clone(), shown.clone());
+        tokio::task::spawn_blocking(move || media::samples(&file, &shown))
+            .await
+            .map_err(|e| e.to_string())??
+    };
+    let seconds = pcm.len() as f32 / egui_bench::voice::audio::SPEECH_RATE as f32;
+    let model = speech.pick("");
+    let (text, on) = speech.read(&model, pcm).await?;
+    let text = text.trim();
+    let words = if text.is_empty() { "(no speech heard)" } else { text };
+    Ok(format!(
+        "{shown}: {seconds:.1}s of audio, transcribed by {model} on the {on}. These are the words \
+         spoken, not the sound itself: you cannot hear the voice, its tone or its timing.\n\n{words}"
+    ))
 }
 
 /// What the user said, with any pictures, sound or video they attached shown to the model.
@@ -2349,6 +2383,40 @@ mod tests {
         assert!(url.starts_with("data:image/png;base64,"), "{url}");
         let tool_at = messages.iter().rposition(|m| m["role"] == "tool").unwrap();
         assert!(tool_at < messages.len() - 1, "media must follow every tool result");
+    }
+
+    /// The trigger was a WAV read on a model behind a router that takes no audio: the router
+    /// refused the whole turn. Now the model gets Whisper's words and no sound at all. Needs a
+    /// Whisper model on disc, in AGENTBENCH_TEST_MODELS (a folder holding whisper-base.en), and a
+    /// recording of speech in AGENTBENCH_TEST_WAV; skipped without them.
+    #[tokio::test]
+    async fn read_file_on_a_sound_gives_the_model_the_words_and_no_audio() {
+        let (Some(models), Some(wav)) =
+            (std::env::var_os("AGENTBENCH_TEST_MODELS"), std::env::var_os("AGENTBENCH_TEST_WAV"))
+        else {
+            eprintln!("set AGENTBENCH_TEST_MODELS and AGENTBENCH_TEST_WAV to run this; skipping");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::copy(&wav, dir.path().join("said.wav")).unwrap();
+        let (url, asked) = stub(vec![
+            vec![call("c1", "read_file", json!({"path": "said.wav"}))],
+            vec![say("it matches")],
+        ]);
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.speech = Some(crate::speech::Speech::new(models.into(), "whisper-base.en"));
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "check it", &io).await.unwrap();
+        let _ = asked.recv().unwrap();
+        let second = asked.recv().unwrap();
+        let sent = second.to_string();
+        assert!(!sent.contains("input_audio"), "no sound goes to the model");
+        let messages = second["messages"].as_array().unwrap();
+        let tool = messages.iter().find(|m| m["role"] == "tool").unwrap();
+        let text = tool["content"].as_str().unwrap().to_lowercase();
+        assert!(text.contains("transcribed by whisper-base.en"), "{text}");
+        assert!(text.contains("not the sound itself"), "{text}");
+        assert!(text.contains("agentbench") || text.contains("hello"), "the words: {text}");
     }
 
     #[tokio::test]

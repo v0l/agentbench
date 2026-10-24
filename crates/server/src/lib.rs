@@ -109,8 +109,19 @@ impl Config {
         model: agent::native::Shared,
         titles: Option<titles::Titles>,
     ) -> Vec<Box<dyn Agent>> {
+        self.agents_with_speech(model, titles, None)
+    }
+
+    /// The agents, with the native agent reading sound files through `speech` as well.
+    pub fn agents_with_speech(
+        &self,
+        model: agent::native::Shared,
+        titles: Option<titles::Titles>,
+        speech: Option<speech::Speech>,
+    ) -> Vec<Box<dyn Agent>> {
         let mut native = agent::Native::shared(model);
         native.titles = titles;
+        native.speech = speech;
         native.code = std::sync::Arc::new(agent::code::Code::new(self.code.clone()));
         let mut all: Vec<Box<dyn Agent>> = vec![
             Box::new(native),
@@ -177,8 +188,20 @@ pub async fn serve_config(
 ) -> Result<(), String> {
     let model = agent::native::Shared::new(saved_model(&store, &config.model));
     let titles = titles::Titles::new(saved_title_model(&store, &config.title_model), model.clone());
-    let agents = config.agents_with_titles(model.clone(), Some(titles.clone()));
-    serve_inner(store, agents, Some(model), Some(titles), listen, web, shutdown).await
+    // One Whisper for the transcription endpoint and the agent's read_file, so it loads once.
+    let speech = speech::Speech::new(home().join("models"), &speech_model(&store));
+    let agents =
+        config.agents_with_speech(model.clone(), Some(titles.clone()), Some(speech.clone()));
+    serve_inner(store, agents, Some(model), Some(titles), Some(speech), listen, web, shutdown).await
+}
+
+/// The model a speech request gets when it names none of ours: set it with
+/// AGENTBENCH_SPEECH_MODEL, or it is the one saved, or Whisper large v3 turbo.
+fn speech_model(store: &store::Store) -> String {
+    env_var("SPEECH_MODEL")
+        .and_then(|v| v.into_string().ok())
+        .or_else(|| store.setting("speech_model").ok().flatten())
+        .unwrap_or_else(|| "whisper-large-v3-turbo".into())
 }
 
 pub async fn serve_with(
@@ -188,7 +211,7 @@ pub async fn serve_with(
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    serve_inner(store, agents, None, None, listen, web, shutdown).await
+    serve_inner(store, agents, None, None, None, listen, web, shutdown).await
 }
 
 pub async fn serve_agents(
@@ -198,14 +221,16 @@ pub async fn serve_agents(
     listen: SocketAddr,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    serve_inner(store, agents, model, None, listen, None, shutdown).await
+    serve_inner(store, agents, model, None, None, listen, None, shutdown).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_inner(
     store: store::Store,
     agents: Vec<Box<dyn Agent>>,
     model: Option<agent::native::Shared>,
     titles: Option<titles::Titles>,
+    speech: Option<speech::Speech>,
     listen: SocketAddr,
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -219,11 +244,8 @@ async fn serve_inner(
         let _ = projects::ensure_home(&store, &dir);
     }
     let token = token(&store).map_err(|e| e.0)?;
-    // The model a speech request gets when it names none of ours: set it with AGENTBENCH_SPEECH_MODEL.
-    let speech_model = env_var("SPEECH_MODEL")
-        .and_then(|v| v.into_string().ok())
-        .or_else(|| store.setting("speech_model").ok().flatten())
-        .unwrap_or_else(|| "whisper-large-v3-turbo".into());
+    let speech =
+        speech.unwrap_or_else(|| speech::Speech::new(home().join("models"), &speech_model(&store)));
     let mut runner = runner::Runner::new(store, agents);
     let titles = titles.or_else(|| {
         model
@@ -235,7 +257,6 @@ async fn serve_inner(
     }
     *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
         runner::Base { url: local_url(listen), token: token.clone() };
-    let speech = speech::Speech::new(home().join("models"), &speech_model);
     let voice = voice::Voice::default();
     let api = api::Api { runner, token, model, speech, voice };
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
