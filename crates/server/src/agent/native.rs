@@ -833,6 +833,7 @@ struct Reply {
     text: String,
     calls: Vec<Call>,
     usage: Option<Usage>,
+    finish: Option<String>,
 }
 
 #[async_trait]
@@ -1697,6 +1698,23 @@ where
         }
         take(&v, &mut reply, io);
     }
+    check_complete(done, reply)
+}
+
+fn check_complete(done: bool, reply: Reply) -> Result<Reply, Failure> {
+    if reply.finish.as_deref() == Some("length") {
+        return Err(Failure::Fatal(
+            "the model hit its output limit before it finished; ask it to carry on, or raise the limit on the server".into(),
+        ));
+    }
+    if !done && reply.finish.is_none() {
+        return Err(Failure::Transient(
+            "the stream ended early, before the reply was complete".into(),
+        ));
+    }
+    if reply.text.trim().is_empty() && reply.calls.is_empty() {
+        return Err(Failure::Transient("the model sent no answer after thinking".into()));
+    }
     Ok(reply)
 }
 
@@ -1740,6 +1758,9 @@ fn take(v: &Value, reply: &mut Reply, io: &dyn Io) {
             turns: 1,
             ..Usage::default()
         });
+    }
+    if let Some(reason) = v.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
+        reply.finish = Some(reason.to_string());
     }
     let Some(delta) = v.pointer("/choices/0/delta") else { return };
     for key in ["reasoning_content", "reasoning"] {
@@ -2787,6 +2808,75 @@ mod tests {
             "{events:?}"
         );
         assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "hello")));
+    }
+
+    fn thought(text: &str) -> Value {
+        json!({"choices":[{"delta":{"reasoning_content":text}}]})
+    }
+
+    fn finished(reason: &str) -> Value {
+        json!({"choices":[{"delta":{},"finish_reason":reason}]})
+    }
+
+    /// A server that streams `events` and then closes the connection without `[DONE]`, as a
+    /// proxy does when it cuts a request that thought for too long.
+    fn cuts_off_after(cuts: usize, events: Vec<Value>, then: Vec<Value>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for _ in 0..cuts {
+                let Ok((mut s, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 65536];
+                let _ = s.read(&mut buf);
+                let mut sse = String::new();
+                for e in &events {
+                    sse.push_str(&format!("data: {e}\n\n"));
+                }
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
+                    sse.len()
+                );
+            }
+            stub_on(listener, vec![then]);
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_stream_cut_off_while_thinking_is_sent_again_not_taken_as_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let url =
+            cuts_off_after(1, vec![thought("planning the whole hotel")], vec![say("built it")]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        let events = io.events();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Notice(n) if n.contains("ended early") && n.contains("retrying"))),
+            "{events:?}"
+        );
+        assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "built it")));
+    }
+
+    #[tokio::test]
+    async fn a_model_that_only_thinks_is_asked_again_then_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _) = stub(vec![vec![thought("hmm")]; 1 + RETRIES as usize]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
+        assert!(e.contains("no answer"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn running_out_of_output_tokens_is_an_error_not_a_quiet_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _) = stub(vec![vec![thought("a very long plan"), finished("length")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
+        assert!(e.contains("output limit"), "{e}");
     }
 
     #[tokio::test]
