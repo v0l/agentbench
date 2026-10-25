@@ -348,6 +348,7 @@ mod tests {
             prompt,
             cwd: Path::new("/tmp"),
             model,
+            effort: None,
             resume,
             history: &[],
             context: &c,

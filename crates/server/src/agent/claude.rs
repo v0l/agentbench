@@ -282,6 +282,7 @@ mod tests {
                 prompt: "hi",
                 cwd: Path::new("/tmp"),
                 model: Some("sonnet"),
+                effort: None,
                 resume: Some("abc"),
                 history: &[],
                 context: &c,

@@ -1879,6 +1879,7 @@ mod tests {
             title: String::new(),
             cwd: String::new(),
             model: None,
+            effort: None,
             issue_id: None,
             status,
             agent_session: None,

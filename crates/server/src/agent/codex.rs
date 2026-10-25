@@ -310,6 +310,7 @@ mod tests {
             prompt: "hi",
             cwd: Path::new("/tmp"),
             model: None,
+            effort: None,
             resume,
             history: &[],
             context: &c,

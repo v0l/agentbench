@@ -83,6 +83,7 @@ pub struct Turn<'a> {
     pub files: &'a [Attached],
     pub cwd: &'a Path,
     pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
     pub resume: Option<&'a str>,
     pub history: &'a [Entry],
     pub context: &'a Context,

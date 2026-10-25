@@ -888,6 +888,10 @@ impl Agent for Native {
     async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
         let base = self.model.get();
         let mut model = base.choose(turn.model.unwrap_or_default());
+        let chat_effort = turn.effort.map(str::trim).filter(|e| !e.is_empty());
+        if let Some(effort) = chat_effort {
+            model.effort = effort.to_string();
+        }
         if model.model.trim().is_empty() {
             return Err("pick a server and model for the native agent under settings".into());
         }
@@ -942,8 +946,19 @@ impl Agent for Native {
                     Err(e) => Err(e),
                     Ok(args) => match name {
                         "switch_model" => {
-                            switch(&base, &mut model, &args, turn.context, io, self.patience.probe)
-                                .await
+                            let switched = switch(
+                                &base,
+                                &mut model,
+                                &args,
+                                turn.context,
+                                io,
+                                self.patience.probe,
+                            )
+                            .await;
+                            if let Some(effort) = chat_effort {
+                                model.effort = effort.to_string();
+                            }
+                            switched
                         }
                         "read_file" if media::is_audio(&args) && self.speech.is_some() => {
                             let speech = self.speech.clone().unwrap_or_default();
@@ -1988,6 +2003,7 @@ mod tests {
             files: &[],
             cwd: dir,
             model: None,
+            effort: None,
             resume: None,
             history: &[],
             context: &c,
@@ -2370,6 +2386,7 @@ mod tests {
             files: &[],
             cwd: dir.path(),
             model: None,
+            effort: None,
             resume: None,
             history: &[],
             context: &c,
@@ -2393,6 +2410,7 @@ mod tests {
             files: &[],
             cwd: dir.path(),
             model: None,
+            effort: None,
             resume: None,
             history: &[],
             context: &c,
@@ -2499,6 +2517,7 @@ mod tests {
             files: &files,
             cwd: dir.path(),
             model: None,
+            effort: None,
             resume: None,
             history: &[],
             context: &c,
@@ -3091,6 +3110,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chats_effort_beats_the_setting_and_the_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("a")]]);
+        let native = Native::new(Model {
+            url,
+            model: "m".into(),
+            effort: "high".into(),
+            ..Model::default()
+        });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let c = context();
+        let turn = Turn {
+            prompt: "go",
+            files: &[],
+            cwd: dir.path(),
+            model: None,
+            effort: Some("minimal"),
+            resume: None,
+            history: &[],
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        assert_eq!(asked.recv().unwrap()["reasoning_effort"], "minimal");
+    }
+
+    #[tokio::test]
     async fn no_effort_leaves_reasoning_effort_out_of_the_request() {
         let dir = tempfile::tempdir().unwrap();
         let (url, asked) = stub(vec![vec![say("a")]]);
@@ -3179,6 +3224,7 @@ mod tests {
             prompt: "x",
             cwd: dir.path(),
             model: Some("low"),
+            effort: None,
             resume: None,
             history: &[],
             context: &c,

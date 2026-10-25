@@ -180,6 +180,8 @@ pub struct Session {
     pub title: String,
     pub cwd: String,
     pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
     pub issue_id: Option<Id>,
     pub status: SessionStatus,
     pub agent_session: Option<String>,
@@ -561,7 +563,7 @@ pub struct Slash {
     pub about: &'static str,
 }
 
-pub const SLASH: [Slash; 7] = [
+pub const SLASH: [Slash; 8] = [
     Slash { name: "new", args: "", about: "start a fresh chat in this worktree with this agent" },
     Slash { name: "close", args: "", about: "stop the agent and delete this chat" },
     Slash { name: "stop", args: "", about: "interrupt what the agent is doing" },
@@ -579,6 +581,11 @@ pub const SLASH: [Slash; 7] = [
         name: "model",
         args: "<low|medium|high|id>",
         about: "switch this chat to another model, or another server by level; empty goes back to the default",
+    },
+    Slash {
+        name: "thinking",
+        args: "<none|minimal|low|medium|high|xhigh>",
+        about: "set how hard the model thinks in this chat; empty goes back to the setting",
     },
     Slash {
         name: "title",

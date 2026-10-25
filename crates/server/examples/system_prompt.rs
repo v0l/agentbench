@@ -46,6 +46,7 @@ fn main() -> Result<(), String> {
         files: &[],
         cwd: &cwd,
         model: None,
+        effort: None,
         resume: None,
         history: &[],
         context: &context,

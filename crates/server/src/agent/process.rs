@@ -80,6 +80,7 @@ impl<T: Cli> Agent for T {
             files: &[],
             cwd: turn.cwd,
             model: turn.model,
+            effort: turn.effort,
             resume: turn.resume,
             history: turn.history,
             context: turn.context,

@@ -164,6 +164,7 @@ CREATE TABLE notes (
     "UPDATE sessions SET agent = 'native' WHERE agent = 'agentbench';",
     // The built-in agent was called foreman, not agentbench, so the step above moved nothing.
     "UPDATE sessions SET agent = 'native' WHERE agent IN ('foreman', 'agentbench');",
+    "ALTER TABLE sessions ADD COLUMN effort TEXT;",
 ];
 
 #[derive(Debug)]
@@ -230,6 +231,7 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         title: row.get("title")?,
         cwd: row.get("cwd")?,
         model: row.get("model")?,
+        effort: row.get("effort")?,
         issue_id: row.get("issue_id")?,
         status: SessionStatus::parse(&status).unwrap_or(SessionStatus::Idle),
         agent_session: row.get("agent_session")?,
@@ -781,6 +783,15 @@ impl Store {
         db.execute(
             "UPDATE sessions SET model = ?1, updated_at = ?2 WHERE id = ?3",
             params![model, now(), id],
+        )?;
+        Store::changed(&db, "session", id)
+    }
+
+    pub fn set_effort(&self, id: SessionId, effort: Option<&str>) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "UPDATE sessions SET effort = ?1, updated_at = ?2 WHERE id = ?3",
+            params![effort, now(), id],
         )?;
         Store::changed(&db, "session", id)
     }

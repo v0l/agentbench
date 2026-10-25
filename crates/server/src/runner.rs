@@ -368,6 +368,23 @@ impl Runner {
                     None => "this chat now uses the agent's default model".into(),
                 })
             }
+            "thinking" => {
+                let arg = arg.to_lowercase();
+                let effort = Some(arg.as_str()).filter(|e| !e.is_empty());
+                if let Some(e) = effort
+                    && !agentbench_core::EFFORTS.contains(&e)
+                {
+                    return Err(StoreError(format!(
+                        "thinking is one of {}",
+                        agentbench_core::EFFORTS.join(", ")
+                    )));
+                }
+                self.store.set_effort(session.id, effort)?;
+                note(match effort {
+                    Some(e) => format!("this chat now thinks at {e}"),
+                    None => "this chat now thinks as set under agent settings".into(),
+                })
+            }
             "title" => {
                 if !arg.is_empty() {
                     self.store.set_title(
@@ -601,6 +618,7 @@ impl Runner {
             files: &files,
             cwd: &cwd,
             model: session.model.as_deref(),
+            effort: session.effort.as_deref(),
             resume,
             history: &history,
             context: &context,
@@ -1465,6 +1483,13 @@ mod tests {
         runner.send(&fresh(&runner), "/model high").unwrap();
         assert_eq!(fresh(&runner).model.as_deref(), Some("high"));
         runner.send(&fresh(&runner), "/model qwen-big").unwrap();
+
+        runner.send(&fresh(&runner), "/thinking Low").unwrap();
+        assert_eq!(fresh(&runner).effort.as_deref(), Some("low"));
+        assert!(runner.send(&fresh(&runner), "/thinking turbo").is_err());
+        assert_eq!(fresh(&runner).effort.as_deref(), Some("low"));
+        runner.send(&fresh(&runner), "/thinking").unwrap();
+        assert_eq!(fresh(&runner).effort, None);
 
         runner.send(&fresh(&runner), "/compact").unwrap();
         wait_idle(&runner, s.id).await;
