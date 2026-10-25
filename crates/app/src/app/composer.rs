@@ -364,6 +364,13 @@ fn build(s: &Session, f: Fields, short: bool) -> (Built, String) {
         line = line.legend(tag).gap(if short { 4.0 } else { 6.0 }).set(m).size(11.0);
         any = true;
     }
+    let effort = s.effort.as_deref().filter(|e| !e.is_empty()).unwrap_or(&u.effort);
+    if !effort.is_empty() {
+        line = if any { line.gap(if short { 10.0 } else { 14.0 }) } else { line };
+        let tag = if short { "t" } else { "thinking" };
+        line = line.legend(tag).gap(if short { 4.0 } else { 6.0 }).value(effort).size(11.0);
+        any = true;
+    }
     let fill = u.fill();
     if u.context > 0 {
         let tint = match fill {
@@ -409,9 +416,10 @@ fn build(s: &Session, f: Fields, short: bool) -> (Built, String) {
         any = true;
     }
     let tip = format!(
-        "{}{}{}{}",
+        "{}{}{}{}{}",
         if u.host.is_empty() { String::new() } else { format!("server {}\n", u.host) },
         model.map(|m| format!("model {m}\n")).unwrap_or_default(),
+        if effort.is_empty() { String::new() } else { format!("thinking {effort}\n") },
         match (u.context, u.window) {
             (0, _) => "context not reported yet".to_string(),
             (c, 0) => format!("{c} tokens of context; the window is not known"),

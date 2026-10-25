@@ -946,19 +946,16 @@ impl Agent for Native {
                     Err(e) => Err(e),
                     Ok(args) => match name {
                         "switch_model" => {
-                            let switched = switch(
+                            switch(
                                 &base,
                                 &mut model,
+                                chat_effort,
                                 &args,
                                 turn.context,
                                 io,
                                 self.patience.probe,
                             )
-                            .await;
-                            if let Some(effort) = chat_effort {
-                                model.effort = effort.to_string();
-                            }
-                            switched
+                            .await
                         }
                         "read_file" if media::is_audio(&args) && self.speech.is_some() => {
                             let speech = self.speech.clone().unwrap_or_default();
@@ -1059,7 +1056,12 @@ impl Agent for Native {
 /// says the model has, or a default when it does not say.
 async fn serving(model: &Model, probe: Duration) -> Usage {
     let window = window_of(model, probe).await;
-    Usage::serving(model.model.trim(), &agentbench_core::host_of(&model.url), window)
+    Usage::serving(
+        model.model.trim(),
+        &agentbench_core::host_of(&model.url),
+        window,
+        model.effort.trim(),
+    )
 }
 
 /// The windows already found, by server and model.
@@ -1223,6 +1225,7 @@ async fn user_message(text: &str, files: &[super::Attached]) -> Value {
 async fn switch(
     base: &Model,
     model: &mut Model,
+    chat_effort: Option<&str>,
     args: &Value,
     cx: &Context,
     io: &dyn Io,
@@ -1240,6 +1243,10 @@ async fn switch(
         ));
     };
     let name = name.to_lowercase();
+    let mut next = next;
+    if let Some(effort) = chat_effort {
+        next.effort = effort.to_string();
+    }
     if next.model == model.model && next.url == model.url {
         return Ok(format!("already on {name} ({})", next.model));
     }
@@ -3133,6 +3140,10 @@ mod tests {
         };
         native.run(&turn, &io).await.unwrap();
         assert_eq!(asked.recv().unwrap()["reasoning_effort"], "minimal");
+        assert!(
+            io.events().iter().any(|e| matches!(e, Event::Usage(u) if u.effort == "minimal")),
+            "the status line is told the effort"
+        );
     }
 
     #[tokio::test]

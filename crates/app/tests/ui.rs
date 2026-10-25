@@ -284,6 +284,7 @@ fn give_usage(rig: &Rig) -> agentbench_core::Session {
                 window: 128_000,
                 model: "qwen3-coder".into(),
                 host: "gpu.lan:11434".into(),
+                effort: "medium".into(),
                 turns: 1,
                 lsp: vec![
                     lsp("rust", ".", agentbench_core::LspHealth::Ready, ""),

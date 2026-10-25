@@ -92,7 +92,7 @@ impl Decoder for ClaudeDecoder {
                     out.push(Event::Started { agent_session: id.to_string() });
                 }
                 if !self.model.is_empty() {
-                    out.push(Event::Usage(Usage::serving(&self.model, "", 0)));
+                    out.push(Event::Usage(Usage::serving(&self.model, "", 0, "")));
                 }
                 out
             }

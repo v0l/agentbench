@@ -210,6 +210,9 @@ pub struct Usage {
     /// The host of the server that model runs on. Empty for agents that keep that to themselves.
     #[serde(default)]
     pub host: String,
+    /// How hard the model was asked to think. Empty when the server decides.
+    #[serde(default)]
+    pub effort: String,
     /// The language servers behind the agent's code tools, as they were last seen. Like `context`
     /// this is a reading, not a total: a newer one replaces it.
     #[serde(default)]
@@ -264,6 +267,7 @@ impl Usage {
         if !other.model.is_empty() {
             self.model = other.model.clone();
             self.host = other.host.clone();
+            self.effort = other.effort.clone();
         }
         if !other.lsp.is_empty() {
             self.lsp = other.lsp.clone();
@@ -271,8 +275,14 @@ impl Usage {
     }
 
     /// A reading of the model in use, to merge in with `add`.
-    pub fn serving(model: &str, host: &str, window: u64) -> Usage {
-        Usage { model: model.into(), host: host.into(), window, ..Usage::default() }
+    pub fn serving(model: &str, host: &str, window: u64, effort: &str) -> Usage {
+        Usage {
+            model: model.into(),
+            host: host.into(),
+            window,
+            effort: effort.into(),
+            ..Usage::default()
+        }
     }
 
     /// How full the context is, 0.0 to 1.0 and a little beyond when it has overflowed.
