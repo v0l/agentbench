@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 /// Most sessions of a project that may be busy at once before an agent is refused another.
-const BUSY_MAX: usize = 8;
+const BUSY_MAX: usize = 100;
 
 /// The runner the tools start and message sessions through. The runner owns the tools, so it
 /// hands itself over once it is built.
