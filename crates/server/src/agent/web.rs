@@ -1,5 +1,5 @@
 //! `web_search` and `web_fetch`: let an agent look things up on the web and read or download a
-//! page. Search is DuckDuckGo's keyless HTML endpoint; fetch turns a page into readable markdown
+//! page. Search tries DuckDuckGo, Bing and Brave's keyless HTML pages in turn, moving on when one rate limits; fetch turns a page into readable markdown
 //! (no scripts, menus or footers) that the agent can read in pages, or have a small model answer a question about.
 
 use super::files::{self, number};
@@ -14,7 +14,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-const SEARCH_URL: &str = "https://html.duckduckgo.com/html/";
+const DUCKDUCKGO_URL: &str = "https://html.duckduckgo.com/html/";
+const BING_URL: &str = "https://www.bing.com/search";
+const BRAVE_URL: &str = "https://search.brave.com/search";
 const SEARCH_RESULTS: usize = 8;
 const SEARCH_MAX: usize = 20;
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -65,7 +67,7 @@ fn squash(text: &str) -> String {
 
 /// DuckDuckGo wraps each result link in a redirect that carries the real address in `uddg`.
 fn result_url(href: &str) -> Option<String> {
-    let link = Url::parse(SEARCH_URL).ok()?.join(href).ok()?;
+    let link = Url::parse(DUCKDUCKGO_URL).ok()?.join(href).ok()?;
     let target = link
         .query_pairs()
         .find(|(k, _)| k == "uddg")
@@ -75,12 +77,10 @@ fn result_url(href: &str) -> Option<String> {
     matches!(target.scheme(), "http" | "https").then(|| target.to_string())
 }
 
-pub fn parse_results(page: &str) -> Result<Vec<Hit>, String> {
+pub fn parse_duckduckgo(page: &str) -> Result<Vec<Hit>, String> {
     let doc = Html::parse_document(page);
     if doc.select(&sel(".anomaly-modal__box, #challenge-form")).next().is_some() {
-        return Err("DuckDuckGo asked for a bot check and is rate limiting; wait a minute, or \
-                    fetch a search page you know with web_fetch"
-            .into());
+        return Err("DuckDuckGo asked for a bot check and is rate limiting".into());
     }
     let (result, link, snippet) = (sel(".result"), sel(".result__a"), sel(".result__snippet"));
     let mut hits = Vec::new();
@@ -98,6 +98,165 @@ pub fn parse_results(page: &str) -> Result<Vec<Hit>, String> {
         hits.push(Hit { title, url, snippet: snippet.unwrap_or_default() });
     }
     Ok(hits)
+}
+
+fn bing_target(href: &str) -> Option<String> {
+    use base64::Engine;
+    let link = Url::parse(href).ok()?;
+    let Some((_, encoded)) = link.query_pairs().find(|(k, _)| k == "u") else {
+        return matches!(link.scheme(), "http" | "https").then(|| link.to_string());
+    };
+    let raw = encoded.strip_prefix("a1")?;
+    let bytes =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw.trim_end_matches('=')).ok()?;
+    let target = Url::parse(&String::from_utf8(bytes).ok()?).ok()?;
+    matches!(target.scheme(), "http" | "https").then(|| target.to_string())
+}
+
+pub fn parse_bing(page: &str) -> Result<Vec<Hit>, String> {
+    let doc = Html::parse_document(page);
+    let (result, link, snippet) =
+        (sel("li.b_algo"), sel("h2 a"), sel(".b_caption p, p.b_lineclamp2, .b_algoSlug"));
+    let mut hits = Vec::new();
+    for r in doc.select(&result) {
+        let Some(a) = r.select(&link).next() else { continue };
+        let title = squash(&a.text().collect::<String>());
+        let Some(url) = a.value().attr("href").and_then(bing_target) else { continue };
+        if title.is_empty() {
+            continue;
+        }
+        let text = r
+            .select(&snippet)
+            .next()
+            .map(|s| squash(&s.text().collect::<String>()))
+            .unwrap_or_default();
+        let text = text.strip_suffix("Read more").unwrap_or(&text).trim().to_string();
+        hits.push(Hit { title, url, snippet: text });
+    }
+    Ok(hits)
+}
+
+pub fn parse_brave(page: &str) -> Result<Vec<Hit>, String> {
+    let doc = Html::parse_document(page);
+    let (result, link, title, snippet) = (
+        sel(r#".snippet[data-type="web"]"#),
+        sel(".result-content > a[href]"),
+        sel(".title"),
+        sel(".generic-snippet .content"),
+    );
+    let mut hits = Vec::new();
+    for r in doc.select(&result) {
+        let Some(a) = r.select(&link).next() else { continue };
+        let Some(url) = a
+            .value()
+            .attr("href")
+            .filter(|h| h.starts_with("http://") || h.starts_with("https://"))
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let name = a
+            .select(&title)
+            .next()
+            .map(|t| squash(&t.text().collect::<String>()))
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        let text = r.select(&snippet).next().map(|s| squash(&s.text().collect::<String>()));
+        hits.push(Hit { title: name, url, snippet: text.unwrap_or_default() });
+    }
+    Ok(hits)
+}
+
+pub struct Engine {
+    pub name: &'static str,
+    pub url: String,
+    pub query_key: &'static str,
+    pub extra: &'static [(&'static str, &'static str)],
+    pub parse: fn(&str) -> Result<Vec<Hit>, String>,
+}
+
+pub fn engines() -> Vec<Engine> {
+    vec![
+        Engine {
+            name: "DuckDuckGo",
+            url: DUCKDUCKGO_URL.into(),
+            query_key: "q",
+            extra: &[],
+            parse: parse_duckduckgo,
+        },
+        Engine {
+            name: "Bing",
+            url: BING_URL.into(),
+            query_key: "q",
+            extra: &[("setlang", "en")],
+            parse: parse_bing,
+        },
+        Engine {
+            name: "Brave",
+            url: BRAVE_URL.into(),
+            query_key: "q",
+            extra: &[],
+            parse: parse_brave,
+        },
+    ]
+}
+
+async fn ask_engine(engine: &Engine, query: &str) -> Result<Vec<Hit>, String> {
+    let mut url = Url::parse(&engine.url).map_err(|e| e.to_string())?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair(engine.query_key, query);
+        for (k, v) in engine.extra {
+            pairs.append_pair(k, v);
+        }
+    }
+    let resp = crate::http::client()
+        .get(url)
+        .header("Accept", "text/html")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("User-Agent", BROWSER)
+        .timeout(READ_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| format!("{} failed: {}", engine.name, client_error(e)))?;
+    let status = resp.status();
+    if matches!(status.as_u16(), 202 | 403 | 429) {
+        return Err(format!("{} is rate limiting ({status})", engine.name));
+    }
+    let body = resp.text().await.map_err(client_error)?;
+    if !status.is_success() {
+        return Err(format!("{} failed: {status}", engine.name));
+    }
+    (engine.parse)(&body).map_err(|e| format!("{}: {e}", engine.name))
+}
+
+pub async fn search_with(
+    engines: &[Engine],
+    query: &str,
+    domains: &[String],
+    want: usize,
+) -> Result<Vec<Hit>, String> {
+    let mut failures = Vec::new();
+    let mut answered = false;
+    for engine in engines {
+        match ask_engine(engine, query).await {
+            Ok(hits) => {
+                answered = true;
+                let hits: Vec<Hit> = filter_domains(hits, domains).into_iter().take(want).collect();
+                if !hits.is_empty() {
+                    return Ok(hits);
+                }
+            }
+            Err(e) => failures.push(e),
+        }
+    }
+    if answered {
+        Ok(Vec::new())
+    } else {
+        Err(format!("every search engine failed: {}", failures.join("; ")))
+    }
 }
 
 fn host_matches(url: &str, domain: &str) -> bool {
@@ -158,30 +317,7 @@ pub async fn search(args: &Value, stop: &CancellationToken) -> Result<String, St
         .filter(|n| *n > 0)
         .unwrap_or(SEARCH_RESULTS)
         .min(SEARCH_MAX);
-    let mut search_url = Url::parse(SEARCH_URL).map_err(|e| e.to_string())?;
-    search_url.query_pairs_mut().append_pair("q", query);
-    let page = until_stopped(stop, async {
-        let resp = crate::http::client()
-            .get(search_url)
-            .header("Accept", "text/html")
-            .header("User-Agent", BROWSER)
-            .timeout(READ_TIMEOUT)
-            .send()
-            .await
-            .map_err(|e| format!("search failed: {}", client_error(e)))?;
-        let status = resp.status();
-        if status.as_u16() == 202 {
-            return Err("DuckDuckGo is rate limiting; wait a minute and try again".into());
-        }
-        let body = resp.text().await.map_err(client_error)?;
-        if !status.is_success() {
-            return Err(format!("search failed: {status}"));
-        }
-        Ok(body)
-    })
-    .await?;
-    let hits = filter_domains(parse_results(&page)?, &domains);
-    let hits: Vec<Hit> = hits.into_iter().take(want).collect();
+    let hits = until_stopped(stop, search_with(&engines(), query, &domains, want)).await?;
     Ok(format_hits(query, &hits))
 }
 
@@ -636,7 +772,7 @@ mod tests {
 
     #[test]
     fn search_results_are_read_from_duckduckgo_html() {
-        let hits = parse_results(DDG).unwrap();
+        let hits = parse_duckduckgo(DDG).unwrap();
         assert_eq!(
             hits,
             vec![
@@ -658,13 +794,15 @@ mod tests {
         ));
         assert!(format_hits("zzz", &[]).starts_with("no results for \"zzz\""));
         assert!(
-            parse_results(r#"<div id="challenge-form"></div>"#).unwrap_err().contains("bot check")
+            parse_duckduckgo(r#"<div id="challenge-form"></div>"#)
+                .unwrap_err()
+                .contains("bot check")
         );
     }
 
     #[test]
     fn domains_keep_or_drop_sites() {
-        let hits = || parse_results(DDG).unwrap();
+        let hits = || parse_duckduckgo(DDG).unwrap();
         let only = filter_domains(hits(), &["github.com".into()]);
         assert_eq!(only.len(), 1);
         assert_eq!(only[0].title, "rust-lang/rust");
@@ -867,6 +1005,128 @@ mod tests {
         assert!(err.contains("no title model"), "{err}");
         let save = json!({"url": format!("{site}/page"), "prompt": "x", "save_to": "x"});
         assert!(fetch(&save, &ws, Some(&titles), &stop).await.unwrap_err().contains("save_to"));
+    }
+
+    const BING: &str = r#"<html><body><ol id="b_results">
+      <li class="b_algo"><div class="b_tpcn"><a class="tilk" href="https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw&ntb=1">icon</a></div>
+        <h2><a href="https://www.bing.com/ck/a?!&&p=x&u=a1aHR0cHM6Ly9ydXN0LWxhbmcub3JnLw&ntb=1"><strong>Rust</strong> Programming Language</a></h2>
+        <div class="b_caption"><p class="b_lineclamp2">Rust is fast.<a class="b_algoReadMore" href="x">Read more</a></p></div></li>
+      <li class="b_algo"><h2><a href="https://serde.rs/">Serde</a></h2></li>
+      <li class="b_ad"><h2><a href="https://ads.example">Ad</a></h2></li>
+    </ol></body></html>"#;
+
+    const BRAVE: &str = r#"<html><body>
+      <div class="snippet" data-type="web"><div class="result-content"><a href="https://serde.rs/"><cite>serde.rs</cite>
+        <div class="title search-snippet-title" title="Overview">Overview &middot; Serde</div></a>
+        <div class="generic-snippet"><div class="content">Serde is <strong>a framework</strong>.</div></div></div></div>
+      <div class="snippet" data-type="news"><div class="result-content"><a href="https://news.example/"><div class="title">News</div></a></div></div>
+    </body></html>"#;
+
+    #[test]
+    fn bing_results_are_read_with_their_real_addresses() {
+        let hits = parse_bing(BING).unwrap();
+        assert_eq!(
+            hits,
+            vec![
+                Hit {
+                    title: "Rust Programming Language".into(),
+                    url: "https://rust-lang.org/".into(),
+                    snippet: "Rust is fast.".into(),
+                },
+                Hit {
+                    title: "Serde".into(),
+                    url: "https://serde.rs/".into(),
+                    snippet: String::new()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn brave_results_are_read_from_web_snippets() {
+        let hits = parse_brave(BRAVE).unwrap();
+        assert_eq!(
+            hits,
+            vec![Hit {
+                title: "Overview \u{b7} Serde".into(),
+                url: "https://serde.rs/".into(),
+                snippet: "Serde is a framework.".into(),
+            }]
+        );
+    }
+
+    fn engine(
+        name: &'static str,
+        url: String,
+        parse: fn(&str) -> Result<Vec<Hit>, String>,
+    ) -> Engine {
+        Engine { name, url, query_key: "q", extra: &[], parse }
+    }
+
+    #[tokio::test]
+    async fn search_moves_to_the_next_engine_when_one_is_rate_limited() {
+        let site = serve(vec![("/ok?q=rust", "text/html", DDG.as_bytes().to_vec())]).await;
+        let engines = vec![
+            engine("First", format!("{site}/limited"), parse_duckduckgo),
+            engine("Second", format!("{site}/ok"), parse_duckduckgo),
+        ];
+        let hits = search_with(&engines, "rust", &[], 8).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].title, "The Rust Programming Language");
+    }
+
+    #[tokio::test]
+    async fn search_moves_on_when_an_engine_shows_a_bot_check() {
+        let site = serve(vec![
+            ("/bot?q=rust", "text/html", br#"<div id="challenge-form"></div>"#.to_vec()),
+            ("/ok?q=rust", "text/html", DDG.as_bytes().to_vec()),
+        ])
+        .await;
+        let engines = vec![
+            engine("First", format!("{site}/bot"), parse_duckduckgo),
+            engine("Second", format!("{site}/ok"), parse_duckduckgo),
+        ];
+        assert_eq!(search_with(&engines, "rust", &[], 8).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_reports_every_engine_when_all_fail() {
+        let site = serve(vec![]).await;
+        let engines = vec![
+            engine("First", format!("{site}/a"), parse_duckduckgo),
+            engine("Second", format!("{site}/b"), parse_duckduckgo),
+        ];
+        let err = search_with(&engines, "rust", &[], 8).await.unwrap_err();
+        assert!(err.contains("First") && err.contains("Second"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn search_with_no_matches_is_an_empty_answer_not_an_error() {
+        let site = serve(vec![("/ok?q=rust", "text/html", DDG.as_bytes().to_vec())]).await;
+        let engines = vec![engine("Only", format!("{site}/ok"), parse_duckduckgo)];
+        let hits = search_with(&engines, "rust", &["nowhere.example".into()], 8).await.unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "reaches the internet"]
+    async fn live_most_engines_answer() {
+        let mut answered = 0;
+        for e in engines() {
+            match ask_engine(&e, "rust serde").await {
+                Ok(hits) => {
+                    println!("{}: {} hits, first {:?}", e.name, hits.len(), hits.first());
+                    assert!(hits.len() >= 3, "{} gave {}", e.name, hits.len());
+                    assert!(
+                        hits.iter()
+                            .all(|h| h.url.starts_with("http") && !h.url.contains("bing.com/ck"))
+                    );
+                    answered += 1;
+                }
+                Err(err) => println!("{}: {err}", e.name),
+            }
+        }
+        assert!(answered >= 2);
     }
 
     #[tokio::test]
