@@ -36,6 +36,7 @@ impl App {
                 low: Default::default(),
                 medium: Default::default(),
                 high: Default::default(),
+                effort: String::new(),
             },
             loaded: false,
             models: None,
@@ -218,6 +219,9 @@ impl App {
                             ui.add(egui::DragValue::new(&mut st.model.compact_at).range(0..=100).suffix("%"));
                         },
                     );
+                    row_help(ui, "thinking", EFFORT_HELP, |ui| {
+                        effort_input(ui, "effort-main", &mut st.model.effort, "server default");
+                    });
                     match &st.models {
                         Some(Err(e)) => status(ui, false, e),
                         Some(Ok(l)) => status(ui, true, &format!("{} models on the server", l.len())),
@@ -251,6 +255,9 @@ impl App {
                                     field(ui, &mut level.url, &own);
                                 },
                             );
+                            row_help(ui, "  thinking", EFFORT_HELP, |ui| {
+                                effort_input(ui, &format!("effort-{name}"), &mut level.effort, "same as the agent");
+                            });
                             if !level.url.trim().is_empty() {
                                 let explain = if level.has_key {
                                     "A key is saved; leave this empty to keep it."
@@ -657,6 +664,14 @@ pub(super) fn speech_section(
         ui,
         "The speak key beside send records from the default microphone until you press it again, then adds what you said to the message. Nothing is sent until you send it.",
     );
+}
+
+const EFFORT_HELP: &str = "How hard the model thinks, sent as reasoning_effort. Lower is faster and keeps long thinking from stalling a turn. Empty leaves it to the server.";
+
+fn effort_input(ui: &mut Ui, id: &str, picked: &mut String, unset: &str) {
+    let options = std::iter::once((String::new(), unset.to_string()))
+        .chain(agentbench_core::EFFORTS.iter().map(|e| (e.to_string(), e.to_string())));
+    choice_fit(ui, id, picked, options);
 }
 
 /// `choice`, but a long label is cut to the width of the box instead of widening it past the dialog.

@@ -44,6 +44,9 @@ pub struct Model {
     pub medium: Level,
     #[serde(default)]
     pub high: Level,
+    /// How hard the model thinks, sent as `reasoning_effort`. Empty leaves it to the server.
+    #[serde(default)]
+    pub effort: String,
 }
 
 /// One rung of the ladder. A level with no model is not set up. One with no
@@ -57,6 +60,9 @@ pub struct Level {
     pub model: String,
     #[serde(default)]
     pub key: String,
+    /// Empty uses the native agent's own effort.
+    #[serde(default)]
+    pub effort: String,
 }
 
 fn default_compact_at() -> u64 {
@@ -85,6 +91,7 @@ impl Default for Model {
             low: Level::default(),
             medium: Level::default(),
             high: Level::default(),
+            effort: String::new(),
         }
     }
 }
@@ -103,6 +110,9 @@ impl Model {
         let model = own(&level.model)?;
         let mut out = self.clone();
         out.model = model;
+        if let Some(effort) = own(&level.effort) {
+            out.effort = effort;
+        }
         if let Some(url) = own(&level.url) {
             out.url = url;
             out.key = level.key.trim().to_string();
@@ -1272,13 +1282,17 @@ async fn complete(
     patience: Patience,
     io: &dyn Io,
 ) -> Result<Reply, String> {
-    let body = json!({
+    let mut body = json!({
         "model": model.model.trim(),
         "messages": messages,
         "tools": tools,
         "stream": true,
         "stream_options": { "include_usage": true },
     });
+    let effort = model.effort.trim();
+    if !effort.is_empty() {
+        body["reasoning_effort"] = json!(effort);
+    }
     let mut attempt = 0;
     loop {
         let failure = match attempt_once(model, &body, patience, io).await {
@@ -2962,7 +2976,12 @@ mod tests {
             model: "mid".into(),
             key: "secret".into(),
             low: Level { model: "tiny".into(), ..Level::default() },
-            high: Level { url: "http://big/v1".into(), model: "huge".into(), key: "other".into() },
+            high: Level {
+                url: "http://big/v1".into(),
+                model: "huge".into(),
+                key: "other".into(),
+                effort: String::new(),
+            },
             ..Model::default()
         };
         let low = m.level("LOW").unwrap();
@@ -2979,7 +2998,12 @@ mod tests {
         assert!(m.level("tiny").is_none());
         // A server of its own without a key does not get the native agent's key.
         let bare = Model {
-            high: Level { url: "http://big/v1".into(), model: "x".into(), key: String::new() },
+            high: Level {
+                url: "http://big/v1".into(),
+                model: "x".into(),
+                key: String::new(),
+                effort: String::new(),
+            },
             ..m.clone()
         };
         assert_eq!(bare.level("high").unwrap().key, "");
@@ -3000,6 +3024,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_thinking_effort_is_sent_and_a_level_can_override_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("a")], vec![say("b")]]);
+        let model = Model {
+            url,
+            model: "m".into(),
+            effort: "low".into(),
+            high: Level { model: "big".into(), effort: "high".into(), ..Level::default() },
+            ..Model::default()
+        };
+        let native = Native::new(model.clone());
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        assert_eq!(asked.recv().unwrap()["reasoning_effort"], "low");
+        assert_eq!(model.choose("high").effort, "high");
+        assert_eq!(model.choose("medium").effort, "low");
+    }
+
+    #[tokio::test]
+    async fn no_effort_leaves_reasoning_effort_out_of_the_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("a")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        assert!(asked.recv().unwrap().get("reasoning_effort").is_none());
+    }
+
+    #[tokio::test]
     async fn the_agent_can_switch_to_a_higher_model_on_another_server_mid_turn() {
         let dir = tempfile::tempdir().unwrap();
         let (big_url, big_asked) = stub(vec![vec![say("solved")]]);
@@ -3011,7 +3064,12 @@ mod tests {
         let native = Native::new(Model {
             url,
             model: "m".into(),
-            high: Level { url: big_url, model: "big".into(), key: String::new() },
+            high: Level {
+                url: big_url,
+                model: "big".into(),
+                key: String::new(),
+                effort: String::new(),
+            },
             ..Model::default()
         });
         let io = TestIo::new(Arc::new(FakeApi));

@@ -318,6 +318,7 @@ fn level_masked(l: &crate::agent::native::Level) -> agentbench_core::LevelSettin
         model: l.model.clone(),
         key: String::new(),
         has_key: !l.key.trim().is_empty(),
+        effort: l.effort.clone(),
     }
 }
 
@@ -332,6 +333,7 @@ fn masked(m: &crate::agent::native::Model) -> agentbench_core::ModelSettings {
         low: level_masked(&m.low),
         medium: level_masked(&m.medium),
         high: level_masked(&m.high),
+        effort: m.effort.clone(),
     }
 }
 
@@ -352,7 +354,17 @@ fn level_merged(
     } else {
         String::new()
     };
-    crate::agent::native::Level { url, model: new.model.trim().to_string(), key }
+    crate::agent::native::Level {
+        url,
+        model: new.model.trim().to_string(),
+        key,
+        effort: clean_effort(&new.effort),
+    }
+}
+
+fn clean_effort(effort: &str) -> String {
+    let effort = effort.trim().to_lowercase();
+    if agentbench_core::EFFORTS.contains(&effort.as_str()) { effort } else { String::new() }
 }
 
 async fn get_model(State(api): State<Api>) -> Reply<agentbench_core::ModelSettings> {
@@ -377,6 +389,7 @@ async fn put_model(
         m.steps = new.steps.min(100_000);
     }
     m.compact_at = new.compact_at.min(100);
+    m.effort = clean_effort(&new.effort);
     m.low = level_merged(&m.low, &new.low);
     m.medium = level_merged(&m.medium, &new.medium);
     m.high = level_merged(&m.high, &new.high);
@@ -1154,6 +1167,16 @@ mod tests {
         assert_eq!(shared.get().high.key, "");
         let saved = f.api.runner.store().setting("model").unwrap().unwrap();
         assert!(saved.contains("huger"));
+        let mut efforts = base.clone();
+        efforts["effort"] = json!("Low");
+        efforts["high"] = json!({"model": "huger", "effort": "medium"});
+        efforts["low"] = json!({"model": "tiny", "effort": "turbo"});
+        let (s, m) = put(efforts).await;
+        assert_eq!(s, StatusCode::OK, "{m}");
+        assert_eq!(m["effort"], "low");
+        assert_eq!(m["high"]["effort"], "medium");
+        assert_eq!(m["low"]["effort"], "", "an unknown effort is dropped");
+        assert_eq!(shared.get().level("high").unwrap().effort, "medium");
     }
 
     #[tokio::test]

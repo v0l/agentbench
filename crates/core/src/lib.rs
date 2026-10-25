@@ -498,6 +498,9 @@ pub struct ModelSettings {
     pub medium: LevelSettings,
     #[serde(default)]
     pub high: LevelSettings,
+    /// How hard the model thinks. Empty leaves it to the server.
+    #[serde(default)]
+    pub effort: String,
 }
 
 /// One rung of the model ladder: a cheap model for mechanical work, a stronger
@@ -512,7 +515,12 @@ pub struct LevelSettings {
     pub key: String,
     #[serde(default)]
     pub has_key: bool,
+    /// Empty uses the native agent's own effort.
+    #[serde(default)]
+    pub effort: String,
 }
+
+pub const EFFORTS: [&str; 6] = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
 /// The host part of a server address: `http://user@gpu.lan:11434/v1` is `gpu.lan:11434`.
 pub fn host_of(url: &str) -> String {
