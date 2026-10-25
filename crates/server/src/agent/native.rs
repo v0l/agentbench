@@ -20,7 +20,9 @@ const HEADERS: Duration = Duration::from_secs(90);
 /// connection is dead and the request is sent again.
 const STALL: Duration = Duration::from_secs(45);
 const BASH_DEFAULT: u64 = 120;
-const BASH_MAX: u64 = 900;
+const BASH_MAX: u64 = 600;
+/// The longest any one tool call may run before it is given up on.
+const TOOL_LIMIT: Duration = Duration::from_secs(600);
 const OUTPUT_MAX: usize = 30_000;
 /// How long output is read after the shell exits. A background job that keeps the pipes open
 /// (a dev server) would otherwise hold the call until it died.
@@ -194,13 +196,14 @@ pub struct Patience {
     /// How long to ask a server what window its model has before assuming the default.
     /// Zero does not ask.
     pub probe: Duration,
+    pub tool: Duration,
 }
 
 impl Default for Patience {
     fn default() -> Self {
         // The stub servers in tests answer one request per reply, so they are not probed.
         let probe = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(4) };
-        Patience { headers: HEADERS, stall: STALL, probe }
+        Patience { headers: HEADERS, stall: STALL, probe, tool: TOOL_LIMIT }
     }
 }
 
@@ -242,7 +245,7 @@ pub const AGENTBENCH_TOOLS: [&str; 16] = [
 
 /// How long `wait_for_session` waits when not told, and the longest it may.
 const WAIT_DEFAULT: u64 = 300;
-const WAIT_MAX: u64 = 3600;
+const WAIT_MAX: u64 = 540;
 /// How long `bash_output` waits for something new when not told, and the longest it may.
 const OUTPUT_WAIT: u64 = 0;
 const OUTPUT_WAIT_MAX: u64 = 60;
@@ -348,7 +351,7 @@ fn agentbench_specs() -> Vec<Spec> {
             object(
                 json!({
                     "id": string("The session id"),
-                    "timeout_s": id("Seconds to wait, default 300, at most 3600"),
+                    "timeout_s": id("Seconds to wait, default 300, at most 540; call it again to keep waiting"),
                 }),
                 &["id"],
             ),
@@ -478,7 +481,7 @@ fn bash_spec() -> Spec {
         object(
             json!({
                 "command": string("The command line, run by bash -c"),
-                "timeout_s": { "type": "integer", "description": "Seconds before it is killed, default 120, at most 900" },
+                "timeout_s": { "type": "integer", "description": "Seconds before it is killed, default 120, at most 600" },
                 "background": { "type": "boolean", "description": "Start it and answer at once with a handle, for a dev server, a watcher or a long build. Read it with bash_output and stop it with bash_kill. Needs no timeout" },
             }),
             &["command"],
@@ -946,9 +949,10 @@ impl Agent for Native {
                     input: input.clone(),
                 });
                 let name = files::canonical(&call.name);
+                let limit = if name == "ask_user" { Duration::MAX } else { self.patience.tool };
                 let result = match parsed {
                     Err(e) => Err(e),
-                    Ok(args) => match name {
+                    Ok(args) => tokio::time::timeout(limit, async { match name {
                         "switch_model" => {
                             switch(
                                 &base,
@@ -987,7 +991,14 @@ impl Agent for Native {
                             })
                         }
                         _ => self.tool(name, &args, &workspace, turn.context, io).await,
-                    },
+                    } })
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(format!(
+                            "{name} was stopped after {} minutes; run long work with bash background:true and read it with bash_output",
+                            limit.as_secs() / 60
+                        ))
+                    }),
                 };
                 if result.is_ok()
                     && matches!(name, "write_file" | "edit_file")
@@ -1965,6 +1976,19 @@ mod tests {
         }
     }
 
+    struct HangingApi;
+
+    impl Api for HangingApi {
+        fn call(
+            &self,
+            _tool: &str,
+            _args: &Value,
+            _session: agentbench_core::SessionId,
+        ) -> Result<Value, String> {
+            Ok(json!({ "busy": true }))
+        }
+    }
+
     fn stub(replies: Vec<Vec<Value>>) -> (String, std::sync::mpsc::Receiver<Value>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         stub_on(listener, replies)
@@ -2892,6 +2916,7 @@ mod tests {
                 headers: Duration::from_millis(400),
                 stall: Duration::from_millis(400),
                 probe: Duration::ZERO,
+                tool: Duration::from_secs(600),
             },
             ..Native::new(Model { url, model: "m".into(), ..Model::default() })
         }
@@ -3049,6 +3074,41 @@ mod tests {
         let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
         assert_eq!(e, "stopped");
         assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_that_runs_past_the_limit_is_stopped_and_the_turn_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _) = stub(vec![
+            vec![call("c1", "wait_for_session", json!({"id": "nobody", "timeout_s": 30}))],
+            vec![say("moved on")],
+        ]);
+        let native = Native {
+            patience: Patience {
+                tool: Duration::from_millis(300),
+                ..impatient(url.clone()).patience
+            },
+            ..Native::new(Model { url, model: "m".into(), ..Model::default() })
+        };
+        let io = TestIo::new(Arc::new(HangingApi));
+        let started = Instant::now();
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let events = io.events();
+        let ended = events.iter().find_map(|e| match e {
+            Event::ToolEnd { output, error, .. } => Some((output.clone(), *error)),
+            _ => None,
+        });
+        let (output, error) = ended.expect("the call ended");
+        assert!(error && output.contains("was stopped after"), "{output}");
+        assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "moved on")));
+    }
+
+    #[test]
+    fn no_wait_can_outlast_the_tool_limit() {
+        assert!(Duration::from_secs(WAIT_MAX) < TOOL_LIMIT);
+        assert!(Duration::from_secs(BASH_MAX) <= TOOL_LIMIT);
+        assert_eq!(Patience::default().tool, TOOL_LIMIT);
     }
 
     #[test]
