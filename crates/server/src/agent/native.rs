@@ -1299,6 +1299,20 @@ async fn complete(
             Ok(reply) => return Ok(reply),
             Err(Failure::Fatal(e)) => return Err(e),
             Err(Failure::Transient(e)) => e,
+            Err(Failure::Truncated) => {
+                let current = body.get("reasoning_effort").and_then(Value::as_str).unwrap_or("");
+                match calmer(current) {
+                    Some(next) if attempt < RETRIES => {
+                        attempt += 1;
+                        body["reasoning_effort"] = json!(next);
+                        io.emit(Event::Notice(format!(
+                            "the model ran out of output while thinking; sending the request again with thinking at {next} ({attempt}/{RETRIES})"
+                        )));
+                        continue;
+                    }
+                    _ => return Err(OUTPUT_LIMIT.into()),
+                }
+            }
         };
         if io.stopped() {
             return Err("stopped".into());
@@ -1325,6 +1339,20 @@ enum Failure {
     Transient(String),
     /// The server answered with a refusal, or the user stopped the turn.
     Fatal(String),
+    /// The reply ran into the server's output limit, usually because thinking used it all.
+    Truncated,
+}
+
+const OUTPUT_LIMIT: &str = "the model hit its output limit before it finished, even with less thinking; raise the limit on the server";
+
+fn calmer(effort: &str) -> Option<&'static str> {
+    match effort {
+        "" | "xhigh" => Some("medium"),
+        "high" => Some("medium"),
+        "medium" => Some("low"),
+        "low" => Some("minimal"),
+        _ => None,
+    }
 }
 
 async fn attempt_once(
@@ -1717,9 +1745,7 @@ where
 
 fn check_complete(done: bool, reply: Reply) -> Result<Reply, Failure> {
     if reply.finish.as_deref() == Some("length") {
-        return Err(Failure::Fatal(
-            "the model hit its output limit before it finished; ask it to carry on, or raise the limit on the server".into(),
-        ));
+        return Err(Failure::Truncated);
     }
     if !done && reply.finish.is_none() {
         return Err(Failure::Transient(
@@ -2884,9 +2910,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reply_that_thinks_past_the_output_limit_is_sent_again_with_less_thinking() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![
+            vec![thought("a very long plan"), finished("length")],
+            vec![thought("a shorter plan"), finished("length")],
+            vec![say("done")],
+        ]);
+        let native = Native::new(Model {
+            url,
+            model: "m".into(),
+            effort: "high".into(),
+            ..Model::default()
+        });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        assert_eq!(asked.recv().unwrap()["reasoning_effort"], "high");
+        assert_eq!(asked.recv().unwrap()["reasoning_effort"], "medium");
+        assert_eq!(asked.recv().unwrap()["reasoning_effort"], "low");
+        assert!(io.events().iter().any(|e| matches!(e, Event::Text { delta } if delta == "done")));
+    }
+
+    #[tokio::test]
     async fn running_out_of_output_tokens_is_an_error_not_a_quiet_stop() {
         let dir = tempfile::tempdir().unwrap();
-        let (url, _) = stub(vec![vec![thought("a very long plan"), finished("length")]]);
+        let (url, _) = stub(vec![vec![thought("a very long plan"), finished("length")]; 4]);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
         let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
