@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -21,6 +22,9 @@ const STALL: Duration = Duration::from_secs(45);
 const BASH_DEFAULT: u64 = 120;
 const BASH_MAX: u64 = 900;
 const OUTPUT_MAX: usize = 30_000;
+/// How long output is read after the shell exits. A background job that keeps the pipes open
+/// (a dev server) would otherwise hold the call until it died.
+const PIPE_GRACE: Duration = Duration::from_millis(500);
 /// How many times a request that stalled, timed out or never connected is sent again.
 const RETRIES: u32 = 3;
 
@@ -1883,16 +1887,24 @@ async fn bash(
     let started = Instant::now();
     let mut child = cmd.spawn().map_err(|e| format!("bash: {e}"))?;
     let read = |pipe: Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>| {
-        tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut buf).await;
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let shared = buf.clone();
+        let task = tokio::spawn(async move {
+            let Some(mut p) = pipe else { return };
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = p.read(&mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut b) = shared.lock() {
+                    b.extend_from_slice(&chunk[..n]);
+                }
             }
-            buf
-        })
+        });
+        (task, buf)
     };
-    let out = read(child.stdout.take().map(|p| Box::new(p) as _));
-    let err = read(child.stderr.take().map(|p| Box::new(p) as _));
+    let (out_task, out_buf) = read(child.stdout.take().map(|p| Box::new(p) as _));
+    let (err_task, err_buf) = read(child.stderr.take().map(|p| Box::new(p) as _));
     let status = tokio::select! {
         s = child.wait() => s.ok(),
         _ = tokio::time::sleep(limit) => None,
@@ -1905,8 +1917,16 @@ async fn bash(
         }
         let _ = child.kill().await;
     }
-    let mut text = String::from_utf8_lossy(&out.await.unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&err.await.unwrap_or_default()).into_owned();
+    let drained = |task: tokio::task::JoinHandle<()>, buf: Arc<std::sync::Mutex<Vec<u8>>>| async move {
+        let mut task = task;
+        if tokio::time::timeout(PIPE_GRACE, &mut task).await.is_err() {
+            task.abort();
+        }
+        let bytes = buf.lock().map(|b| b.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let mut text = drained(out_task, out_buf).await;
+    let stderr = drained(err_task, err_buf).await;
     if !stderr.is_empty() {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
@@ -2596,6 +2616,23 @@ mod tests {
         assert!(slow.contains("killed after 1s"), "{slow}");
     }
 
+    #[tokio::test]
+    async fn bash_returns_when_a_background_job_keeps_the_pipes_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = TestIo::new(Arc::new(FakeApi));
+        let c = context();
+        let started = Instant::now();
+        let ran = tokio::time::timeout(
+            Duration::from_secs(10),
+            bash(dir.path(), "echo before; cd . && sleep 6 & echo after", None, &c, &io),
+        )
+        .await
+        .expect("bash waited for a background job that outlived it")
+        .unwrap();
+        assert!(ran.contains("before") && ran.contains("after"), "{ran}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
     #[test]
     fn the_window_is_found_under_whatever_name_a_server_uses() {
         assert_eq!(window_in(&json!({"id": "m", "max_model_len": 32768})), Some(32768));
@@ -2892,8 +2929,24 @@ mod tests {
         std::thread::spawn(move || {
             for _ in 0..cuts {
                 let Ok((mut s, _)) = listener.accept() else { return };
-                let mut buf = [0u8; 65536];
-                let _ = s.read(&mut buf);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if s.read(&mut byte).unwrap_or(0) != 1 {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let length = String::from_utf8_lossy(&head)
+                    .lines()
+                    .find_map(|l| {
+                        l.to_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0u8; length];
+                let _ = s.read_exact(&mut body);
                 let mut sse = String::new();
                 for e in &events {
                     sse.push_str(&format!("data: {e}\n\n"));
