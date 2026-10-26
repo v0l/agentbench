@@ -779,6 +779,52 @@ pub fn system(turn: &Turn, base: &Model) -> String {
     out
 }
 
+fn current_level(base: &Model, model: &Model) -> Option<&'static str> {
+    levels(base)
+        .into_iter()
+        .find(|l| base.level(l).is_some_and(|m| m.model == model.model && m.url == model.url))
+}
+
+fn model_levels_section(base: &Model, model: &Model) -> String {
+    let set = levels(base);
+    if set.len() < 2 {
+        return String::new();
+    }
+    let on = current_level(base, model);
+    let lines: Vec<String> = set
+        .iter()
+        .map(|l| {
+            let m = base.level(l).map(|m| m.model).unwrap_or_default();
+            let here = if Some(*l) == on { " (you are on this one)" } else { "" };
+            format!("- {l}: {m}{here}")
+        })
+        .collect();
+    section(
+        "model_levels",
+        &format!(
+            "You can change the model you run on with switch_model, and the change lasts for the rest of the chat:\n{}\n\
+             Pick the level the work needs and move as it changes. Go up to the highest level before designing something new, \
+             planning a large change, or when the same fix has failed twice. Come down to the lowest for mechanical work: \
+             renames, formatting, moving code, reading and summarising files, running builds and tests, writing docs. \
+             Switch before you start a stretch of work, not after it.",
+            lines.join("\n")
+        ),
+    )
+}
+
+fn struggling_hint(base: &Model, model: &Model) -> Option<String> {
+    let set = levels(base);
+    let on = current_level(base, model)?;
+    let top = set.last()?;
+    (on != *top).then(|| {
+        format!(
+            "hint: several tool calls in a row have failed. If you are stuck, switch_model to {top} for this."
+        )
+    })
+}
+
+const STRUGGLE: usize = 3;
+
 fn code_section(languages: &[String]) -> String {
     if languages.is_empty() {
         return String::new();
@@ -980,8 +1026,11 @@ impl Agent for Native {
             if turn.context.home { Vec::new() } else { self.usable_languages(workspace.root()) };
         let mut prompt = system(turn, &base);
         prompt.push_str(&code_section(&languages));
+        prompt.push_str(&model_levels_section(&base, &model));
         let mut messages = vec![json!({ "role": "system", "content": prompt })];
         let mut hinted = languages.is_empty();
+        let mut failures = 0usize;
+        let mut nudged = false;
         messages.extend(history(turn.history));
         messages.push(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(&base);
@@ -1077,6 +1126,19 @@ impl Agent for Native {
                             limit.as_secs() / 60
                         ))
                     }),
+                };
+                failures = if result.is_err() && name != "switch_model" { failures + 1 } else { 0 };
+                let result = match result {
+                    Err(e) if failures >= STRUGGLE && !nudged => {
+                        match struggling_hint(&base, &model) {
+                            Some(h) => {
+                                nudged = true;
+                                Err(format!("{e}\n\n{h}"))
+                            }
+                            None => Err(e),
+                        }
+                    }
+                    other => other,
                 };
                 let result = match result {
                     Ok(out) if !hinted => match symbol_looked_up(name, &input) {
@@ -2148,6 +2210,88 @@ mod tests {
             context: &c,
         };
         native.run(&turn, io).await
+    }
+
+    fn three_levels() -> Model {
+        Model {
+            model: "mid".into(),
+            low: Level { model: "tiny".into(), ..Level::default() },
+            medium: Level { model: "mid".into(), ..Level::default() },
+            high: Level { model: "huge".into(), ..Level::default() },
+            ..Model::default()
+        }
+    }
+
+    #[test]
+    fn the_prompt_lists_the_levels_and_says_which_one_the_chat_is_on() {
+        let base = three_levels();
+        let text = model_levels_section(&base, &base.choose("low"));
+        assert!(text.starts_with("<model_levels>"), "{text}");
+        assert!(text.contains("- low: tiny (you are on this one)"), "{text}");
+        assert!(text.contains("- high: huge\n") || text.contains("- high: huge"), "{text}");
+        assert!(!text.contains("medium: mid (you are on"), "{text}");
+        assert!(text.contains("switch_model"));
+        assert_eq!(model_levels_section(&Model::default(), &Model::default()), "");
+        let one =
+            Model { low: Level { model: "tiny".into(), ..Level::default() }, ..Model::default() };
+        assert_eq!(model_levels_section(&one, &one), "", "one level has nothing to switch to");
+    }
+
+    #[test]
+    fn a_run_of_failures_points_at_the_top_level_unless_already_there() {
+        let base = three_levels();
+        let hint = struggling_hint(&base, &base.choose("low")).unwrap();
+        assert!(hint.contains("switch_model to high"), "{hint}");
+        assert!(struggling_hint(&base, &base.choose("high")).is_none());
+    }
+
+    #[tokio::test]
+    async fn three_failed_calls_in_a_row_tell_the_agent_it_can_switch_up_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = |id: &str| call(id, "read_file", json!({"path": "missing.txt"}));
+        let (url, asked) = stub(vec![
+            vec![bad("c1")],
+            vec![bad("c2")],
+            vec![bad("c3")],
+            vec![bad("c4")],
+            vec![say("giving up")],
+        ]);
+        let mut base = three_levels();
+        base.url = url;
+        base.model = "tiny".into();
+        base.low.model = "tiny".into();
+        let native = Native::new(base);
+        let io = TestIo::new(Arc::new(FakeApi));
+        let c = context();
+        let turn = Turn {
+            prompt: "go",
+            files: &[],
+            cwd: dir.path(),
+            model: Some("low"),
+            effort: None,
+            resume: None,
+            history: &[],
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        let first = asked.recv().unwrap();
+        let system = first["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            system.contains("<model_levels>") && system.contains("(you are on this one)"),
+            "{system}"
+        );
+        let outputs: Vec<String> = io
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::ToolEnd { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 4);
+        assert!(!outputs[1].contains("switch_model"), "{}", outputs[1]);
+        assert!(outputs[2].contains("switch_model to high"), "{}", outputs[2]);
+        assert!(!outputs[3].contains("switch_model"), "{}", outputs[3]);
     }
 
     #[test]
