@@ -1457,6 +1457,55 @@ fn ctrl_c_in_the_composer_clears_the_draft_unless_text_is_selected() {
     assert_eq!(h.state().draft_of(session.id), "", "ctrl+c with nothing selected clears the box");
 }
 
+fn arrow(h: &mut Harness<'_, App>, key: egui::Key) {
+    h.event(egui::Event::Key {
+        key,
+        physical_key: Some(key),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(2);
+}
+
+#[test]
+fn up_in_an_empty_composer_brings_back_the_last_message_sent() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(2);
+    let sent = rig
+        .store
+        .messages(session.id, 0)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|m| match m.entry {
+            agentbench_core::Entry::User { text, .. } => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    click(&mut h, 800.0, 735.0);
+    h.run_steps(3);
+    arrow(&mut h, egui::Key::ArrowUp);
+    assert_eq!(h.state().draft_of(session.id), sent, "up on an empty box recalls the last message");
+    arrow(&mut h, egui::Key::ArrowDown);
+    assert_eq!(h.state().draft_of(session.id), "", "down steps back to an empty box");
+
+    h.event(egui::Event::Text("something new".into()));
+    h.run_steps(2);
+    arrow(&mut h, egui::Key::ArrowUp);
+    assert_eq!(
+        h.state().draft_of(session.id),
+        "something new",
+        "a half typed message is left alone"
+    );
+}
+
 #[test]
 fn a_long_draft_scrolls_in_the_composer_and_leaves_the_keys_on_screen() {
     let rig = rig();

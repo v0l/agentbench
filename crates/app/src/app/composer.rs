@@ -153,6 +153,52 @@ impl App {
         }
     }
 
+    fn recall_sent(&mut self, ui: &Ui, session: SessionId) {
+        let id = egui::Id::new(("composer", self.drawing));
+        if !ui.memory(|m| m.has_focus(id)) {
+            return;
+        }
+        let typed = self.draft.trim_end();
+        let sent: Vec<&str> = self
+            .transcripts
+            .get(&session)
+            .map(|t| {
+                t.messages
+                    .iter()
+                    .rev()
+                    .filter_map(|m| match &m.entry {
+                        Entry::User { text, .. } if !text.trim().is_empty() => Some(text.trim()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let at = if typed.is_empty() { None } else { sent.iter().position(|t| *t == typed) };
+        let up = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::ArrowUp);
+        let down = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::ArrowDown);
+        let next = if !typed.is_empty() && at.is_none() {
+            return;
+        } else if ui.input_mut(|i| i.consume_shortcut(&up)) {
+            at.map_or(0, |n| n + 1)
+        } else if at.is_some() && ui.input_mut(|i| i.consume_shortcut(&down)) {
+            match at {
+                Some(0) | None => {
+                    self.draft.clear();
+                    return;
+                }
+                Some(n) => n - 1,
+            }
+        } else {
+            return;
+        };
+        let Some(text) = sent.get(next) else { return };
+        self.draft = text.to_string();
+        let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+        let end = egui::text::CCursor::new(self.draft.chars().count());
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+        state.store(ui.ctx(), id);
+    }
+
     pub(super) fn composer(
         &mut self,
         ui: &mut Ui,
@@ -174,6 +220,9 @@ impl App {
         // draft for it, so typing or sending now would be overwritten or cut the take short.
         let speaking =
             self.voice.busy() && self.speaking_in.is_some() && self.speaking_in == self.drawing;
+        if !speaking && let Some(s) = session {
+            self.recall_sent(ui, s.id);
+        }
         let edit = ui
             .add_enabled_ui(!speaking, |ui| {
                 prose_id(
