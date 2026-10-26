@@ -208,6 +208,24 @@ impl Default for Patience {
 }
 
 impl Native {
+    fn usable_languages(&self, root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .code
+            .status(root)
+            .into_iter()
+            .filter(|l| {
+                !matches!(
+                    l.health,
+                    agentbench_core::LspHealth::Missing | agentbench_core::LspHealth::Failed
+                )
+            })
+            .map(|l| l.name)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     pub fn new(model: Model) -> Native {
         Native { model: Shared::new(model), ..Native::default() }
     }
@@ -477,7 +495,8 @@ fn bash_spec() -> Spec {
     Spec::new(
         "bash",
         "Run a shell command in the worktree and read what it prints: git, cargo, tests, scripts, anything installed. \
-         It runs as the user with their environment, in the worktree. Use the file tools for editing.",
+         It runs as the user with their environment, in the worktree. Use the file tools for editing. Do not use it to \
+         read or search source: code_find, code_outline, search_files and read_file do that better.",
         object(
             json!({
                 "command": string("The command line, run by bash -c"),
@@ -571,7 +590,8 @@ fn file_specs() -> Vec<Spec> {
     ));
     specs.push(Spec::new(
         "search_files",
-        "Search the text files in the worktree (or any folder on this machine) for a regular expression, like grep -rn. Case insensitive unless \
+        "Search the text files in the worktree (or any folder on this machine) for a regular expression, like grep -rn. \
+         For a function, type or constant by name use code_find instead. Case insensitive unless \
          case_sensitive is true. Narrow it with `include` globs such as \"*.rs\" or \"src/**/*.{ts,tsx}\" (a pattern \
          with no slash matches the file name at any depth) and `exclude` globs. .gitignore rules are honoured. Each \
          hit is path:line: text; context lines use a dash instead of a colon. Use output=files to list just the \
@@ -759,6 +779,59 @@ pub fn system(turn: &Turn, base: &Model) -> String {
     out
 }
 
+fn code_section(languages: &[String]) -> String {
+    if languages.is_empty() {
+        return String::new();
+    }
+    section(
+        "code_navigation",
+        &format!(
+            "Language servers are running for this project ({}). For source code, use them before grep or reading whole files:\n\
+             - code_find: a function, type or constant by name, with its signature, source and every place that uses it. Use it instead of search_files or grep whenever you are looking for a symbol, and before changing one to see what depends on it.\n\
+             - code_outline: what is in a file or folder, with line numbers. Use it instead of reading a file to find your way around, then read_file only the lines you need.\n\
+             - code_diagnostics: the errors in a file right now. Use it to check an edit instead of running a build.\n\
+             Keep search_files for text that is not a symbol (strings, comments, config, logs). Do not cat, sed -n, head or grep source files in bash.",
+            languages.join(", ")
+        ),
+    )
+}
+
+fn symbol_looked_up(tool: &str, input: &Value) -> Option<String> {
+    static GREP: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static NAME: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let name = NAME.get_or_init(|| {
+        regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_]{2,}(::[A-Za-z_][A-Za-z0-9_]*)*$").unwrap()
+    });
+    match tool {
+        "search_files" => {
+            let pattern = files::text(input, &["pattern", "query"])?.trim();
+            let source = input.get("path").and_then(Value::as_str).unwrap_or("");
+            let text_only =
+                source.ends_with(".md") || source.ends_with(".toml") || source.ends_with(".json");
+            (name.is_match(pattern) && !text_only).then(|| pattern.to_string())
+        }
+        "bash" => {
+            let command = files::text(input, &["command", "cmd"])?;
+            let grep = GREP.get_or_init(|| {
+                regex::Regex::new(
+                    r#"^\s*(?:grep|rg)\b(?:\s+-\S+)*\s+(?:'([^']*)'|"([^"]*)"|(\S+))"#,
+                )
+                .unwrap()
+            });
+            let found = grep.captures(command)?;
+            let word = found.get(1).or(found.get(2)).or(found.get(3))?.as_str();
+            name.is_match(word).then(|| word.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn symbol_hint(symbol: &str) -> String {
+    format!(
+        "hint: if {symbol} is a function, type or constant, code_find {{\"name\": \"{symbol}\"}} gives its definition, source and every use through the language server in one call, with no grep needed."
+    )
+}
+
 fn history(entries: &[Entry]) -> Vec<Value> {
     let mut out = Vec::new();
     for e in agentbench_core::since_summary(entries) {
@@ -903,7 +976,12 @@ impl Agent for Native {
             return Err("pick a server and model for the native agent under settings".into());
         }
         let workspace = open_workspace(turn.cwd)?;
-        let mut messages = vec![json!({ "role": "system", "content": system(turn, &base) })];
+        let languages =
+            if turn.context.home { Vec::new() } else { self.usable_languages(workspace.root()) };
+        let mut prompt = system(turn, &base);
+        prompt.push_str(&code_section(&languages));
+        let mut messages = vec![json!({ "role": "system", "content": prompt })];
+        let mut hinted = languages.is_empty();
         messages.extend(history(turn.history));
         messages.push(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(&base);
@@ -999,6 +1077,16 @@ impl Agent for Native {
                             limit.as_secs() / 60
                         ))
                     }),
+                };
+                let result = match result {
+                    Ok(out) if !hinted => match symbol_looked_up(name, &input) {
+                        Some(symbol) => {
+                            hinted = true;
+                            Ok(format!("{out}\n\n{}", symbol_hint(&symbol)))
+                        }
+                        None => Ok(out),
+                    },
+                    other => other,
                 };
                 if result.is_ok()
                     && matches!(name, "write_file" | "edit_file")
@@ -2060,6 +2148,75 @@ mod tests {
             context: &c,
         };
         native.run(&turn, io).await
+    }
+
+    #[test]
+    fn code_navigation_is_only_described_when_a_language_server_can_answer() {
+        assert_eq!(code_section(&[]), "");
+        let text = code_section(&["rust".into(), "typescript".into()]);
+        assert!(text.starts_with("<code_navigation>"), "{text}");
+        for tool in ["code_find", "code_outline", "code_diagnostics"] {
+            assert!(text.contains(tool), "{tool} missing: {text}");
+        }
+        assert!(text.contains("rust, typescript"));
+    }
+
+    #[test]
+    fn a_grep_for_a_name_is_taken_as_a_symbol_lookup() {
+        let bash = |c: &str| symbol_looked_up("bash", &json!({"command": c}));
+        assert_eq!(bash("grep -rn fn_name crates/").as_deref(), Some("fn_name"));
+        assert_eq!(bash("cd x && grep -n \"Session\" src/lib.rs").as_deref(), None);
+        assert_eq!(bash("rg -n parse_slash").as_deref(), Some("parse_slash"));
+        assert_eq!(bash("cargo test").as_deref(), None);
+        assert_eq!(bash("grep -rn 'two words' .").as_deref(), None);
+        let search = |p: &str| symbol_looked_up("search_files", &json!({"pattern": p}));
+        assert_eq!(search("parse_slash").as_deref(), Some("parse_slash"));
+        assert_eq!(search("TODO|FIXME").as_deref(), None);
+        assert_eq!(search("fn \\w+_test").as_deref(), None);
+        assert_eq!(symbol_looked_up("read_file", &json!({"path": "x"})), None);
+    }
+
+    #[tokio::test]
+    async fn the_first_symbol_search_points_at_code_find_and_only_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"d\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn parse_slash() {}\n").unwrap();
+        let (url, asked) = stub(vec![
+            vec![call("c1", "search_files", json!({"pattern": "parse_slash"}))],
+            vec![call("c2", "search_files", json!({"pattern": "parse_slash"}))],
+            vec![say("done")],
+        ]);
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.code =
+            Arc::new(super::super::code::Code::new(super::super::code::Settings::default()));
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "where is parse_slash", &io).await.unwrap();
+        let first = asked.recv().unwrap();
+        let system = first["messages"][0]["content"].as_str().unwrap().to_string();
+        if native.usable_languages(dir.path()).is_empty() {
+            assert!(
+                super::super::resolve(Path::new("rust-analyzer")).is_none(),
+                "rust-analyzer is installed but no language was found"
+            );
+            assert!(!system.contains("<code_navigation>"));
+            return;
+        }
+        assert!(system.contains("<code_navigation>"), "{system}");
+        let outputs: Vec<String> = io
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::ToolEnd { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(outputs[0].contains("code_find"), "{}", outputs[0]);
+        assert!(!outputs[1].contains("code_find"), "{}", outputs[1]);
     }
 
     /// Needs rust-analyzer; skipped where it is not installed.
