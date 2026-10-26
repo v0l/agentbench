@@ -1028,7 +1028,10 @@ fn the_voice_page_says_where_speech_runs() {
     h.state_mut().settings_use_server_speech();
     h.run_steps(3);
     shot(&mut h, "settings-server-speech");
-    assert!(models.iter().any(|(id, label)| id == "whisper-large-v3-turbo" && label.contains("MB")), "{models:?}");
+    assert!(
+        models.iter().any(|(id, label)| id == "whisper-large-v3-turbo" && label.contains("MB")),
+        "{models:?}"
+    );
 }
 
 #[test]
@@ -1405,6 +1408,53 @@ fn the_composer_keeps_focus_when_a_file_is_attached() {
     h.event(egui::Event::Text(" two".into()));
     h.run_steps(2);
     assert_eq!(h.state().draft_of(session.id), "one two", "typing carries on after the paste");
+}
+
+fn copy_key(h: &mut Harness<'_, App>) {
+    h.event(egui::Event::Copy);
+    h.run_steps(2);
+}
+
+#[test]
+fn ctrl_c_in_the_composer_clears_the_draft_unless_text_is_selected() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(2);
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Text("half a thought".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().draft_of(session.id), "half a thought");
+
+    h.event(egui::Event::Key {
+        key: egui::Key::A,
+        physical_key: Some(egui::Key::A),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    });
+    h.run_steps(2);
+    copy_key(&mut h);
+    assert_eq!(
+        h.state().draft_of(session.id),
+        "half a thought",
+        "a selection is copied, not cleared"
+    );
+
+    h.event(egui::Event::Key {
+        key: egui::Key::ArrowRight,
+        physical_key: Some(egui::Key::ArrowRight),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(2);
+    copy_key(&mut h);
+    assert_eq!(h.state().draft_of(session.id), "", "ctrl+c with nothing selected clears the box");
 }
 
 #[test]

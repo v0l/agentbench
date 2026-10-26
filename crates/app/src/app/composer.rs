@@ -191,6 +191,9 @@ impl App {
             self.refocus = None;
             edit.request_focus();
         }
+        if edit.has_focus() && !speaking && copy_pressed(ui) && nothing_selected(ui, edit.id) {
+            self.draft.clear();
+        }
         self.slash_menu(ui, edit.rect);
         let enter = edit.has_focus()
             && ui.input(|i| {
@@ -486,4 +489,22 @@ pub(super) fn lsp_look(h: LspHealth) -> (egui::Color32, &'static str) {
         LspHealth::Missing => (LEGEND, "missing"),
         LspHealth::Failed => (FAULT, "failed"),
     }
+}
+
+fn copy_pressed(ui: &Ui) -> bool {
+    ui.input(|i| {
+        i.events.iter().any(|e| match e {
+            egui::Event::Copy => true,
+            egui::Event::Key { key: egui::Key::C, pressed: true, modifiers, .. } => {
+                modifiers.command && !modifiers.shift
+            }
+            _ => false,
+        })
+    })
+}
+
+fn nothing_selected(ui: &Ui, id: egui::Id) -> bool {
+    egui::TextEdit::load_state(ui.ctx(), id)
+        .and_then(|state| state.cursor.char_range())
+        .is_none_or(|range| range.primary == range.secondary)
 }
