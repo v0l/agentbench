@@ -81,7 +81,8 @@ Narrow windows show one chat.
 in the session's worktree with file tools and bash, searches the web
 (`web_search`) and reads, queries (`prompt`, answered by the title model) or downloads pages
 (`web_fetch`), loads skills from
-`~/.agents/skills`, and has tools for the tracker (`list_issues`, `get_issue`,
+`~/.agents/skills`, looks for new ones in the skills.sh directory (`find_skills`, which
+never installs anything itself), and has tools for the tracker (`list_issues`, `get_issue`,
 `file_issue`, `update_issue`, `comment_on_issue`) and
 `ask_user`, which puts a question in the chat and waits for the answer. Options
 show one to a row, `multiple` lets the user tick several, and `questions` asks a

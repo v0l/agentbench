@@ -692,12 +692,30 @@ fn web_specs() -> Vec<Spec> {
     ]
 }
 
+fn skill_specs() -> Vec<Spec> {
+    vec![Spec::new(
+        "find_skills",
+        "Search the public skills directory (skills.sh) for a skill that covers a task you lack the know-how for, such as a file \
+         format, a service or a workflow. The skills already installed are listed in your brief and read with load_skill: look there \
+         first. Each result gives the skill, its install count, its page and the command that installs it. Check the page and the \
+         author before trusting one, and ask the user before you install anything.",
+        object(
+            json!({
+                "query": string("What the skill should help with, e.g. \"pdf forms\" or \"changelog\""),
+                "limit": integer("How many results, default 8, at most 20"),
+            }),
+            &["query"],
+        ),
+    )]
+}
+
 pub fn specs() -> Vec<Spec> {
     let mut all = file_specs();
     all.push(bash_spec());
     all.extend(job_specs());
     all.push(screenshot_spec());
     all.extend(web_specs());
+    all.extend(skill_specs());
     all.extend(super::code::specs());
     all.extend(agentbench_specs());
     all
@@ -1686,6 +1704,7 @@ impl Native {
             }
             "web_search" => super::web::search(args, io.stop()).await,
             "web_fetch" => super::web::fetch(args, ws, self.titles.as_ref(), io.stop()).await,
+            "find_skills" => super::skills::find(args, io.stop()).await,
             "start_session" if args.get("project").is_some_and(|p| !p.is_null()) => {
                 confirm_project(args, cx, io).await?;
                 io.api()
