@@ -128,7 +128,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Command::Code { path } => {
             let dir = path.unwrap_or_else(|| PathBuf::from("."));
             let dir = std::fs::canonicalize(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            let code = crate::agent::code::Code::new(config.code.clone());
+            let code =
+                crate::agent::code::Code::new(crate::agent::code::unconfined(config.code.clone()));
             let found = code.report(&dir);
             if found.is_empty() {
                 println!("no language recognised in {}", dir.display());

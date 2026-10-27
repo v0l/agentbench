@@ -102,6 +102,13 @@ impl TitleModel {
     }
 }
 
+#[egui_bench::agent::async_trait]
+impl egui_bench::agent::web::Reader for Titles {
+    async fn extract(&self, text: &str, prompt: &str) -> Result<String, String> {
+        Titles::extract(self, text, prompt).await
+    }
+}
+
 impl Titles {
     pub fn new(config: TitleModel, main: Shared) -> Titles {
         Titles { config: Arc::new(RwLock::new(config)), main }

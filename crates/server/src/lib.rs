@@ -123,7 +123,8 @@ impl Config {
         let mut native = agent::Native::shared(model);
         native.titles = titles;
         native.speech = speech;
-        native.code = std::sync::Arc::new(agent::code::Code::new(self.code.clone()));
+        native.code =
+            std::sync::Arc::new(agent::code::Code::new(agent::code::unconfined(self.code.clone())));
         let mut all: Vec<Box<dyn Agent>> = vec![
             Box::new(native),
             Box::new(agent::Pi::new(self.pi.clone().unwrap_or_else(|| "pi".into()))),

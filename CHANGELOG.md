@@ -6,6 +6,9 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 
 ## [Unreleased]
 
+### Changed
+- The built in agent's web, code, background job, skills directory and checklist tools come from egui_bench 0.8, which now has them for every bench app; agentbench keeps running them as the user in the worktree. Its own copies are gone.
+
 ### Added
 - `find_skills` for the built in agent: searches the skills.sh directory and gives each result's install count, page and install command, so an agent short of know-how can look for a skill. It only searches; the brief tells the agent to ask you before installing one.
 - `agentbench chat`, a terminal chat with any agent, for odd jobs that belong to no repository. It opens in your home folder like a chat from the window, shares the server, and shows the same transcript: markdown, tool calls (ctrl+o opens their output), thinking, questions you answer with the arrow keys, and the model, context fill and cost in the status line. `-c` carries on with the latest chat, `/resume` picks an older one, and the same slash commands work (`/model`, `/thinking`, `/compact`, `/title`, `/new`, `/close`). `--agent`, `--model` and `--project` choose where it goes, and `--url` with `--token` uses a server on another machine. Leaving does not stop the agent.

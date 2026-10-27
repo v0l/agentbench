@@ -173,14 +173,13 @@ impl Shared {
     }
 }
 
-#[derive(Default)]
 pub struct Native {
     pub model: Shared,
     pub patience: Patience,
     /// The small model that answers `prompt` about a page for `web_fetch`.
     pub titles: Option<crate::titles::Titles>,
     /// Commands the agents left running with `bash` and `background`.
-    pub jobs: super::jobs::Jobs,
+    pub jobs: egui_bench::agent::jobs::Jobs,
     /// Language servers, for the `code_*` tools and the errors shown after an edit.
     pub code: std::sync::Arc<super::code::Code>,
     /// Whisper, for a sound file `read_file` is asked for: the model gets the words, since most
@@ -207,6 +206,21 @@ impl Default for Patience {
     }
 }
 
+impl Default for Native {
+    fn default() -> Self {
+        Native {
+            model: Shared::default(),
+            patience: Patience::default(),
+            titles: None,
+            jobs: Default::default(),
+            code: std::sync::Arc::new(super::code::Code::new(super::code::unconfined(
+                super::code::Settings::default(),
+            ))),
+            speech: None,
+        }
+    }
+}
+
 impl Native {
     fn usable_languages(&self, root: &Path) -> Vec<String> {
         let mut names: Vec<String> = self
@@ -216,7 +230,8 @@ impl Native {
             .filter(|l| {
                 !matches!(
                     l.health,
-                    agentbench_core::LspHealth::Missing | agentbench_core::LspHealth::Failed
+                    egui_bench::agent::code::Health::Missing
+                        | egui_bench::agent::code::Health::Failed
                 )
             })
             .map(|l| l.name)
@@ -1055,7 +1070,7 @@ impl Agent for Native {
         let mut broken: std::collections::HashSet<std::path::PathBuf> = Default::default();
         io.emit(Event::Usage(serving(&model, self.patience.probe).await));
         if !turn.context.home {
-            let lsp = self.code.status(workspace.root());
+            let lsp = super::code::status(&self.code, workspace.root());
             if !lsp.is_empty() {
                 io.emit(Event::Usage(Usage { lsp, ..Usage::default() }));
             }
@@ -1626,7 +1641,7 @@ impl Native {
         root: &Path,
         io: &dyn Io,
     ) -> T {
-        let mut last = self.code.status(root);
+        let mut last = super::code::status(&self.code, root);
         let mut work = std::pin::pin!(work);
         let mut tick = tokio::time::interval(Duration::from_millis(700));
         tick.tick().await;
@@ -1641,7 +1656,7 @@ impl Native {
     }
 
     fn report_lsp(&self, root: &Path, last: &mut Vec<agentbench_core::Lsp>, io: &dyn Io) {
-        let now = self.code.status(root);
+        let now = super::code::status(&self.code, root);
         if now != *last && !now.is_empty() {
             io.emit(Event::Usage(Usage { lsp: now.clone(), ..Usage::default() }));
             *last = now;
@@ -1667,28 +1682,30 @@ impl Native {
             }
             "bash" if args.get("background").and_then(Value::as_bool).unwrap_or(false) => {
                 let command = files::text(args, &["command", "cmd"]).ok_or("missing `command`")?;
-                let handle = self.jobs.start(cx.session, ws.root(), command, cx.env())?;
+                let confine = egui_bench::agent::spawn::Confine::Open { env: cx.env() };
+                let handle =
+                    self.jobs.start(&cx.session.to_string(), ws.root(), command, &confine)?;
                 Ok(format!(
                     "started in the background as {handle}. bash_output {handle} reads what it prints; bash_kill {handle} stops it."
                 ))
             }
             "bash_output" => match files::text(args, &["handle", "id"]) {
-                None => Ok(self.jobs.list(cx.session)),
+                None => Ok(self.jobs.list(&cx.session.to_string())),
                 Some(h) => {
                     let wait = number(&["wait_s", "wait"]).map_or(OUTPUT_WAIT, |n| n as u64);
                     let wait = Duration::from_secs(wait.min(OUTPUT_WAIT_MAX));
-                    self.jobs.output(cx.session, h, wait, io.stop()).await
+                    self.jobs.output(&cx.session.to_string(), h, wait, io.stop()).await
                 }
             },
             "bash_kill" => {
                 let h = files::text(args, &["handle", "id"]).ok_or("missing `handle`")?;
-                self.jobs.kill(cx.session, h).await
+                self.jobs.kill(&cx.session.to_string(), h).await
             }
             "wait_for_session" => {
                 let wait = number(&["timeout_s", "timeout"]).map_or(WAIT_DEFAULT, |n| n as u64);
                 wait_for_session(args, Duration::from_secs(wait.clamp(1, WAIT_MAX)), cx, io).await
             }
-            "todo_write" => todo_write(args),
+            "todo_write" => egui_bench::agent::todo::write(args),
             "bash" => {
                 bash(
                     ws.root(),
@@ -1702,9 +1719,12 @@ impl Native {
             n if super::code::TOOLS.contains(&n) => {
                 self.watched(self.code.run(n, args, ws, io.stop()), ws.root(), io).await
             }
-            "web_search" => super::web::search(args, io.stop()).await,
-            "web_fetch" => super::web::fetch(args, ws, self.titles.as_ref(), io.stop()).await,
-            "find_skills" => super::skills::find(args, io.stop()).await,
+            "web_search" => egui_bench::agent::web::search(args, io.stop()).await,
+            "web_fetch" => {
+                let reader = self.titles.as_ref().map(|t| t as &dyn egui_bench::agent::web::Reader);
+                egui_bench::agent::web::fetch(args, ws, reader, io.stop()).await
+            }
+            "find_skills" => egui_bench::agent::skills::find(args, io.stop()).await,
             "start_session" if args.get("project").is_some_and(|p| !p.is_null()) => {
                 confirm_project(args, cx, io).await?;
                 io.api()
@@ -1789,46 +1809,6 @@ async fn confirm_project(args: &Value, cx: &Context, io: &dyn Io) -> Result<(), 
     };
     api.call("grant_project", &json!({ "project": target, "scope": scope }), cx.session)?;
     Ok(())
-}
-
-/// The checklist the model sent, answered back as text so it stays in the conversation. The
-/// window draws the same list from the call's input.
-fn todo_write(args: &Value) -> Result<String, String> {
-    let items = args.get("items").and_then(Value::as_array).ok_or("missing `items`, a list")?;
-    let mut lines = Vec::new();
-    let (mut doing, mut left) = (0, 0);
-    for (i, item) in items.iter().enumerate() {
-        let text = item
-            .get("text")
-            .or_else(|| item.get("content"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| format!("items[{i}] has no `text`"))?;
-        let mark = match item.get("status").and_then(Value::as_str).unwrap_or("pending") {
-            "done" | "completed" => "[x]",
-            "in_progress" | "doing" => {
-                doing += 1;
-                left += 1;
-                "[~]"
-            }
-            "pending" | "todo" => {
-                left += 1;
-                "[ ]"
-            }
-            other => {
-                return Err(format!("{other:?} is not a status: pending, in_progress or done"));
-            }
-        };
-        lines.push(format!("{mark} {text}"));
-    }
-    let note = match (doing, left) {
-        (_, 0) if !lines.is_empty() => "\nAll done.".to_string(),
-        (0, _) => "\nNothing is marked in_progress.".to_string(),
-        (1, _) => String::new(),
-        _ => "\nMore than one item is in progress; keep to one.".to_string(),
-    };
-    Ok(format!("{}{note}", lines.join("\n")))
 }
 
 /// Wait for a session of this project to stop being busy.
@@ -2355,8 +2335,9 @@ mod tests {
             vec![say("done")],
         ]);
         let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
-        native.code =
-            Arc::new(super::super::code::Code::new(super::super::code::Settings::default()));
+        native.code = Arc::new(super::super::code::Code::new(super::super::code::unconfined(
+            Default::default(),
+        )));
         let io = TestIo::new(Arc::new(FakeApi));
         run(&native, dir.path(), "where is parse_slash", &io).await.unwrap();
         let first = asked.recv().unwrap();
@@ -2408,10 +2389,9 @@ mod tests {
                 vec![say("fixing")],
             ]);
             let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
-            native.code = Arc::new(super::super::code::Code::new(super::super::code::Settings {
-                role: role.into(),
-                ..Default::default()
-            }));
+            native.code = Arc::new(super::super::code::Code::new(super::super::code::unconfined(
+                super::super::code::Settings { role: role.into(), ..Default::default() },
+            )));
             let io = TestIo::new(Arc::new(FakeApi));
             run(&native, dir.path(), "break it", &io).await.unwrap();
             let _first = asked.recv().unwrap();

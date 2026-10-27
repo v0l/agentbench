@@ -1897,25 +1897,34 @@ dependencies = [
 
 [[package]]
 name = "egui_bench"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89cd15152f67e4e748adf757e4bba014204feef70b1b0a63a713c7ab08a57c45"
+version = "0.8.0"
 dependencies = [
+ "async-trait",
+ "base64 0.23.1",
  "byteorder",
  "candle-core",
  "candle-nn",
  "candle-transformers",
  "dirs",
  "egui",
+ "futures-util",
+ "ignore",
  "pulldown-cmark",
  "rand 0.9.5",
  "rand_distr",
+ "reqwest",
+ "rustls",
+ "scraper",
  "serde",
  "serde_json",
  "tokenizers",
+ "tokio",
+ "tokio-util",
  "tracing",
  "ureq",
+ "url",
  "web-time",
+ "webpki-roots",
 ]
 
 [[package]]
