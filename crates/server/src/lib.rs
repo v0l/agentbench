@@ -10,6 +10,7 @@ pub mod speech;
 pub mod store;
 pub mod titles;
 pub mod tools;
+pub mod tui;
 pub mod voice;
 
 use agent::{Agent, JsonCommand};

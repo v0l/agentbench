@@ -6,6 +6,9 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 
 ## [Unreleased]
 
+### Added
+- `agentbench chat`, a terminal chat with any agent, for odd jobs that belong to no repository. It opens in your home folder like a chat from the window, shares the server, and shows the same transcript: markdown, tool calls (ctrl+o opens their output), thinking, questions you answer with the arrow keys, and the model, context fill and cost in the status line. `-c` carries on with the latest chat, `/resume` picks an older one, and the same slash commands work (`/model`, `/thinking`, `/compact`, `/title`, `/new`, `/close`). `--agent`, `--model` and `--project` choose where it goes, and `--url` with `--token` uses a server on another machine. Leaving does not stop the agent.
+
 ## [0.4.0] - 2026-10-24
 
 ### Changed

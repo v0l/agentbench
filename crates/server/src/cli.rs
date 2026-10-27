@@ -37,6 +37,26 @@ pub enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Chat with an agent in the terminal.
+    Chat {
+        /// The first message; starts a chat at once.
+        prompt: Vec<String>,
+        /// Carry on with the most recent chat.
+        #[arg(short = 'c', long = "continue")]
+        resume: bool,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// The project to chat in, by name or path; default the home folder.
+        #[arg(long)]
+        project: Option<String>,
+        /// Use a server on another machine.
+        #[arg(long, env = "AGENTBENCH_URL")]
+        url: Option<String>,
+        #[arg(long, env = "AGENTBENCH_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+    },
 }
 
 pub fn logging() {
@@ -59,6 +79,19 @@ pub fn exit(result: Result<(), String>) -> ExitCode {
 
 pub async fn run(cli: Cli) -> Result<(), String> {
     let home = cli.home.unwrap_or_else(home);
+    if let Some(Command::Chat { prompt, resume, agent, model, project, url, token }) = cli.command {
+        let server = match (url, token) {
+            (Some(url), Some(token)) => crate::tui::Server { url, token },
+            (Some(_), None) => return Err("--url needs --token".into()),
+            _ => crate::tui::local(Some(home))?,
+        };
+        let prompt = Some(prompt.join(" ")).filter(|p| !p.trim().is_empty());
+        return crate::tui::run(
+            server,
+            crate::tui::Options { agent, model, project, resume, prompt },
+        )
+        .await;
+    }
     let config = Config::load(&home_file(&home, "agentbench.toml", "foreman.toml"))?;
     let store = Store::open(&home_file(&home, "agentbench.db", "foreman.db")).map_err(|e| e.0)?;
     match cli.command.unwrap_or(Command::Serve) {
@@ -111,6 +144,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
+        Command::Chat { .. } => unreachable!("handled before the store opens"),
         Command::Agents => {
             let model = crate::agent::native::Shared::new(saved_model(&store, &config.model));
             for a in config.agents_with(model) {

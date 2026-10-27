@@ -50,6 +50,22 @@ database.
 Data lives in `$AGENTBENCH_HOME` (default `~/.local/share/agentbench`):
 `agentbench.db` and an optional `agentbench.toml`.
 
+## Chatting in a terminal
+
+```sh
+agentbench chat                      # a new chat in your home folder
+agentbench chat -c                   # carry on with the latest one
+agentbench chat summarise ~/notes.md # first message given on the command line
+agentbench chat --agent claude --project snort
+```
+
+It starts the server if it is not running, or use `--url` and `--token` (or
+`AGENTBENCH_URL` and `AGENTBENCH_TOKEN`) for one on another machine. It is the same chat as
+in the window, so the two show each other's messages. Enter sends, alt+enter or `\` then enter
+adds a line, up recalls earlier messages, esc stops the agent, ctrl+o shows tool output
+and thinking, and `/help` lists the rest. Leaving (ctrl+c twice, ctrl+d or `/quit`) does not
+stop the agent.
+
 ## Watching several chats
 
 The five keys beside **settings** tile the chat area: one chat, two side by side, two
