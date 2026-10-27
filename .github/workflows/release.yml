@@ -52,12 +52,12 @@ jobs:
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
-            features: ''
+            features: --no-default-features --features agentbench/local-speech
           - os: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
             # The Apple GPU through Metal, which every Apple Silicon Mac has.
-            features: --features metal
+            features: --no-default-features --features metal
           # 2022 and not latest: CUDA 12.8's nvcc refuses a Visual Studio newer than 2022, which
           # windows-latest now has. Waveshark pins it for the same reason.
           - os: windows-2022

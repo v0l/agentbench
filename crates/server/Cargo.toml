@@ -10,6 +10,7 @@ license.workspace = true
 name = "agentbench_server"
 
 [features]
+default = ["cuda"]
 # Read speech on an NVIDIA card when there is one; the CUDA runtime is loaded only if present.
 cuda = ["egui_bench/speech-cuda"]
 # Read speech on the Apple GPU through Metal. Builds for macOS only.

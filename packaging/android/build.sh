@@ -47,7 +47,7 @@ if [ -n "${RELEASE:-}" ]; then
     trap 'rm -f "$TMPKEY"' EXIT
     export CARGO_APK_RELEASE_KEYSTORE=$TMPKEY CARGO_APK_RELEASE_KEYSTORE_PASSWORD=android
 fi
-cargo apk build --lib -p agentbench $FLAG
+cargo apk build --lib -p agentbench --no-default-features --features local-speech $FLAG
 LIB=$ROOT/target/$PROFILE/apk/lib/arm64-v8a/libagentbench.so
 [ -f "$LIB" ] || LIB=$(find "$ROOT/target" -path "*apk/lib/arm64-v8a/libagentbench.so" | head -1)
 

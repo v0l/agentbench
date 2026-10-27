@@ -7,6 +7,7 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 ## [Unreleased]
 
 ### Changed
+- `cuda` is a default feature of the window and the server, so a plain `cargo install` or `cargo build` runs speech on an NVIDIA card. Mac, Android, web and arm Linux builds pass `--no-default-features`.
 - The built in agent's web, code, background job, skills directory and checklist tools come from egui_bench 0.8, which now has them for every bench app; agentbench keeps running them as the user in the worktree. Its own copies are gone.
 
 ### Added

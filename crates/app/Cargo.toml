@@ -11,7 +11,7 @@ repository.workspace = true
 crate-type = ["lib", "cdylib"]
 
 [features]
-default = ["local-speech"]
+default = ["cuda"]
 # Whisper on this machine. Without it voice input can only use a server.
 local-speech = ["egui_bench/speech"]
 # Run Whisper on an NVIDIA card when there is one. Needs the CUDA toolkit to build.
@@ -68,7 +68,7 @@ cpal = "0.18"
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
 # Whisper on this machine through candle.
-agentbench-server = { path = "../server" }
+agentbench-server = { path = "../server", default-features = false }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 clap = { version = "4.6", features = ["derive", "env"] }

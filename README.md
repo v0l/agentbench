@@ -28,6 +28,11 @@ changes in [CHANGELOG.md](CHANGELOG.md).
 cargo run --release -p agentbench
 ```
 
+A build from source runs Whisper and read aloud on an NVIDIA card by default, so it needs the
+CUDA toolkit. A machine without a card still runs the build, on the CPU. On a Mac use
+`--no-default-features --features metal`, and anywhere without the toolkit
+`--no-default-features --features local-speech`.
+
 The window starts the server in the background if it is not already running,
 and connects to it. The server keeps running after the window closes so agents
 carry on, and a later window reuses it. To use a server on another machine
@@ -274,7 +279,8 @@ agent's.
 ## Web and Android
 
 ```sh
-cargo build -p agentbench --lib --release --target wasm32-unknown-unknown
+cargo build -p agentbench --lib --release --target wasm32-unknown-unknown \
+    --no-default-features --features local-speech
 wasm-bindgen --target web --no-typescript --out-dir web/pkg \
     target/wasm32-unknown-unknown/release/agentbench.wasm
 agentbench-server --web web
@@ -283,7 +289,7 @@ agentbench-server --web web
 The server then serves the app at `/`, and the page fills in its own address.
 
 ```sh
-cargo apk build -p agentbench --lib --release
+cargo apk build -p agentbench --lib --release --no-default-features --features local-speech
 ```
 
 ## API
