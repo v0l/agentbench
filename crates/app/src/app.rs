@@ -402,6 +402,7 @@ pub struct App {
     asking_models: HashSet<String>,
     markdown: markdown::Cache,
     follow: bool,
+    jump: Option<Tile>,
     awaiting: Option<Id>,
     thinking: bool,
     /// How many times the fonts were swapped, so measured transcript heights are dropped.
@@ -516,6 +517,7 @@ impl App {
             asking_models: HashSet::new(),
             markdown: markdown::Cache::default(),
             follow: true,
+            jump: None,
             awaiting: None,
             refocus: None,
             composer_h: HashMap::new(),
@@ -936,6 +938,10 @@ impl App {
     /// The draft of the chat `session`, as the tile shows it.
     pub fn draft_of(&self, session: SessionId) -> &str {
         self.panes.get(&session).map_or("", |p| p.draft.as_str())
+    }
+
+    pub fn follows(&self, session: SessionId) -> bool {
+        self.panes.get(&session).is_none_or(|p| p.follow)
     }
 
     /// Whether the microphone is open.

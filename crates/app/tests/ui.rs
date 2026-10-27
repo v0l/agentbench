@@ -866,6 +866,55 @@ fn a_checklist_shows_its_items_in_the_transcript() {
     assert!(h.query_by_label("run the tests").is_none(), "folded on a phone");
 }
 
+fn scrolled_to_the_top(
+    h: &mut Harness<'_, App>,
+    at: egui::Pos2,
+    session: agentbench_core::SessionId,
+) {
+    h.event(egui::Event::PointerMoved(at));
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 100_000.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(6);
+    assert!(!h.state().follows(session), "the chat is scrolled up");
+}
+
+#[test]
+fn end_scrolls_the_chat_to_the_latest_message() {
+    let rig = rig();
+    let s = long_chat(&rig, 12);
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 60);
+    h.run_steps(3);
+    scrolled_to_the_top(&mut h, egui::pos2(800.0, 300.0), s.id);
+    arrow(&mut h, egui::Key::End);
+    h.run_steps(30);
+    assert!(h.state().follows(s.id), "end brings the chat back to the bottom");
+}
+
+#[test]
+fn on_a_phone_the_latest_key_scrolls_a_chat_to_the_bottom() {
+    let rig = rig();
+    let s = long_chat(&rig, 12);
+    let mut h = harness_at(rig.url.clone(), [450.0, 1000.0]);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 60);
+    h.run_steps(3);
+    assert!(h.query_by_label("latest").is_none(), "no key while the chat is at the bottom");
+    scrolled_to_the_top(&mut h, egui::pos2(225.0, 400.0), s.id);
+    shot(&mut h, "phone-latest");
+    h.get_by_label("latest").click();
+    h.run_steps(30);
+    assert!(h.state().follows(s.id), "the key brings the chat back to the bottom");
+    assert!(h.query_by_label("latest").is_none(), "the key goes once at the bottom");
+}
+
 #[test]
 fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
     let rig = rig();

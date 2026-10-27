@@ -356,6 +356,10 @@ impl App {
         let mut inner = ui
             .new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
         inner.set_clip_rect(rect.intersect(ui.clip_rect()));
+        let jump = self.jump_asked(ui);
+        if jump {
+            self.follow = true;
+        }
         let scroll = egui::ScrollArea::vertical()
             .max_height(rect.height())
             .auto_shrink([false, false])
@@ -418,6 +422,9 @@ impl App {
                     );
                     ui.add_space(6.0);
                 }
+                if jump {
+                    ui.scroll_to_cursor(Some(Align::BOTTOM));
+                }
             });
         if let Some(t) = self.transcripts.get_mut(&s.id) {
             // Messages that arrived while drawing cannot happen, but keep anything that did.
@@ -429,6 +436,9 @@ impl App {
         let at_bottom =
             scroll.state.offset.y + scroll.inner_rect.height() >= scroll.content_size.y - 4.0;
         self.follow = at_bottom;
+        if !at_bottom {
+            self.latest_key(ui, scroll.inner_rect);
+        }
 
         ui.add_space(6.0);
         let missing = tree.as_ref().is_some_and(|w| w.missing);
@@ -460,6 +470,31 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    fn jump_asked(&mut self, ui: &Ui) -> bool {
+        if self.jump.is_some() && self.jump == self.drawing {
+            self.jump = None;
+            return true;
+        }
+        let composer = egui::Id::new(("composer", self.drawing));
+        let in_composer = ui.memory(|m| m.has_focus(composer));
+        let typing = ui.ctx().text_edit_focused() && !(in_composer && self.draft.is_empty());
+        self.focused
+            && !typing
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::End))
+    }
+
+    fn latest_key(&mut self, ui: &mut Ui, transcript: egui::Rect) {
+        let key = Key::new("latest").outline(VALUE).id_salt(("latest", self.drawing));
+        let size = Vec2::new(key.width(ui), KEY_H);
+        let at = transcript.right_bottom() - size - Vec2::new(18.0, 10.0);
+        let r = key.paint(ui, egui::Rect::from_min_size(at, size));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "latest"));
+        if r.clicked() {
+            self.jump = self.drawing;
+            ui.ctx().request_repaint();
         }
     }
 }

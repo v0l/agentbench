@@ -271,6 +271,7 @@ impl App {
                     out = Some((self.draft.trim().to_string(), files));
                     self.draft.clear();
                     self.follow = true;
+                    self.jump = self.drawing;
                 }
                 if !compact || self.focused {
                     self.speak_key(ui);
