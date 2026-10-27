@@ -12,7 +12,9 @@ fn main() -> std::process::ExitCode {
             }
         };
     }
-    logging();
+    if !cli.interactive() {
+        logging();
+    }
     exit(agentbench::runtime().block_on(run(cli)))
 }
 

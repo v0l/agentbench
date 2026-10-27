@@ -4,6 +4,9 @@ use std::process::ExitCode;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    logging();
-    exit(run(Cli::parse()).await)
+    let cli = Cli::parse();
+    if !cli.interactive() {
+        logging();
+    }
+    exit(run(cli).await)
 }

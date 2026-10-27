@@ -59,6 +59,12 @@ pub enum Command {
     },
 }
 
+impl Cli {
+    pub fn interactive(&self) -> bool {
+        matches!(self.command, Some(Command::Chat { .. }))
+    }
+}
+
 pub fn logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
