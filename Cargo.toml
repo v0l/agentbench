@@ -28,7 +28,6 @@ opt-level = 1
 # machine: with no card, candle reports no CUDA device and speech runs on the CPU. The same patch as
 # waveshark.
 [patch.crates-io]
-egui_bench = { path = "../egui_bench" }
 candle-core = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
 candle-kernels = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
 candle-nn = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
