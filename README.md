@@ -310,7 +310,7 @@ cargo apk build -p agentbench --lib --release --no-default-features --features l
 | `POST /api/sessions/{id}/messages` `{text, attachments?}` | next turn; each attachment is `{name, mime, data}`, data base64 |
 | `GET /api/sessions/{id}/attachments/{file}` | the bytes of a file sent in that chat |
 | `POST /api/sessions/{id}/answer` `{question, answer}` | answer an agent's question |
-| `POST /api/sessions/{id}/interrupt` | stop the turn |
+| `POST /api/sessions/{id}/interrupt` | stop the turn; replies `{interrupted, queued}` with the unread messages it took back |
 
 Sessions are named by UUID, so a deleted chat's id is never handed to a new one.
 Projects, worktrees, issues and messages keep plain numbers.

@@ -145,8 +145,9 @@ impl Net {
         done(self.post(&format!("/api/sessions/{id}/answer"), Some(&body)).await?).await
     }
 
-    pub async fn interrupt(&self, id: SessionId) -> Result<(), String> {
-        done(self.post::<()>(&format!("/api/sessions/{id}/interrupt"), None).await?).await
+    pub async fn interrupt(&self, id: SessionId) -> Result<Vec<String>, String> {
+        let r = self.post::<()>(&format!("/api/sessions/{id}/interrupt"), None).await?;
+        Ok(read::<agentbench_core::Interrupted>(r).await?.queued)
     }
 
     pub async fn delete(&self, id: SessionId) -> Result<(), String> {

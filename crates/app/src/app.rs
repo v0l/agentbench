@@ -941,6 +941,15 @@ impl App {
         self.panes.get(&session).map_or("", |p| p.draft.as_str())
     }
 
+    fn restore_queued(&mut self, session: SessionId, queued: &[String]) {
+        if queued.is_empty() {
+            return;
+        }
+        let pane = self.panes.entry(session).or_default();
+        pane.draft = agentbench_core::restore_queued(&pane.draft, queued);
+        self.refocus = Some(Tile::Chat(session));
+    }
+
     pub fn follows(&self, session: SessionId) -> bool {
         self.panes.get(&session).is_none_or(|p| p.follow)
     }
@@ -1170,6 +1179,10 @@ impl App {
             }
             Reply::Comments(iid, c) => {
                 self.comments.insert(iid, c);
+            }
+            Reply::Interrupted(sid, queued) => {
+                self.notice = Some((true, "stopping".into()));
+                self.restore_queued(sid, &queued);
             }
             Reply::Model(m) => {
                 if let Some(st) = &mut self.settings {
@@ -1968,6 +1981,16 @@ mod tests {
         assert_eq!(app.draft_of(b), "hello there");
         assert_eq!(app.draft_of(a), "first");
         assert_eq!(app.refocus, Some(Tile::Chat(b)));
+    }
+
+    #[test]
+    fn stopping_puts_the_queued_messages_back_in_the_draft() {
+        let mut app = App::new(&egui::Context::default(), None, None);
+        let a = "00000000-0000-0000-0000-000000000001".parse::<SessionId>().unwrap();
+        app.panes.entry(a).or_default().draft = "half typed".into();
+        app.handle(Reply::Interrupted(a, vec!["first".into(), "second".into()]));
+        assert_eq!(app.draft_of(a), "first\nsecond\nhalf typed");
+        assert_eq!(app.refocus, Some(Tile::Chat(a)));
     }
 
     #[test]

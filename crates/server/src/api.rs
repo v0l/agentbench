@@ -760,9 +760,16 @@ async fn attachment(
         .into_response())
 }
 
-async fn interrupt(State(api): State<Api>, Path(id): Path<SessionId>) -> Reply<serde_json::Value> {
+async fn interrupt(
+    State(api): State<Api>,
+    Path(id): Path<SessionId>,
+) -> Reply<agentbench_core::Interrupted> {
     api.runner.store().session(id)?;
-    Ok(Json(json!({ "interrupted": api.runner.interrupt(id) })))
+    let queued = api.runner.interrupt_returning_queued(id);
+    Ok(Json(agentbench_core::Interrupted {
+        interrupted: queued.is_some(),
+        queued: queued.unwrap_or_default(),
+    }))
 }
 
 pub fn watch_worktrees(api: Api, every: Duration) {

@@ -182,8 +182,8 @@ impl Loop {
             Cmd::Interrupt => {
                 if let Some(id) = app.session.as_ref().map(|s| s.id) {
                     self.spawn(async move {
-                        net.interrupt(id).await?;
-                        Ok(None)
+                        let queued = net.interrupt(id).await?;
+                        Ok(Some(Reply::Interrupted(id, queued)))
                     });
                 }
             }

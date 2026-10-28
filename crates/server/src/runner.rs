@@ -247,17 +247,29 @@ impl Runner {
     }
 
     pub fn interrupt(&self, session: SessionId) -> bool {
-        let live = self.live();
-        let Some(l) = live.get(&session) else {
+        let Some(dropped) = self.stop(session) else {
             return false;
         };
-        l.stop.cancel();
-        l.questions.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        let dropped: Vec<Message> =
-            l.inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
-        drop(live);
         self.not_sent(session, "the agent was stopped first", dropped);
         true
+    }
+
+    pub fn interrupt_returning_queued(&self, session: SessionId) -> Option<Vec<String>> {
+        let dropped = self.stop(session)?;
+        let texts = dropped.iter().map(|m| m.text.clone()).collect();
+        let files: Vec<Message> =
+            dropped.into_iter().filter(|m| !m.attachments.is_empty()).collect();
+        self.not_sent(session, "the agent was stopped first", files);
+        Some(texts)
+    }
+
+    fn stop(&self, session: SessionId) -> Option<Vec<Message>> {
+        let live = self.live();
+        let l = live.get(&session)?;
+        l.stop.cancel();
+        l.questions.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let dropped = l.inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+        Some(dropped)
     }
 
     pub fn answer(
@@ -1089,6 +1101,32 @@ mod tests {
         assert_eq!(msgs.last().unwrap().entry, Entry::Notice { text: "stopped".into() });
         let out = std::process::Command::new("pgrep").args(["-f", &marker]).output().unwrap();
         assert!(out.stdout.is_empty(), "the backgrounded child survived");
+    }
+
+    #[tokio::test]
+    async fn stopping_hands_back_the_queued_messages_instead_of_dropping_them() {
+        let (runner, s) = setup(script_agent("slow", r#"echo '{"text":"working"}'; sleep 30"#));
+        runner.send(&s, "go").unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        runner.send(&s, "then this").unwrap();
+        runner.send(&s, "and that").unwrap();
+        assert_eq!(
+            runner.interrupt_returning_queued(s.id),
+            Some(vec!["then this".to_string(), "and that".to_string()])
+        );
+        wait_idle(&runner, s.id).await;
+        let notices: Vec<String> = runner
+            .store()
+            .messages(s.id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::Notice { text } if text.starts_with("not sent") => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(runner.interrupt_returning_queued(s.id), None);
     }
 
     struct Steerable;

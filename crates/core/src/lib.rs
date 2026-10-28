@@ -885,6 +885,23 @@ pub struct Answer {
     pub answers: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Interrupted {
+    pub interrupted: bool,
+    #[serde(default)]
+    pub queued: Vec<String>,
+}
+
+pub fn restore_queued(draft: &str, queued: &[String]) -> String {
+    queued
+        .iter()
+        .map(|q| q.trim())
+        .chain([draft.trim()])
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl SessionStatus {
     pub fn busy(self) -> bool {
         matches!(self, SessionStatus::Running | SessionStatus::Waiting)
@@ -941,6 +958,16 @@ pub fn branch_slug(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_messages_return_to_the_draft_one_per_line() {
+        let q = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(restore_queued("", &q(&["first", "second"])), "first\nsecond");
+        assert_eq!(restore_queued("typing", &q(&["first", ""])), "first\ntyping");
+        assert_eq!(restore_queued("typing", &[]), "typing");
+        let old: Interrupted = serde_json::from_str(r#"{"interrupted":true}"#).unwrap();
+        assert!(old.queued.is_empty());
+    }
 
     #[test]
     fn issue_states_round_trip_their_names() {

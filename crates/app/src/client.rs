@@ -42,6 +42,7 @@ pub enum Reply {
     AgentModels(String, Result<Vec<String>, String>),
     Changed(Id),
     Messages(SessionId, Vec<Message>),
+    Interrupted(SessionId, Vec<String>),
     Comments(Id, Vec<Comment>),
     Done(String),
     Failed(String),
@@ -460,12 +461,10 @@ impl Client {
     }
 
     pub fn interrupt(&mut self, session: SessionId) {
-        self.act::<()>(
-            Method::POST,
-            &format!("/api/sessions/{session}/interrupt"),
-            None,
-            "stopping",
-        );
+        let req = self.request(Method::POST, &format!("/api/sessions/{session}/interrupt"), None);
+        self.send(req, move |r: agentbench_core::Interrupted| {
+            Reply::Interrupted(session, r.queued)
+        });
     }
 
     pub fn delete_session(&mut self, session: SessionId) {

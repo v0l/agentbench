@@ -51,6 +51,7 @@ pub enum Reply {
     Opened(Session, Vec<Message>),
     Refreshed(Session, Vec<Message>),
     Created(Session),
+    Interrupted(SessionId, Vec<String>),
     Sessions(Vec<Session>),
     Changed(Result<Id, String>),
     Failed(String),
@@ -231,6 +232,13 @@ impl App {
                 self.model = None;
                 self.lines_stale = true;
                 return Some(Cmd::Refresh);
+            }
+            Reply::Interrupted(id, queued) => {
+                if self.session.as_ref().is_some_and(|s| s.id == id) && !queued.is_empty() {
+                    let text = agentbench_core::restore_queued(self.editor.text(), &queued);
+                    self.editor.set(&text);
+                    self.history_at = None;
+                }
             }
             Reply::Sessions(all) => {
                 let mut items: Vec<Session> =
@@ -672,6 +680,7 @@ impl App {
                 self.say(Tone::Error, format!("/{name} needs a chat, send a message first"));
                 None
             }
+            "stop" => Some(Cmd::Interrupt),
             _ => Some(Cmd::Send(text.to_string())),
         })
     }
@@ -862,6 +871,19 @@ pub mod tests {
         assert_eq!(a.key(press(KeyCode::Esc), 10), None);
         a.open(session(SessionStatus::Running), vec![]);
         assert_eq!(a.key(press(KeyCode::Esc), 10), Some(Cmd::Interrupt));
+    }
+
+    #[test]
+    fn stopping_puts_the_queued_messages_back_in_the_composer() {
+        let mut a = app();
+        let s = session(SessionStatus::Running);
+        let id = s.id;
+        a.open(s, vec![]);
+        type_text(&mut a, "half");
+        a.reply(Reply::Interrupted(id, vec!["first".into(), "second".into()]));
+        assert_eq!(a.editor.text(), "first\nsecond\nhalf");
+        a.reply(Reply::Interrupted(SessionId(uuid::Uuid::from_u128(9)), vec!["other".into()]));
+        assert_eq!(a.editor.text(), "first\nsecond\nhalf");
     }
 
     #[test]

@@ -467,6 +467,11 @@ impl App {
                     }
                 }
                 Some("close") => self.confirm = Some(Confirm::Session(s.id, s.title.clone())),
+                Some("stop") if s.status.busy() => {
+                    if let Some(c) = &mut self.client {
+                        c.interrupt(s.id);
+                    }
+                }
                 _ => {
                     if let Some(c) = &mut self.client {
                         c.send_with(s.id, &text, files);
