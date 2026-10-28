@@ -167,6 +167,8 @@ CREATE TABLE notes (
     "ALTER TABLE sessions ADD COLUMN effort TEXT;",
 ];
 
+const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
+
 #[derive(Debug)]
 pub struct StoreError(pub String);
 
@@ -238,6 +240,7 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         usage: serde_json::from_str(&usage).unwrap_or_default(),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        queued: Vec::new(),
     })
 }
 
@@ -316,7 +319,35 @@ impl Store {
             ))?;
         }
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        Ok(Store { conn: Arc::new(Mutex::new(conn)) })
+        let store = Store { conn: Arc::new(Mutex::new(conn)) };
+        if store.setting(WIRE_TRANSCRIPTS)?.is_none() {
+            store.convert_native_transcripts()?;
+        }
+        Ok(store)
+    }
+
+    fn convert_native_transcripts(&self) -> Result<()> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let rows: Vec<(Id, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT m.id, m.entry FROM messages m JOIN sessions s ON s.id = m.session_id \
+                 WHERE s.agent = 'native'",
+            )?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, text) in rows {
+            let Ok(entry) = serde_json::from_str::<Entry>(&text) else { continue };
+            let messages = crate::agent::native::wire_of(&entry, "user");
+            if messages.is_empty() {
+                continue;
+            }
+            let wire = serde_json::to_string(&Entry::Wire { messages }).unwrap_or_default();
+            tx.execute("UPDATE messages SET entry = ?1 WHERE id = ?2", params![wire, id])?;
+        }
+        tx.execute("INSERT INTO settings (key, value) VALUES (?1, '1')", [WIRE_TRANSCRIPTS])?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn db(&self) -> MutexGuard<'_, Connection> {
@@ -728,6 +759,12 @@ impl Store {
             "UPDATE sessions SET status = ?1, updated_at = ?2 WHERE id = ?3",
             params![status.as_str(), now(), id],
         )?;
+        Store::changed(&db, "session", id)
+    }
+
+    pub fn touch_session(&self, id: SessionId) -> Result<()> {
+        let db = self.db();
+        db.execute("UPDATE sessions SET updated_at = ?1 WHERE id = ?2", params![now(), id])?;
         Store::changed(&db, "session", id)
     }
 
@@ -1211,6 +1248,61 @@ mod tests {
         let got = s.session(sess.id).unwrap().usage;
         assert_eq!((got.context, got.window, got.input_tokens), (0, 1000, 10));
         assert_eq!((got.model.as_str(), got.host.as_str()), ("m", "h"));
+    }
+
+    #[test]
+    fn old_native_chats_become_what_was_sent_and_others_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.db");
+        let (native, pi) = {
+            let s = Store::open(&path).unwrap();
+            let (_, main) = project(&s, "/r");
+            let native = s.add_session(main.id, "native", "t", None, None).unwrap();
+            let pi = s.add_session(main.id, "pi", "u", None, None).unwrap();
+            for e in [
+                Entry::user("hi"),
+                Entry::Tool {
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "ls"}),
+                    output: Some("a".into()),
+                    error: false,
+                },
+                Entry::Notice { text: "note".into() },
+                Entry::Summary { text: "so far".into() },
+            ] {
+                s.add_message(native.id, &e).unwrap();
+            }
+            s.add_message(pi.id, &Entry::user("there")).unwrap();
+            s.db().execute("DELETE FROM settings WHERE key = ?1", [WIRE_TRANSCRIPTS]).unwrap();
+            (native, pi)
+        };
+        let s = Store::open(&path).unwrap();
+        let rows: Vec<Entry> =
+            s.messages(native.id, 0).unwrap().into_iter().map(|m| m.entry).collect();
+        let wire = |e: &Entry| match e {
+            Entry::Wire { messages } => messages.iter().map(|m| m.message.clone()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(wire(&rows[0]), [serde_json::json!({"role": "user", "content": "hi"})]);
+        assert_eq!(wire(&rows[1])[1]["content"], "a");
+        assert_eq!(rows[2], Entry::Notice { text: "note".into() });
+        assert_eq!(rows[3], Entry::Summary { text: "so far".into() });
+        let shown: Vec<Entry> = agentbench_core::shown(&s.messages(native.id, 0).unwrap())
+            .into_iter()
+            .map(|m| m.entry)
+            .collect();
+        assert_eq!(shown[0], Entry::user("hi"));
+        assert!(matches!(&shown[1], Entry::Tool { output: Some(o), .. } if o == "a"));
+        assert_eq!(s.messages(pi.id, 0).unwrap()[0].entry, Entry::user("there"));
+        s.add_message(native.id, &Entry::user("later")).unwrap();
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        assert_eq!(
+            s.messages(native.id, 0).unwrap()[4].entry,
+            Entry::user("later"),
+            "converted once"
+        );
     }
 
     #[test]

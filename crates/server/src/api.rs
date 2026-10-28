@@ -277,7 +277,7 @@ async fn overview(State(api): State<Api>) -> Reply<Overview> {
         projects: store.projects()?,
         worktrees: store.worktrees(None)?,
         issues: store.issues()?,
-        sessions: store.sessions()?,
+        sessions: api.runner.with_queued(store.sessions()?),
         cursor: store.cursor()?,
     }))
 }
@@ -641,14 +641,15 @@ async fn add_comment(
 }
 
 async fn sessions(State(api): State<Api>) -> Reply<Vec<agentbench_core::Session>> {
-    Ok(Json(api.runner.store().sessions()?))
+    Ok(Json(api.runner.with_queued(api.runner.store().sessions()?)))
 }
 
 async fn session(
     State(api): State<Api>,
     Path(id): Path<SessionId>,
 ) -> Reply<agentbench_core::Session> {
-    Ok(Json(api.runner.store().session(id)?))
+    let session = api.runner.store().session(id)?;
+    Ok(Json(api.runner.with_queued(vec![session]).remove(0)))
 }
 
 async fn spawn(api: &Api, new: NewSession) -> Result<agentbench_core::Session, Failure> {

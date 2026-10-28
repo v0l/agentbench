@@ -188,6 +188,8 @@ pub struct Session {
     pub usage: Usage,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -397,9 +399,6 @@ pub enum Entry {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<Attachment>,
-        /// Sent while the agent was busy and not yet read by it.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        queued: bool,
     },
     Question {
         id: String,
@@ -439,13 +438,145 @@ pub enum Entry {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         broken: Vec<String>,
     },
+    Wire {
+        messages: Vec<Sent>,
+    },
     #[serde(other)]
     Unknown,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Sent {
+    pub message: Value,
+    #[serde(default)]
+    pub said: Said,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "as", rename_all = "snake_case")]
+pub enum Said {
+    #[default]
+    Plain,
+    Typed {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<Attachment>,
+    },
+    Diagnostics {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        broken: Vec<String>,
+    },
+}
+
+pub const SUMMARY_PREAMBLE: &str =
+    "Here is a summary of our conversation so far. Carry on from it.";
+
+pub const SYSTEM_PROMPT: &str = "system prompt";
+
+pub fn content_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn tool_input(arguments: &Value) -> Value {
+    match arguments.as_str() {
+        Some(s) => serde_json::from_str(s).unwrap_or_else(|_| Value::String(s.to_string())),
+        None => arguments.clone(),
+    }
+}
+
+fn tool_output(content: &Value) -> (String, bool) {
+    let text = content_text(content);
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(o)) if o.len() == 1 && o.get("error").is_some_and(Value::is_string) => {
+            (o["error"].as_str().unwrap_or_default().to_string(), true)
+        }
+        _ => (text, false),
+    }
+}
+
+pub const SHOWN_PER_ROW: i64 = 256;
+
+pub fn shown(rows: &[Message]) -> Vec<Message> {
+    let mut results: std::collections::HashMap<&str, (String, bool)> = Default::default();
+    for row in rows {
+        if let Entry::Wire { messages } = &row.entry {
+            for Sent { message, .. } in messages {
+                if message["role"] == "tool"
+                    && let Some(id) = message["tool_call_id"].as_str()
+                {
+                    results.insert(id, tool_output(&message["content"]));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for row in rows {
+        let mut entries = Vec::new();
+        match &row.entry {
+            Entry::Wire { messages } => {
+                for Sent { message, said } in messages {
+                    let text = content_text(&message["content"]);
+                    match (message["role"].as_str().unwrap_or_default(), said) {
+                        ("system", _) => entries.push(Entry::Tool {
+                            call_id: String::new(),
+                            name: SYSTEM_PROMPT.into(),
+                            input: Value::Null,
+                            output: Some(text),
+                            error: false,
+                        }),
+                        ("assistant", _) => {
+                            if !text.trim().is_empty() {
+                                entries
+                                    .push(Entry::Assistant { text: text.trim_start().to_string() });
+                            }
+                            for call in message["tool_calls"].as_array().into_iter().flatten() {
+                                let call_id = call["id"].as_str().unwrap_or_default().to_string();
+                                let (output, error) = match results.get(call_id.as_str()) {
+                                    Some((o, e)) => (Some(o.clone()), *e),
+                                    None => (None, false),
+                                };
+                                entries.push(Entry::Tool {
+                                    name: call["function"]["name"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                    input: tool_input(&call["function"]["arguments"]),
+                                    call_id,
+                                    output,
+                                    error,
+                                });
+                            }
+                        }
+                        ("tool", _) => {}
+                        (_, Said::Typed { attachments }) => {
+                            entries.push(Entry::User { text, attachments: attachments.clone() })
+                        }
+                        (_, Said::Diagnostics { broken }) => {
+                            entries.push(Entry::Diagnostics { text, broken: broken.clone() })
+                        }
+                        (_, Said::Plain) => {}
+                    }
+                }
+            }
+            other => entries.push(other.clone()),
+        }
+        for (i, entry) in entries.into_iter().enumerate() {
+            out.push(Message { id: row.id * SHOWN_PER_ROW + i as i64, entry, ..row.clone() });
+        }
+    }
+    out
+}
+
 impl Entry {
     pub fn user(text: impl Into<String>) -> Entry {
-        Entry::User { text: text.into(), attachments: Vec::new(), queued: false }
+        Entry::User { text: text.into(), attachments: Vec::new() }
     }
 
     pub fn text(&self) -> &str {
@@ -462,6 +593,9 @@ impl Entry {
                 questions.first().map(|q| q.text.as_str()).unwrap_or_default()
             }
             Entry::Summary { text } => text,
+            Entry::Wire { messages } => {
+                messages.iter().find_map(|s| s.message["content"].as_str()).unwrap_or_default()
+            }
             Entry::Unknown => "",
         }
     }

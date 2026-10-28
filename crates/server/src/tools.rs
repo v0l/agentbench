@@ -272,7 +272,7 @@ impl Api for StoreApi {
                 self.reaches(&me, &other)?;
                 let last =
                     args.get("last").and_then(Value::as_u64).unwrap_or(20).clamp(1, 200) as usize;
-                let msgs = s.messages(other.id, 0).map_err(|e| e.0)?;
+                let msgs = agentbench_core::shown(&s.messages(other.id, 0).map_err(|e| e.0)?);
                 let start = msgs.len().saturating_sub(last);
                 let lines: Vec<Value> = msgs[start..]
                     .iter()
@@ -288,9 +288,7 @@ impl Api for StoreApi {
             "session_status" => {
                 let other = s.session(session_id(args)?).map_err(|e| e.0)?;
                 self.reaches(&me, &other)?;
-                let last = s
-                    .messages(other.id, 0)
-                    .map_err(|e| e.0)?
+                let last = agentbench_core::shown(&s.messages(other.id, 0).map_err(|e| e.0)?)
                     .into_iter()
                     .rev()
                     .find_map(|m| match m.entry {
@@ -579,6 +577,7 @@ fn kind(e: &Entry) -> &'static str {
         Entry::Error { .. } => "error",
         Entry::Notice { .. } => "notice",
         Entry::Diagnostics { .. } => "diagnostics",
+        Entry::Wire { .. } => "sent",
         Entry::Unknown => "unknown",
         Entry::Summary { .. } => "summary",
     }

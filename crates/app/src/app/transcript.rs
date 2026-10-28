@@ -116,38 +116,8 @@ impl App {
 
     pub(super) fn entry(&mut self, ui: &mut Ui, m: &Message, session: SessionId) {
         match &m.entry {
-            Entry::User { text, attachments, queued } => {
-                ui.add_space(6.0);
-                let (rail, fill) =
-                    if *queued { (LEGEND, egui::Color32::TRANSPARENT) } else { (READOUT, PANEL) };
-                rail_block(ui, rail, fill, |ui| {
-                    if *queued {
-                        Line::new()
-                            .legend("you")
-                            .size(10.0)
-                            .gap(8.0)
-                            .note("queued: the agent has not read this yet")
-                            .size(10.0)
-                            .show(ui);
-                    } else {
-                        Line::new()
-                            .legend("you")
-                            .size(10.0)
-                            .gap(8.0)
-                            .note(ago(m.created_at))
-                            .size(10.0)
-                            .show(ui);
-                    }
-                    ui.add_space(2.0);
-                    if !text.is_empty() {
-                        markdown::show(ui, &mut self.markdown, text, m.id as usize);
-                    }
-                    if !attachments.is_empty() {
-                        ui.add_space(4.0);
-                        self.attached(ui, session, attachments);
-                    }
-                });
-                ui.add_space(4.0);
+            Entry::User { text, attachments } => {
+                self.you(ui, m.id, m.created_at, text, attachments, session, false)
             }
             Entry::Assistant { text } => {
                 let mut read = false;
@@ -217,7 +187,7 @@ impl App {
                 Some(&agentbench_core::diagnostics_findings(text)),
                 false,
             ),
-            Entry::Unknown => {}
+            Entry::Wire { .. } | Entry::Unknown => {}
             Entry::Summary { text } if text.is_empty() => {
                 heading(ui, "cleared: the agent starts afresh here");
             }
@@ -229,6 +199,50 @@ impl App {
                 ui.add_space(4.0);
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn you(
+        &mut self,
+        ui: &mut Ui,
+        id: Id,
+        created_at: i64,
+        text: &str,
+        attachments: &[agentbench_core::Attachment],
+        session: SessionId,
+        queued: bool,
+    ) {
+        ui.add_space(6.0);
+        let (rail, fill) =
+            if queued { (LEGEND, egui::Color32::TRANSPARENT) } else { (READOUT, PANEL) };
+        rail_block(ui, rail, fill, |ui| {
+            if queued {
+                Line::new()
+                    .legend("you")
+                    .size(10.0)
+                    .gap(8.0)
+                    .note("queued: the agent has not read this yet")
+                    .size(10.0)
+                    .show(ui);
+            } else {
+                Line::new()
+                    .legend("you")
+                    .size(10.0)
+                    .gap(8.0)
+                    .note(ago(created_at))
+                    .size(10.0)
+                    .show(ui);
+            }
+            ui.add_space(2.0);
+            if !text.is_empty() {
+                markdown::show(ui, &mut self.markdown, text, id as usize);
+            }
+            if !attachments.is_empty() {
+                ui.add_space(4.0);
+                self.attached(ui, session, attachments);
+            }
+        });
+        ui.add_space(4.0);
     }
 
     /// The files a message carried: pictures as thumbnails, anything else as a named chip.

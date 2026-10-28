@@ -334,9 +334,14 @@ pub(crate) mod fake {
                     }
                 };
                 log.lock().unwrap().push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+                let kind = if reply.starts_with("data:") {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                    "HTTP/1.1 {status} X\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
                     reply.len()
                 );
             }
@@ -346,6 +351,10 @@ pub(crate) mod fake {
 
     pub(crate) fn completion(text: &str) -> String {
         json!({ "choices": [{ "message": { "role": "assistant", "content": text } }] }).to_string()
+    }
+
+    pub(crate) fn streamed(delta: Value) -> String {
+        format!("data: {}\n\ndata: [DONE]\n\n", json!({ "choices": [{ "delta": delta }] }))
     }
 }
 

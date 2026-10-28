@@ -32,24 +32,11 @@ struct Live {
 struct Message {
     text: String,
     attachments: Vec<Attachment>,
-    /// The transcript row showing this message while it waits for the agent to read it.
-    queued: Option<Id>,
 }
 
 impl Message {
     fn entry(&self) -> Entry {
-        Entry::User {
-            text: self.text.clone(),
-            attachments: self.attachments.clone(),
-            queued: false,
-        }
-    }
-
-    /// Show the waiting row as sent, now the agent has it.
-    fn delivered(&self, store: &Store) {
-        if let Some(id) = self.queued {
-            let _ = store.update_message(id, &self.entry());
-        }
+        Entry::User { text: self.text.clone(), attachments: self.attachments.clone() }
     }
 }
 
@@ -116,12 +103,11 @@ impl Runner {
         }
         let (store, changed) = (self.store.clone(), self.changed.clone());
         tokio::spawn(async move {
-            let entries: Vec<Entry> = store
-                .messages(session, 0)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|m| m.entry)
-                .collect();
+            let entries: Vec<Entry> =
+                agentbench_core::shown(&store.messages(session, 0).unwrap_or_default())
+                    .into_iter()
+                    .map(|m| m.entry)
+                    .collect();
             match titles.title(&entries).await {
                 Ok(title) => {
                     if matches!(store.set_title(session, &title, force), Ok(true)) {
@@ -230,6 +216,36 @@ impl Runner {
         self.live().contains_key(&session)
     }
 
+    pub fn queued(&self, session: SessionId) -> Vec<String> {
+        self.live()
+            .get(&session)
+            .map(|l| {
+                l.inbox
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .map(|m| m.text.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn with_queued(&self, mut sessions: Vec<Session>) -> Vec<Session> {
+        for s in &mut sessions {
+            s.queued = self.queued(s.id);
+        }
+        sessions
+    }
+
+    fn not_sent(&self, session: SessionId, why: &str, dropped: Vec<Message>) {
+        for m in dropped {
+            let text = format!("not sent, {why}: {}", m.text);
+            let _ = self.store.add_message(session, &Entry::Notice { text });
+        }
+        let _ = self.store.touch_session(session);
+        self.changed.notify_waiters();
+    }
+
     pub fn interrupt(&self, session: SessionId) -> bool {
         let live = self.live();
         let Some(l) = live.get(&session) else {
@@ -240,12 +256,7 @@ impl Runner {
         let dropped: Vec<Message> =
             l.inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
         drop(live);
-        for m in dropped {
-            if let Some(id) = m.queued {
-                let text = format!("not sent, the agent was stopped first: {}", m.text);
-                let _ = self.store.update_message(id, &Entry::Notice { text });
-            }
-        }
+        self.not_sent(session, "the agent was stopped first", dropped);
         true
     }
 
@@ -315,11 +326,7 @@ impl Runner {
                 .unwrap_or("application/octet-stream");
             attachments.push(self.store.add_attachment(session.id, &name, mime, &data)?);
         }
-        self.send_text(
-            session,
-            Message { text: text.to_string(), attachments, queued: None },
-            Mode::Chat,
-        )
+        self.send_text(session, Message { text: text.to_string(), attachments }, Mode::Chat)
     }
 
     /// The files of a message, written to a folder of this session's so an agent can read them.
@@ -409,8 +416,7 @@ impl Runner {
                         "stop the agent or let it finish before compacting".into(),
                     ));
                 }
-                let prompt =
-                    Message { text: COMPACT_PROMPT.into(), attachments: Vec::new(), queued: None };
+                let prompt = Message { text: COMPACT_PROMPT.into(), attachments: Vec::new() };
                 self.send_text(session, prompt, Mode::Compact)
             }
             other => Err(StoreError(format!("/{other} is handled by the window"))),
@@ -427,23 +433,9 @@ impl Runner {
         {
             let live = self.live();
             if let Some(l) = live.get(&session.id) {
-                // Show it at once. A steerable agent only reads the inbox between steps, which
-                // can be a while, and the composer has already cleared by then. It shows as
-                // queued until the agent takes it.
-                let mut msg = msg;
-                let shown = if agent.steerable() {
-                    Entry::User {
-                        text: msg.text.clone(),
-                        attachments: msg.attachments.clone(),
-                        queued: true,
-                    }
-                } else {
-                    Entry::Notice { text: format!("queued for when this turn ends: {}", msg.text) }
-                };
-                let row = self.store.add_message(session.id, &shown)?;
-                msg.queued = agent.steerable().then_some(row.id);
                 l.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
                 drop(live);
+                self.store.touch_session(session.id)?;
                 self.changed.notify_waiters();
                 return Ok(());
             }
@@ -460,9 +452,6 @@ impl Runner {
         tokio::spawn(async move {
             let Live { stop, inbox, questions } = live;
             let mut next = Some(first);
-            // The first prompt is not on screen yet. A steer that missed its step and runs as
-            // the next turn was shown when it was sent, if the agent is steerable.
-            let mut shown = false;
             while let Some(prompt) = next.take() {
                 if stop.is_cancelled() {
                     break;
@@ -472,7 +461,7 @@ impl Runner {
                     Err(_) => break,
                 };
                 let status = runner
-                    .turn(agent.as_ref(), &session, &prompt, shown, &stop, &inbox, &questions, mode)
+                    .turn(agent.as_ref(), &session, &prompt, &stop, &inbox, &questions, mode)
                     .await;
                 let _ = runner.store.set_status(session_id, status);
                 runner.changed.notify_waiters();
@@ -495,25 +484,19 @@ impl Runner {
                 let mut queued = inbox.lock().unwrap_or_else(|e| e.into_inner());
                 if !queued.is_empty() {
                     let all: Vec<Message> = queued.drain(..).collect();
-                    all.iter().for_each(|m| m.delivered(&runner.store));
                     next = Some(Message {
-                        queued: None,
                         text: all.iter().map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n\n"),
                         attachments: all.into_iter().flat_map(|m| m.attachments).collect(),
                     });
-                    shown = agent.steerable();
                 }
             }
             // A turn that failed or was stopped never reads what was waiting.
             let left: Vec<Message> =
                 inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
-            for m in left {
-                if let Some(id) = m.queued {
-                    let text = format!("not sent, the turn ended first: {}", m.text);
-                    let _ = runner.store.update_message(id, &Entry::Notice { text });
-                }
-            }
             runner.live().remove(&session_id);
+            if !left.is_empty() {
+                runner.not_sent(session_id, "the turn ended first", left);
+            }
             runner.changed.notify_waiters();
         });
         Ok(())
@@ -541,8 +524,8 @@ impl Runner {
                 text: format!("the context is {:.0}% full, so it is being compacted", used * 100.0),
             },
         );
-        let prompt = Message { text: COMPACT_PROMPT.into(), attachments: Vec::new(), queued: None };
-        self.turn(agent, &session, &prompt, false, stop, inbox, questions, Mode::Compact).await
+        let prompt = Message { text: COMPACT_PROMPT.into(), attachments: Vec::new() };
+        self.turn(agent, &session, &prompt, stop, inbox, questions, Mode::Compact).await
     }
 
     fn context(&self, session: &Session) -> Context {
@@ -570,7 +553,6 @@ impl Runner {
         agent: &dyn Agent,
         session: &Session,
         msg: &Message,
-        shown: bool,
         stop: &CancellationToken,
         inbox: &Arc<Mutex<Vec<Message>>>,
         questions: &Waiting,
@@ -587,9 +569,9 @@ impl Runner {
             Mode::Chat => msg.entry(),
             Mode::Compact => Entry::Notice { text: "compacting the conversation".into() },
         };
-        if !shown && self.store.add_message(session.id, &entry).is_err() {
+        let Ok(prompt_row) = self.store.add_message(session.id, &entry) else {
             return SessionStatus::Failed;
-        }
+        };
         let summary = history.iter().rev().find_map(|e| match e {
             Entry::Summary { text } => Some(text.clone()),
             _ => None,
@@ -627,7 +609,13 @@ impl Runner {
             store: self.store.clone(),
             session: session.id,
             changed: self.changed.clone(),
-            state: Mutex::new(SinkState { capture: mode == Mode::Compact, ..SinkState::default() }),
+            state: Mutex::new(SinkState {
+                capture: mode == Mode::Compact,
+                raw: agent.writes_log(),
+                prompt: msg.attachments.clone(),
+                typed: (mode == Mode::Chat).then_some(prompt_row.id),
+                ..SinkState::default()
+            }),
             stop: stop.clone(),
             inbox: inbox.clone(),
             questions: questions.clone(),
@@ -689,6 +677,9 @@ enum Mode {
 #[derive(Default)]
 struct SinkState {
     capture: bool,
+    raw: bool,
+    prompt: Vec<Attachment>,
+    typed: Option<Id>,
     captured: String,
     text: Option<(Id, String)>,
     dirty: Option<Instant>,
@@ -789,6 +780,38 @@ impl Sink {
 }
 
 impl Sink {
+    fn sent(&self, mut messages: Vec<agentbench_core::Sent>) {
+        let mut st = self.lock();
+        if st.capture || !st.raw {
+            return;
+        }
+        let mut typed = None;
+        for s in &mut messages {
+            if let agentbench_core::Said::Typed { attachments } = &mut s.said {
+                *attachments = std::mem::take(&mut st.prompt);
+                typed = st.typed.take();
+            }
+        }
+        let streamed = match messages.first() {
+            Some(s) if s.message["role"] == "assistant" => st.text.take().map(|(id, _)| id),
+            Some(s) if s.message["role"] == "system" => st.typed.take(),
+            _ => typed,
+        };
+        st.thinking = None;
+        st.dirty = None;
+        drop(st);
+        let entry = Entry::Wire { messages };
+        match streamed {
+            Some(id) => {
+                let _ = self.store.update_message(id, &entry);
+            }
+            None => {
+                let _ = self.store.add_message(self.session, &entry);
+            }
+        }
+        self.changed.notify_waiters();
+    }
+
     async fn wait(
         &self,
         id: &str,
@@ -824,6 +847,8 @@ impl Io for Sink {
             }
             Event::Text { delta } => self.append(&delta, false),
             Event::Thinking { text } => self.append(&text, true),
+            Event::ToolStart { .. } | Event::ToolEnd { .. } | Event::Diagnostics { .. }
+                if self.lock().raw => {}
             Event::ToolStart { call_id, name, input } => {
                 let entry = Entry::Tool {
                     call_id: call_id.clone(),
@@ -856,7 +881,6 @@ impl Io for Sink {
                     }
                 }
             }
-            // The message was already shown when it was sent, see send_text.
             Event::Steered { .. } => {}
             Event::Usage(u) => {
                 let _ = self.store.add_usage(self.session, &u);
@@ -867,6 +891,7 @@ impl Io for Sink {
             Event::Diagnostics { text, broken } => {
                 self.entry(Entry::Diagnostics { text, broken });
             }
+            Event::Sent(messages) => self.sent(messages),
             Event::Error(text) => {
                 self.entry(Entry::Error { text });
             }
@@ -885,8 +910,11 @@ impl Io for Sink {
         let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
         let msg = (!inbox.is_empty()).then(|| inbox.remove(0))?;
         drop(inbox);
-        msg.delivered(&self.store);
-        self.runner.changed.notify_waiters();
+        let id = self.entry(msg.entry());
+        let mut st = self.lock();
+        st.prompt = msg.attachments.clone();
+        st.typed = id;
+        drop(st);
         let files = self.runner.materialise(self.session, &msg.attachments);
         Some(Steer { text: msg.text, files })
     }
@@ -1088,16 +1116,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_steer_shows_as_soon_as_it_is_sent_and_only_once() {
+    async fn a_queued_message_is_kept_aside_until_the_agent_reads_it() {
         let (runner, s) = setup(Box::new(Steerable));
         runner.send(&s, "go").unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         runner.send(&s, "left instead").unwrap();
         let users = |runner: &Runner| -> Vec<String> {
-            runner
-                .store()
-                .messages(s.id, 0)
-                .unwrap()
+            agentbench_core::shown(&runner.store().messages(s.id, 0).unwrap())
                 .into_iter()
                 .filter_map(|m| match m.entry {
                     Entry::User { text, .. } => Some(text),
@@ -1105,22 +1130,19 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(users(&runner), ["go", "left instead"]);
-        let queued = |runner: &Runner| -> Vec<bool> {
-            runner
-                .store()
-                .messages(s.id, 0)
-                .unwrap()
-                .into_iter()
-                .filter_map(|m| match m.entry {
-                    Entry::User { queued, .. } => Some(queued),
-                    _ => None,
-                })
-                .collect()
-        };
+        assert_eq!(users(&runner), ["go"], "not in the chat while it waits");
+        assert_eq!(runner.queued(s.id), ["left instead"]);
+        assert_eq!(
+            runner.with_queued(vec![fresh_session(&runner, s.id)])[0].queued,
+            ["left instead"]
+        );
         wait_idle(&runner, s.id).await;
         assert_eq!(users(&runner), ["go", "left instead"]);
-        assert_eq!(queued(&runner), [false, false], "once read it no longer shows as waiting");
+        assert!(runner.queued(s.id).is_empty());
+    }
+
+    fn fresh_session(runner: &Runner, id: SessionId) -> Session {
+        runner.store().session(id).unwrap()
     }
 
     struct Looker(Mutex<Vec<Steer>>);
@@ -1552,6 +1574,71 @@ mod tests {
             })
             .collect();
         assert!(notes.iter().any(|n| n == "nothing to stop"));
+    }
+
+    #[tokio::test]
+    async fn a_native_chat_is_resent_from_its_own_rows_byte_for_byte() {
+        use crate::agent::native::{Model, Native};
+        use crate::titles::fake::{server, streamed};
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Use tabs here.\n").unwrap();
+        let long = "x".repeat(5000);
+        let call = json!({"tool_calls": [
+            {"index": 0, "id": "c1", "function": {"name": "bash", "arguments": json!({"command": format!("echo {long}")}).to_string()}},
+            {"index": 1, "id": "c2", "function": {"name": "bash", "arguments": "{\"command\": \"false\"}"}},
+        ]});
+        let (url, seen) = server(vec![
+            (200, streamed(call)),
+            (200, streamed(json!({"content": "  done"}))),
+            (200, streamed(json!({"content": "again"}))),
+            (200, streamed(json!({"content": "We ran echo."}))),
+            (200, streamed(json!({"content": "fresh"}))),
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let store = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&store, dir.path().to_str().unwrap());
+        let s = store.add_session(main.id, "native", "t", None, None).unwrap();
+        let runner = Runner::new(store, vec![Box::new(native)]);
+        let fresh = |runner: &Runner| runner.store().session(s.id).unwrap();
+        runner.send(&fresh(&runner), "one").unwrap();
+        wait_idle(&runner, s.id).await;
+        std::fs::write(dir.path().join("AGENTS.md"), "Use spaces now.\n").unwrap();
+        runner.send(&fresh(&runner), "two").unwrap();
+        wait_idle(&runner, s.id).await;
+        let asked = seen.lock().unwrap().clone();
+        let before = asked[1]["messages"].as_array().unwrap();
+        let now = asked[2]["messages"].as_array().unwrap();
+        assert_eq!(now[..before.len()], before[..], "the second turn changed what was sent");
+        assert!(now[0]["content"].as_str().unwrap().contains("Use tabs here."));
+        assert!(now.iter().any(|m| m["content"].as_str().is_some_and(|t| t.contains(&long))));
+        assert_eq!(now[before.len()], json!({"role": "assistant", "content": "  done"}));
+        assert_eq!(now[before.len() + 1], json!({"role": "user", "content": "two"}));
+
+        let shown: Vec<Entry> = agentbench_core::shown(&runner.store().messages(s.id, 0).unwrap())
+            .into_iter()
+            .map(|m| m.entry)
+            .collect();
+        assert!(
+            matches!(&shown[0], Entry::Tool { name, .. } if name == agentbench_core::SYSTEM_PROMPT)
+        );
+        assert_eq!(shown[1], Entry::user("one"));
+        assert!(
+            matches!(&shown[2], Entry::Tool { name, output: Some(o), .. } if name == "bash" && o.contains(&long))
+        );
+        assert!(matches!(&shown[3], Entry::Tool { error: true, .. }));
+        assert_eq!(shown[4], Entry::Assistant { text: "done".into() });
+        assert_eq!(shown[5], Entry::user("two"));
+
+        runner.send(&fresh(&runner), "/compact").unwrap();
+        wait_idle(&runner, s.id).await;
+        runner.send(&fresh(&runner), "three").unwrap();
+        wait_idle(&runner, s.id).await;
+        let last = seen.lock().unwrap()[4]["messages"].as_array().unwrap().clone();
+        assert_eq!(last.len(), 3, "{last:?}");
+        assert!(last[0]["content"].as_str().unwrap().contains("Use spaces now."));
+        assert!(last[1]["content"].as_str().unwrap().ends_with("We ran echo."));
+        assert_eq!(last[2], json!({"role": "user", "content": "three"}));
     }
 
     fn titled(url: String, agent: Box<dyn Agent>, auto: bool) -> (Runner, Session) {

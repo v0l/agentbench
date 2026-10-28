@@ -1,5 +1,5 @@
 use super::{Agent, Context, Event, Io, Turn, async_trait, brief, files, media};
-use agentbench_core::{Entry, Question, Usage};
+use agentbench_core::{Entry, Question, SUMMARY_PREAMBLE, Said, Sent, Usage};
 use egui_bench::agent::skillset;
 use egui_bench::agent::tools::{self, Spec, integer, object, string};
 use egui_bench::agent::workspace::Workspace;
@@ -911,37 +911,49 @@ fn symbol_hint(symbol: &str) -> String {
     )
 }
 
-fn history(entries: &[Entry], role: &str) -> Vec<Value> {
-    let mut out = Vec::new();
-    for e in agentbench_core::since_summary(entries) {
-        match e {
-            Entry::Summary { text } => out.push(json!({
-                "role": "user",
-                "content": format!("Here is a summary of our conversation so far. Carry on from it.\n\n{text}"),
-            })),
-            Entry::User { text, attachments, .. } if !attachments.is_empty() => {
+fn history(entries: &[Entry]) -> Vec<Value> {
+    let mut rows: Vec<&Vec<Sent>> = agentbench_core::since_summary(entries)
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Wire { messages } => Some(messages),
+            _ => None,
+        })
+        .collect();
+    rows.sort_by_key(|row| row.first().is_none_or(|s| s.message["role"] != "system"));
+    rows.into_iter().flatten().map(|s| s.message.clone()).collect()
+}
+
+/// An entry written before the transcript held what was sent, as the messages it was replayed
+/// as then. Each old chat is turned into these once, so its replay never changes again.
+pub fn wire_of(entry: &Entry, role: &str) -> Vec<Sent> {
+    let plain = |message: Value| Sent { message, said: Said::Plain };
+    match entry {
+        Entry::User { text, attachments } => {
+            let content = if attachments.is_empty() {
+                text.clone()
+            } else {
                 let names: Vec<&str> = attachments.iter().map(|a| a.name.as_str()).collect();
-                out.push(json!({
-                    "role": "user",
-                    "content": format!("{text}\n\n(attached earlier: {})", names.join(", ")),
-                }))
-            }
-            Entry::User { text, .. } => out.push(json!({ "role": "user", "content": text })),
-            Entry::Assistant { text } => out.push(json!({ "role": "assistant", "content": text })),
-            Entry::Tool { call_id, name, input, output, error } => {
-                let result = match (output, error) {
-                    (Some(o), false) => clip(o, 2000),
-                    (Some(o), true) => format!("failed: {}", clip(o, 2000)),
-                    (None, _) => "no result".into(),
-                };
-                // Replayed as a real call and its result. As prose ("called x and got ...") the
-                // model copies the style and writes made up calls and output instead of calling.
-                let id = if call_id.is_empty() { format!("call_{}", out.len()) } else { call_id.clone() };
-                let args = match input {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                out.push(json!({
+                format!("{text}\n\n(attached earlier: {})", names.join(", "))
+            };
+            vec![Sent {
+                message: json!({ "role": "user", "content": content }),
+                said: Said::Typed { attachments: attachments.clone() },
+            }]
+        }
+        Entry::Assistant { text } => vec![plain(json!({ "role": "assistant", "content": text }))],
+        Entry::Tool { call_id, name, input, output, error } => {
+            let result = match (output, error) {
+                (Some(o), false) => clip(o, 2000),
+                (Some(o), true) => format!("failed: {}", clip(o, 2000)),
+                (None, _) => "no result".into(),
+            };
+            let id = if call_id.is_empty() { "call_0".to_string() } else { call_id.clone() };
+            let args = match input {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            vec![
+                plain(json!({
                     "role": "assistant",
                     "content": "",
                     "tool_calls": [{
@@ -949,45 +961,51 @@ fn history(entries: &[Entry], role: &str) -> Vec<Value> {
                         "type": "function",
                         "function": { "name": name, "arguments": args },
                     }],
-                }));
-                out.push(json!({ "role": "tool", "tool_call_id": id, "content": result }));
-            }
-            Entry::Question { question, answer, .. } => out.push(json!({
-                "role": "assistant",
-                "content": format!(
-                    "asked the user: {} and they answered: {}",
-                    question.text,
-                    answer.as_deref().unwrap_or("nothing")
-                ),
-            })),
-            Entry::Questions { questions, answers, .. } => {
-                let said = questions
-                    .iter()
-                    .enumerate()
-                    .map(|(i, q)| {
-                        let a = answers.as_ref().and_then(|a| a.get(i)).map(String::as_str);
-                        format!("{} {}", q.text, a.unwrap_or("nothing"))
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                out.push(json!({
-                    "role": "assistant",
-                    "content": format!("asked the user several questions and they answered: {said}"),
-                }));
-            }
-            Entry::Diagnostics { text, .. } => out.push(json!({ "role": role, "content": text })),
-            Entry::Thinking { .. } | Entry::Error { .. } | Entry::Notice { .. } | Entry::Unknown => {}
+                })),
+                plain(json!({ "role": "tool", "tool_call_id": id, "content": result })),
+            ]
         }
+        Entry::Question { question, answer, .. } => vec![plain(json!({
+            "role": "assistant",
+            "content": format!(
+                "asked the user: {} and they answered: {}",
+                question.text,
+                answer.as_deref().unwrap_or("nothing")
+            ),
+        }))],
+        Entry::Questions { questions, answers, .. } => {
+            let said = questions
+                .iter()
+                .enumerate()
+                .map(|(i, q)| {
+                    let a = answers.as_ref().and_then(|a| a.get(i)).map(String::as_str);
+                    format!("{} {}", q.text, a.unwrap_or("nothing"))
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            vec![plain(json!({
+                "role": "assistant",
+                "content": format!("asked the user several questions and they answered: {said}"),
+            }))]
+        }
+        Entry::Diagnostics { text, broken } => vec![Sent {
+            message: json!({ "role": role, "content": text }),
+            said: Said::Diagnostics { broken: broken.clone() },
+        }],
+        _ => Vec::new(),
     }
-    out
 }
 
 fn still_broken(entries: &[Entry]) -> std::collections::HashSet<std::path::PathBuf> {
     agentbench_core::since_summary(entries)
         .iter()
         .rev()
-        .find_map(|e| match e {
-            Entry::Diagnostics { broken, .. } => Some(broken.iter().map(Into::into).collect()),
+        .flat_map(|e| match e {
+            Entry::Wire { messages } => messages.iter().rev().collect(),
+            _ => Vec::new(),
+        })
+        .find_map(|s| match &s.said {
+            Said::Diagnostics { broken } => Some(broken.iter().map(Into::into).collect()),
             _ => None,
         })
         .unwrap_or_default()
@@ -1000,6 +1018,62 @@ fn clip(text: &str, max: usize) -> String {
     let head = text.floor_char_boundary(max / 2);
     let tail = text.ceil_char_boundary(text.len() - max / 2);
     format!("{}\n... {} bytes left out ...\n{}", &text[..head], tail - head, &text[tail..])
+}
+
+struct Log<'a> {
+    messages: Vec<Value>,
+    io: &'a dyn Io,
+}
+
+impl<'a> Log<'a> {
+    fn new(io: &'a dyn Io, replay: Vec<Value>) -> Log<'a> {
+        let mut log = Log { messages: replay, io };
+        for id in unanswered(&log.messages) {
+            log.push(json!({ "role": "tool", "tool_call_id": id, "content": "no result: the turn ended first" }));
+        }
+        log
+    }
+
+    fn push(&mut self, message: Value) {
+        self.say(message, Said::Plain);
+    }
+
+    fn say(&mut self, message: Value, said: Said) {
+        self.io.emit(Event::Sent(vec![Sent { message: message.clone(), said }]));
+        self.messages.push(message);
+    }
+
+    fn open(&mut self, opening: Vec<Value>) {
+        let sent = opening.iter().map(|m| Sent { message: m.clone(), said: Said::Plain }).collect();
+        self.io.emit(Event::Sent(sent));
+        self.messages.splice(0..0, opening);
+    }
+}
+
+impl std::ops::Deref for Log<'_> {
+    type Target = [Value];
+
+    fn deref(&self) -> &[Value] {
+        &self.messages
+    }
+}
+
+fn unanswered(messages: &[Value]) -> Vec<String> {
+    let Some(at) = messages.iter().rposition(|m| m["role"] == "assistant") else {
+        return Vec::new();
+    };
+    let answered: Vec<&Value> = messages[at + 1..]
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| &m["tool_call_id"])
+        .collect();
+    messages[at]["tool_calls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| !answered.contains(&&c["id"]))
+        .filter_map(|c| c["id"].as_str().map(str::to_string))
+        .collect()
 }
 
 #[derive(Default, Clone)]
@@ -1052,6 +1126,10 @@ impl Agent for Native {
         true
     }
 
+    fn writes_log(&self) -> bool {
+        true
+    }
+
     fn compact_at(&self) -> u64 {
         self.model.get().compact_at
     }
@@ -1069,15 +1147,29 @@ impl Agent for Native {
         let workspace = open_workspace(turn.cwd)?;
         let languages =
             if turn.context.home { Vec::new() } else { self.usable_languages(workspace.root()) };
-        let mut prompt = system(turn, &base);
-        prompt.push_str(&code_section(&languages));
-        prompt.push_str(&model_levels_section(&base, &model));
-        let mut messages = vec![json!({ "role": "system", "content": prompt })];
+        let mut messages = Log::new(io, history(turn.history));
+        if !messages.first().is_some_and(|m| m["role"] == "system") {
+            let mut prompt = system(turn, &base);
+            prompt.push_str(&code_section(&languages));
+            prompt.push_str(&model_levels_section(&base, &model));
+            let mut opening = vec![json!({ "role": "system", "content": prompt })];
+            if let Some(Entry::Summary { text }) = agentbench_core::since_summary(turn.history)
+                .first()
+                .filter(|e| matches!(e, Entry::Summary { text } if !text.is_empty()))
+            {
+                opening.push(
+                    json!({ "role": "user", "content": format!("{SUMMARY_PREAMBLE}\n\n{text}") }),
+                );
+            }
+            messages.open(opening);
+        }
         let mut hinted = languages.is_empty();
         let mut failures = 0usize;
         let mut nudged = false;
-        messages.extend(history(turn.history, self.code.role()));
-        messages.push(user_message(turn.prompt, turn.files).await);
+        messages.say(
+            user_message(turn.prompt, turn.files).await,
+            Said::Typed { attachments: Vec::new() },
+        );
         let tools = tool_list(&base);
         let mut broken = still_broken(turn.history);
         io.emit(Event::Usage(serving(&model, self.patience.probe).await));
@@ -1239,17 +1331,23 @@ impl Agent for Native {
                     )
                     .await;
                 if let Some(note) = super::code::render(&reports, workspace.root(), &mut broken) {
-                    messages.push(json!({ "role": self.code.role(), "content": note }));
                     let mut files: Vec<String> =
                         broken.iter().map(|p| p.to_string_lossy().into_owned()).collect();
                     files.sort();
+                    messages.say(
+                        json!({ "role": self.code.role(), "content": note }),
+                        Said::Diagnostics { broken: files.clone() },
+                    );
                     io.emit(Event::Diagnostics { text: note, broken: files });
                 }
             }
             let mut steered = false;
             while let Some(steer) = io.steer() {
                 io.emit(Event::Steered { text: steer.text.clone() });
-                messages.push(user_message(&steer.text, &steer.files).await);
+                messages.say(
+                    user_message(&steer.text, &steer.files).await,
+                    Said::Typed { attachments: Vec::new() },
+                );
                 steered = true;
             }
             if reply.calls.is_empty() && !steered {
@@ -2467,23 +2565,7 @@ mod tests {
         let first = TestIo::new(Arc::new(FakeApi));
         run(&native, dir.path(), "break it", &first).await.unwrap();
         let (_, _) = (asked.recv().unwrap(), asked.recv().unwrap());
-        let mut entries = vec![Entry::user("break it")];
-        for e in first.events() {
-            match e {
-                Event::ToolEnd { call_id, name, output, error } => entries.push(Entry::Tool {
-                    call_id,
-                    name,
-                    input: json!({}),
-                    output: Some(output),
-                    error,
-                }),
-                Event::Diagnostics { text, broken } => {
-                    entries.push(Entry::Diagnostics { text, broken })
-                }
-                _ => {}
-            }
-        }
-        entries.push(Entry::Assistant { text: "left it broken".into() });
+        let entries = rows_from(&first);
         let c = context();
         let turn = Turn {
             prompt: "now fix it",
@@ -2883,6 +2965,107 @@ mod tests {
         assert!(!system.contains("<arg "), "{system}");
     }
 
+    fn rows_from(io: &TestIo) -> Vec<Entry> {
+        io.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Sent(messages) => Some(Entry::Wire { messages }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sent_by(io: &TestIo) -> Vec<Value> {
+        rows_from(io)
+            .into_iter()
+            .flat_map(|e| match e {
+                Entry::Wire { messages } => messages.into_iter().map(|s| s.message).collect(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_later_turn_resends_the_first_turn_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Use tabs here.\n").unwrap();
+        let long = "x".repeat(5000);
+        let (url, asked) = stub(vec![
+            vec![json!({"choices":[{"delta":{"tool_calls":[
+                {"index":0,"id":"c1","function":{"name":"bash","arguments":json!({"command": format!("echo {long}")}).to_string()}},
+                {"index":1,"id":"c2","function":{"name":"bash","arguments":json!({"command": "false"}).to_string()}},
+            ]}}]})],
+            vec![say("done")],
+            vec![say("again")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let c = context();
+        let first = TestIo::new(Arc::new(FakeApi));
+        let turn = |prompt, history| Turn {
+            prompt,
+            files: &[],
+            cwd: dir.path(),
+            model: None,
+            effort: None,
+            resume: None,
+            history,
+            context: &c,
+        };
+        native.run(&turn("one", &[]), &first).await.unwrap();
+        let (_, last_of_first) = (asked.recv().unwrap(), asked.recv().unwrap());
+        assert_eq!(sent_by(&first).last(), Some(&json!({"role": "assistant", "content": "done"})));
+        let rows = rows_from(&first);
+        std::fs::write(dir.path().join("AGENTS.md"), "Use spaces now.\n").unwrap();
+        let second = TestIo::new(Arc::new(FakeApi));
+        native.run(&turn("two", &rows), &second).await.unwrap();
+        let opening = asked.recv().unwrap();
+        let before = last_of_first["messages"].as_array().unwrap();
+        let now = opening["messages"].as_array().unwrap();
+        assert_eq!(now[..before.len()], before[..], "the prefix changed");
+        assert!(now[0]["content"].as_str().unwrap().contains("Use tabs here."));
+        assert!(now.iter().any(|m| m["content"].as_str().is_some_and(|t| t.contains(&long))));
+        assert_eq!(now[before.len()], json!({"role": "assistant", "content": "done"}));
+        assert_eq!(now[before.len() + 1], json!({"role": "user", "content": "two"}));
+    }
+
+    #[tokio::test]
+    async fn a_turn_cut_off_mid_call_is_answered_before_the_next_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("ok")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let c = context();
+        let log = [
+            json!({"role": "system", "content": "s"}),
+            json!({"role": "user", "content": "one"}),
+            json!({"role": "assistant", "content": "", "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+                {"id": "b", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ]}),
+            json!({"role": "tool", "tool_call_id": "a", "content": "fine"}),
+        ];
+        let io = TestIo::new(Arc::new(FakeApi));
+        let rows = vec![Entry::Wire {
+            messages: log.iter().map(|m| Sent { message: m.clone(), said: Said::Plain }).collect(),
+        }];
+        let turn = Turn {
+            prompt: "two",
+            files: &[],
+            cwd: dir.path(),
+            model: None,
+            effort: None,
+            resume: None,
+            history: &rows,
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        let now = asked.recv().unwrap()["messages"].as_array().unwrap().clone();
+        assert_eq!(now[..4], log[..]);
+        assert_eq!(now[4]["tool_call_id"], "b");
+        assert_eq!(now[5], json!({"role": "user", "content": "two"}));
+        let sent = sent_by(&io);
+        assert_eq!(sent[0]["tool_call_id"], "b", "the answer is kept for the turn after");
+    }
+
     #[test]
     fn standing_instructions_come_from_agents_md_when_it_has_text() {
         let dir = tempfile::tempdir().unwrap();
@@ -2989,22 +3172,59 @@ mod tests {
         assert!(url.starts_with("data:image/png;base64,"), "{last}");
     }
 
-    #[test]
-    fn a_summary_replaces_what_came_before_it() {
-        let entries = vec![
-            Entry::user("old"),
-            Entry::Summary { text: "we fixed login".into() },
-            Entry::user("next"),
-        ];
-        let h = history(&entries, "user");
-        assert_eq!(h.len(), 2);
-        assert!(h[0]["content"].as_str().unwrap().contains("we fixed login"));
-        assert_eq!(h[1]["content"], "next");
+    fn wire(entries: &[Entry]) -> Vec<Entry> {
+        entries
+            .iter()
+            .map(|e| match wire_of(e, "user") {
+                messages if messages.is_empty() => e.clone(),
+                messages => Entry::Wire { messages },
+            })
+            .collect()
     }
 
     #[test]
-    fn earlier_turns_are_replayed_from_the_transcript() {
-        let entries = vec![
+    fn a_summary_replaces_what_came_before_it() {
+        let entries = wire(&[
+            Entry::user("old"),
+            Entry::Summary { text: "we fixed login".into() },
+            Entry::user("next"),
+        ]);
+        assert_eq!(history(&entries), [json!({"role": "user", "content": "next"})]);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_log_after_a_summary_opens_with_it_as_the_first_user_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("ok")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let c = context();
+        let entries = vec![Entry::user("old"), Entry::Summary { text: "we fixed login".into() }];
+        let io = TestIo::new(Arc::new(FakeApi));
+        let turn = Turn {
+            prompt: "next",
+            files: &[],
+            cwd: dir.path(),
+            model: None,
+            effort: None,
+            resume: None,
+            history: &entries,
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        let sent = asked.recv().unwrap()["messages"].as_array().unwrap().clone();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0]["role"], "system");
+        assert_eq!(
+            sent[1],
+            json!({"role": "user", "content": format!("{SUMMARY_PREAMBLE}\n\nwe fixed login")})
+        );
+        assert_eq!(sent[2], json!({"role": "user", "content": "next"}));
+        assert_eq!(sent_by(&io)[..3], sent[..], "the opening is kept for the turn after");
+    }
+
+    #[test]
+    fn old_entries_become_the_messages_they_were_replayed_as() {
+        let entries = wire(&[
             Entry::user("hi"),
             Entry::Thinking { text: "hmm".into() },
             Entry::Tool {
@@ -3015,8 +3235,8 @@ mod tests {
                 error: false,
             },
             Entry::Assistant { text: "there is a".into() },
-        ];
-        let h = history(&entries, "user");
+        ]);
+        let h = history(&entries);
         assert_eq!(h.len(), 4);
         assert_eq!(h[0], json!({"role": "user", "content": "hi"}));
         let call = &h[1]["tool_calls"][0];
@@ -3028,6 +3248,33 @@ mod tests {
             !h.iter().any(|m| m["content"].as_str().is_some_and(|c| c.contains("called bash"))),
             "a past call is not written out as prose the model would copy"
         );
+    }
+
+    #[tokio::test]
+    async fn a_migrated_chat_gets_its_system_prompt_first_and_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("ok")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let c = context();
+        let entries = wire(&[Entry::user("hi"), Entry::Assistant { text: "hello".into() }]);
+        let io = TestIo::new(Arc::new(FakeApi));
+        let turn = Turn {
+            prompt: "again",
+            files: &[],
+            cwd: dir.path(),
+            model: None,
+            effort: None,
+            resume: None,
+            history: &entries,
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        let sent = asked.recv().unwrap()["messages"].as_array().unwrap().clone();
+        assert_eq!(sent[0]["role"], "system");
+        assert_eq!(sent[1], json!({"role": "user", "content": "hi"}));
+        let mut all = entries.clone();
+        all.extend(rows_from(&io));
+        assert_eq!(history(&all)[..sent.len()], sent[..], "the system row comes first on replay");
     }
 
     #[tokio::test]

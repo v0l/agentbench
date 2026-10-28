@@ -273,6 +273,7 @@ enum Confirm {
 
 #[derive(Default)]
 struct Transcript {
+    rows: Vec<Message>,
     messages: Vec<Message>,
     last: Id,
     loading: bool,
@@ -1157,12 +1158,15 @@ impl App {
                 t.loading = false;
                 for m in msgs {
                     t.last = t.last.max(m.id);
-                    t.heights.forget(m.id);
-                    match t.messages.iter_mut().rev().find(|x| x.id == m.id) {
+                    for i in 0..agentbench_core::SHOWN_PER_ROW {
+                        t.heights.forget(m.id * agentbench_core::SHOWN_PER_ROW + i);
+                    }
+                    match t.rows.iter_mut().rev().find(|x| x.id == m.id) {
                         Some(x) => *x = m,
-                        None => t.messages.push(m),
+                        None => t.rows.push(m),
                     }
                 }
+                t.messages = agentbench_core::shown(&t.rows);
             }
             Reply::Comments(iid, c) => {
                 self.comments.insert(iid, c);
@@ -1274,8 +1278,8 @@ impl App {
             return;
         }
         t.loading = true;
-        let tail = t.messages.iter().rev().take(3).map(|m| m.id).min().unwrap_or(0);
-        let after = if t.messages.is_empty() { 0 } else { tail.saturating_sub(1) };
+        let tail = t.rows.iter().rev().take(3).map(|m| m.id).min().unwrap_or(0);
+        let after = if t.rows.is_empty() { 0 } else { tail.saturating_sub(1) };
         if let Some(c) = &mut self.client {
             c.messages(sid, after);
         }
@@ -1892,6 +1896,7 @@ mod tests {
             usage: Default::default(),
             created_at: 0,
             updated_at: 0,
+            queued: Vec::new(),
         };
         let all = [
             s(SessionStatus::Idle),

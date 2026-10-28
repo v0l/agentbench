@@ -97,6 +97,7 @@ pub enum Event {
     Usage(Usage),
     Notice(String),
     Diagnostics { text: String, broken: Vec<String> },
+    Sent(Vec<agentbench_core::Sent>),
     Error(String),
     Done,
 }
@@ -132,6 +133,9 @@ pub trait Agent: Send + Sync {
     fn about(&self) -> String;
     fn resumable(&self) -> bool;
     fn steerable(&self) -> bool {
+        false
+    }
+    fn writes_log(&self) -> bool {
         false
     }
     /// Once a chat's context is this many percent full, agentbench summarises it and starts the

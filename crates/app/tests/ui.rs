@@ -891,6 +891,50 @@ fn diagnostics_after_an_edit_show_as_a_folded_row_with_the_first_finding() {
     assert!(h.query_by_label_contains("harness speaking").is_none());
 }
 
+#[test]
+fn a_native_chat_shows_from_what_was_sent() {
+    use agentbench_core::{Said, Sent};
+    use serde_json::json;
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "native", "list it", None, None).unwrap();
+    let row = |messages: Vec<(serde_json::Value, Said)>| Entry::Wire {
+        messages: messages.into_iter().map(|(message, said)| Sent { message, said }).collect(),
+    };
+    for e in [
+        row(vec![(json!({"role": "system", "content": "You are a careful agent."}), Said::Plain)]),
+        row(vec![(
+            json!({"role": "user", "content": "list the files"}),
+            Said::Typed { attachments: vec![] },
+        )]),
+        row(vec![(
+            json!({"role": "assistant", "content": "Looking.", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}},
+            ]}),
+            Said::Plain,
+        )]),
+        row(vec![(
+            json!({"role": "tool", "tool_call_id": "c1", "content": "Cargo.toml\nsrc"}),
+            Said::Plain,
+        )]),
+        row(vec![(json!({"role": "assistant", "content": "Two entries."}), Said::Plain)]),
+    ] {
+        rig.store.add_message(s.id, &e).unwrap();
+    }
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 5);
+    h.run_steps(3);
+    shot(&mut h, "native-wire");
+    h.get_by_label("list the files");
+    h.get_by_label("Looking.");
+    h.get_by_label("Two entries.");
+    h.get_by_label("$ ls");
+    h.get_by_label("You are a careful agent.");
+    h.get_by_label("Cargo.toml   +1 lines");
+}
+
 fn scrolled_to_the_top(
     h: &mut Harness<'_, App>,
     at: egui::Pos2,

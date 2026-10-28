@@ -422,6 +422,9 @@ impl App {
                     );
                     ui.add_space(6.0);
                 }
+                for (i, text) in s.queued.iter().enumerate() {
+                    self.you(ui, -1 - i as Id, 0, text, &[], s.id, true);
+                }
                 if jump {
                     ui.scroll_to_cursor(Some(Align::BOTTOM));
                 }

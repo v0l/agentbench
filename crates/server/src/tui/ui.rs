@@ -124,14 +124,11 @@ fn question_lines(
 
 fn entry_lines(m: &Message, expanded: bool, width: usize) -> Vec<Line<'static>> {
     match &m.entry {
-        Entry::User { text, attachments, queued } => {
+        Entry::User { text, attachments } => {
             let lead = piece("› ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD));
             let mut body = piece(text, Style::default().add_modifier(Modifier::BOLD));
             if !attachments.is_empty() {
                 body.push((format!("  [{} files]", attachments.len()), dim()));
-            }
-            if *queued {
-                body.push(("  (queued)".into(), dim()));
             }
             let mut rows = Vec::new();
             for para in text_paragraphs(&body) {
@@ -182,7 +179,7 @@ fn entry_lines(m: &Message, expanded: bool, width: usize) -> Vec<Line<'static>> 
             expanded,
             width,
         ),
-        Entry::Unknown => Vec::new(),
+        Entry::Wire { .. } | Entry::Unknown => Vec::new(),
         Entry::Summary { text } if text.is_empty() => {
             vec![line(piece("── cleared: the agent starts afresh here ──", dim()))]
         }
@@ -209,10 +206,16 @@ fn text_paragraphs(body: &[Piece]) -> Vec<Vec<Piece>> {
     paras
 }
 
-pub fn transcript(messages: &[Message], expanded: bool, width: usize) -> Vec<Line<'static>> {
+pub fn transcript(
+    messages: &[Message],
+    queued: &[String],
+    expanded: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut rows: Vec<Line<'static>> = Vec::new();
     let mut prev: Option<&Entry> = None;
-    for m in messages {
+    let messages = agentbench_core::shown(messages);
+    for m in &messages {
         let body = entry_lines(m, expanded, width);
         if body.is_empty() {
             continue;
@@ -229,6 +232,17 @@ pub fn transcript(messages: &[Message], expanded: bool, width: usize) -> Vec<Lin
         }
         rows.extend(body);
         prev = Some(&m.entry);
+    }
+    for text in queued {
+        if !rows.is_empty() {
+            rows.push(Line::default());
+        }
+        let lead = piece("› ", dim());
+        let mut body = piece(text, dim());
+        body.push(("  (queued)".into(), dim()));
+        for para in text_paragraphs(&body) {
+            rows.extend(wrap(&para, width, &lead, &piece("  ", dim())));
+        }
     }
     rows
 }
@@ -459,7 +473,8 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &mut View) {
     f.render_widget(Paragraph::new(title_line(app, width)), title);
 
     if app.lines_stale || view.width != width || view.expanded != app.expanded {
-        view.lines = transcript(&app.messages, app.expanded, width);
+        let queued = app.session.as_ref().map(|s| s.queued.as_slice()).unwrap_or_default();
+        view.lines = transcript(&app.messages, queued, app.expanded, width);
         view.width = width;
         view.expanded = app.expanded;
         app.lines_stale = false;
@@ -789,12 +804,13 @@ mod tests {
     }
 
     #[test]
-    fn queued_messages_and_attachments_are_tagged() {
+    fn queued_messages_are_listed_after_the_transcript() {
         let mut a = app();
-        a.open(
-            session(SessionStatus::Running),
-            vec![msg(1, Entry::User { text: "steer".into(), attachments: vec![], queued: true })],
-        );
-        assert!(joined(&render(&mut a, 40, 10)).contains("(queued)"));
+        let mut s = session(SessionStatus::Running);
+        s.queued = vec!["steer".into()];
+        a.open(s, vec![msg(1, Entry::user("go"))]);
+        let shown = joined(&render(&mut a, 40, 10));
+        assert!(shown.contains("steer  (queued)"), "{shown}");
+        assert!(shown.find("go").unwrap() < shown.find("steer").unwrap());
     }
 }

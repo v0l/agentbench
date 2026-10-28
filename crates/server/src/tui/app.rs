@@ -173,7 +173,7 @@ impl App {
         self.pick = Pick::default();
         self.lines_stale = true;
         self.dirty = true;
-        for m in &self.messages {
+        for m in &agentbench_core::shown(&self.messages) {
             if let Entry::User { text, .. } = &m.entry
                 && self.history.last() != Some(text)
             {
@@ -207,7 +207,9 @@ impl App {
                 Entry::Tool { output, .. } => output.is_none(),
                 Entry::Question { answer, .. } => answer.is_none(),
                 Entry::Questions { answers, .. } => answers.is_none(),
-                Entry::User { queued, .. } => *queued,
+                Entry::Wire { messages } => {
+                    messages.iter().any(|s| s.message["role"] == "assistant")
+                }
                 _ => false,
             })
             .map(|m| m.id)
@@ -736,6 +738,7 @@ pub mod tests {
             usage: Usage::default(),
             created_at: 0,
             updated_at: 0,
+            queued: Vec::new(),
         }
     }
 
