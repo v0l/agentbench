@@ -781,10 +781,11 @@ impl Sink {
 
 impl Sink {
     fn sent(&self, mut messages: Vec<agentbench_core::Sent>) {
-        let mut st = self.lock();
-        if st.capture || !st.raw {
+        if self.lock().capture || !self.lock().raw {
             return;
         }
+        self.flush();
+        let mut st = self.lock();
         let mut typed = None;
         for s in &mut messages {
             if let agentbench_core::Said::Typed { attachments } = &mut s.said {
@@ -798,7 +799,6 @@ impl Sink {
             _ => typed,
         };
         st.thinking = None;
-        st.dirty = None;
         drop(st);
         let entry = Entry::Wire { messages };
         match streamed {
@@ -1574,6 +1574,61 @@ mod tests {
             })
             .collect();
         assert!(notes.iter().any(|n| n == "nothing to stop"));
+    }
+
+    struct Thinker;
+
+    #[async_trait]
+    impl Agent for Thinker {
+        fn name(&self) -> &str {
+            "thinker"
+        }
+        fn label(&self) -> &str {
+            "Thinker"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn writes_log(&self) -> bool {
+            true
+        }
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            for word in ["The", " user", " wants", " a", " list."] {
+                io.emit(Event::Thinking { text: word.into() });
+            }
+            io.emit(Event::Sent(vec![agentbench_core::Sent {
+                message: serde_json::json!({"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "list_issues", "arguments": ""}},
+                ]}),
+                said: agentbench_core::Said::Plain,
+            }]));
+            io.emit(Event::Done);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_streamed_before_a_sent_message_is_kept_whole() {
+        let (runner, s) = setup(Box::new(Thinker));
+        runner.send(&s, "list it").unwrap();
+        wait_idle(&runner, s.id).await;
+        let thinking: Vec<String> = runner
+            .store()
+            .messages(s.id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::Thinking { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, ["The user wants a list."]);
     }
 
     #[tokio::test]
