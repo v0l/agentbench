@@ -254,8 +254,11 @@ async fn serve_inner(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
     let stale = store.reset_running().map_err(|e| e.0)?;
-    if stale > 0 {
-        tracing::info!("{stale} sessions were running when agentbench last stopped");
+    if !stale.is_empty() {
+        tracing::info!(
+            "resuming {} sessions that were running when agentbench last stopped",
+            stale.len()
+        );
     }
     if let Some(dir) = dirs::home_dir() {
         // A home folder that is a project itself is left alone.
@@ -277,6 +280,7 @@ async fn serve_inner(
     *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
         runner::Base { url: local_url(listen), token: token.clone() };
     let api = api::Api { runner, token, model, speech, voice };
+    api.runner.resume(&stale);
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     let listener =
         tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;

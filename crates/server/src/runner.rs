@@ -423,6 +423,15 @@ impl Runner {
         }
     }
 
+    pub fn resume(&self, sessions: &[SessionId]) {
+        for id in sessions {
+            let Ok(session) = self.store.session(*id) else { continue };
+            if let Err(e) = self.send(&session, RESUME_PROMPT) {
+                tracing::warn!("could not resume session {id}: {}", e.0);
+            }
+        }
+    }
+
     fn send_text(&self, session: &Session, msg: Message, mode: Mode) -> Result<(), StoreError> {
         let agent = self
             .agent(&session.agent)
@@ -663,6 +672,9 @@ fn file_name(name: &str) -> String {
         base.chars().filter(|c| !c.is_control()).collect::<String>().chars().take(120).collect();
     if clean.is_empty() || clean == "." || clean == ".." { "file".to_string() } else { clean }
 }
+
+const RESUME_PROMPT: &str =
+    "The agentbench server was restarted and stopped your turn. Carry on where you left off.";
 
 const COMPACT_PROMPT: &str = "Summarise this conversation so another agent can carry on from it without the transcript. \
 Keep: what the user asked for, decisions made and why, files changed, what is done, what is left, and anything you were about to do. \
@@ -1574,6 +1586,23 @@ mod tests {
             })
             .collect();
         assert!(notes.iter().any(|n| n == "nothing to stop"));
+    }
+
+    #[tokio::test]
+    async fn sessions_cut_off_by_a_restart_are_resumed() {
+        let script = r#"read p; echo "{\"text\":\"resumed: $p\"}""#;
+        let store = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&store, "/tmp");
+        let busy = store.add_session(main.id, "echo", "busy", None, None).unwrap();
+        let idle = store.add_session(main.id, "echo", "idle", None, None).unwrap();
+        store.set_status(busy.id, SessionStatus::Running).unwrap();
+        let stale = store.reset_running().unwrap();
+        let runner = Runner::new(store, vec![script_agent("echo", script)]);
+        runner.resume(&stale);
+        assert_eq!(wait_idle(&runner, busy.id).await.status, SessionStatus::Idle);
+        let last = runner.store().messages(busy.id, 0).unwrap().pop().unwrap().entry;
+        assert_eq!(last, Entry::Assistant { text: format!("resumed: {RESUME_PROMPT}") });
+        assert!(runner.store().messages(idle.id, 0).unwrap().is_empty());
     }
 
     struct Thinker;

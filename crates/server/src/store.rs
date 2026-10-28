@@ -912,9 +912,17 @@ impl Store {
         Ok(n > 0)
     }
 
-    pub fn reset_running(&self) -> Result<usize> {
+    pub fn reset_running(&self) -> Result<Vec<SessionId>> {
         let db = self.db();
-        Ok(db.execute("UPDATE sessions SET status = 'stopped' WHERE status = 'running'", [])?)
+        let ids = db
+            .prepare("SELECT id FROM sessions WHERE status IN ('running', 'waiting')")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<SessionId>>>()?;
+        db.execute(
+            "UPDATE sessions SET status = 'stopped' WHERE status IN ('running', 'waiting')",
+            [],
+        )?;
+        Ok(ids)
     }
 
     pub fn add_message(&self, session_id: SessionId, entry: &Entry) -> Result<Message> {
@@ -1325,9 +1333,18 @@ mod tests {
         let s = Store::memory().unwrap();
         let (_, main) = project(&s, "/r");
         let sess = s.add_session(main.id, "pi", "t", None, None).unwrap();
+        let asking = s.add_session(main.id, "pi", "u", None, None).unwrap();
+        let idle = s.add_session(main.id, "pi", "v", None, None).unwrap();
         s.set_status(sess.id, SessionStatus::Running).unwrap();
-        assert_eq!(s.reset_running().unwrap(), 1);
+        s.set_status(asking.id, SessionStatus::Waiting).unwrap();
+        let mut stopped = s.reset_running().unwrap();
+        stopped.sort();
+        let mut want = vec![sess.id, asking.id];
+        want.sort();
+        assert_eq!(stopped, want);
         assert_eq!(s.session(sess.id).unwrap().status, SessionStatus::Stopped);
+        assert_eq!(s.session(asking.id).unwrap().status, SessionStatus::Stopped);
+        assert_eq!(s.session(idle.id).unwrap().status, SessionStatus::Idle);
     }
 
     #[test]
