@@ -209,6 +209,15 @@ impl App {
                     Line::new().note(text.clone()).size(11.0).wrapped(ui);
                 });
             }
+            Entry::Diagnostics { text, .. } => self.tool_row(
+                ui,
+                m.id,
+                "diagnostics",
+                &serde_json::json!({ "message": "language server" }),
+                Some(&agentbench_core::diagnostics_findings(text)),
+                false,
+            ),
+            Entry::Unknown => {}
             Entry::Summary { text } if text.is_empty() => {
                 heading(ui, "cleared: the agent starts afresh here");
             }

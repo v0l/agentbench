@@ -866,6 +866,31 @@ fn a_checklist_shows_its_items_in_the_transcript() {
     assert!(h.query_by_label("run the tests").is_none(), "folded on a phone");
 }
 
+#[test]
+fn diagnostics_after_an_edit_show_as_a_folded_row_with_the_first_finding() {
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "native", "break it", None, None).unwrap();
+    rig.store.add_message(s.id, &Entry::user("break it")).unwrap();
+    rig.store
+        .add_message(
+            s.id,
+            &Entry::Diagnostics {
+                text: "<language-server-diagnostics>\nChecked by the language server after your edit; this is the harness speaking, not the user. Fix what is yours:\nsrc/lib.rs: 1 error (rust)\n  src/lib.rs:2:5  error[E0308] mismatched types\n</language-server-diagnostics>".into(),
+                broken: vec!["src/lib.rs".into()],
+            },
+        )
+        .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 2);
+    h.run_steps(3);
+    shot(&mut h, "diagnostics");
+    h.get_by_label("src/lib.rs: 1 error (rust)   +1 lines");
+    assert!(h.query_by_label_contains("harness speaking").is_none());
+}
+
 fn scrolled_to_the_top(
     h: &mut Harness<'_, App>,
     at: egui::Pos2,

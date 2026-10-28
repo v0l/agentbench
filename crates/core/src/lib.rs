@@ -434,6 +434,13 @@ pub enum Entry {
     Notice {
         text: String,
     },
+    Diagnostics {
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        broken: Vec<String>,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 impl Entry {
@@ -447,13 +454,15 @@ impl Entry {
             | Entry::Assistant { text }
             | Entry::Thinking { text }
             | Entry::Error { text }
-            | Entry::Notice { text } => text,
+            | Entry::Notice { text }
+            | Entry::Diagnostics { text, .. } => text,
             Entry::Tool { name, .. } => name,
             Entry::Question { question, .. } => &question.text,
             Entry::Questions { questions, .. } => {
                 questions.first().map(|q| q.text.as_str()).unwrap_or_default()
             }
             Entry::Summary { text } => text,
+            Entry::Unknown => "",
         }
     }
 }
@@ -615,6 +624,13 @@ pub fn since_summary(entries: &[Entry]) -> &[Entry] {
         Some(i) => &entries[i..],
         None => entries,
     }
+}
+
+pub fn diagnostics_findings(text: &str) -> String {
+    text.lines()
+        .filter(|l| !l.starts_with('<') && !l.starts_with("Checked by the language server"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn short_title(text: &str, max: usize) -> String {
@@ -882,6 +898,26 @@ mod tests {
         let e = vec![Entry::user("a"), Entry::Summary { text: "s1".into() }, Entry::user("b")];
         assert_eq!(since_summary(&e).len(), 2);
         assert_eq!(since_summary(&e[..1]).len(), 1);
+    }
+
+    #[test]
+    fn an_entry_of_a_kind_this_build_does_not_know_still_decodes() {
+        let m: Vec<Message> = serde_json::from_str(
+            r#"[{"id":1,"session_id":"00000000-0000-4000-8000-000000000001","entry":{"kind":"from_the_future","text":"x"},"created_at":0},
+                {"id":2,"session_id":"00000000-0000-4000-8000-000000000001","entry":{"kind":"user","text":"hi"},"created_at":0}]"#,
+        )
+        .unwrap();
+        assert_eq!(m[0].entry, Entry::Unknown);
+        assert_eq!(m[1].entry, Entry::user("hi"));
+    }
+
+    #[test]
+    fn diagnostics_are_shown_without_the_wrapper_meant_for_the_model() {
+        let note = "<language-server-diagnostics>\nChecked by the language server after your edit; this is the harness speaking, not the user. Fix what is yours:\nsrc/lib.rs: 1 error (rust)\n  src/lib.rs:2:5  error[E0308] mismatched types\n</language-server-diagnostics>";
+        assert_eq!(
+            diagnostics_findings(note),
+            "src/lib.rs: 1 error (rust)\n  src/lib.rs:2:5  error[E0308] mismatched types"
+        );
     }
 
     #[test]

@@ -96,6 +96,7 @@ pub enum Event {
     Steered { text: String },
     Usage(Usage),
     Notice(String),
+    Diagnostics { text: String, broken: Vec<String> },
     Error(String),
     Done,
 }

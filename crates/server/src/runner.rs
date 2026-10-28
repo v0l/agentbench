@@ -864,6 +864,9 @@ impl Io for Sink {
             Event::Notice(text) => {
                 self.entry(Entry::Notice { text });
             }
+            Event::Diagnostics { text, broken } => {
+                self.entry(Entry::Diagnostics { text, broken });
+            }
             Event::Error(text) => {
                 self.entry(Entry::Error { text });
             }

@@ -911,7 +911,7 @@ fn symbol_hint(symbol: &str) -> String {
     )
 }
 
-fn history(entries: &[Entry]) -> Vec<Value> {
+fn history(entries: &[Entry], role: &str) -> Vec<Value> {
     let mut out = Vec::new();
     for e in agentbench_core::since_summary(entries) {
         match e {
@@ -975,10 +975,22 @@ fn history(entries: &[Entry]) -> Vec<Value> {
                     "content": format!("asked the user several questions and they answered: {said}"),
                 }));
             }
-            Entry::Thinking { .. } | Entry::Error { .. } | Entry::Notice { .. } => {}
+            Entry::Diagnostics { text, .. } => out.push(json!({ "role": role, "content": text })),
+            Entry::Thinking { .. } | Entry::Error { .. } | Entry::Notice { .. } | Entry::Unknown => {}
         }
     }
     out
+}
+
+fn still_broken(entries: &[Entry]) -> std::collections::HashSet<std::path::PathBuf> {
+    agentbench_core::since_summary(entries)
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Entry::Diagnostics { broken, .. } => Some(broken.iter().map(Into::into).collect()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -1064,10 +1076,10 @@ impl Agent for Native {
         let mut hinted = languages.is_empty();
         let mut failures = 0usize;
         let mut nudged = false;
-        messages.extend(history(turn.history));
+        messages.extend(history(turn.history, self.code.role()));
         messages.push(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(&base);
-        let mut broken: std::collections::HashSet<std::path::PathBuf> = Default::default();
+        let mut broken = still_broken(turn.history);
         io.emit(Event::Usage(serving(&model, self.patience.probe).await));
         if !turn.context.home {
             let lsp = super::code::status(&self.code, workspace.root());
@@ -1228,6 +1240,10 @@ impl Agent for Native {
                     .await;
                 if let Some(note) = super::code::render(&reports, workspace.root(), &mut broken) {
                     messages.push(json!({ "role": self.code.role(), "content": note }));
+                    let mut files: Vec<String> =
+                        broken.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                    files.sort();
+                    io.emit(Event::Diagnostics { text: note, broken: files });
                 }
             }
             let mut steered = false;
@@ -2405,7 +2421,98 @@ mod tests {
                     && text.contains("E0308"),
                 "{text}"
             );
+            let saved = io.events().into_iter().find_map(|e| match e {
+                Event::Diagnostics { text, broken } => Some((text, broken)),
+                _ => None,
+            });
+            let (saved_text, broken) = saved.expect("the note is saved to the transcript");
+            assert_eq!(saved_text, text);
+            assert!(broken.len() == 1 && broken[0].ends_with("src/lib.rs"), "{broken:?}");
         }
+    }
+
+    /// Needs rust-analyzer; skipped where it is not installed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn diagnostics_from_an_earlier_turn_are_replayed_and_a_fix_in_a_later_one_is_reported() {
+        if super::super::resolve(Path::new("rust-analyzer")).is_none() {
+            eprintln!("rust-analyzer is not installed; skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn one() -> u32 {\n    1\n}\n").unwrap();
+        let (url, asked) = stub(vec![
+            vec![call(
+                "c1",
+                "edit_file",
+                json!({"path": "src/lib.rs", "old": "    1\n", "new": "    \"one\"\n"}),
+            )],
+            vec![say("left it broken")],
+            vec![call(
+                "c2",
+                "edit_file",
+                json!({"path": "src/lib.rs", "old": "    \"one\"\n", "new": "    1\n"}),
+            )],
+            vec![say("fixed")],
+        ]);
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.code = Arc::new(super::super::code::Code::new(super::super::code::unconfined(
+            super::super::code::Settings { role: "developer".into(), ..Default::default() },
+        )));
+        let first = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "break it", &first).await.unwrap();
+        let (_, _) = (asked.recv().unwrap(), asked.recv().unwrap());
+        let mut entries = vec![Entry::user("break it")];
+        for e in first.events() {
+            match e {
+                Event::ToolEnd { call_id, name, output, error } => entries.push(Entry::Tool {
+                    call_id,
+                    name,
+                    input: json!({}),
+                    output: Some(output),
+                    error,
+                }),
+                Event::Diagnostics { text, broken } => {
+                    entries.push(Entry::Diagnostics { text, broken })
+                }
+                _ => {}
+            }
+        }
+        entries.push(Entry::Assistant { text: "left it broken".into() });
+        let c = context();
+        let turn = Turn {
+            prompt: "now fix it",
+            files: &[],
+            cwd: dir.path(),
+            model: None,
+            effort: None,
+            resume: None,
+            history: &entries,
+            context: &c,
+        };
+        let second = TestIo::new(Arc::new(FakeApi));
+        native.run(&turn, &second).await.unwrap();
+        let opening = asked.recv().unwrap();
+        let replayed: Vec<&Value> = opening["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                m["content"].as_str().is_some_and(|t| t.contains("<language-server-diagnostics>"))
+            })
+            .collect();
+        assert_eq!(replayed.len(), 1, "{opening}");
+        assert_eq!(replayed[0]["role"], "developer");
+        assert!(replayed[0]["content"].as_str().unwrap().contains("E0308"));
+        let after_fix = asked.recv().unwrap();
+        let last = after_fix["messages"].as_array().unwrap().last().unwrap().clone();
+        let note = last["content"].as_str().unwrap_or_default();
+        assert!(note.contains("src/lib.rs: no errors now"), "{last}");
     }
 
     #[tokio::test]
@@ -2889,7 +2996,7 @@ mod tests {
             Entry::Summary { text: "we fixed login".into() },
             Entry::user("next"),
         ];
-        let h = history(&entries);
+        let h = history(&entries, "user");
         assert_eq!(h.len(), 2);
         assert!(h[0]["content"].as_str().unwrap().contains("we fixed login"));
         assert_eq!(h[1]["content"], "next");
@@ -2909,7 +3016,7 @@ mod tests {
             },
             Entry::Assistant { text: "there is a".into() },
         ];
-        let h = history(&entries);
+        let h = history(&entries, "user");
         assert_eq!(h.len(), 4);
         assert_eq!(h[0], json!({"role": "user", "content": "hi"}));
         let call = &h[1]["tool_calls"][0];

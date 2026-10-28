@@ -174,6 +174,15 @@ fn entry_lines(m: &Message, expanded: bool, width: usize) -> Vec<Line<'static>> 
             )
         }
         Entry::Notice { text } => wrap(&piece(text, dim()), width, &[], &[]),
+        Entry::Diagnostics { text, .. } => tool_lines(
+            "diagnostics",
+            &serde_json::json!({ "message": "language server" }),
+            &Some(agentbench_core::diagnostics_findings(text)),
+            false,
+            expanded,
+            width,
+        ),
+        Entry::Unknown => Vec::new(),
         Entry::Summary { text } if text.is_empty() => {
             vec![line(piece("── cleared: the agent starts afresh here ──", dim()))]
         }
@@ -642,6 +651,25 @@ mod tests {
         assert!(text.contains("no such file"));
         a.expanded = true;
         assert!(joined(&render(&mut a, 50, 14)).contains("file-one"));
+    }
+
+    #[test]
+    fn diagnostics_after_an_edit_show_as_a_row_that_opens_to_the_findings() {
+        let note = "<language-server-diagnostics>\nChecked by the language server after your edit; this is the harness speaking, not the user. Fix what is yours:\nsrc/lib.rs: 1 error (rust)\n</language-server-diagnostics>";
+        let mut a = app();
+        a.open(
+            session(SessionStatus::Idle),
+            vec![msg(1, Entry::Diagnostics { text: note.into(), broken: vec![] })],
+        );
+        let text = joined(&render(&mut a, 60, 14));
+        assert!(text.contains("diagnostics language server"), "{text}");
+        assert!(!text.contains("src/lib.rs"));
+        a.expanded = true;
+        let text = joined(&render(&mut a, 60, 14));
+        assert!(
+            text.contains("src/lib.rs: 1 error") && !text.contains("harness speaking"),
+            "{text}"
+        );
     }
 
     #[test]
