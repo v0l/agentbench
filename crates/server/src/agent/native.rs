@@ -733,7 +733,11 @@ pub fn specs() -> Vec<Spec> {
     all.extend(skill_specs());
     all.extend(super::code::specs());
     all.extend(agentbench_specs());
-    all
+    let mut seen = std::collections::HashSet::new();
+    let mut unique: Vec<Spec> =
+        all.into_iter().rev().filter(|s| seen.insert(s.name.clone())).collect();
+    unique.reverse();
+    unique
 }
 
 /// The levels that have a model, lowest first.
@@ -4017,5 +4021,18 @@ mod tests {
         let io = TestIo::new(Arc::new(FakeApi));
         let e = run(&Native::default(), dir.path(), "x", &io).await.unwrap_err();
         assert!(e.contains("pick a server and model"), "{e}");
+    }
+}
+
+#[cfg(test)]
+mod unique_tool_names {
+    use super::*;
+
+    #[test]
+    fn every_offered_tool_name_is_unique() {
+        let mut seen = std::collections::HashSet::new();
+        let dupes: Vec<String> =
+            specs().into_iter().map(|s| s.name).filter(|n| !seen.insert(n.clone())).collect();
+        assert!(dupes.is_empty(), "duplicate tool names: {dupes:?}");
     }
 }
