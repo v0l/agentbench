@@ -1605,6 +1605,54 @@ mod tests {
         assert!(runner.store().messages(idle.id, 0).unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn a_turn_cut_off_mid_call_replays_its_answer_before_the_next_prompt() {
+        use crate::agent::native::{Model, Native};
+        use crate::titles::fake::{server, streamed};
+        use agentbench_core::{Said, Sent};
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let (url, seen) = server(vec![
+            (200, streamed(json!({"content": "carrying on"}))),
+            (200, streamed(json!({"content": "still fine"}))),
+        ]);
+        let store = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&store, dir.path().to_str().unwrap());
+        let s = store.add_session(main.id, "native", "t", None, None).unwrap();
+        let row = |message: serde_json::Value| Entry::Wire {
+            messages: vec![Sent { message, said: Said::Plain }],
+        };
+        for e in [
+            row(json!({"role": "system", "content": "s"})),
+            row(json!({"role": "user", "content": "one"})),
+            row(json!({"role": "assistant", "content": "", "tool_calls": [
+                {"id": "a", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+            ]})),
+        ] {
+            store.add_message(s.id, &e).unwrap();
+        }
+        store.set_status(s.id, SessionStatus::Running).unwrap();
+        let stale = store.reset_running().unwrap();
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let runner = Runner::new(store, vec![Box::new(native)]);
+        runner.resume(&stale);
+        wait_idle(&runner, s.id).await;
+        runner.send(&runner.store().session(s.id).unwrap(), "two").unwrap();
+        assert_eq!(wait_idle(&runner, s.id).await.status, SessionStatus::Idle);
+        let roles = |body: &serde_json::Value| -> Vec<String> {
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["role"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let asked = seen.lock().unwrap().clone();
+        let want = ["system", "user", "assistant", "tool", "user"];
+        assert_eq!(roles(&asked[0]), want);
+        assert_eq!(roles(&asked[1])[..5], want, "the replay keeps the answer before the prompt");
+    }
+
     struct Thinker;
 
     #[async_trait]

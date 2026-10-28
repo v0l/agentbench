@@ -924,7 +924,24 @@ fn history(entries: &[Entry]) -> Vec<Value> {
         })
         .collect();
     rows.sort_by_key(|row| row.first().is_none_or(|s| s.message["role"] != "system"));
-    rows.into_iter().flatten().map(|s| s.message.clone()).collect()
+    let mut out: Vec<Value> = Vec::new();
+    for message in rows.into_iter().flatten().map(|s| s.message.clone()) {
+        let late = message["role"] == "tool"
+            && out.last().is_some_and(|m| m["role"] != "tool" && m["role"] != "assistant");
+        let call = out.iter().rposition(|m| {
+            m["tool_calls"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|c| c["id"] == message["tool_call_id"]))
+        });
+        match call {
+            Some(at) if late => {
+                let after = out[at + 1..].iter().take_while(|m| m["role"] == "tool").count();
+                out.insert(at + 1 + after, message);
+            }
+            _ => out.push(message),
+        }
+    }
+    out
 }
 
 /// An entry written before the transcript held what was sent, as the messages it was replayed
@@ -1031,11 +1048,20 @@ struct Log<'a> {
 
 impl<'a> Log<'a> {
     fn new(io: &'a dyn Io, replay: Vec<Value>) -> Log<'a> {
-        let mut log = Log { messages: replay, io };
-        for id in unanswered(&log.messages) {
-            log.push(json!({ "role": "tool", "tool_call_id": id, "content": "no result: the turn ended first" }));
-        }
-        log
+        Log { messages: replay, io }
+    }
+
+    fn prompt(&mut self, prompt: Value) {
+        let mut sent: Vec<Sent> = unanswered(&self.messages)
+            .into_iter()
+            .map(|id| Sent {
+                message: json!({ "role": "tool", "tool_call_id": id, "content": "no result: the turn ended first" }),
+                said: Said::Plain,
+            })
+            .collect();
+        sent.push(Sent { message: prompt, said: Said::Typed { attachments: Vec::new() } });
+        self.messages.extend(sent.iter().map(|s| s.message.clone()));
+        self.io.emit(Event::Sent(sent));
     }
 
     fn push(&mut self, message: Value) {
@@ -1170,10 +1196,7 @@ impl Agent for Native {
         let mut hinted = languages.is_empty();
         let mut failures = 0usize;
         let mut nudged = false;
-        messages.say(
-            user_message(turn.prompt, turn.files).await,
-            Said::Typed { attachments: Vec::new() },
-        );
+        messages.prompt(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(&base);
         let mut broken = still_broken(turn.history);
         io.emit(Event::Usage(serving(&model, self.patience.probe).await));
@@ -3068,6 +3091,19 @@ mod tests {
         assert_eq!(now[5], json!({"role": "user", "content": "two"}));
         let sent = sent_by(&io);
         assert_eq!(sent[0]["tool_call_id"], "b", "the answer is kept for the turn after");
+    }
+
+    #[test]
+    fn a_tool_result_saved_after_the_next_prompt_is_replayed_before_it() {
+        let row =
+            |message: Value| Entry::Wire { messages: vec![Sent { message, said: Said::Plain }] };
+        let call = json!({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+        ]});
+        let prompt = json!({"role": "user", "content": "carry on"});
+        let answer = json!({"role": "tool", "tool_call_id": "a", "content": "no result"});
+        let entries = [row(call.clone()), row(prompt.clone()), row(answer.clone())];
+        assert_eq!(history(&entries), [call, answer, prompt]);
     }
 
     #[test]
