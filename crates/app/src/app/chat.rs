@@ -287,6 +287,14 @@ impl App {
                 {
                     self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
                 }
+                if s.agent == "native"
+                    && ui
+                        .add(Key::new("console").outline(VALUE))
+                        .on_hover_text("output of the commands this agent left running")
+                        .clicked()
+                {
+                    self.console = Some(Console::new(s.id));
+                }
                 if s.status.busy()
                     && ui.add(Key::new("stop").outline(FAULT)).clicked()
                     && let Some(c) = &mut self.client

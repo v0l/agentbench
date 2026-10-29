@@ -148,6 +148,14 @@ pub trait Agent: Send + Sync {
 
     fn end(&self, _session: SessionId) {}
 
+    fn jobs(&self, _session: SessionId) -> Vec<agentbench_core::Job> {
+        Vec::new()
+    }
+
+    async fn kill_job(&self, _session: SessionId, _handle: &str) -> Result<(), String> {
+        Err("this agent has no background commands".into())
+    }
+
     /// The models this agent can be told to use. Empty when it cannot say, and then the
     /// window offers a plain text field instead of a dropdown.
     async fn models(&self) -> Result<Vec<String>, String> {

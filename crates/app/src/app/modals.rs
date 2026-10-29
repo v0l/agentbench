@@ -9,6 +9,7 @@ impl App {
         self.start_modal(ctx);
         self.worktree_modal(ctx);
         self.confirm_modal(ctx);
+        self.console_modal(ctx);
         self.settings_modal(ctx);
         self.scan_modal(ctx);
     }
@@ -71,6 +72,84 @@ impl App {
             self.scan_view = None;
         } else {
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    pub(super) fn console_modal(&mut self, ctx: &egui::Context) {
+        let Some(c) = &mut self.console else {
+            return;
+        };
+        let now = web_time::Instant::now();
+        if c.asked.is_none_or(|t| now.duration_since(t) >= CONSOLE_EVERY)
+            && let Some(client) = &mut self.client
+        {
+            client.jobs(c.session);
+            c.asked = Some(now);
+        }
+        let session = c.session;
+        let mut kill = None;
+        let m = egui::Modal::new(egui::Id::new("console"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(modal_width(ctx, 760.0));
+                modal_title(ui, "Console");
+                if c.jobs.is_empty() {
+                    hint(ui, "This chat has no background commands. Ask the agent to start a dev server and it shows up here.");
+                    return;
+                }
+                c.selected = c.selected.min(c.jobs.len() - 1);
+                ui.horizontal_wrapped(|ui| {
+                    for (i, j) in c.jobs.iter().enumerate() {
+                        let tint = if j.running { OK } else if j.exit == Some(0) { LEGEND } else { FAULT };
+                        if chip(ui, &format!("{} {}", j.handle, job_state(j)), tint, i == c.selected).clicked() {
+                            c.selected = i;
+                        }
+                    }
+                });
+                let job = c.jobs[c.selected].clone();
+                ui.add_space(4.0);
+                note(ui, &job.command, LEGEND);
+                ui.add_space(4.0);
+                let text = strip_ansi(&job.text);
+                let height = (ctx.content_rect().height() * 0.55).clamp(160.0, 520.0);
+                egui::Frame::NONE.fill(CHASSIS).inner_margin(6).show(ui, |ui| {
+                    egui::ScrollArea::both()
+                        .max_height(height)
+                        .min_scrolled_height(height)
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            if job.dropped > 0 {
+                                hint(ui, &format!("{} bytes of older output were dropped", job.dropped));
+                            }
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(text).monospace().size(12.0))
+                                    .selectable(true)
+                                    .wrap_mode(egui::TextWrapMode::Extend),
+                            );
+                        });
+                });
+                ui.add_space(6.0);
+                footer(ui, |ui| {
+                    if job.running
+                        && ui.add(Key::new("stop it").solid(FAULT).min_width(100.0)).clicked()
+                    {
+                        kill = Some(job.handle.clone());
+                    }
+                });
+            });
+        if let Some(handle) = kill
+            && let Some(client) = &mut self.client
+        {
+            client.kill_job(session, &handle);
+            if let Some(c) = &mut self.console {
+                c.asked = None;
+            }
+        }
+        if m.should_close() {
+            self.console = None;
+        } else {
+            ctx.request_repaint_after(CONSOLE_EVERY);
         }
     }
 

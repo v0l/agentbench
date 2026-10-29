@@ -892,6 +892,19 @@ pub struct Interrupted {
     pub queued: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Job {
+    pub handle: String,
+    pub command: String,
+    pub running: bool,
+    #[serde(default)]
+    pub exit: Option<i32>,
+    pub seconds: u64,
+    #[serde(default)]
+    pub dropped: usize,
+    pub text: String,
+}
+
 pub fn restore_queued(draft: &str, queued: &[String]) -> String {
     queued
         .iter()

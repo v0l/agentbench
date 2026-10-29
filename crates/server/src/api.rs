@@ -95,6 +95,8 @@ pub fn router(api: Api) -> Router {
         .route("/api/sessions/{id}", get(session).delete(delete_session))
         .route("/api/sessions/{id}/messages", get(messages).post(send))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
+        .route("/api/sessions/{id}/jobs", get(jobs))
+        .route("/api/sessions/{id}/jobs/{handle}/kill", post(kill_job))
         .route("/api/sessions/{id}/answer", post(answer))
         .route("/v1/audio/transcriptions", post(transcribe))
         .route("/v1/audio/speech", post(speak))
@@ -773,6 +775,23 @@ async fn interrupt(
     }))
 }
 
+async fn jobs(
+    State(api): State<Api>,
+    Path(id): Path<SessionId>,
+) -> Reply<Vec<agentbench_core::Job>> {
+    api.runner.store().session(id)?;
+    Ok(Json(api.runner.jobs(id)))
+}
+
+async fn kill_job(
+    State(api): State<Api>,
+    Path((id, handle)): Path<(SessionId, String)>,
+) -> Reply<serde_json::Value> {
+    api.runner.store().session(id)?;
+    api.runner.kill_job(id, &handle).await.map_err(|e| Failure(StatusCode::NOT_FOUND, e))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 pub fn watch_worktrees(api: Api, every: Duration) {
     tokio::spawn(async move {
         loop {
@@ -1375,6 +1394,59 @@ mod tests {
             call(&app, "DELETE", &format!("/api/worktrees/{wid}?force=true"), None, T).await.0,
             StatusCode::NO_CONTENT
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_chats_background_commands_can_be_read_and_stopped() {
+        use crate::agent::native::{Model, Native};
+        let f = fixture();
+        let native = Native::new(Model { model: "m".into(), ..Model::default() });
+        let jobs = native.jobs.clone();
+        let api = Api {
+            runner: Runner::new(f.api.runner.store().clone(), vec![Box::new(native)]),
+            ..f.api.clone()
+        };
+        let app = router(api);
+        let pid = project(&f).await;
+        let (_, sess) = call(
+            &app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "native", "place": {"kind": "new", "branch": "dev"}, "prompt": null})),
+            T,
+        )
+        .await;
+        let id = sid(&sess).to_string();
+        let (s, none) = call(&app, "GET", &format!("/api/sessions/{id}/jobs"), None, T).await;
+        assert_eq!((s, none), (StatusCode::OK, json!([])));
+        jobs.start(
+            &id,
+            &f.repo,
+            "echo serving; sleep 60",
+            &egui_bench::agent::spawn::Confine::Open { env: Vec::new() },
+        )
+        .unwrap();
+        let mut text = String::new();
+        for _ in 0..50 {
+            let (_, list) = call(&app, "GET", &format!("/api/sessions/{id}/jobs"), None, T).await;
+            text = list[0]["text"].as_str().unwrap_or_default().to_string();
+            if text.contains("serving") {
+                assert_eq!(list[0]["running"], true);
+                assert_eq!(list[0]["handle"], "job-1");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(text.contains("serving"), "{text}");
+        let (s, _) =
+            call(&app, "POST", &format!("/api/sessions/{id}/jobs/job-1/kill"), None, T).await;
+        assert_eq!(s, StatusCode::OK);
+        let (_, list) = call(&app, "GET", &format!("/api/sessions/{id}/jobs"), None, T).await;
+        assert_eq!(list[0]["running"], false);
+        let (s, _) =
+            call(&app, "POST", &format!("/api/sessions/{id}/jobs/job-9/kill"), None, T).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

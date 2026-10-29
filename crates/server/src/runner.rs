@@ -208,6 +208,19 @@ impl Runner {
         }
     }
 
+    pub fn jobs(&self, session: SessionId) -> Vec<agentbench_core::Job> {
+        self.agents.values().flat_map(|a| a.jobs(session)).collect()
+    }
+
+    pub async fn kill_job(&self, session: SessionId, handle: &str) -> Result<(), String> {
+        for agent in self.agents.values() {
+            if agent.jobs(session).iter().any(|j| j.handle == handle) {
+                return agent.kill_job(session, handle).await;
+            }
+        }
+        Err(format!("no background command called {handle:?}"))
+    }
+
     pub fn agents(&self) -> Vec<Arc<dyn Agent>> {
         let mut all: Vec<_> = self.agents.values().cloned().collect();
         all.sort_by(|a, b| a.name().cmp(b.name()));

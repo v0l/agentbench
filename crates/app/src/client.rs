@@ -43,6 +43,7 @@ pub enum Reply {
     Changed(Id),
     Messages(SessionId, Vec<Message>),
     Interrupted(SessionId, Vec<String>),
+    Jobs(SessionId, Vec<agentbench_core::Job>),
     Comments(Id, Vec<Comment>),
     Done(String),
     Failed(String),
@@ -465,6 +466,20 @@ impl Client {
         self.send(req, move |r: agentbench_core::Interrupted| {
             Reply::Interrupted(session, r.queued)
         });
+    }
+
+    pub fn jobs(&mut self, session: SessionId) {
+        let req = self.request(Method::GET, &format!("/api/sessions/{session}/jobs"), None);
+        self.send(req, move |j| Reply::Jobs(session, j));
+    }
+
+    pub fn kill_job(&mut self, session: SessionId, handle: &str) {
+        self.act::<()>(
+            Method::POST,
+            &format!("/api/sessions/{session}/jobs/{handle}/kill"),
+            None,
+            "stopped",
+        );
     }
 
     pub fn delete_session(&mut self, session: SessionId) {

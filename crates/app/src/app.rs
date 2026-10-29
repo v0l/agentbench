@@ -264,6 +264,59 @@ struct Settings {
     speech_models: Option<Option<Vec<(String, String)>>>,
 }
 
+const CONSOLE_EVERY: Duration = Duration::from_secs(1);
+
+struct Console {
+    session: SessionId,
+    jobs: Vec<agentbench_core::Job>,
+    selected: usize,
+    asked: Option<web_time::Instant>,
+}
+
+impl Console {
+    fn new(session: SessionId) -> Console {
+        Console { session, jobs: Vec::new(), selected: 0, asked: None }
+    }
+}
+
+fn job_state(j: &agentbench_core::Job) -> String {
+    match (j.running, j.exit) {
+        (true, _) => "running".into(),
+        (false, Some(c)) => format!("exited {c}"),
+        (false, None) => "ended".into(),
+    }
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    for n in chars.by_ref() {
+                        if ('@'..='~').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(n) = chars.next() {
+                        if n == '\x07' || (n == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\r' => out.push('\n'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 enum Confirm {
     Project(Id, String),
     Worktree(Id, String, bool),
@@ -390,6 +443,7 @@ pub struct App {
     start: Option<Start>,
     new_worktree: Option<(Id, String)>,
     confirm: Option<Confirm>,
+    console: Option<Console>,
     settings: Option<Settings>,
     save_requested: bool,
     tray: crate::attach::Tray,
@@ -507,6 +561,7 @@ impl App {
             start: None,
             new_worktree: None,
             confirm: None,
+            console: None,
             settings: None,
             save_requested: false,
             tray: crate::attach::Tray::default(),
@@ -1183,6 +1238,12 @@ impl App {
             Reply::Interrupted(sid, queued) => {
                 self.notice = Some((true, "stopping".into()));
                 self.restore_queued(sid, &queued);
+            }
+            Reply::Jobs(sid, jobs) => {
+                if let Some(c) = self.console.as_mut().filter(|c| c.session == sid) {
+                    c.jobs = jobs;
+                    c.asked = None;
+                }
             }
             Reply::Model(m) => {
                 if let Some(st) = &mut self.settings {
@@ -1991,6 +2052,31 @@ mod tests {
         app.handle(Reply::Interrupted(a, vec!["first".into(), "second".into()]));
         assert_eq!(app.draft_of(a), "first\nsecond\nhalf typed");
         assert_eq!(app.refocus, Some(Tile::Chat(a)));
+    }
+
+    #[test]
+    fn console_text_loses_colour_codes_and_carriage_returns() {
+        assert_eq!(
+            strip_ansi("\x1b[32mready\x1b[0m in 3ms\r\nnext\rtick"),
+            "ready in 3ms\nnext\ntick"
+        );
+        assert_eq!(strip_ansi("\x1b]0;title\x07plain"), "plain");
+    }
+
+    #[test]
+    fn the_console_keeps_the_jobs_of_its_own_chat_only() {
+        let mut app = App::new(&egui::Context::default(), None, None);
+        let a = "00000000-0000-0000-0000-000000000001".parse::<SessionId>().unwrap();
+        let b = "00000000-0000-0000-0000-000000000002".parse::<SessionId>().unwrap();
+        let job =
+            agentbench_core::Job { handle: "job-1".into(), running: true, ..Default::default() };
+        app.handle(Reply::Jobs(a, vec![job.clone()]));
+        assert!(app.console.is_none());
+        app.console = Some(Console::new(a));
+        app.handle(Reply::Jobs(b, vec![job.clone()]));
+        assert!(app.console.as_ref().unwrap().jobs.is_empty());
+        app.handle(Reply::Jobs(a, vec![job]));
+        assert_eq!(app.console.as_ref().unwrap().jobs.len(), 1);
     }
 
     #[test]

@@ -1239,6 +1239,30 @@ impl Agent for Native {
         self.browsers.close(&session.to_string());
     }
 
+    fn jobs(&self, session: agentbench_core::SessionId) -> Vec<agentbench_core::Job> {
+        self.jobs
+            .snapshot(&session.to_string())
+            .into_iter()
+            .map(|j| agentbench_core::Job {
+                handle: j.handle,
+                command: j.command,
+                running: j.running,
+                exit: j.exit,
+                seconds: j.seconds,
+                dropped: j.dropped,
+                text: j.text,
+            })
+            .collect()
+    }
+
+    async fn kill_job(
+        &self,
+        session: agentbench_core::SessionId,
+        handle: &str,
+    ) -> Result<(), String> {
+        self.jobs.kill(&session.to_string(), handle).await.map(|_| ())
+    }
+
     fn label(&self) -> &str {
         "Native"
     }
