@@ -161,7 +161,7 @@ mod tests {
         let trees = s.worktrees(Some(p.id)).unwrap();
         assert_eq!(trees.len(), 2);
         assert!(trees[0].main);
-        assert!(!trees[1].created_by_foreman, "an agent-made tree is adopted, not owned");
+        assert!(!trees[1].owned, "an agent-made tree is adopted, not owned");
         assert!(add(&s, &main, None, false).is_err(), "the same repo twice");
     }
 
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(p.name, "mine");
 
         let w = add_worktree(&s, p.id, "fix-login", None).unwrap();
-        assert!(w.created_by_foreman);
+        assert!(w.owned);
         assert_eq!(w.branch.as_deref(), Some("fix-login"));
         assert!(Path::new(&w.path).is_dir());
         assert!(add_worktree(&s, p.id, "bad..name", None).is_err());

@@ -1,14 +1,14 @@
 use agentbench_server::agent::native::system;
 use agentbench_server::agent::{Context, Turn};
 use agentbench_server::store::Store;
-use agentbench_server::{Config, home, home_file, saved_model};
+use agentbench_server::{Config, home, saved_model};
 use std::process::Command;
 
 fn main() -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = home();
-    let config = Config::load(&home_file(&home, "agentbench.toml", "foreman.toml"))?;
-    let store = Store::open(&home_file(&home, "agentbench.db", "foreman.db")).map_err(|e| e.0)?;
+    let config = Config::load(&home.join("agentbench.toml"))?;
+    let store = Store::open(&home.join("agentbench.db")).map_err(|e| e.0)?;
     let model = saved_model(&store, &config.model);
 
     let project = store.project_by_path(&cwd.to_string_lossy()).map_err(|e| e.0)?;

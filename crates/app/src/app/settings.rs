@@ -459,7 +459,7 @@ pub(super) fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
                     "address",
                     "Where the server listens, through whatever tunnel or DNAT you put in front of it.",
                     |ui| {
-                        let r = field(ui, &mut st.url, "https://foreman.example.com");
+                        let r = field(ui, &mut st.url, "https://agentbench.example.com");
                         // A pairing link pasted here fills in the address and the token.
                         if r.changed()
                             && let Some(p) = agentbench_core::pairing::Pairing::parse(&st.url)
@@ -485,7 +485,7 @@ pub(super) fn pair_section(ui: &mut Ui, st: &mut Settings) {
             "external address",
             "Where a phone reaches this server from outside this machine: a public address, a tunnel, or the machine's address on your network. Kept on this device.",
             |ui| {
-                field(ui, &mut st.external, "https://foreman.example.com");
+                field(ui, &mut st.external, "https://agentbench.example.com");
             },
         );
         match pairing_of(st) {

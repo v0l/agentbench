@@ -63,7 +63,7 @@ impl Settings {
         match st.get_string("voice_mode").as_deref() {
             Some("local") if cfg!(local_speech) => s.mode = Mode::Local,
             Some("server") => s.mode = Mode::Server,
-            Some("agentbench" | "foreman") => s.mode = Mode::Agentbench,
+            Some("agentbench") => s.mode = Mode::Agentbench,
             _ => {}
         }
         // Kept as saved, even when this build does not know it: the server lists its own models

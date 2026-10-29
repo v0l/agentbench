@@ -51,15 +51,11 @@ pub fn local_url(listen: SocketAddr) -> String {
     }
 }
 
-/// An environment variable under its current name, else under the name it had when the app was
-/// called foreman: `AGENTBENCH_HOME`, else `FOREMAN_HOME`.
 pub fn env_var(name: &str) -> Option<std::ffi::OsString> {
     std::env::var_os(format!("AGENTBENCH_{name}"))
-        .or_else(|| std::env::var_os(format!("FOREMAN_{name}")))
 }
 
-/// Where the database, token and models live. An install made when the app was called foreman
-/// keeps using its `foreman` folder until that is renamed.
+/// Where the database, token and models live.
 pub fn home() -> PathBuf {
     if let Some(dir) = env_var("HOME") {
         return PathBuf::from(dir);
@@ -72,19 +68,8 @@ pub fn data_dir() -> PathBuf {
     dirs::data_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// The home folder under a data folder. The window keeps its own settings in a folder of the same
-/// name, so it is the database that says whether the old folder is still the one in use.
 pub fn home_in(data: &Path) -> PathBuf {
-    let (new, old) = (data.join("agentbench"), data.join("foreman"));
-    let has_db = |d: &Path| d.join("agentbench.db").exists() || d.join("foreman.db").exists();
-    if !has_db(&new) && has_db(&old) { old } else { new }
-}
-
-/// A file in the home folder: `name`, unless only the `legacy` one from before the rename exists.
-pub fn home_file(home: &Path, name: &str, legacy: &str) -> PathBuf {
-    let new = home.join(name);
-    let old = home.join(legacy);
-    if !new.exists() && old.exists() { old } else { new }
+    data.join("agentbench")
 }
 
 impl Config {
@@ -321,27 +306,6 @@ mod tests {
         let agents = c.agents();
         let names: Vec<_> = agents.iter().map(|a| a.name()).collect();
         assert_eq!(names, ["native", "pi", "claude", "aider", "codex"]);
-    }
-
-    #[test]
-    fn an_install_from_before_the_rename_keeps_its_folder_and_files() {
-        let data = tempfile::tempdir().unwrap();
-        assert_eq!(home_in(data.path()), data.path().join("agentbench"), "a fresh install");
-        let old = data.path().join("foreman");
-        std::fs::create_dir_all(&old).unwrap();
-        std::fs::write(old.join("app.ron"), "x").unwrap();
-        assert_eq!(home_in(data.path()), data.path().join("agentbench"), "no database there");
-        std::fs::write(old.join("foreman.db"), "x").unwrap();
-        std::fs::write(old.join("foreman.toml"), "x").unwrap();
-        assert_eq!(home_in(data.path()), old, "the old database is still in use");
-        // The window makes the new folder for its settings; the server must not follow it there.
-        std::fs::create_dir_all(data.path().join("agentbench")).unwrap();
-        std::fs::write(data.path().join("agentbench/app.ron"), "x").unwrap();
-        assert_eq!(home_in(data.path()), old);
-        assert_eq!(home_file(&old, "agentbench.db", "foreman.db"), old.join("foreman.db"));
-        assert_eq!(home_file(&old, "agentbench.toml", "foreman.toml"), old.join("foreman.toml"));
-        std::fs::write(old.join("agentbench.db"), "x").unwrap();
-        assert_eq!(home_file(&old, "agentbench.db", "foreman.db"), old.join("agentbench.db"));
     }
 
     #[test]

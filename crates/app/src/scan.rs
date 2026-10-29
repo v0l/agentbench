@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn a_code_is_read_from_a_grey_picture_of_it() {
         let link = agentbench_core::pairing::Pairing {
-            url: "https://foreman.harkin.network".into(),
+            url: "https://agentbench.harkin.network".into(),
             token: "k3Y/with+odd=chars".into(),
         }
         .link();

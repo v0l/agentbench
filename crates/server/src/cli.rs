@@ -1,6 +1,4 @@
-use crate::{
-    Config, DEFAULT_LISTEN, home, home_file, saved_model, serve_config, store::Store, token,
-};
+use crate::{Config, DEFAULT_LISTEN, home, saved_model, serve_config, store::Store, token};
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -98,8 +96,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         )
         .await;
     }
-    let config = Config::load(&home_file(&home, "agentbench.toml", "foreman.toml"))?;
-    let store = Store::open(&home_file(&home, "agentbench.db", "foreman.db")).map_err(|e| e.0)?;
+    let config = Config::load(&home.join("agentbench.toml"))?;
+    let store = Store::open(&home.join("agentbench.db")).map_err(|e| e.0)?;
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
             tracing::info!("agentbench {} in {}", env!("CARGO_PKG_VERSION"), home.display());

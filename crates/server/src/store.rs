@@ -26,7 +26,7 @@ CREATE TABLE worktrees (
     head TEXT,
     main INTEGER NOT NULL DEFAULT 0,
     missing INTEGER NOT NULL DEFAULT 0,
-    created_by_foreman INTEGER NOT NULL DEFAULT 0,
+    owned INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
 );
 CREATE TABLE issues (
@@ -161,9 +161,6 @@ CREATE TABLE notes (
 );
 "#,
     "ALTER TABLE projects ADD COLUMN home INTEGER NOT NULL DEFAULT 0;",
-    "UPDATE sessions SET agent = 'native' WHERE agent = 'agentbench';",
-    // The built-in agent was called foreman, not agentbench, so the step above moved nothing.
-    "UPDATE sessions SET agent = 'native' WHERE agent IN ('foreman', 'agentbench');",
     "ALTER TABLE sessions ADD COLUMN effort TEXT;",
 ];
 
@@ -253,7 +250,7 @@ fn worktree_row(row: &Row) -> rusqlite::Result<Worktree> {
         head: row.get("head")?,
         main: row.get("main")?,
         missing: row.get("missing")?,
-        created_by_foreman: row.get("created_by_foreman")?,
+        owned: row.get("owned")?,
         created_at: row.get("created_at")?,
     })
 }
@@ -464,7 +461,7 @@ impl Store {
             )?;
             let id = db.last_insert_rowid();
             db.execute(
-                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, created_by_foreman, created_at)
+                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, owned, created_at)
                  VALUES (?1, ?2, NULL, NULL, 1, 0, 0, ?3)",
                 params![id, path, t],
             )?;
@@ -534,7 +531,7 @@ impl Store {
             }
             changed = true;
             db.execute(
-                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, created_by_foreman, created_at)
+                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, owned, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)
                  ON CONFLICT(path) DO UPDATE SET branch = excluded.branch, head = excluded.head,
                      main = excluded.main, missing = 0",
@@ -1071,7 +1068,7 @@ mod tests {
         let all = s.worktrees(Some(p.id)).unwrap();
         assert_eq!(all.len(), 2);
         assert!(all[0].main);
-        assert!(all[1].created_by_foreman);
+        assert!(all[1].owned);
 
         let renamed = vec![tree("/r", "main", true), tree("/r-a", "a2", false)];
         assert!(s.sync_worktrees(p.id, &renamed, None).unwrap());
@@ -1387,32 +1384,6 @@ mod tests {
         let b = s.add_session(main.id, "x", "b", None, None).unwrap();
         assert_ne!(a.id, b.id);
         assert!(s.messages(b.id, 0).unwrap().is_empty());
-    }
-
-    #[test]
-    fn sessions_of_the_old_foreman_agent_move_to_native() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("f.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            for step in &SCHEMA[..7] {
-                conn.execute_batch(step).unwrap();
-            }
-            conn.pragma_update(None, "user_version", 7).unwrap();
-            conn.execute_batch(
-                r#"
-                INSERT INTO projects VALUES (1, 'demo', '/r', 'main', NULL, 0, 0);
-                INSERT INTO worktrees VALUES (1, 1, '/r', 'main', NULL, 1, 0, 0, 0);
-                INSERT INTO sessions VALUES ('11111111-1111-4111-8111-111111111111', 1, 1, 'foreman', 'old', NULL, NULL, 'idle', NULL, '{}', 5, 6, 0);
-                INSERT INTO sessions VALUES ('22222222-2222-4222-8222-222222222222', 1, 1, 'pi', 'other', NULL, NULL, 'idle', NULL, '{}', 5, 6, 0);
-                "#,
-            )
-            .unwrap();
-        }
-        let s = Store::open(&path).unwrap();
-        let mut agents: Vec<_> = s.sessions().unwrap().into_iter().map(|x| x.agent).collect();
-        agents.sort();
-        assert_eq!(agents, ["native", "pi"]);
     }
 
     #[test]

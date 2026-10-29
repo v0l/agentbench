@@ -613,6 +613,19 @@ fn browser_spec() -> Spec {
     )
 }
 
+fn set_browser_target_spec() -> Spec {
+    Spec::new(
+        "set_browser_target",
+        "Choose which browser the browser tool drives: headlesschrome (the default, a private headless browser started on demand) \
+         or ip:port, the remote debugging address of the user's own running browser, with their logins and tabs. \
+         Chromium browsers write the port to DevToolsActivePort in their profile folder. It opens its own tab and leaves the user's tabs alone.",
+        object(
+            json!({ "target": string("headlesschrome, or ip:port such as 127.0.0.1:35215") }),
+            &["target"],
+        ),
+    )
+}
+
 fn file_specs() -> Vec<Spec> {
     let mut specs: Vec<Spec> = tools::builtin()
         .into_iter()
@@ -770,6 +783,7 @@ pub fn specs() -> Vec<Spec> {
     all.push(bash_spec());
     all.extend(job_specs());
     all.push(browser_spec());
+    all.push(set_browser_target_spec());
     all.push(screenshot_spec());
     all.extend(web_specs());
     all.extend(skill_specs());
@@ -984,6 +998,15 @@ fn history(entries: &[Entry]) -> Vec<Value> {
                 .as_array()
                 .is_some_and(|c| c.iter().any(|c| c["id"] == message["tool_call_id"]))
         });
+        let answered = call.is_some_and(|at| {
+            out[at + 1..]
+                .iter()
+                .take_while(|m| m["role"] == "tool")
+                .any(|m| m["tool_call_id"] == message["tool_call_id"])
+        });
+        if message["role"] == "tool" && answered {
+            continue;
+        }
         match call {
             Some(at) if late => {
                 let after = out[at + 1..].iter().take_while(|m| m["role"] == "tool").count();
@@ -1352,6 +1375,13 @@ impl Agent for Native {
                                 }),
                                 None => self.tool(name, &args, &workspace, turn.context, io).await,
                             }
+                        }
+                        "set_browser_target" => {
+                            let mut args = args.clone();
+                            args["action"] = json!("connect");
+                            self.browsers
+                                .act(&turn.context.session.to_string(), &workspace, &args, io.stop())
+                                .await
                         }
                         "browser" => {
                             self.browsers
@@ -2922,6 +2952,7 @@ mod tests {
             "bash_kill",
             "screenshot",
             "browser",
+            "set_browser_target",
             "todo_write",
             "start_session",
             "wait_for_session",
@@ -3214,6 +3245,25 @@ mod tests {
         let answer = json!({"role": "tool", "tool_call_id": "a", "content": "no result"});
         let entries = [row(call.clone()), row(prompt.clone()), row(answer.clone())];
         assert_eq!(history(&entries), [call, answer, prompt]);
+    }
+
+    #[test]
+    fn a_call_answered_for_a_cut_off_turn_and_again_when_it_finishes_is_replayed_once() {
+        let row = |messages: Vec<Value>| Entry::Wire {
+            messages: messages
+                .into_iter()
+                .map(|message| Sent { message, said: Said::Plain })
+                .collect(),
+        };
+        let call = json!({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+        ]});
+        let cut = json!({"role": "tool", "tool_call_id": "a", "content": "no result: the turn ended first"});
+        let prompt = json!({"role": "user", "content": "carry on"});
+        let finished = json!({"role": "tool", "tool_call_id": "a", "content": "done"});
+        let entries =
+            [row(vec![call.clone()]), row(vec![cut.clone(), prompt.clone()]), row(vec![finished])];
+        assert_eq!(history(&entries), [call, cut, prompt]);
     }
 
     #[test]
