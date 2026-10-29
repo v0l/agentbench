@@ -1073,6 +1073,18 @@ impl<'a> Log<'a> {
         self.messages.push(message);
     }
 
+    fn strip_pictures(&mut self) -> bool {
+        let mut removed = false;
+        for message in &mut self.messages {
+            let Some(parts) = message["content"].as_array_mut() else { continue };
+            for part in parts.iter_mut().filter(|p| p["type"] == "image_url") {
+                *part = json!({ "type": "text", "text": "(picture removed: the model server refused it)" });
+                removed = true;
+            }
+        }
+        removed
+    }
+
     fn open(&mut self, opening: Vec<Value>) {
         let sent = opening.iter().map(|m| Sent { message: m.clone(), said: Said::Plain }).collect();
         self.io.emit(Event::Sent(sent));
@@ -1210,7 +1222,18 @@ impl Agent for Native {
             if io.stopped() {
                 return Err("stopped".into());
             }
-            let reply = complete(&model, &messages, &tools, self.patience, io).await?;
+            let reply = loop {
+                match complete(&model, &messages, &tools, self.patience, io).await {
+                    Ok(reply) => break reply,
+                    Err(e) if refused_picture(&e) && messages.strip_pictures() => {
+                        io.emit(Event::Notice(
+                            "the model server refused a picture; removed it and sending the request again"
+                                .into(),
+                        ));
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
             if let Some(mut u) = reply.usage {
                 // The prompt just sent is what the conversation weighs now.
                 u.context = u.input_tokens + u.cache_read_tokens;
@@ -1693,6 +1716,11 @@ async fn complete(
             _ = tokio::time::sleep(wait) => {}
         }
     }
+}
+
+fn refused_picture(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("refused the request") && (error.contains("image") || error.contains("picture"))
 }
 
 enum Failure {
@@ -3177,6 +3205,13 @@ mod tests {
         assert!(text.contains("transcribed by whisper-base.en"), "{text}");
         assert!(text.contains("not the sound itself"), "{text}");
         assert!(text.contains("agentbench") || text.contains("hello"), "the words: {text}");
+    }
+
+    #[test]
+    fn an_oversized_picture_refusal_is_recognised() {
+        let e = "the model server refused the request: Provider error: messages.42.content.2.image.source.base64.data: At least one of the image dimensions exceed max allowed size for many-image requests: 3000 pixels";
+        assert!(refused_picture(e));
+        assert!(!refused_picture("the model server refused the request: bad api key"));
     }
 
     #[tokio::test]

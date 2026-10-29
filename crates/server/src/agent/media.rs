@@ -125,7 +125,7 @@ fn image(file: &Path, shown: &str, bytes: u64) -> Result<Media, String> {
         _ => None,
     };
     let (data, mime, converted) = match mime {
-        Some(mime) if bytes <= IMAGE_MAX => {
+        Some(mime) if bytes <= IMAGE_MAX && !too_wide(file) => {
             (fs::read(file).map_err(|e| format!("{shown}: {e}"))?, mime, false)
         }
         _ => {
@@ -240,6 +240,20 @@ fn video(file: &Path, shown: &str, bytes: u64, frames: usize) -> Result<Media, S
         times.join(", "),
     );
     Ok(Media { note, parts })
+}
+
+fn too_wide(file: &Path) -> bool {
+    let out = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height"])
+        .args(["-of", "csv=p=0"])
+        .arg(file)
+        .output();
+    let Ok(out) = out else { return false };
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .split(',')
+        .filter_map(|n| n.trim().parse::<u32>().ok())
+        .any(|edge| edge > EDGE)
 }
 
 fn shrink() -> String {
@@ -391,6 +405,21 @@ mod tests {
         assert!(
             m.parts[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/jpeg;base64,")
         );
+    }
+
+    #[test]
+    fn a_small_file_with_a_huge_edge_is_shrunk() {
+        if !have_ffmpeg() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(make(
+            dir.path(),
+            "a.png",
+            &["-f", "lavfi", "-i", "color=red:s=3200x64", "-frames:v", "1"]
+        ));
+        let m = open(&dir, json!({"path": "a.png"})).unwrap().unwrap();
+        assert!(m.note.contains("shrunk to a JPEG"), "{}", m.note);
     }
 
     #[test]
