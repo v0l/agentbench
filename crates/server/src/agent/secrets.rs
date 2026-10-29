@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 const OPEN: &str = "{{secret:";
 const CLOSE: &str = "}}";
+const SCRUB_MIN: usize = 10;
 
 #[derive(Clone, Default)]
 pub struct Secrets(Arc<Mutex<HashMap<(String, String), String>>>);
@@ -86,7 +87,7 @@ impl Secrets {
     pub fn scrub(&self, session: &str, text: &str) -> String {
         let mut forms: Vec<(String, String)> = Vec::new();
         for ((s, name), value) in self.lock().iter() {
-            if s != session || value.is_empty() {
+            if s != session || value.len() < SCRUB_MIN {
                 continue;
             }
             for form in spellings(value) {
@@ -158,14 +159,14 @@ mod tests {
     #[test]
     fn a_placeholder_is_filled_in_any_argument_and_the_value_scrubbed_from_output() {
         let s = Secrets::default();
-        s.set("a", "API_KEY", "hunter2");
+        s.set("a", "API_KEY", "hunter2-long");
         let filled = s
             .fill("a", &json!({"command": "curl -H 'x: {{secret:API_KEY}}' h", "n": [1, "{{secret:API_KEY}}"]}))
             .unwrap();
-        assert_eq!(filled["command"], "curl -H 'x: hunter2' h");
-        assert_eq!(filled["n"][1], "hunter2");
-        assert_eq!(s.scrub("a", "sent hunter2 ok"), "sent {{secret:API_KEY}} ok");
-        assert_eq!(s.scrub("b", "sent hunter2 ok"), "sent hunter2 ok");
+        assert_eq!(filled["command"], "curl -H 'x: hunter2-long' h");
+        assert_eq!(filled["n"][1], "hunter2-long");
+        assert_eq!(s.scrub("a", "sent hunter2-long ok"), "sent {{secret:API_KEY}} ok");
+        assert_eq!(s.scrub("b", "sent hunter2-long ok"), "sent hunter2-long ok");
     }
 
     #[test]
@@ -181,6 +182,15 @@ mod tests {
         assert_eq!(s.scrub("a", "!dr0w ss@p"), "{{secret:K}}");
         let basic = base64::engine::general_purpose::STANDARD.encode("user:p@ss w0rd!");
         assert!(!s.scrub("a", &format!("Authorization: Basic {basic}")).contains(&basic[8..]));
+    }
+
+    #[test]
+    fn a_short_value_such_as_a_username_is_filled_but_not_hidden_from_output() {
+        let s = Secrets::default();
+        s.set("a", "REGISTRY_USERNAME", "robot");
+        let asked = placeholder("REGISTRY_USERNAME");
+        assert_eq!(s.fill("a", &json!(asked)).unwrap(), json!("robot"));
+        assert_eq!(s.scrub("a", "a robot pushed it"), "a robot pushed it");
     }
 
     #[test]

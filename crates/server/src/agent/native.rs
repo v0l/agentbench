@@ -2094,7 +2094,7 @@ impl Native {
                     self.secrets.set(&key, name, answer.trim());
                 }
                 Ok(format!(
-                    "{name} is available for this chat. Write {} in any tool argument (a bash command, a browser type text, a web_fetch header) and the harness puts the value there. You never see the value and it is removed from tool output.",
+                    "{name} is available for this chat. Write {} in any tool argument (a bash command, a browser type text, a web_fetch header) and the harness puts the value there. You never see the value. Values of 10 characters or more are removed from tool output, shorter ones such as usernames are not.",
                     super::secrets::placeholder(name)
                 ))
             }
