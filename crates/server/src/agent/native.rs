@@ -3227,6 +3227,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_mcp_server_in_the_worktree_is_offered_called_and_its_picture_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fake_mcp.py"), FAKE_MCP).unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers": {"board": {"command": "python3", "args": ["fake_mcp.py"]}}}"#,
+        )
+        .unwrap();
+        let render = json!({"server": "board", "tool": "render", "args": {"layer": "F.Cu"}});
+        let (url, asked) = stub(vec![
+            vec![call("c1", "mcp", json!({"server": "board"}))],
+            vec![call("c2", "mcp", render)],
+            vec![say("a board")],
+        ]);
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.mcp = Arc::new(Mcp::new(egui_bench::agent::mcp::Settings {
+            files: Vec::new(),
+            ..mcp_settings()
+        }));
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "draw it", &io).await.unwrap();
+        let first = asked.recv().unwrap();
+        assert!(first["tools"].to_string().contains("\"mcp\""), "the mcp tool is offered");
+        let prompt = first["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            prompt.contains("<mcp_servers>\nMCP servers are set up for you: board."),
+            "{prompt}"
+        );
+        let listed = tool_results(&asked.recv().unwrap());
+        assert!(listed[0].contains("- render(layer?: string): Draw the board."), "{listed:?}");
+        let third = asked.recv().unwrap();
+        assert_eq!(tool_results(&third)[1], "layer F.Cu\n[a image/png picture, 1 KB, attached]");
+        let last = third["messages"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["role"], "user");
+        assert_eq!(last["content"][1]["image_url"]["url"], "data:image/png;base64,iVBORw0KGgo=");
+    }
+
+    const FAKE_MCP: &str = r#"import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m:
+        continue
+    r = {}
+    if m["method"] == "initialize":
+        r = {"protocolVersion": m["params"]["protocolVersion"], "capabilities": {"tools": {}}, "serverInfo": {"name": "board", "version": "1"}}
+    elif m["method"] == "tools/list":
+        r = {"tools": [{"name": "render", "description": "Draw the board.", "inputSchema": {"type": "object", "properties": {"layer": {"type": "string"}}}}]}
+    elif m["method"] == "tools/call":
+        r = {"content": [{"type": "text", "text": "layer " + m["params"]["arguments"]["layer"]}, {"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo="}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+"#;
+
+    #[test]
+    fn without_mcp_servers_the_mcp_tool_is_not_offered() {
+        let base = Model::default();
+        assert!(!offered(&base, false).iter().any(|t| t.name == "mcp"));
+        assert!(offered(&base, true).iter().any(|t| t.name == "mcp"));
+    }
+
+    #[tokio::test]
     async fn read_file_shows_a_picture_to_the_model() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shot.png"), b"PNGDATA").unwrap();
