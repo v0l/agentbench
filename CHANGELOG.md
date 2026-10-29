@@ -6,9 +6,19 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-29
+
 ### Added
-- `cleanup_worktree` for the built in agent: removes a finished worktree, every chat session in it, and its branch if merged.
 - MCP servers for the built in agent, from `~/.agents/mcp.json` and a worktree's `.mcp.json`, over stdio or streamable HTTP. One `mcp` tool lists the servers, lists a server's tools and calls them; a server starts when first used and pictures it sends back reach the model. The client is egui_bench 0.8.1's `mcp` feature.
+- `browser` for the built in agent: drives a real browser over the DevTools protocol and answers with the page as a text grid of numbered links, buttons and fields to act on, instead of pictures. `set_browser_target` points it at your own running browser instead of a private headless one; it then works in a tab of its own.
+- `cleanup_worktree` for the built in agent: removes a finished worktree, every chat session in it, and its branch if merged.
+
+### Changed
+- A picture wider or taller than 2048 pixels is shrunk before the model sees it, and if the model server still refuses a picture, it is taken out and the request sent again.
+- The last of the foreman names are gone: `FOREMAN_*` variables, a `~/.local/share/foreman` folder and `foreman.db` are no longer read. Rename the folder to `agentbench` and set `AGENTBENCH_*` before upgrading an install from before 0.2.0. The worktree flag in the API is `owned`, not `created_by_agentbench`.
+
+### Fixed
+- A tool result saved twice for one call is replayed once, so the model server no longer refuses the chat.
 
 ## [0.5.0] - 2026-10-29
 
