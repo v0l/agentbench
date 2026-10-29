@@ -26,7 +26,7 @@ CREATE TABLE worktrees (
     head TEXT,
     main INTEGER NOT NULL DEFAULT 0,
     missing INTEGER NOT NULL DEFAULT 0,
-    created_by_agentbench INTEGER NOT NULL DEFAULT 0,
+    owned INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
 );
 CREATE TABLE issues (
@@ -250,7 +250,7 @@ fn worktree_row(row: &Row) -> rusqlite::Result<Worktree> {
         head: row.get("head")?,
         main: row.get("main")?,
         missing: row.get("missing")?,
-        created_by_agentbench: row.get("created_by_agentbench")?,
+        owned: row.get("owned")?,
         created_at: row.get("created_at")?,
     })
 }
@@ -461,7 +461,7 @@ impl Store {
             )?;
             let id = db.last_insert_rowid();
             db.execute(
-                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, created_by_agentbench, created_at)
+                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, owned, created_at)
                  VALUES (?1, ?2, NULL, NULL, 1, 0, 0, ?3)",
                 params![id, path, t],
             )?;
@@ -531,7 +531,7 @@ impl Store {
             }
             changed = true;
             db.execute(
-                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, created_by_agentbench, created_at)
+                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, owned, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)
                  ON CONFLICT(path) DO UPDATE SET branch = excluded.branch, head = excluded.head,
                      main = excluded.main, missing = 0",
@@ -1068,7 +1068,7 @@ mod tests {
         let all = s.worktrees(Some(p.id)).unwrap();
         assert_eq!(all.len(), 2);
         assert!(all[0].main);
-        assert!(all[1].created_by_agentbench);
+        assert!(all[1].owned);
 
         let renamed = vec![tree("/r", "main", true), tree("/r-a", "a2", false)];
         assert!(s.sync_worktrees(p.id, &renamed, None).unwrap());

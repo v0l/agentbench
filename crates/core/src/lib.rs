@@ -100,7 +100,7 @@ pub struct Worktree {
     pub head: Option<String>,
     pub main: bool,
     pub missing: bool,
-    pub created_by_agentbench: bool,
+    pub owned: bool,
     pub created_at: i64,
 }
 
@@ -1110,7 +1110,7 @@ mod tests {
             head: Some("0123456789abcdef".into()),
             main: false,
             missing: false,
-            created_by_agentbench: false,
+            owned: false,
             created_at: 0,
         };
         assert_eq!(w.label(), "feat");

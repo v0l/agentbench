@@ -1307,7 +1307,7 @@ mod tests {
         assert_eq!(issue["state"], "doing");
         let (_, trees) =
             call(&f.app, "GET", &format!("/api/projects/{pid}/worktrees"), None, T).await;
-        assert_eq!(trees[1]["created_by_agentbench"], true);
+        assert_eq!(trees[1]["owned"], true);
     }
 
     #[tokio::test]
