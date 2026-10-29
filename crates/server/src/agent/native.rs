@@ -1390,7 +1390,9 @@ impl Agent for Native {
                         }
                         egui_bench::agent::mcp::NAME => {
                             self.mcp.run(&args, workspace.root(), io.stop()).await.map(|a| {
-                                attached.extend(a.images.iter().map(|i| i.part()));
+                                attached.extend(
+                                    a.images.iter().map(|i| media::inline_picture(&i.mime, &i.data)),
+                                );
                                 a.text
                             })
                         }

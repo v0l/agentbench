@@ -75,6 +75,30 @@ pub fn attachment(file: &Path, name: &str) -> Result<Media, String> {
     }
 }
 
+pub fn inline_picture(mime: &str, data: &str) -> Value {
+    let original = json!({
+        "type": "image_url",
+        "image_url": { "url": format!("data:{mime};base64,{data}") },
+    });
+    let Ok(bytes) = STANDARD.decode(data) else { return original };
+    let extension = match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "img",
+    };
+    let Ok(scratch) = Scratch::new() else { return original };
+    let file = scratch.file(&format!("picture.{extension}"));
+    if fs::write(&file, &bytes).is_err() {
+        return original;
+    }
+    match image(&file, "picture", bytes.len() as u64) {
+        Ok(media) => media.parts.into_iter().nth(1).unwrap_or(original),
+        Err(_) => original,
+    }
+}
+
 fn load(ws: &Workspace, path: &str, kind: Kind, args: &Value) -> Result<Media, String> {
     let file = ws.resolve_for(path, Access::Read)?;
     let shown = ws.shown(&file);
@@ -405,6 +429,28 @@ mod tests {
         assert!(
             m.parts[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/jpeg;base64,")
         );
+    }
+
+    #[test]
+    fn an_inline_picture_with_a_huge_edge_is_shrunk() {
+        if !have_ffmpeg() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(make(
+            dir.path(),
+            "a.png",
+            &["-f", "lavfi", "-i", "color=red:s=3200x64", "-frames:v", "1"]
+        ));
+        let data = STANDARD.encode(fs::read(dir.path().join("a.png")).unwrap());
+        let part = inline_picture("image/png", &data);
+        assert!(part["image_url"]["url"].as_str().unwrap().starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[test]
+    fn a_small_inline_picture_is_kept_as_it_is() {
+        let part = inline_picture("image/png", "iVBORw0KGgo=");
+        assert_eq!(part["image_url"]["url"], "data:image/png;base64,iVBORw0KGgo=");
     }
 
     #[test]
