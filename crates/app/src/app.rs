@@ -269,11 +269,22 @@ struct TerminalView {
     screen: Option<agentbench_core::Screen>,
     asked: Option<web_time::Instant>,
     size: (u16, u16),
+    jobs: Vec<agentbench_core::Job>,
+    jobs_asked: Option<web_time::Instant>,
+    job: Option<String>,
 }
 
 impl TerminalView {
     fn new(session: SessionId) -> TerminalView {
-        TerminalView { session, screen: None, asked: None, size: (0, 0) }
+        TerminalView {
+            session,
+            screen: None,
+            asked: None,
+            size: (0, 0),
+            jobs: Vec::new(),
+            jobs_asked: None,
+            job: None,
+        }
     }
 }
 
@@ -323,19 +334,6 @@ fn terminal_bytes(events: &[egui::Event]) -> String {
 
 const CONSOLE_EVERY: Duration = Duration::from_secs(1);
 const TERMINAL_EVERY: Duration = Duration::from_millis(150);
-
-struct Console {
-    session: SessionId,
-    jobs: Vec<agentbench_core::Job>,
-    selected: usize,
-    asked: Option<web_time::Instant>,
-}
-
-impl Console {
-    fn new(session: SessionId) -> Console {
-        Console { session, jobs: Vec::new(), selected: 0, asked: None }
-    }
-}
 
 fn job_state(j: &agentbench_core::Job) -> String {
     match (j.running, j.exit) {
@@ -501,7 +499,6 @@ pub struct App {
     start: Option<Start>,
     new_worktree: Option<(Id, String)>,
     confirm: Option<Confirm>,
-    console: Option<Console>,
     terminal: Option<TerminalView>,
     settings: Option<Settings>,
     save_requested: bool,
@@ -620,7 +617,6 @@ impl App {
             start: None,
             new_worktree: None,
             confirm: None,
-            console: None,
             terminal: None,
             settings: None,
             save_requested: false,
@@ -1306,9 +1302,9 @@ impl App {
                 }
             }
             Reply::Jobs(sid, jobs) => {
-                if let Some(c) = self.console.as_mut().filter(|c| c.session == sid) {
-                    c.jobs = jobs;
-                    c.asked = None;
+                if let Some(t) = self.terminal.as_mut().filter(|t| t.session == sid) {
+                    t.jobs = jobs;
+                    t.jobs_asked = None;
                 }
             }
             Reply::Model(m) => {
@@ -2142,7 +2138,7 @@ mod tests {
     }
 
     #[test]
-    fn console_text_loses_colour_codes_and_carriage_returns() {
+    fn job_text_loses_colour_codes_and_carriage_returns() {
         assert_eq!(
             strip_ansi("\x1b[32mready\x1b[0m in 3ms\r\nnext\rtick"),
             "ready in 3ms\nnext\ntick"
@@ -2151,19 +2147,19 @@ mod tests {
     }
 
     #[test]
-    fn the_console_keeps_the_jobs_of_its_own_chat_only() {
+    fn the_terminal_keeps_the_jobs_of_its_own_chat_only() {
         let mut app = App::new(&egui::Context::default(), None, None);
         let a = "00000000-0000-0000-0000-000000000001".parse::<SessionId>().unwrap();
         let b = "00000000-0000-0000-0000-000000000002".parse::<SessionId>().unwrap();
         let job =
             agentbench_core::Job { handle: "job-1".into(), running: true, ..Default::default() };
         app.handle(Reply::Jobs(a, vec![job.clone()]));
-        assert!(app.console.is_none());
-        app.console = Some(Console::new(a));
+        assert!(app.terminal.is_none());
+        app.terminal = Some(TerminalView::new(a));
         app.handle(Reply::Jobs(b, vec![job.clone()]));
-        assert!(app.console.as_ref().unwrap().jobs.is_empty());
+        assert!(app.terminal.as_ref().unwrap().jobs.is_empty());
         app.handle(Reply::Jobs(a, vec![job]));
-        assert_eq!(app.console.as_ref().unwrap().jobs.len(), 1);
+        assert_eq!(app.terminal.as_ref().unwrap().jobs.len(), 1);
     }
 
     #[test]

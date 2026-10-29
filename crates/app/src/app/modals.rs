@@ -9,7 +9,6 @@ impl App {
         self.start_modal(ctx);
         self.worktree_modal(ctx);
         self.confirm_modal(ctx);
-        self.console_modal(ctx);
         self.terminal_modal(ctx);
         self.settings_modal(ctx);
         self.scan_modal(ctx);
@@ -81,29 +80,37 @@ impl App {
             return;
         };
         let session = t.session;
-        let events = ctx.input(|i| i.events.clone());
-        let data = terminal_bytes(&events);
         let now = web_time::Instant::now();
+        let on_shell = t.job.is_none();
         let font = mono(13.0);
         let (cell_w, cell_h) = ctx.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let width = modal_width(ctx, 900.0);
         let height = (ctx.content_rect().height() * 0.6).clamp(200.0, 560.0);
         let size = (((height / cell_h) as u16).max(5), (((width - 20.0) / cell_w) as u16).max(20));
-        let resize = if size != t.size { size } else { (0, 0) };
-        let ask = t.asked.is_none_or(|a| now.duration_since(a) >= TERMINAL_EVERY);
-        if (!data.is_empty() || resize != (0, 0))
-            && let Some(c) = &mut self.client
-        {
-            c.terminal_send(session, &data, resize.0, resize.1);
-            t.size = size;
-            t.asked = None;
-        }
-        if ask && let Some(c) = &mut self.client {
-            c.terminal(session);
-            t.asked = Some(now);
+        if let Some(c) = &mut self.client {
+            if t.jobs_asked.is_none_or(|a| now.duration_since(a) >= CONSOLE_EVERY) {
+                c.jobs(session);
+                t.jobs_asked = Some(now);
+            }
+            if on_shell {
+                let data = terminal_bytes(&ctx.input(|i| i.events.clone()));
+                let resize = if size != t.size { size } else { (0, 0) };
+                if !data.is_empty() || resize != (0, 0) {
+                    c.terminal_send(session, &data, resize.0, resize.1);
+                    t.size = size;
+                    t.asked = None;
+                }
+                if t.asked.is_none_or(|a| now.duration_since(a) >= TERMINAL_EVERY) {
+                    c.terminal(session);
+                    t.asked = Some(now);
+                }
+            }
         }
         let screen = t.screen.clone();
+        let jobs = t.jobs.clone();
+        let mut selected = t.job.clone();
         let mut close = false;
+        let mut kill = None;
         let m = egui::Modal::new(egui::Id::new("terminal"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -114,88 +121,64 @@ impl App {
                         close = ui.add(Key::new("close").outline(FAULT)).clicked();
                     });
                 });
-                hint(
-                    ui,
-                    "Runs in this chat's folder. The agent never sees what you type or paste here.",
-                );
-                ui.add_space(4.0);
-                egui::Frame::NONE.fill(CHASSIS).inner_margin(6).show(ui, |ui| {
-                    ui.set_min_height(height);
-                    match &screen {
-                        None => hint(ui, "starting"),
-                        Some(s) => {
-                            let text = s.rows.join("\n");
-                            let origin = ui.cursor().min;
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(text).font(font.clone()))
-                                    .wrap_mode(egui::TextWrapMode::Extend),
-                            );
-                            if s.cursor_shown && s.alive {
-                                let at = origin
-                                    + Vec2::new(
-                                        s.cursor_col as f32 * cell_w,
-                                        s.cursor_row as f32 * cell_h,
-                                    );
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(at, Vec2::new(cell_w, cell_h)),
-                                    0.0,
-                                    READOUT.gamma_multiply(0.6),
-                                );
-                            }
-                            if !s.alive {
-                                hint(ui, "the shell has exited");
-                            }
-                        }
-                    }
-                });
-            });
-        if close || m.backdrop_response.clicked() {
-            if let Some(c) = &mut self.client {
-                c.terminal_close(session);
-            }
-            self.terminal = None;
-        } else {
-            ctx.request_repaint_after(TERMINAL_EVERY);
-        }
-    }
-
-    pub(super) fn console_modal(&mut self, ctx: &egui::Context) {
-        let Some(c) = &mut self.console else {
-            return;
-        };
-        let now = web_time::Instant::now();
-        if c.asked.is_none_or(|t| now.duration_since(t) >= CONSOLE_EVERY)
-            && let Some(client) = &mut self.client
-        {
-            client.jobs(c.session);
-            c.asked = Some(now);
-        }
-        let session = c.session;
-        let mut kill = None;
-        let m = egui::Modal::new(egui::Id::new("console"))
-            .backdrop_color(egui::Color32::from_black_alpha(150))
-            .show(ctx, |ui| {
-                ui.set_width(modal_width(ctx, 760.0));
-                modal_title(ui, "Console");
-                if c.jobs.is_empty() {
-                    hint(ui, "This chat has no background commands. Ask the agent to start a dev server and it shows up here.");
-                    return;
-                }
-                c.selected = c.selected.min(c.jobs.len() - 1);
                 ui.horizontal_wrapped(|ui| {
-                    for (i, j) in c.jobs.iter().enumerate() {
-                        let tint = if j.running { OK } else if j.exit == Some(0) { LEGEND } else { FAULT };
-                        if chip(ui, &format!("{} {}", j.handle, job_state(j)), tint, i == c.selected).clicked() {
-                            c.selected = i;
+                    if chip(ui, "shell", READOUT, selected.is_none()).clicked() {
+                        selected = None;
+                    }
+                    for j in &jobs {
+                        let tint = if j.running {
+                            OK
+                        } else if j.exit == Some(0) {
+                            LEGEND
+                        } else {
+                            FAULT
+                        };
+                        let on = selected.as_deref() == Some(j.handle.as_str());
+                        if chip(ui, &format!("{} {}", j.handle, job_state(j)), tint, on).clicked() {
+                            selected = Some(j.handle.clone());
                         }
                     }
                 });
-                let job = c.jobs[c.selected].clone();
                 ui.add_space(4.0);
+                let job = selected.as_ref().and_then(|h| jobs.iter().find(|j| &j.handle == h));
+                let Some(job) = job else {
+                    hint(
+                        ui,
+                        "A shell in this chat's folder. The agent never sees what you type or paste here. Commands the agent starts in the background get a tab each.",
+                    );
+                    ui.add_space(4.0);
+                    egui::Frame::NONE.fill(CHASSIS).inner_margin(6).show(ui, |ui| {
+                        ui.set_min_height(height);
+                        let Some(s) = &screen else {
+                            return hint(ui, "starting");
+                        };
+                        let origin = ui.cursor().min;
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(s.rows.join("\n")).font(font.clone()),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                        if s.cursor_shown && s.alive {
+                            let at = origin
+                                + Vec2::new(
+                                    s.cursor_col as f32 * cell_w,
+                                    s.cursor_row as f32 * cell_h,
+                                );
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(at, Vec2::new(cell_w, cell_h)),
+                                0.0,
+                                READOUT.gamma_multiply(0.6),
+                            );
+                        }
+                        if !s.alive {
+                            hint(ui, "the shell has exited");
+                        }
+                    });
+                    return;
+                };
                 note(ui, &job.command, LEGEND);
                 ui.add_space(4.0);
-                let text = strip_ansi(&job.text);
-                let height = (ctx.content_rect().height() * 0.55).clamp(160.0, 520.0);
                 egui::Frame::NONE.fill(CHASSIS).inner_margin(6).show(ui, |ui| {
                     egui::ScrollArea::both()
                         .max_height(height)
@@ -204,12 +187,17 @@ impl App {
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
                             if job.dropped > 0 {
-                                hint(ui, &format!("{} bytes of older output were dropped", job.dropped));
+                                hint(
+                                    ui,
+                                    &format!("{} bytes of older output were dropped", job.dropped),
+                                );
                             }
                             ui.add(
-                                egui::Label::new(egui::RichText::new(text).monospace().size(12.0))
-                                    .selectable(true)
-                                    .wrap_mode(egui::TextWrapMode::Extend),
+                                egui::Label::new(
+                                    egui::RichText::new(strip_ansi(&job.text)).font(font.clone()),
+                                )
+                                .selectable(true)
+                                .wrap_mode(egui::TextWrapMode::Extend),
                             );
                         });
                 });
@@ -222,19 +210,23 @@ impl App {
                     }
                 });
             });
-        if let Some(handle) = kill
-            && let Some(client) = &mut self.client
-        {
-            client.kill_job(session, &handle);
-            if let Some(c) = &mut self.console {
-                c.asked = None;
+        if close || m.backdrop_response.clicked() {
+            if let Some(c) = &mut self.client {
+                c.terminal_close(session);
+            }
+            self.terminal = None;
+            return;
+        }
+        if let Some(t) = &mut self.terminal {
+            t.job = selected;
+            if let Some(handle) = kill
+                && let Some(c) = &mut self.client
+            {
+                c.kill_job(session, &handle);
+                t.jobs_asked = None;
             }
         }
-        if m.should_close() {
-            self.console = None;
-        } else {
-            ctx.request_repaint_after(CONSOLE_EVERY);
-        }
+        ctx.request_repaint_after(TERMINAL_EVERY);
     }
 
     pub(super) fn add_project_modal(&mut self, ctx: &egui::Context) {

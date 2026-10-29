@@ -289,18 +289,12 @@ impl App {
                 }
                 if ui
                     .add(Key::new("terminal").outline(VALUE))
-                    .on_hover_text("a shell in this chat's folder that the agent cannot see")
+                    .on_hover_text(
+                        "a shell the agent cannot see, and the output of commands it left running",
+                    )
                     .clicked()
                 {
                     self.terminal = Some(TerminalView::new(s.id));
-                }
-                if s.agent == "native"
-                    && ui
-                        .add(Key::new("console").outline(VALUE))
-                        .on_hover_text("output of the commands this agent left running")
-                        .clicked()
-                {
-                    self.console = Some(Console::new(s.id));
                 }
                 if s.status.busy()
                     && ui.add(Key::new("stop").outline(FAULT)).clicked()
