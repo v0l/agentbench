@@ -1063,10 +1063,10 @@ fn settings_pair_a_phone_with_a_code_for_the_external_address() {
     h.run_steps(3);
     // This window reaches the server on loopback, which a phone cannot, so there is no code yet.
     assert!(h.state().settings_pairing().is_none());
-    h.state_mut().settings_set_external("https://foreman.harkin.network");
+    h.state_mut().settings_set_external("https://agentbench.harkin.network");
     h.run_steps(3);
     let p = h.state().settings_pairing().expect("a code once the address is given");
-    assert_eq!(p.url, "https://foreman.harkin.network");
+    assert_eq!(p.url, "https://agentbench.harkin.network");
     assert_eq!(p.token, TOKEN);
     shot(&mut h, "settings-pair");
 }

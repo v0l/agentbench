@@ -165,6 +165,7 @@ CREATE TABLE notes (
     // The built-in agent was called foreman, not agentbench, so the step above moved nothing.
     "UPDATE sessions SET agent = 'native' WHERE agent IN ('foreman', 'agentbench');",
     "ALTER TABLE sessions ADD COLUMN effort TEXT;",
+    "ALTER TABLE worktrees RENAME COLUMN created_by_foreman TO created_by_agentbench;",
 ];
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
@@ -253,7 +254,7 @@ fn worktree_row(row: &Row) -> rusqlite::Result<Worktree> {
         head: row.get("head")?,
         main: row.get("main")?,
         missing: row.get("missing")?,
-        created_by_foreman: row.get("created_by_foreman")?,
+        created_by_agentbench: row.get("created_by_agentbench")?,
         created_at: row.get("created_at")?,
     })
 }
@@ -464,7 +465,7 @@ impl Store {
             )?;
             let id = db.last_insert_rowid();
             db.execute(
-                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, created_by_foreman, created_at)
+                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, created_by_agentbench, created_at)
                  VALUES (?1, ?2, NULL, NULL, 1, 0, 0, ?3)",
                 params![id, path, t],
             )?;
@@ -534,7 +535,7 @@ impl Store {
             }
             changed = true;
             db.execute(
-                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, created_by_foreman, created_at)
+                "INSERT INTO worktrees (project_id, path, branch, head, main, missing, created_by_agentbench, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)
                  ON CONFLICT(path) DO UPDATE SET branch = excluded.branch, head = excluded.head,
                      main = excluded.main, missing = 0",
@@ -1071,7 +1072,7 @@ mod tests {
         let all = s.worktrees(Some(p.id)).unwrap();
         assert_eq!(all.len(), 2);
         assert!(all[0].main);
-        assert!(all[1].created_by_foreman);
+        assert!(all[1].created_by_agentbench);
 
         let renamed = vec![tree("/r", "main", true), tree("/r-a", "a2", false)];
         assert!(s.sync_worktrees(p.id, &renamed, None).unwrap());
