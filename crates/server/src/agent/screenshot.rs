@@ -37,7 +37,7 @@ const APPS: [&str; 3] = [
 #[cfg(not(target_os = "macos"))]
 const APPS: [&str; 0] = [];
 
-fn browser() -> Option<PathBuf> {
+pub(super) fn browser() -> Option<PathBuf> {
     BROWSERS
         .iter()
         .map(std::path::Path::new)
@@ -46,7 +46,7 @@ fn browser() -> Option<PathBuf> {
 }
 
 /// The address to open: web addresses as they are, a file by its absolute path.
-fn address(ws: &Workspace, target: &str) -> Result<String, String> {
+pub(super) fn address(ws: &Workspace, target: &str) -> Result<String, String> {
     let target = target.trim();
     if let Some((scheme, _)) = target.split_once("://") {
         return match scheme.to_ascii_lowercase().as_str() {

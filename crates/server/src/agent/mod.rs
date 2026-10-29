@@ -1,3 +1,4 @@
+mod browser;
 mod claude;
 pub mod code;
 mod codex;
@@ -144,6 +145,8 @@ pub trait Agent: Send + Sync {
         0
     }
     async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String>;
+
+    fn end(&self, _session: SessionId) {}
 
     /// The models this agent can be told to use. Empty when it cannot say, and then the
     /// window offers a plain text field instead of a dropdown.

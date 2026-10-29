@@ -185,6 +185,7 @@ pub struct Native {
     /// Whisper, for a sound file `read_file` is asked for: the model gets the words, since most
     /// models behind a router take no audio and refuse the turn if they are sent some.
     pub speech: Option<crate::speech::Speech>,
+    pub browsers: super::browser::Browsers,
 }
 
 /// How long the model server may stay silent before a request is given up and sent again.
@@ -217,6 +218,7 @@ impl Default for Native {
                 super::code::Settings::default(),
             ))),
             speech: None,
+            browsers: Default::default(),
         }
     }
 }
@@ -557,8 +559,8 @@ fn labels_schema_replacing() -> Value {
 fn screenshot_spec() -> Spec {
     Spec::new(
         "screenshot",
-        "Take a picture of a web page or a local HTML file with a headless browser, and look at it. Use it to check UI you built: \
-         start a dev server with bash background, then screenshot its address. Needs Chrome, Chromium or Edge installed.",
+        "A last resort: take a picture of a web page or a local HTML file and look at it, only when how something looks is the question. \
+         Prefer browser, which is far cheaper and lets you act on the page. Needs Chrome, Chromium or Edge installed.",
         object(
             json!({
                 "url": string("An http(s) address, localhost:PORT, or an HTML file in the worktree"),
@@ -568,6 +570,34 @@ fn screenshot_spec() -> Spec {
                 "save_to": string("Also keep the picture at this path"),
             }),
             &["url"],
+        ),
+    )
+}
+
+fn browser_spec() -> Spec {
+    Spec::new(
+        "browser",
+        "Drive a real browser through compact text instead of pictures. Every action answers with the page as a text grid: \
+         links are [3]text, buttons [4 label], fields [5:value] or [5:___ placeholder], checkboxes [6:X] or [6: ], selects [7:\u{25bc} choice]. \
+         Act on a number with click, type, select; refs change after every action, so use the newest grid. Overlays and modals hide \
+         what they cover, so only what a user could click is shown. Use it first for anything about a web page: reading it, \
+         filling forms, logging in, checking UI you built. Use eval for exact data (a value, a list, a count) instead of reading the grid. \
+         One browser lives for the whole chat and keeps its cookies. Take a screenshot only as a last resort, for how something looks.",
+        object(
+            json!({
+                "action": string("goto (needs url), snapshot, click (ref), type (ref, text; submit:true presses Enter after), select (ref, value), press (key such as Enter, Tab, Escape, Ctrl+a), scroll (direction down, up, top or bottom; amount in pages), eval (js, an expression whose value comes back; grid:true adds the grid)"),
+                "url": string("For goto: an http(s) address, a bare domain, localhost:PORT, or an HTML file in the worktree"),
+                "ref": integer("The number in [brackets] in the latest grid"),
+                "text": string("For type: the text to put in the field, replacing what was there"),
+                "value": string("For select: the option's value or visible text"),
+                "key": string("For press: Enter, Tab, Escape, ArrowDown, Backspace, a letter, or a combination like Ctrl+a"),
+                "direction": string("For scroll: down, up, top or bottom"),
+                "js": string("For eval: JavaScript run in the page; the result is returned as JSON"),
+                "submit": json!({ "type": "boolean", "description": "For type: press Enter afterwards" }),
+                "grid": json!({ "type": "boolean", "description": "For eval: also return the grid" }),
+                "amount": json!({ "type": "number", "description": "For scroll: how many pages, default 1" }),
+            }),
+            &["action"],
         ),
     )
 }
@@ -728,6 +758,7 @@ pub fn specs() -> Vec<Spec> {
     let mut all = file_specs();
     all.push(bash_spec());
     all.extend(job_specs());
+    all.push(browser_spec());
     all.push(screenshot_spec());
     all.extend(web_specs());
     all.extend(skill_specs());
@@ -1127,6 +1158,10 @@ impl Agent for Native {
         "native"
     }
 
+    fn end(&self, session: agentbench_core::SessionId) {
+        self.browsers.close(&session.to_string());
+    }
+
     fn label(&self) -> &str {
         "Native"
     }
@@ -1274,6 +1309,11 @@ impl Agent for Native {
                                 }),
                                 None => self.tool(name, &args, &workspace, turn.context, io).await,
                             }
+                        }
+                        "browser" => {
+                            self.browsers
+                                .act(&turn.context.session.to_string(), &workspace, &args, io.stop())
+                                .await
                         }
                         "screenshot" => {
                             super::screenshot::take(&workspace, &args, io.stop()).await.map(|m| {
@@ -2363,6 +2403,21 @@ mod tests {
     }
 
     #[test]
+    fn the_browser_is_offered_ahead_of_screenshots_which_are_a_last_resort() {
+        let all = specs();
+        let browser = all.iter().find(|s| s.name == "browser").unwrap();
+        let shot = all.iter().find(|s| s.name == "screenshot").unwrap();
+        assert!(browser.about.contains("last resort"), "{}", browser.about);
+        assert!(shot.about.starts_with("A last resort"), "{}", shot.about);
+        assert!(shot.about.contains("Prefer browser"), "{}", shot.about);
+        let listing = tool_section(&all);
+        assert!(
+            listing.contains("- browser: Drive a real browser through compact text"),
+            "{listing}"
+        );
+    }
+
+    #[test]
     fn the_prompt_lists_the_levels_and_says_which_one_the_chat_is_on() {
         let base = three_levels();
         let text = model_levels_section(&base, &base.choose("low"));
@@ -2812,6 +2867,7 @@ mod tests {
             "bash_output",
             "bash_kill",
             "screenshot",
+            "browser",
             "todo_write",
             "start_session",
             "wait_for_session",

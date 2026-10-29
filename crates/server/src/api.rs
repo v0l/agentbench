@@ -691,6 +691,7 @@ async fn delete_session(
     Path(id): Path<SessionId>,
 ) -> Result<StatusCode, Failure> {
     api.runner.interrupt(id);
+    api.runner.end(id);
     api.runner.store().delete_session(id)?;
     changed(&api);
     Ok(StatusCode::NO_CONTENT)
