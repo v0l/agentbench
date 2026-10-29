@@ -70,6 +70,13 @@ jobs:
       # pushed tag checks out a tag.
       - uses: actions/checkout@v4
 
+      - name: Exclude the build from Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", "C:\Program Files\NVIDIA GPU Computing Toolkit"
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -102,7 +109,7 @@ jobs:
         if: matrix.cuda && runner.os == 'Windows'
         with:
           cuda: ${{ matrix.cuda }}
-          method: local
+          method: network
           # Windows names differ from Linux's and the installer refuses the whole list over one it
           # does not know: there is no cccl package here, its headers come with nvcc, and
           # nvrtc_dev has an underscore.
