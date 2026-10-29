@@ -394,6 +394,16 @@ impl Drop for Live {
     }
 }
 
+pub const HEADLESS: &str = "headlesschrome";
+
+pub fn target(setting: &str) -> Result<Option<String>, String> {
+    let s = setting.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case(HEADLESS) || s.eq_ignore_ascii_case("default") {
+        return Ok(None);
+    }
+    endpoint(s).map(Some).ok_or_else(|| format!("target must be {HEADLESS} or ip:port, not {s}"))
+}
+
 pub fn endpoint(setting: &str) -> Option<String> {
     let s = setting.trim();
     if s.is_empty() {
@@ -768,11 +778,8 @@ impl Browsers {
             *guard = None;
         }
         if action == "connect" {
-            let setting = text_arg(args, &["address", "url"]).unwrap_or("");
-            let wanted = match setting.trim() {
-                "" | "own" | "default" => None,
-                other => Some(endpoint(other).ok_or("missing `address`")?),
-            };
+            let setting = text_arg(args, &["target", "address"]).unwrap_or("");
+            let wanted = target(setting)?;
             *guard = None;
             *guard = Some(tokio::select! {
                 l = async { match &wanted { Some(url) => attach(url).await, None => start_own().await } } => l?,
@@ -1010,9 +1017,18 @@ mod tests {
         let ws = egui_bench::agent::workspace::Workspace::open(dir.path()).unwrap();
         let stop = CancellationToken::new();
         let browsers = Browsers::default();
-        let args = json!({"action": "connect", "address": "127.0.0.1:1"});
+        let args = json!({"action": "connect", "target": "127.0.0.1:1"});
         let err = browsers.act("s", &ws, &args, &stop).await.unwrap_err();
         assert!(err.contains("127.0.0.1:1"), "{err}");
+    }
+
+    #[test]
+    fn the_target_is_headless_chrome_or_an_address() {
+        assert_eq!(target("headlesschrome"), Ok(None));
+        assert_eq!(target("HeadlessChrome"), Ok(None));
+        assert_eq!(target(""), Ok(None));
+        assert_eq!(target("10.0.0.5:9222"), Ok(Some("ws://10.0.0.5:9222/devtools/browser".into())));
+        assert_eq!(target("9222"), Ok(Some("ws://127.0.0.1:9222/devtools/browser".into())));
     }
 
     #[test]
