@@ -1,5 +1,5 @@
 (i, wanted) => {
-  const el = (window.__twEls || [])[i];
+  const el = window.__twEls instanceof Map ? window.__twEls.get(i) : undefined;
   if (!el || !el.isConnected) return { error: 'stale' };
   if (el.localName !== 'select') return { error: 'not a select' };
   const options = [...el.options];

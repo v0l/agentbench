@@ -1,5 +1,5 @@
 (i, mode) => {
-  const el = (window.__twEls || [])[i];
+  const el = window.__twEls instanceof Map ? window.__twEls.get(i) : undefined;
   if (!el || !el.isConnected) return { error: 'stale' };
   const a = el.closest('a');
   if (a && a.target === '_blank') a.target = '_self';

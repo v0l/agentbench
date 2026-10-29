@@ -1,4 +1,4 @@
-mod browser;
+pub mod browser;
 mod claude;
 pub mod code;
 mod codex;

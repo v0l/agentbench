@@ -108,6 +108,7 @@ impl Config {
         let mut native = agent::Native::shared(model);
         native.titles = titles;
         native.speech = speech;
+        native.browsers = agent::browser::Browsers::saved_in(home());
         native.code =
             std::sync::Arc::new(agent::code::Code::new(agent::code::unconfined(self.code.clone())));
         let mut all: Vec<Box<dyn Agent>> = vec![

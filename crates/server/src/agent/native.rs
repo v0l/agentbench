@@ -604,19 +604,26 @@ fn browser_spec() -> Spec {
         "browser",
         "Drive a real browser through compact text instead of pictures. Every action answers with the page as a text grid: \
          links are [3]text, buttons [4 label], fields [5:value] or [5:___ placeholder], checkboxes [6:X] or [6: ], selects [7:\u{25bc} choice]. \
-         Act on a number with click, type, select; refs change after every action, so use the newest grid. Overlays and modals hide \
-         what they cover, so only what a user could click is shown. Use it first for anything about a web page: reading it, \
-         filling forms, logging in, checking UI you built. Use eval for exact data (a value, a list, a count) instead of reading the grid. \
+         Act on an element by its number, or by `label` (its visible text, with `near` naming text close to the one you mean when several match). \
+         Refs stay with their element, and a ref whose element has gone is refused, so snapshot again when told. Overlays and modals hide \
+         what they cover, so only what a user could click is shown. Every action waits for the page to finish loading and rendering; \
+         use wait for something slower. Use it first for anything about a web page: reading it, \
+         filling forms, uploading and downloading files, logging in, checking UI you built. Use eval for exact data (a value, a list, a count) instead of reading the grid. \
          One browser lives for the whole chat and keeps its cookies. Take a screenshot only as a last resort, for how something looks.",
         object(
             json!({
-                "action": string("goto (needs url), snapshot, click (ref), type (ref, text; submit:true presses Enter after), select (ref, value), press (key such as Enter, Tab, Escape, Ctrl+a), scroll (direction down, up, top or bottom; amount in pages), eval (js, an expression whose value comes back; grid:true adds the grid)"),
-                "url": string("For goto: an http(s) address, a bare domain, localhost:PORT, or an HTML file in the worktree"),
+                "action": string("goto (needs url), snapshot, click (ref or label), type (ref or label, text; submit:true presses Enter after), select (ref or label, value), press (key such as Enter, Tab, Escape, Ctrl+a), scroll (direction down, up, top or bottom; amount in pages), wait (text to wait for, or just ms), upload (ref or label of a file field or the button that opens one, files), download (ref or label of what starts it, or url fetched with the page's cookies; save_to), eval (js, an expression whose value comes back; grid:true adds the grid)"),
+                "url": string("For goto: an http(s) address, a bare domain, localhost:PORT, or an HTML file in the worktree. For download: the file's address, relative to the page"),
                 "ref": integer("The number in [brackets] in the latest grid"),
-                "text": string("For type: the text to put in the field, replacing what was there"),
+                "label": string("Instead of ref: the element's visible text or accessible name, such as \"No\" or \"Start declaration\""),
+                "near": string("With label: text close to the element you mean, such as the question a radio answers"),
+                "text": string("For type: the text to put in the field, replacing what was there. For click: the same as label. For wait: the text to wait for"),
                 "value": string("For select: the option's value or visible text"),
                 "key": string("For press: Enter, Tab, Escape, ArrowDown, Backspace, a letter, or a combination like Ctrl+a"),
                 "direction": string("For scroll: down, up, top or bottom"),
+                "files": json!({ "type": "array", "items": { "type": "string" }, "description": "For upload: paths of the files to put in the field" }),
+                "save_to": string("For download: where to keep the file, default downloads/ and its own name"),
+                "ms": integer("For wait: how long to wait for the text, or to sleep with no text, default 10000, at most 60000. For download: how long to wait for it to start"),
                 "js": string("For eval: JavaScript run in the page; the result is returned as JSON"),
                 "submit": json!({ "type": "boolean", "description": "For type: press Enter afterwards" }),
                 "grid": json!({ "type": "boolean", "description": "For eval: also return the grid" }),
@@ -632,7 +639,8 @@ fn set_browser_target_spec() -> Spec {
         "set_browser_target",
         "Choose which browser the browser tool drives: headlesschrome (the default, a private headless browser started on demand) \
          or ip:port, the remote debugging address of the user's own running browser, with their logins and tabs. \
-         Chromium browsers write the port to DevToolsActivePort in their profile folder. It opens its own tab and leaves the user's tabs alone.",
+         Chromium browsers write the port to DevToolsActivePort in their profile folder. It opens its own tab and leaves the user's tabs alone. \
+         The choice is kept for this chat, across restarts of agentbench.",
         object(
             json!({ "target": string("headlesschrome, or ip:port such as 127.0.0.1:35215") }),
             &["target"],

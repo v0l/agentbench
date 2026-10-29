@@ -1,10 +1,11 @@
 use super::screenshot;
+use egui_bench::agent::grants::Access;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -21,12 +22,20 @@ const EVAL_CHARS: usize = 8_000;
 const IDLE: Duration = Duration::from_secs(20 * 60);
 const REPLY_WAIT: Duration = Duration::from_secs(30);
 const LAUNCH_WAIT: Duration = Duration::from_secs(20);
-const LOAD_WAIT: Duration = Duration::from_secs(15);
 const ROW_SLACK: f64 = 9.0;
 const PARAGRAPH_GAP: f64 = 36.0;
 const EXTRACT: &str = include_str!("browser/extract.js");
 const TARGET: &str = include_str!("browser/target.js");
 const SELECT: &str = include_str!("browser/select.js");
+const FIND: &str = include_str!("browser/find.js");
+const WATCH: &str = include_str!("browser/watch.js");
+const QUIET: &str = include_str!("browser/quiet.js");
+const QUIET_FOR: f64 = 400.0;
+const SETTLE_MAX: Duration = Duration::from_secs(10);
+const RESTLESS_MAX: Duration = Duration::from_secs(2);
+const WAIT_DEFAULT: u64 = 10_000;
+const WAIT_MAX: u64 = 60_000;
+const DOWNLOAD_MAX: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Node {
@@ -59,6 +68,8 @@ pub struct Page {
     pub scroll_height: f64,
     pub vw: f64,
     pub vh: f64,
+    #[serde(default)]
+    pub next: usize,
     pub nodes: Vec<Node>,
 }
 
@@ -80,8 +91,16 @@ fn cell(n: &Node) -> String {
         }
         "input" | "textarea" if n.t.is_empty() => format!("[{r}:___ {}{off}]", n.hint),
         "input" | "textarea" => format!("[{r}:{}{off}]", n.t),
-        "checkbox" => format!("[{r}:{}{off}]", if n.on { "X" } else { " " }),
-        "radio" => format!("[{r}:{}{off}]", if n.on { "\u{25cf}" } else { "\u{25cb}" }),
+        "checkbox" | "radio" => {
+            let mark = match (n.k.as_str(), n.on) {
+                ("checkbox", true) => "X",
+                ("checkbox", false) => " ",
+                (_, true) => "\u{25cf}",
+                _ => "\u{25cb}",
+            };
+            let label = if n.t.is_empty() { String::new() } else { format!(" {}", n.t) };
+            format!("[{r}:{mark}{off}]{label}")
+        }
         "select" => format!("[{r}:\u{25bc} {}{off}]", n.t),
         "file" if n.t.is_empty() => format!("[{r}:file{off}]"),
         "file" => format!("[{r}:file {}{off}]", n.t),
@@ -179,6 +198,8 @@ pub fn view(page: &Page, notes: &[String], cols: usize, max: usize) -> String {
 pub enum Incoming {
     Reply { id: u64, result: Result<Value, String> },
     Dialog { session: Option<String>, message: String },
+    Event(Value),
+    Detached(String),
     Other,
 }
 
@@ -197,6 +218,15 @@ pub fn route(text: &str) -> Incoming {
         let message = format!("{kind} dialog accepted: {}", p["message"].as_str().unwrap_or(""));
         let session = v.get("sessionId").and_then(Value::as_str).map(str::to_string);
         return Incoming::Dialog { session, message };
+    }
+    let method = v.get("method").and_then(Value::as_str).unwrap_or("");
+    if method == "Target.detachedFromTarget"
+        && let Some(s) = v["params"]["sessionId"].as_str()
+    {
+        return Incoming::Detached(s.to_string());
+    }
+    if method.starts_with("Browser.download") || method == "Page.fileChooserOpened" {
+        return Incoming::Event(json!({ "method": method, "params": v["params"] }));
     }
     Incoming::Other
 }
@@ -285,13 +315,16 @@ pub fn address(
     screenshot::address(ws, t)
 }
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+type Pending = Arc<Mutex<HashMap<u64, (Option<String>, oneshot::Sender<Result<Value, String>>)>>>;
+const DETACHED: &str = "Session with given id not found";
 
 struct Cdp {
     out: mpsc::UnboundedSender<Message>,
     pending: Pending,
     next: AtomicU64,
     dialogs: Arc<Mutex<Vec<String>>>,
+    events: Arc<Mutex<Vec<Value>>>,
+    detached: Arc<Mutex<std::collections::HashSet<String>>>,
     closed: Arc<AtomicBool>,
 }
 
@@ -303,6 +336,8 @@ impl Cdp {
         let (out, mut queue) = mpsc::unbounded_channel::<Message>();
         let pending: Pending = Default::default();
         let dialogs: Arc<Mutex<Vec<String>>> = Default::default();
+        let events: Arc<Mutex<Vec<Value>>> = Default::default();
+        let detached: Arc<Mutex<std::collections::HashSet<String>>> = Default::default();
         let closed = Arc::new(AtomicBool::new(false));
         tokio::spawn(async move {
             while let Some(m) = queue.recv().await {
@@ -312,13 +347,14 @@ impl Cdp {
             }
         });
         let (p, d, c, o) = (pending.clone(), dialogs.clone(), closed.clone(), out.clone());
+        let (e, gone) = (events.clone(), detached.clone());
         tokio::spawn(async move {
             while let Some(Ok(m)) = stream.next().await {
                 let Message::Text(text) = m else { continue };
                 match route(text.as_str()) {
                     Incoming::Reply { id, result } => {
                         let tx = p.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-                        if let Some(tx) = tx {
+                        if let Some((_, tx)) = tx {
                             let _ = tx.send(result);
                         }
                     }
@@ -333,13 +369,33 @@ impl Cdp {
                         }
                         let _ = o.send(Message::text(reply.to_string()));
                     }
+                    Incoming::Event(event) => {
+                        let mut all = e.lock().unwrap_or_else(|e| e.into_inner());
+                        if all.len() < 500 {
+                            all.push(event);
+                        }
+                    }
+                    Incoming::Detached(session) => {
+                        gone.lock().unwrap_or_else(|e| e.into_inner()).insert(session.clone());
+                        let mut all = p.lock().unwrap_or_else(|e| e.into_inner());
+                        let waiting: Vec<u64> = all
+                            .iter()
+                            .filter(|(_, (s, _))| s.as_deref() == Some(session.as_str()))
+                            .map(|(id, _)| *id)
+                            .collect();
+                        for id in waiting {
+                            if let Some((_, tx)) = all.remove(&id) {
+                                let _ = tx.send(Err(DETACHED.into()));
+                            }
+                        }
+                    }
                     Incoming::Other => {}
                 }
             }
             c.store(true, Ordering::SeqCst);
             p.lock().unwrap_or_else(|e| e.into_inner()).clear();
         });
-        Ok(Cdp { out, pending, next: AtomicU64::new(1), dialogs, closed })
+        Ok(Cdp { out, pending, next: AtomicU64::new(1), dialogs, events, detached, closed })
     }
 
     async fn call(
@@ -351,9 +407,17 @@ impl Cdp {
         if self.closed.load(Ordering::SeqCst) {
             return Err("the browser closed".into());
         }
+        if session
+            .is_some_and(|s| self.detached.lock().unwrap_or_else(|e| e.into_inner()).contains(s))
+        {
+            return Err(DETACHED.into());
+        }
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, (session.map(str::to_string), tx));
         let mut msg = json!({ "id": id, "method": method, "params": params });
         if let Some(s) = session {
             msg["sessionId"] = json!(s);
@@ -372,12 +436,34 @@ impl Cdp {
     fn take_dialogs(&self) -> Vec<String> {
         std::mem::take(&mut *self.dialogs.lock().unwrap_or_else(|e| e.into_inner()))
     }
+
+    fn forget_events(&self) {
+        self.events.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    async fn event(&self, wait: Duration, want: impl Fn(&Value) -> bool) -> Option<Value> {
+        let started = Instant::now();
+        loop {
+            {
+                let mut all = self.events.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(i) = all.iter().position(&want) {
+                    return Some(all.remove(i));
+                }
+            }
+            if started.elapsed() >= wait || self.closed.load(Ordering::SeqCst) {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
 struct Live {
     cdp: Cdp,
     target: String,
     tab: String,
+    refs: AtomicUsize,
+    seen: Mutex<String>,
     _child: Option<Child>,
     dir: Option<PathBuf>,
     used: Instant,
@@ -428,7 +514,16 @@ async fn attach(url: &str) -> Result<Live, String> {
         .await?;
     let tab = made["targetId"].as_str().ok_or("no browser tab")?.to_string();
     let target = session_for(&cdp, &tab).await?;
-    Ok(Live { cdp, target, tab, _child: None, dir: None, used: Instant::now() })
+    Ok(Live {
+        cdp,
+        target,
+        tab,
+        refs: AtomicUsize::new(0),
+        seen: Mutex::default(),
+        _child: None,
+        dir: None,
+        used: Instant::now(),
+    })
 }
 
 async fn session_for(cdp: &Cdp, tab: &str) -> Result<String, String> {
@@ -437,10 +532,17 @@ async fn session_for(cdp: &Cdp, tab: &str) -> Result<String, String> {
         .await?;
     let target = attached["sessionId"].as_str().ok_or("no browser session")?.to_string();
     cdp.call(Some(&target), "Page.enable", json!({})).await?;
+    cdp.call(Some(&target), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": WATCH }))
+        .await?;
     Ok(target)
 }
 
-async fn launch() -> Result<Live, String> {
+async fn launch(wanted: Option<&str>) -> Result<Live, String> {
+    if let Some(url) = wanted {
+        return attach(url).await.map_err(|e| {
+            format!("{e}: the browser chosen with set_browser_target is not answering; start it again or pick another target")
+        });
+    }
     if let Some(url) = std::env::var("AGENTBENCH_BROWSER").ok().and_then(|v| endpoint(&v)) {
         return attach(&url).await;
     }
@@ -509,6 +611,8 @@ async fn start(chrome: &std::path::Path, dir: &std::path::Path) -> Result<Live, 
         cdp,
         target,
         tab,
+        refs: AtomicUsize::new(0),
+        seen: Mutex::default(),
         _child: Some(child),
         dir: Some(dir.to_path_buf()),
         used: Instant::now(),
@@ -516,6 +620,39 @@ async fn start(chrome: &std::path::Path, dir: &std::path::Path) -> Result<Live, 
 }
 
 impl Live {
+    async fn reopen(&mut self) -> Result<(), String> {
+        let tabs = self.cdp.call(None, "Target.getTargets", json!({})).await?;
+        let alive = tabs["targetInfos"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|t| t["targetId"] == self.tab.as_str()));
+        if alive {
+            self.target = session_for(&self.cdp, &self.tab).await?;
+            return Ok(());
+        }
+        let made = self
+            .cdp
+            .call(
+                None,
+                "Target.createTarget",
+                json!({ "url": "about:blank", "background": self.dir.is_none() }),
+            )
+            .await?;
+        self.tab = made["targetId"].as_str().ok_or("no browser tab")?.to_string();
+        self.target = session_for(&self.cdp, &self.tab).await?;
+        if self.dir.is_some() {
+            self.send(
+                "Emulation.setDeviceMetricsOverride",
+                json!({ "width": WIDTH, "height": HEIGHT, "deviceScaleFactor": 1, "mobile": false }),
+            )
+            .await?;
+        }
+        let seen = self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if !seen.is_empty() && seen != "about:blank" {
+            self.goto(&seen).await?;
+        }
+        Ok(())
+    }
+
     async fn send(&self, method: &str, params: Value) -> Result<Value, String> {
         self.cdp.call(Some(&self.target), method, params).await
     }
@@ -551,22 +688,62 @@ impl Live {
     async fn settle(&self) {
         tokio::time::sleep(Duration::from_millis(120)).await;
         let started = Instant::now();
-        while started.elapsed() < LOAD_WAIT {
-            if let Ok(Value::String(s)) = self.eval("document.readyState").await {
-                if s == "complete" {
-                    break;
-                }
+        let mut calm: Option<Instant> = None;
+        while started.elapsed() < SETTLE_MAX {
+            let state = match self.eval(QUIET).await {
+                Ok(s) => s,
+                Err(e) if lost(&e) => return,
+                Err(_) => Value::Null,
+            };
+            if state["ready"] == "complete" && !state["watched"].as_bool().unwrap_or(true) {
+                let _ = self.eval(WATCH).await;
+            }
+            let loaded = state["ready"] == "complete"
+                && state["busy"].as_u64() == Some(0)
+                && !state["blank"].as_bool().unwrap_or(false);
+            calm = if loaded { calm.or(Some(Instant::now())) } else { None };
+            let still = state["idle"].as_f64().is_some_and(|ms| ms >= QUIET_FOR);
+            if calm.is_some_and(|c| still || c.elapsed() >= RESTLESS_MAX) {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(350)).await;
+    }
+
+    async fn wait(&self, text: Option<&str>, ms: u64) -> Result<(), String> {
+        let Some(text) = text.filter(|t| !t.trim().is_empty()) else {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            self.settle().await;
+            return Ok(());
+        };
+        let probe = format!(
+            "(document.body ? document.body.innerText : '').toLowerCase().includes({})",
+            json!(text.to_lowercase())
+        );
+        let started = Instant::now();
+        loop {
+            if self.eval(&probe).await? == Value::Bool(true) {
+                self.settle().await;
+                return Ok(());
+            }
+            if started.elapsed() >= Duration::from_millis(ms) {
+                return Err(format!("{text:?} did not appear in {:.1}s", ms as f64 / 1000.0));
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
     }
 
     async fn page(&self) -> Result<Page, String> {
         let mut last = String::new();
         for _ in 0..3 {
-            match self.eval(EXTRACT).await {
-                Ok(Value::String(s)) => return parse_page(&s),
+            let base = self.refs.load(Ordering::SeqCst);
+            match self.call_fn(EXTRACT, &[json!(base)]).await {
+                Ok(Value::String(s)) => {
+                    let page = parse_page(&s)?;
+                    self.refs.fetch_max(page.next, Ordering::SeqCst);
+                    page.url.clone_into(&mut self.seen.lock().unwrap_or_else(|e| e.into_inner()));
+                    return Ok(page);
+                }
                 Ok(other) => last = format!("unexpected page data: {other}"),
                 Err(e) => last = e,
             }
@@ -578,6 +755,24 @@ impl Live {
     async fn grid(&self) -> Result<String, String> {
         let page = self.page().await?;
         Ok(view(&page, &self.cdp.take_dialogs(), COLS, OUTPUT_CHARS))
+    }
+
+    async fn locate(&self, args: &Value, label_keys: &[&str]) -> Result<usize, String> {
+        let Some(label) = (args.get("ref").is_none())
+            .then(|| text_arg(args, label_keys))
+            .flatten()
+            .filter(|l| !l.trim().is_empty())
+        else {
+            return reference(args);
+        };
+        self.page().await?;
+        let near = text_arg(args, &["near"]).filter(|n| !n.trim().is_empty());
+        let v = self.call_fn(FIND, &[json!(label), json!(near)]).await?;
+        match (v["ref"].as_u64(), v["error"].as_str()) {
+            (Some(r), _) => Ok(r as usize),
+            (None, Some(e)) => Err(e.to_string()),
+            (None, None) => Err(format!("nothing on the page is labelled {label:?}")),
+        }
     }
 
     async fn goto(&self, url: &str) -> Result<(), String> {
@@ -646,6 +841,161 @@ impl Live {
         Ok(())
     }
 
+    async fn element(&self, r: usize) -> Result<(String, bool), String> {
+        let found = self
+            .send(
+                "Runtime.evaluate",
+                json!({ "expression": format!("(window.__twEls instanceof Map ? window.__twEls.get({r}) : undefined)") }),
+            )
+            .await?;
+        let id = found["result"]["objectId"]
+            .as_str()
+            .ok_or_else(|| format!("[{r}] is gone from the page; snapshot for fresh refs"))?;
+        let kind = self
+            .send(
+                "Runtime.callFunctionOn",
+                json!({ "objectId": id, "returnByValue": true,
+                        "functionDeclaration": "function () { return this.isConnected && this.localName === 'input' && this.type === 'file'; }" }),
+            )
+            .await?;
+        Ok((id.to_string(), kind["result"]["value"] == true))
+    }
+
+    async fn upload(&self, r: usize, files: &[PathBuf]) -> Result<(), String> {
+        let files: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+        let (id, input) = self.element(r).await?;
+        if input {
+            self.send("DOM.setFileInputFiles", json!({ "files": files, "objectId": id })).await?;
+            self.settle().await;
+            return Ok(());
+        }
+        self.cdp.forget_events();
+        self.send("Page.setInterceptFileChooserDialog", json!({ "enabled": true })).await?;
+        let clicked = self.click(r).await;
+        let chooser = match clicked {
+            Ok(()) => {
+                self.cdp
+                    .event(Duration::from_secs(5), |e| e["method"] == "Page.fileChooserOpened")
+                    .await
+            }
+            Err(_) => None,
+        };
+        let _ = self.send("Page.setInterceptFileChooserDialog", json!({ "enabled": false })).await;
+        clicked?;
+        let chooser = chooser.ok_or_else(|| {
+            format!("[{r}] is not a file field and clicking it opened no file chooser")
+        })?;
+        let node = chooser["params"]["backendNodeId"].clone();
+        if chooser["params"]["mode"] == "selectSingle" && files.len() > 1 {
+            return Err("that file chooser takes one file".into());
+        }
+        self.send("DOM.setFileInputFiles", json!({ "files": files, "backendNodeId": node }))
+            .await?;
+        self.settle().await;
+        Ok(())
+    }
+
+    async fn download_click(&self, r: usize, wait: Duration) -> Result<(PathBuf, String), String> {
+        let dir =
+            std::env::temp_dir().join(format!("agentbench-download-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        self.cdp.forget_events();
+        self.cdp
+            .call(
+                None,
+                "Browser.setDownloadBehavior",
+                json!({ "behavior": "allowAndName", "downloadPath": dir.display().to_string(), "eventsEnabled": true }),
+            )
+            .await?;
+        let got = self.catch_download(r, wait, &dir).await;
+        let _ = self
+            .cdp
+            .call(None, "Browser.setDownloadBehavior", json!({ "behavior": "default" }))
+            .await;
+        if got.is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        got
+    }
+
+    async fn catch_download(
+        &self,
+        r: usize,
+        wait: Duration,
+        dir: &std::path::Path,
+    ) -> Result<(PathBuf, String), String> {
+        self.click(r).await?;
+        let begun =
+            self.cdp.event(wait, |e| e["method"] == "Browser.downloadWillBegin").await.ok_or_else(
+                || format!("[{r}] started no download in {:.1}s", wait.as_secs_f64()),
+            )?;
+        let guid = begun["params"]["guid"].as_str().unwrap_or_default().to_string();
+        let name = begun["params"]["suggestedFilename"].as_str().unwrap_or("download").to_string();
+        let done = self
+            .cdp
+            .event(DOWNLOAD_MAX, |e| {
+                e["method"] == "Browser.downloadProgress"
+                    && e["params"]["guid"] == guid.as_str()
+                    && e["params"]["state"] != "inProgress"
+            })
+            .await
+            .ok_or_else(|| {
+                format!("{name} did not finish downloading in {}s", DOWNLOAD_MAX.as_secs())
+            })?;
+        if done["params"]["state"] != "completed" {
+            return Err(format!("the download of {name} was cancelled"));
+        }
+        Ok((dir.join(&guid), name))
+    }
+
+    async fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        let here = self.eval("location.href").await?;
+        let here = here.as_str().unwrap_or("about:blank");
+        let full = url::Url::parse(here)
+            .and_then(|base| base.join(url))
+            .or_else(|_| url::Url::parse(url))
+            .map_err(|e| format!("{url}: {e}"))?;
+        if !matches!(full.scheme(), "http" | "https") {
+            return Err(format!("{full}: only http and https addresses can be downloaded"));
+        }
+        let cookies = self.send("Network.getCookies", json!({ "urls": [full.as_str()] })).await?;
+        let cookie = cookies["cookies"]
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .map(|c| {
+                        format!(
+                            "{}={}",
+                            c["name"].as_str().unwrap_or(""),
+                            c["value"].as_str().unwrap_or("")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
+        let agent = self.eval("navigator.userAgent").await.unwrap_or(Value::Null);
+        let mut req = crate::http::client().get(full.as_str()).header("referer", here);
+        if !cookie.is_empty() {
+            req = req.header("cookie", cookie);
+        }
+        if let Some(a) = agent.as_str() {
+            req = req.header("user-agent", a);
+        }
+        let reply = tokio::time::timeout(DOWNLOAD_MAX, req.send())
+            .await
+            .map_err(|_| format!("{full} did not answer in {}s", DOWNLOAD_MAX.as_secs()))?
+            .map_err(|e| format!("{full}: {e}"))?;
+        if !reply.status().is_success() {
+            return Err(format!("{full}: {}", reply.status()));
+        }
+        let body = tokio::time::timeout(DOWNLOAD_MAX, reply.bytes())
+            .await
+            .map_err(|_| format!("{full} did not finish in {}s", DOWNLOAD_MAX.as_secs()))?
+            .map_err(|e| format!("{full}: {e}"))?;
+        Ok(body.to_vec())
+    }
+
     async fn select(&self, r: usize, value: &str) -> Result<(), String> {
         let v = self.call_fn(SELECT, &[json!(r), json!(value)]).await?;
         check_target(&v, r)?;
@@ -682,6 +1032,92 @@ impl Live {
     }
 }
 
+fn upload_files(
+    ws: &egui_bench::agent::workspace::Workspace,
+    args: &Value,
+) -> Result<Vec<PathBuf>, String> {
+    let names: Vec<&str> =
+        match args.get("files").or_else(|| args.get("file")).or_else(|| args.get("path")) {
+            Some(Value::Array(all)) => all.iter().filter_map(Value::as_str).collect(),
+            Some(Value::String(one)) => vec![one.as_str()],
+            _ => return Err("missing `files`: the paths of the files to put in the field".into()),
+        };
+    if names.is_empty() {
+        return Err("`files` is empty".into());
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            let path = ws.resolve_for(name, Access::Read)?;
+            if !path.is_file() {
+                return Err(format!("{name} is not a file"));
+            }
+            path.canonicalize().map_err(|e| format!("{name}: {e}"))
+        })
+        .collect()
+}
+
+fn safe_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    let clean: String =
+        base.chars().map(|c| if c.is_control() || c == ':' { '_' } else { c }).collect();
+    match clean.trim_matches('.') {
+        "" => "download".into(),
+        _ => clean,
+    }
+}
+
+async fn download(
+    live: &Live,
+    ws: &egui_bench::agent::workspace::Workspace,
+    args: &Value,
+) -> Result<String, String> {
+    let wait = Duration::from_millis(
+        args.get("ms")
+            .or_else(|| args.get("wait_ms"))
+            .and_then(Value::as_u64)
+            .unwrap_or(WAIT_DEFAULT)
+            .min(WAIT_MAX),
+    );
+    let (bytes, name) = match (args.get("ref").is_none(), text_arg(args, &["url"])) {
+        (true, Some(url)) if text_arg(args, &["label", "text"]).is_none() => {
+            let bytes = live.fetch(url).await?;
+            let name = url.split(['?', '#']).next().unwrap_or(url);
+            (bytes, safe_name(name))
+        }
+        _ => {
+            let r = live.locate(args, &["label", "text"]).await?;
+            let (file, name) = live.download_click(r, wait).await?;
+            let bytes = std::fs::read(&file).map_err(|e| format!("{name}: {e}"));
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            (bytes?, safe_name(&name))
+        }
+    };
+    let save = match text_arg(args, &["save_to", "to"]) {
+        Some(s) => s.to_string(),
+        None => format!("downloads/{name}"),
+    };
+    let dest = ws.resolve_for(&save, Access::Write)?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::write(&dest, &bytes).map_err(|e| format!("{save}: {e}"))?;
+    Ok(format!("saved {name} ({} bytes) to {}", bytes.len(), ws.shown(&dest)))
+}
+
+fn lost(error: &str) -> bool {
+    [
+        "Session with given id not found",
+        "No target with given id",
+        "Target closed",
+        "the browser closed",
+    ]
+    .iter()
+    .any(|m| error.contains(m))
+}
+
 fn check_target(v: &Value, r: usize) -> Result<(), String> {
     match v.get("error").and_then(Value::as_str) {
         None => Ok(()),
@@ -704,7 +1140,7 @@ pub fn eval_text(value: &Value) -> String {
 }
 
 fn reference(args: &Value) -> Result<usize, String> {
-    let v = args.get("ref").ok_or("missing `ref`: the number in [brackets] from the last grid")?;
+    let v = args.get("ref").ok_or("missing `ref`: the number in [brackets] from the last grid, or `label`: the element's visible text")?;
     let n = v
         .as_u64()
         .or_else(|| v.as_str().and_then(|s| s.trim().trim_matches(['[', ']']).parse().ok()))
@@ -726,30 +1162,72 @@ pub fn action_name(args: &Value) -> Result<&'static str, String> {
         "select" => "select",
         "press" | "key" => "press",
         "scroll" => "scroll",
+        "wait" | "wait_for" | "sleep" => "wait",
+        "upload" | "attach" | "set_files" => "upload",
+        "download" | "save" => "download",
         "eval" | "evaluate" | "js" => "eval",
         "connect" => "connect",
         other => {
             return Err(format!(
-                "unknown action {other}: use goto, snapshot, click, type, select, press, scroll, eval or connect"
+                "unknown action {other}: use goto, snapshot, click, type, select, press, scroll, wait, upload, download, eval or connect"
             ));
         }
     })
 }
 
+type Slot = Arc<tokio::sync::Mutex<Option<Live>>>;
+
 #[derive(Clone, Default)]
-pub struct Browsers(Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<Live>>>>>>);
+pub struct Browsers {
+    slots: Arc<Mutex<HashMap<String, Slot>>>,
+    targets: Arc<Mutex<HashMap<String, String>>>,
+    saved: Option<Arc<PathBuf>>,
+}
 
 impl Browsers {
+    pub fn saved_in(dir: PathBuf) -> Browsers {
+        let file = dir.join("browser-targets.json");
+        let targets = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        Browsers {
+            slots: Default::default(),
+            targets: Arc::new(Mutex::new(targets)),
+            saved: Some(Arc::new(file)),
+        }
+    }
+
+    fn wanted(&self, session: &str) -> Option<String> {
+        self.targets.lock().unwrap_or_else(|e| e.into_inner()).get(session).cloned()
+    }
+
+    fn remember(&self, session: &str, url: Option<&str>) {
+        let mut all = self.targets.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = match url {
+            Some(u) => all.insert(session.to_string(), u.to_string()).as_deref() != Some(u),
+            None => all.remove(session).is_some(),
+        };
+        if let (true, Some(file)) = (changed, &self.saved) {
+            if let Some(parent) = file.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ =
+                std::fs::write(file.as_path(), serde_json::to_string(&*all).unwrap_or_default());
+        }
+    }
+
     pub fn close(&self, session: &str) {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(session);
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).remove(session);
+        self.remember(session, None);
     }
 
     pub fn open(&self) -> usize {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
-    fn slot(&self, session: &str) -> Arc<tokio::sync::Mutex<Option<Live>>> {
-        let mut all = self.0.lock().unwrap_or_else(|e| e.into_inner());
+    fn slot(&self, session: &str) -> Slot {
+        let mut all = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         all.retain(|k, s| {
             k == session
                 || s.try_lock()
@@ -774,7 +1252,9 @@ impl Browsers {
         };
         let slot = self.slot(session);
         let mut guard = slot.lock().await;
-        if guard.as_ref().is_some_and(|l| l.cdp.closed.load(Ordering::SeqCst)) {
+        let mut seen = String::new();
+        if let Some(l) = guard.as_ref().filter(|l| l.cdp.closed.load(Ordering::SeqCst)) {
+            seen = l.seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
             *guard = None;
         }
         if action == "connect" {
@@ -785,43 +1265,92 @@ impl Browsers {
                 l = async { match &wanted { Some(url) => attach(url).await, None => start_own().await } } => l?,
                 _ = stop.cancelled() => return Err("stopped".into()),
             });
+            self.remember(session, wanted.as_deref());
         }
+        let wanted = self.wanted(session);
         if guard.is_none() {
-            *guard = Some(tokio::select! {
-                l = launch() => l?,
+            let live = tokio::select! {
+                l = launch(wanted.as_deref()) => l?,
                 _ = stop.cancelled() => return Err("stopped".into()),
-            });
+            };
+            if url.is_none() && !seen.is_empty() && seen != "about:blank" {
+                let _ = live.goto(&seen).await;
+            }
+            *guard = Some(live);
         }
         let live = guard.as_mut().ok_or("no browser")?;
         live.used = Instant::now();
-        let done = tokio::select! {
-            r = run(live, action, url.as_deref(), args) => r,
+        let mut done = tokio::select! {
+            r = run(live, ws, action, url.as_deref(), args) => r,
             _ = stop.cancelled() => Err("stopped".into()),
         };
-        live.used = Instant::now();
-        if live.cdp.closed.load(Ordering::SeqCst) {
-            *guard = None;
+        if done.as_ref().is_err_and(|e| lost(e)) && !stop.is_cancelled() {
+            let reopened = if live.cdp.closed.load(Ordering::SeqCst) {
+                Err("the browser closed".to_string())
+            } else {
+                live.reopen().await
+            };
+            if reopened.is_err() {
+                let seen = live.seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                *guard = None;
+                let fresh = launch(wanted.as_deref()).await?;
+                if !seen.is_empty() && seen != "about:blank" {
+                    let _ = fresh.goto(&seen).await;
+                }
+                *guard = Some(fresh);
+            }
+            let live = guard.as_mut().ok_or("no browser")?;
+            done = tokio::select! {
+                r = run(live, ws, action, url.as_deref(), args) => r,
+                _ = stop.cancelled() => Err("stopped".into()),
+            };
+        }
+        if let Some(live) = guard.as_mut() {
+            live.used = Instant::now();
+            if live.cdp.closed.load(Ordering::SeqCst) {
+                *guard = None;
+            }
         }
         done
     }
 }
 
-async fn run(live: &Live, action: &str, url: Option<&str>, args: &Value) -> Result<String, String> {
+async fn run(
+    live: &Live,
+    ws: &egui_bench::agent::workspace::Workspace,
+    action: &str,
+    url: Option<&str>,
+    args: &Value,
+) -> Result<String, String> {
     match action {
         "goto" => live.goto(url.unwrap_or("about:blank")).await?,
-        "snapshot" => {}
-        "click" => live.click(reference(args)?).await?,
+        "snapshot" => live.settle().await,
+        "wait" => {
+            let ms = args
+                .get("ms")
+                .or_else(|| args.get("wait_ms"))
+                .and_then(Value::as_u64)
+                .unwrap_or(WAIT_DEFAULT)
+                .min(WAIT_MAX);
+            live.wait(text_arg(args, &["text", "for"]), ms).await?
+        }
+        "click" => live.click(live.locate(args, &["label", "text"]).await?).await?,
         "type" => {
             let text = text_arg(args, &["text", "value"]).ok_or("missing `text`")?;
             let submit = args.get("submit").and_then(Value::as_bool).unwrap_or(false);
-            live.type_into(reference(args)?, text, submit).await?
+            live.type_into(live.locate(args, &["label"]).await?, text, submit).await?
         }
         "select" => {
             let value = text_arg(args, &["value", "text"]).ok_or("missing `value`")?;
-            live.select(reference(args)?, value).await?
+            live.select(live.locate(args, &["label"]).await?, value).await?
         }
         "press" => live.press(text_arg(args, &["key"]).ok_or("missing `key`")?).await?,
         "connect" => {}
+        "upload" => {
+            let files = upload_files(ws, args)?;
+            live.upload(live.locate(args, &["label", "text"]).await?, &files).await?
+        }
+        "download" => return download(live, ws, args).await,
         "scroll" => {
             let direction = text_arg(args, &["direction"]).unwrap_or("down");
             let amount = args.get("amount").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.1, 20.0);
@@ -844,6 +1373,7 @@ async fn run(live: &Live, action: &str, url: Option<&str>, args: &Value) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_bench::agent::workspace::Workspace;
 
     fn node(k: &str, t: &str, idx: Option<usize>, x: f64, y: f64) -> Node {
         Node {
@@ -869,6 +1399,7 @@ mod tests {
             scroll_height: 800.0,
             vw: 1200.0,
             vh: 800.0,
+            next: 0,
             nodes,
         }
     }
@@ -902,6 +1433,7 @@ mod tests {
         let mut head = node("heading", "Sign up", None, 0.0, 0.0);
         head.lvl = 2;
         assert_eq!(cell(&check), "[0:X]");
+        assert_eq!(cell(&node("radio", "No", Some(5), 0.0, 0.0)), "[5:\u{25cb}] No");
         assert_eq!(cell(&radio), "[1:\u{25cb} (disabled)]");
         assert_eq!(cell(&empty), "[2:___ Email]");
         assert_eq!(cell(&node("select", "Two", Some(3), 0.0, 0.0)), "[3:\u{25bc} Two]");
@@ -963,6 +1495,14 @@ mod tests {
             }
         );
         assert_eq!(route(r#"{"method":"Page.loadEventFired"}"#), Incoming::Other);
+        assert_eq!(
+            route(r#"{"method":"Target.detachedFromTarget","params":{"sessionId":"S"}}"#),
+            Incoming::Detached("S".into())
+        );
+        assert!(matches!(
+            route(r#"{"method":"Browser.downloadWillBegin","params":{"guid":"g"}}"#),
+            Incoming::Event(e) if e["params"]["guid"] == "g"
+        ));
         assert_eq!(route("garbage"), Incoming::Other);
     }
 
@@ -1073,6 +1613,321 @@ mod tests {
         let at = line.find(needle).unwrap();
         let open = line[..at].rfind('[').unwrap();
         line[open + 1..].split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap()
+    }
+
+    fn workspace_with(files: &[(&str, &str)]) -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        let ws = Workspace::open(dir.path()).unwrap();
+        (dir, ws)
+    }
+
+    async fn act(b: &Browsers, ws: &Workspace, args: Value) -> Result<String, String> {
+        b.act("s1", ws, &args, &CancellationToken::new()).await
+    }
+
+    const QUESTIONS: &str = r##"<html><body>
+<p>Does the game show real-world animals?</p>
+<div role=radiogroup>
+<div role=radio aria-checked=false tabindex=0>Yes</div>
+<div role=radio aria-checked=false tabindex=-1>No</div>
+</div>
+<p>Is the violence realistic?</p>
+<div><span style="position:relative"><input type=radio name=v value=yes style="opacity:0;position:absolute;left:0;width:16px;height:16px;margin:0"><span style="padding-left:20px">Yes</span></span></div>
+<div><span style="position:relative"><input type=radio name=v value=no style="opacity:0;position:absolute;left:0;width:16px;height:16px;margin:0"><span style="padding-left:20px">No</span></span></div>
+<script>
+for (const el of document.querySelectorAll('[role=radio]')) el.addEventListener('click', () => {
+  for (const r of el.parentElement.children) { r.setAttribute('aria-checked', r === el); r.tabIndex = r === el ? 0 : -1; }
+});
+</script>
+</body></html>"##;
+
+    const RERENDER: &str = r##"<html><body>
+<a href="#keep" id=keep>Keep</a>
+<div id=app><button onclick="document.title='started'">Start declaration</button></div>
+<script>
+function rerender() {
+  document.getElementById('app').innerHTML = '<a href="privacy.html">Privacy</a>';
+}
+</script>
+</body></html>"##;
+
+    #[tokio::test]
+    async fn a_ref_from_an_older_grid_is_refused_once_its_element_is_gone() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let (_dir, ws) = workspace_with(&[("r.html", RERENDER), ("privacy.html", "privacy")]);
+        let b = Browsers::default();
+        let first = act(&b, &ws, json!({"action": "goto", "url": "r.html"})).await.unwrap();
+        let start = ref_of(&first, "Start declaration]");
+        let keep = ref_of(&first, "]Keep");
+        act(&b, &ws, json!({"action": "eval", "js": "rerender()"})).await.unwrap();
+        let second = act(&b, &ws, json!({"action": "snapshot"})).await.unwrap();
+        assert!(second.contains("Privacy"), "{second}");
+        assert_eq!(ref_of(&second, "]Keep"), keep, "{second}");
+        assert_ne!(ref_of(&second, "]Privacy"), start, "{second}");
+        let err = act(&b, &ws, json!({"action": "click", "ref": start})).await.unwrap_err();
+        assert!(err.contains("gone"), "{err}");
+        let url = act(&b, &ws, json!({"action": "eval", "js": "location.pathname"})).await.unwrap();
+        assert!(url.ends_with("r.html"), "{url}");
+        let third = act(&b, &ws, json!({"action": "goto", "url": "r.html"})).await.unwrap();
+        assert!(ref_of(&third, "]Keep") > ref_of(&second, "]Privacy"), "{third}");
+    }
+
+    async fn serve(routes: Vec<(&'static str, u64, &'static str)>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let at = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let cookie = head
+                        .lines()
+                        .find_map(|l| {
+                            l.strip_prefix("Cookie: ").or_else(|| l.strip_prefix("cookie: "))
+                        })
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let (_, delay, body) =
+                        routes.iter().find(|r| r.0 == path).copied().unwrap_or(("", 0, ""));
+                    let body = body.replace("{cookie}", &cookie);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{at}")
+    }
+
+    const SPA: &str = r##"<html><body><div id=app></div><script>
+setTimeout(() => {
+  app.innerHTML = '<p>Loading</p>';
+  fetch('/data').then((r) => r.text()).then((t) => { app.innerHTML = '<h1>' + t + '</h1><button onclick="later()">Later</button>'; });
+}, 1200);
+function later() { setTimeout(() => { document.body.insertAdjacentHTML('beforeend', '<p>Arrived</p>'); }, 2500); }
+</script></body></html>"##;
+
+    #[tokio::test]
+    async fn a_page_that_renders_late_is_waited_for() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let base = serve(vec![("/", 0, SPA), ("/data", 1500, "Dashboard")]).await;
+        let (_dir, ws) = workspace_with(&[]);
+        let b = Browsers::default();
+        let grid = act(&b, &ws, json!({"action": "goto", "url": base})).await.unwrap();
+        assert!(grid.contains("# Dashboard"), "{grid}");
+        let grid = act(&b, &ws, json!({"action": "click", "text": "Later"})).await.unwrap();
+        assert!(!grid.contains("Arrived"), "{grid}");
+        let grid = act(&b, &ws, json!({"action": "wait", "text": "Arrived"})).await.unwrap();
+        assert!(grid.contains("Arrived"), "{grid}");
+        let err =
+            act(&b, &ws, json!({"action": "wait", "text": "Never", "ms": 600})).await.unwrap_err();
+        assert!(err.contains("Never"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_page_that_never_stops_moving_is_not_waited_on_for_long() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let clock = "<html><body><p id=t>0</p><script>setInterval(() => { t.textContent = Date.now(); }, 50);</script></body></html>";
+        let (_dir, ws) = workspace_with(&[("clock.html", clock)]);
+        let b = Browsers::default();
+        act(&b, &ws, json!({"action": "goto", "url": "clock.html"})).await.unwrap();
+        let started = Instant::now();
+        act(&b, &ws, json!({"action": "snapshot"})).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_lost_browser_session_is_reopened_on_the_same_page() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let (_dir, ws) = workspace_with(&[("r.html", RERENDER)]);
+        let b = Browsers::default();
+        act(&b, &ws, json!({"action": "goto", "url": "r.html"})).await.unwrap();
+        {
+            let slot = b.slot("s1");
+            let guard = slot.lock().await;
+            let live = guard.as_ref().unwrap();
+            live.cdp
+                .call(None, "Target.detachFromTarget", json!({ "sessionId": live.target }))
+                .await
+                .unwrap();
+        }
+        let grid = act(&b, &ws, json!({"action": "snapshot"})).await.unwrap();
+        assert!(grid.contains("r.html") && grid.contains("Keep"), "{grid}");
+        {
+            let slot = b.slot("s1");
+            let guard = slot.lock().await;
+            let live = guard.as_ref().unwrap();
+            live.cdp
+                .call(None, "Target.closeTarget", json!({ "targetId": live.tab }))
+                .await
+                .unwrap();
+        }
+        let grid = act(&b, &ws, json!({"action": "click", "text": "Keep"})).await.unwrap();
+        assert!(grid.contains("r.html#keep"), "{grid}");
+    }
+
+    #[test]
+    fn a_chosen_browser_target_outlives_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = Browsers::saved_in(dir.path().to_path_buf());
+        before.remember("s1", Some("ws://127.0.0.1:9222/devtools/browser"));
+        before.remember("s2", None);
+        let after = Browsers::saved_in(dir.path().to_path_buf());
+        assert_eq!(after.wanted("s1").as_deref(), Some("ws://127.0.0.1:9222/devtools/browser"));
+        assert_eq!(after.wanted("s2"), None);
+        after.close("s1");
+        assert_eq!(Browsers::saved_in(dir.path().to_path_buf()).wanted("s1"), None);
+    }
+
+    const FILES: &str = r##"<html><body>
+<input type=file id=f multiple onchange="document.title='got ' + [...this.files].map((f) => f.name + ':' + f.size).join(',')">
+<button onclick="document.getElementById('h').click()">Choose screenshot</button>
+<input type=file id=h style="display:none" onchange="out.textContent = 'picked ' + this.files[0].name">
+<p id=out></p>
+<a href="/cert.cer" download>Download certificate</a>
+<button onclick="const a = document.createElement('a'); a.href = window.URL.createObjectURL(new Blob(['made here'])); a.download = 'made.txt'; a.click()">Export</button>
+<button>Nothing</button>
+<script>document.cookie = 'auth=1';</script>
+</body></html>"##;
+
+    #[tokio::test]
+    async fn files_are_uploaded_and_downloads_are_saved() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let base = serve(vec![("/", 0, FILES), ("/cert.cer", 0, "cert for {cookie}")]).await;
+        let (dir, ws) = workspace_with(&[("shot.png", "12345"), ("two.png", "12")]);
+        let b = Browsers::default();
+        let grid = act(&b, &ws, json!({"action": "goto", "url": base})).await.unwrap();
+        let input = ref_of(&grid, ":file]");
+        let grid = act(
+            &b,
+            &ws,
+            json!({"action": "upload", "ref": input, "files": ["shot.png", "two.png"]}),
+        )
+        .await
+        .unwrap();
+        assert!(grid.contains("title: got shot.png:5,two.png:2"), "{grid}");
+        let grid = act(
+            &b,
+            &ws,
+            json!({"action": "upload", "label": "Choose screenshot", "files": ["shot.png"]}),
+        )
+        .await
+        .unwrap();
+        assert!(grid.contains("picked shot.png"), "{grid}");
+        let missing =
+            act(&b, &ws, json!({"action": "upload", "ref": input, "files": ["nope.png"]}))
+                .await
+                .unwrap_err();
+        assert!(missing.contains("nope.png"), "{missing}");
+        let out = act(
+            &b,
+            &ws,
+            json!({"action": "download", "label": "Download certificate", "save_to": "keys/a.cer"}),
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("keys/a.cer"), "{out}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("keys/a.cer")).unwrap(),
+            "cert for auth=1"
+        );
+        let out =
+            act(&b, &ws, json!({"action": "download", "url": "cert.cer", "save_to": "b.cer"}))
+                .await
+                .unwrap();
+        assert!(out.contains("b.cer"), "{out}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("b.cer")).unwrap(), "cert for auth=1");
+        let out = act(&b, &ws, json!({"action": "download", "label": "Export"})).await.unwrap();
+        assert!(out.contains("made.txt"), "{out}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("downloads/made.txt")).unwrap(),
+            "made here"
+        );
+        let none = act(&b, &ws, json!({"action": "download", "label": "Nothing", "ms": 1500}))
+            .await
+            .unwrap_err();
+        assert!(none.contains("no download"), "{none}");
+    }
+
+    #[tokio::test]
+    async fn every_radio_in_a_group_gets_a_ref() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let (_dir, ws) = workspace_with(&[("q.html", QUESTIONS)]);
+        let b = Browsers::default();
+        let grid = act(&b, &ws, json!({"action": "goto", "url": "q.html"})).await.unwrap();
+        let nos: Vec<&str> = grid.lines().filter(|l| l.contains("No")).collect();
+        assert_eq!(nos.len(), 2, "{grid}");
+        assert!(nos.iter().all(|l| l.contains(":\u{25cb}]")), "{grid}");
+        let aria_no = ref_of(nos[0], ":\u{25cb}] No");
+        let grid = act(&b, &ws, json!({"action": "click", "ref": aria_no})).await.unwrap();
+        assert!(grid.contains(&format!("[{aria_no}:\u{25cf}] No")), "{grid}");
+        let native_no =
+            ref_of(grid.lines().filter(|l| l.contains("No")).nth(1).unwrap(), ":\u{25cb}]");
+        act(&b, &ws, json!({"action": "click", "ref": native_no})).await.unwrap();
+        let picked = act(
+            &b,
+            &ws,
+            json!({"action": "eval", "js": "document.querySelector('input:checked').value"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(picked, "no");
+    }
+
+    #[tokio::test]
+    async fn a_click_by_label_text_picks_the_answer_near_its_question() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let (_dir, ws) = workspace_with(&[("q.html", QUESTIONS)]);
+        let b = Browsers::default();
+        act(&b, &ws, json!({"action": "goto", "url": "q.html"})).await.unwrap();
+        let vague = act(&b, &ws, json!({"action": "click", "text": "No"})).await.unwrap_err();
+        assert!(vague.contains("2 elements") && vague.contains("near"), "{vague}");
+        let grid =
+            act(&b, &ws, json!({"action": "click", "text": "No", "near": "violence realistic"}))
+                .await
+                .unwrap();
+        let picked = act(
+            &b,
+            &ws,
+            json!({"action": "eval", "js": "document.querySelector('input:checked').value"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(picked, "no", "{grid}");
+        act(&b, &ws, json!({"action": "click", "label": "no", "near": "real-world animals"}))
+            .await
+            .unwrap();
+        let aria = act(&b, &ws, json!({"action": "eval", "js": "document.querySelectorAll('[role=radio]')[1].getAttribute('aria-checked')"}))
+            .await
+            .unwrap();
+        assert_eq!(aria, "true");
+        let missing = act(&b, &ws, json!({"action": "click", "text": "Maybe"})).await.unwrap_err();
+        assert!(missing.contains("Maybe"), "{missing}");
     }
 
     #[tokio::test]

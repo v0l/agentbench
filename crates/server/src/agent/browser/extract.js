@@ -1,10 +1,12 @@
-(() => {
-  const INTERACTIVE = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[onclick],[role=button],[role=link],[role=checkbox],[role=switch],[role=tab],[role=menuitem],[role=option],[contenteditable=""],[contenteditable=true],[tabindex]:not([tabindex="-1"])';
+(base) => {
+  const INTERACTIVE = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[onclick],[role=button],[role=link],[role=checkbox],[role=switch],[role=radio],[role=menuitemcheckbox],[role=menuitemradio],[role=combobox],[role=tab],[role=menuitem],[role=option],[contenteditable=""],[contenteditable=true],[tabindex]:not([tabindex="-1"])';
   const SKIP = new Set(['script', 'style', 'noscript', 'template', 'svg', 'head', 'meta', 'link', 'iframe', 'canvas', 'option', 'optgroup']);
   const NATIVE = new Set(['a', 'button', 'input', 'select', 'textarea', 'summary']);
   const vw = innerWidth;
   const vh = innerHeight;
-  const els = [];
+  const known = window.__twEls instanceof Map ? window.__twEls : new Map();
+  for (const [id, el] of known) if (!el.isConnected) known.delete(id);
+  let next = Math.max(window.__twNext || 0, base);
   const nodes = [];
   const range = document.createRange();
   const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
@@ -34,8 +36,10 @@
     node.w = r.width;
     node.h = r.height;
     if (node.interactive) {
-      node.idx = els.length;
-      els.push(target || el);
+      const t = target || el;
+      if (typeof t.__twRef !== 'number') t.__twRef = next++;
+      node.idx = t.__twRef;
+      known.set(t.__twRef, t);
     }
     nodes.push(node);
   };
@@ -76,8 +80,12 @@
     } else if (el.isContentEditable) {
       n.k = 'textarea';
       n.t = clean(el.innerText);
-    } else if (role === 'checkbox' || role === 'switch') {
+    } else if (role === 'checkbox' || role === 'switch' || role === 'menuitemcheckbox') {
       n.k = 'checkbox';
+      n.on = el.getAttribute('aria-checked') === 'true';
+      n.t = nameOf(el);
+    } else if (role === 'radio' || role === 'menuitemradio') {
+      n.k = 'radio';
       n.on = el.getAttribute('aria-checked') === 'true';
       n.t = nameOf(el);
     } else {
@@ -89,9 +97,17 @@
   const hiddenCheck = (el) => {
     const type = (el.type || '').toLowerCase();
     if (el.localName !== 'input' || (type !== 'checkbox' && type !== 'radio')) return;
+    const node = { k: type, t: '', interactive: true, on: el.checked, off: el.disabled };
     const label = el.labels && el.labels[0];
-    if (!label || !shown(label)) return;
-    add(label, label.getClientRects()[0], { k: type, t: '', interactive: true, on: el.checked, off: el.disabled });
+    if (label && shown(label)) {
+      add(label, label.getClientRects()[0], node);
+      return;
+    }
+    const s = getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return;
+    const r = el.getClientRects()[0];
+    if (r && r.width > 0 && r.height > 0) add(el, r, node);
+    else if (el.parentElement) add(el.parentElement, el.parentElement.getClientRects()[0], node, el);
   };
   const walk = (el) => {
     const tag = el.localName;
@@ -134,7 +150,8 @@
     }
   };
   if (document.body) walk(document.body);
-  window.__twEls = els;
+  window.__twEls = known;
+  window.__twNext = next;
   return JSON.stringify({
     url: location.href,
     title: document.title,
@@ -142,6 +159,7 @@
     scrollHeight: document.documentElement.scrollHeight,
     vw,
     vh,
+    next,
     nodes,
   });
-})()
+}
