@@ -202,6 +202,12 @@ impl Runner {
         self.agents.get(name).cloned()
     }
 
+    pub fn end(&self, session: SessionId) {
+        for agent in self.agents.values() {
+            agent.end(session);
+        }
+    }
+
     pub fn agents(&self) -> Vec<Arc<dyn Agent>> {
         let mut all: Vec<_> = self.agents.values().cloned().collect();
         all.sort_by(|a, b| a.name().cmp(b.name()));
