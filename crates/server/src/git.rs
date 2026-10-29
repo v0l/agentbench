@@ -148,6 +148,10 @@ pub fn remove_worktree(main: &Path, path: &Path, force: bool) -> Result<(), Stri
     Ok(())
 }
 
+pub fn delete_branch(main: &Path, branch: &str) -> Result<(), String> {
+    git(main, &["branch", "-d", branch]).map(|_| ())
+}
+
 pub fn is_dirty(path: &Path) -> Result<bool, String> {
     Ok(!git(path, &["status", "--porcelain"])?.is_empty())
 }

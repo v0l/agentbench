@@ -7,6 +7,7 @@ All notable changes to Agentbench are listed here. The format follows
 ## [Unreleased]
 
 ### Added
+- `cleanup_worktree` for the built in agent: removes a finished worktree, every chat session in it, and its branch if merged.
 - MCP servers for the built in agent, from `~/.agents/mcp.json` and a worktree's `.mcp.json`, over stdio or streamable HTTP. One `mcp` tool lists the servers, lists a server's tools and calls them; a server starts when first used and pictures it sends back reach the model. The client is egui_bench 0.8.1's `mcp` feature.
 
 ## [0.5.0] - 2026-10-29

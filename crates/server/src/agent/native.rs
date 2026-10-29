@@ -2,7 +2,7 @@ use super::{Agent, Context, Event, Io, Turn, async_trait, brief, files, media};
 use agentbench_core::{Entry, Question, SUMMARY_PREAMBLE, Said, Sent, Usage};
 use egui_bench::agent::mcp::Mcp;
 use egui_bench::agent::skillset;
-use egui_bench::agent::tools::{self, Spec, integer, object, string};
+use egui_bench::agent::tools::{self, Spec, boolean, integer, object, string};
 use egui_bench::agent::workspace::Workspace;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -270,7 +270,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 16] = [
+pub const AGENTBENCH_TOOLS: [&str; 17] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -284,6 +284,7 @@ pub const AGENTBENCH_TOOLS: [&str; 16] = [
     "list_projects",
     "list_worktrees",
     "create_worktree",
+    "cleanup_worktree",
     "remember",
     "recall",
     "notify_user",
@@ -421,6 +422,19 @@ fn agentbench_specs() -> Vec<Spec> {
                     "base": string("What to branch from; defaults to the current HEAD"),
                 }),
                 &["branch"],
+            ),
+        ),
+        Spec::new(
+            "cleanup_worktree",
+            "Remove a worktree of this project when its work is merged or abandoned: deletes the checkout, every chat session in it, and its branch if that is merged. Refuses the main worktree, the one this session is in, one with a session still working, and one with uncommitted changes unless force is set. Ask the user before forcing or before throwing away unmerged work.",
+            object(
+                json!({
+                    "id": id("The worktree, as list_worktrees gives its id"),
+                    "branch": string("Or the worktree's branch"),
+                    "force": boolean("Remove it even with uncommitted changes, which are lost"),
+                    "keep_branch": boolean("Keep the branch even if it is merged"),
+                }),
+                &[],
             ),
         ),
         Spec::new(

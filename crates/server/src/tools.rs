@@ -170,6 +170,70 @@ impl StoreApi {
     }
 }
 
+impl StoreApi {
+    fn cleanup_worktree(
+        &self,
+        args: &Value,
+        me: &agentbench_core::Session,
+    ) -> Result<Value, String> {
+        let s = &self.store;
+        let trees = s.worktrees(Some(me.project_id)).map_err(|e| e.0)?;
+        let tree = match (args.get("id").and_then(Value::as_i64), text(args, "branch")) {
+            (Some(id), _) => trees.into_iter().find(|w| w.id == id),
+            (None, Some(b)) => trees.into_iter().find(|w| w.label() == b.trim()),
+            (None, None) => return Err("give the worktree's `id` or `branch`".into()),
+        };
+        let tree = tree.ok_or("no such worktree in this project; list_worktrees gives them")?;
+        if tree.main {
+            return Err(
+                "that is the main worktree, the project itself; it cannot be removed".into()
+            );
+        }
+        if tree.id == me.worktree_id {
+            return Err("this session works in it; clean it up from another worktree".into());
+        }
+        let sessions: Vec<_> = s
+            .sessions()
+            .map_err(|e| e.0)?
+            .into_iter()
+            .filter(|x| x.worktree_id == tree.id)
+            .collect();
+        let runner = self.runner.get().ok();
+        if let Some(r) = &runner
+            && let Some(busy) = sessions.iter().find(|x| r.is_running(x.id))
+        {
+            return Err(format!("session {} is still working in it; stop it first", busy.id));
+        }
+        let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+        let branch = tree.branch.clone();
+        let project = s.project(me.project_id).map_err(|e| e.0)?;
+        crate::projects::remove_worktree(s, tree.id, force).map_err(|e| e.0)?;
+        if let Some(r) = &runner {
+            for x in &sessions {
+                r.end(x.id);
+            }
+        }
+        let mut out = json!({
+            "removed": tree.path,
+            "sessions_deleted": sessions.iter().map(|x| x.id.to_string()).collect::<Vec<_>>(),
+        });
+        if let Some(b) = branch {
+            let keep = args.get("keep_branch").and_then(Value::as_bool).unwrap_or(false);
+            match keep {
+                true => out["branch_deleted"] = json!(false),
+                false => match crate::git::delete_branch(std::path::Path::new(&project.path), &b) {
+                    Ok(()) => out["branch_deleted"] = json!(true),
+                    Err(e) => {
+                        out["branch_deleted"] = json!(false);
+                        out["branch_kept"] = json!(format!("{b}: {e}"));
+                    }
+                },
+            }
+        }
+        Ok(out)
+    }
+}
+
 impl Api for StoreApi {
     fn call(&self, tool: &str, args: &Value, session: SessionId) -> Result<Value, String> {
         let s = &self.store;
@@ -478,6 +542,7 @@ impl Api for StoreApi {
                 .map_err(|e| e.0)?;
                 json!({ "id": w.id, "branch": w.label(), "path": w.path })
             }
+            "cleanup_worktree" => self.cleanup_worktree(args, &me)?,
             "remember" => {
                 let topic = text(args, "topic").map(|t| t.trim().to_string()).unwrap_or_default();
                 if topic.is_empty() {
@@ -530,6 +595,7 @@ impl Api for StoreApi {
                 | "update_issue"
                 | "comment_on_issue"
                 | "create_worktree"
+                | "cleanup_worktree"
                 | "start_session"
                 | "send_message"
         ) {
@@ -731,5 +797,65 @@ mod tests {
         let listed = api.call("list_worktrees", &json!({}), me.id).unwrap();
         assert_eq!(listed.as_array().unwrap().len(), 2);
         assert!(api.call("create_worktree", &json!({"branch": "bad name"}), me.id).is_err());
+    }
+
+    #[test]
+    fn cleaning_up_a_worktree_removes_its_checkout_chats_and_merged_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let s = Store::memory().unwrap();
+        let p = crate::projects::add(&s, &main, None, false).unwrap();
+        let home = s.main_worktree(p.id).unwrap();
+        let me = s.add_session(home.id, "native", "me", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let made = api.call("create_worktree", &json!({"branch": "done-work"}), me.id).unwrap();
+        let tree = made["id"].as_i64().unwrap();
+        let path = std::path::PathBuf::from(made["path"].as_str().unwrap());
+        let chat = s.add_session(tree, "native", "worker", None, None).unwrap();
+
+        let e = api.call("cleanup_worktree", &json!({"id": home.id}), me.id).unwrap_err();
+        assert!(e.contains("main worktree"), "{e}");
+        let mine = s.add_session(tree, "native", "inside", None, None).unwrap();
+        let e = api.call("cleanup_worktree", &json!({"id": tree}), mine.id).unwrap_err();
+        assert!(e.contains("this session works in it"), "{e}");
+        s.delete_session(mine.id).unwrap();
+        std::fs::write(path.join("draft.txt"), "unsaved").unwrap();
+        let e = api.call("cleanup_worktree", &json!({"branch": "done-work"}), me.id).unwrap_err();
+        assert!(e.contains("uncommitted changes"), "{e}");
+        std::fs::remove_file(path.join("draft.txt")).unwrap();
+
+        let out = api.call("cleanup_worktree", &json!({"branch": "done-work"}), me.id).unwrap();
+        assert_eq!(out["removed"], made["path"]);
+        assert_eq!(out["sessions_deleted"], json!([chat.id.to_string()]));
+        assert_eq!(out["branch_deleted"], true);
+        assert!(!path.exists());
+        assert!(s.session(chat.id).is_err());
+        assert!(!crate::git::branch_exists(&main, "done-work"));
+        assert_eq!(s.worktrees(Some(p.id)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn an_unmerged_branch_is_kept_when_its_worktree_is_cleaned_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let s = Store::memory().unwrap();
+        let p = crate::projects::add(&s, &main, None, false).unwrap();
+        let me =
+            s.add_session(s.main_worktree(p.id).unwrap().id, "native", "me", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let made = api.call("create_worktree", &json!({"branch": "wip"}), me.id).unwrap();
+        let path = made["path"].as_str().unwrap();
+        let commit = std::process::Command::new("git")
+            .args(["-C", path, "-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["commit", "-q", "--allow-empty", "-m", "wip"])
+            .status()
+            .unwrap();
+        assert!(commit.success());
+        let out = api.call("cleanup_worktree", &json!({"id": made["id"]}), me.id).unwrap();
+        assert_eq!(out["branch_deleted"], false);
+        assert!(out["branch_kept"].as_str().unwrap().contains("not fully merged"), "{out}");
+        assert!(crate::git::branch_exists(&main, "wip"));
     }
 }

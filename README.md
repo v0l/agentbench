@@ -105,7 +105,10 @@ Beyond that it can:
   *Always allow in that project*, *Always allow, any project* or *Deny*. The
   agent cannot grant this itself. `GET`/`DELETE /api/settings/cross-project`
   shows and clears the standing permissions;
-- manage worktrees with `list_worktrees` and `create_worktree`;
+- manage worktrees with `list_worktrees` and `create_worktree`, and remove a
+  finished one with `cleanup_worktree`: the checkout, its chats, and its branch
+  when that is merged. It will not remove the main worktree, its own, one with a
+  session still working, or one with uncommitted changes unless told to force it;
 - keep a checklist for the user to follow with `todo_write`;
 - remember things about a project with `remember` and `recall`; the notes open
   every later session of that project;
