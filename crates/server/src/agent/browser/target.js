@@ -23,7 +23,8 @@
   const x = Math.min(Math.max(r.left + r.width / 2, 0), innerWidth - 1);
   const y = Math.min(Math.max(r.top + r.height / 2, 0), innerHeight - 1);
   const hit = document.elementFromPoint(x, y);
-  if (hit && !el.contains(hit) && !hit.contains(el)) {
+  const deco = hit && hit.parentElement === el.parentElement && !(hit.innerText || '').trim();
+  if (hit && !el.contains(hit) && !hit.contains(el) && !deco) {
     const text = (hit.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60);
     return { error: 'covered', by: hit.localName + (hit.id ? '#' + hit.id : '') + (text ? ' "' + text + '"' : '') };
   }

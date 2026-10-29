@@ -14,11 +14,18 @@
     return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
   };
   const onScreen = (r) => r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw;
+  const decoration = (el, hit) =>
+    hit.parentElement === el.parentElement && !clean(hit.innerText) && !hit.matches(INTERACTIVE);
   const free = (el, r) => {
-    const x = clamp(r.left + Math.min(r.width / 2, 12), 0, vw - 1);
-    const y = clamp(r.top + Math.min(r.height / 2, 8), 0, vh - 1);
-    const hit = document.elementFromPoint(x, y);
-    return !hit || el.contains(hit) || hit.contains(el);
+    const xs = [r.left + r.width / 2, r.left + Math.min(r.width / 2, 12), r.right - Math.min(r.width / 2, 12)];
+    const ys = [r.top + r.height / 2, r.top + Math.min(r.height / 2, 8)];
+    for (const px of xs) {
+      for (const py of ys) {
+        const hit = document.elementFromPoint(clamp(px, 0, vw - 1), clamp(py, 0, vh - 1));
+        if (!hit || el.contains(hit) || hit.contains(el) || decoration(el, hit)) return true;
+      }
+    }
+    return false;
   };
   const add = (el, r, node, target) => {
     if (nodes.length >= 2500 || !r || (r.width === 0 && r.height === 0) || !onScreen(r) || !free(el, r)) return;

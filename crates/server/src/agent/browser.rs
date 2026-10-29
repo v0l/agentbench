@@ -945,6 +945,7 @@ mod tests {
 
     const FORM: &str = r##"<html><head><title>Form</title></head><body>
 <h1>Sign up</h1>
+<div style="position:relative;width:200px"><input id=q placeholder="Find"><span style="position:absolute;left:0;top:0;width:24px;height:100%"></span></div>
 <label>Name <input id=n placeholder="Your name"></label><br>
 <select id=s><option value=one>One</option><option value=two>Two</option></select><br>
 <label><input id=c type=checkbox> Agree</label><br>
@@ -981,6 +982,7 @@ mod tests {
         };
         let grid = act(json!({"action": "goto", "url": "form.html"})).await.unwrap();
         assert!(grid.contains("title: Form") && grid.contains("# Sign up"), "{grid}");
+        assert!(grid.contains(":___ Find]"), "{grid}");
         let name = ref_of(&grid, ":___ Your name");
         let grid = act(json!({"action": "type", "ref": name, "text": "Bob"})).await.unwrap();
         assert!(grid.contains(&format!("[{name}:Bob]")), "{grid}");
