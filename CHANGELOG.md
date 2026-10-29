@@ -6,13 +6,26 @@ All notable changes to Agentbench (called Foreman before 0.2.0) are listed here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-29
+
 ### Changed
+- Native agent chats are stored as the exact messages sent to the model, and the window and the phone build the transcript from them. Old native chats are converted once when the server starts. An app older than 0.5.0 cannot read these chats, so update the phone and the window with the server.
+- Messages sent while the agent is busy wait on the server instead of in the transcript, and stopping the turn puts the unread ones back in the composer. `POST /api/sessions/{id}/interrupt` replies `{interrupted, queued}`.
+- Sessions that were running or waiting when the server stopped carry on when it starts again, and a tool call cut off part way is answered before the next prompt.
+- A thinking effort setting, per agent and per model level, sent as `reasoning_effort`, and `/thinking` to change it for one chat. The status line shows the model's thinking.
+- The built in agent is told its model levels and pointed at the top one after three failed calls in a row, and is steered to `code_find` and `code_outline` when a language server can answer.
+- Tool calls stop after 10 minutes, and bash returns when a background job keeps its pipes open.
+- A stream that ends early or with no answer is retried, and one that hits the output limit is retried with less thinking.
+- Web search falls back to Bing and then Brave.
+- A project can have 100 busy sessions.
 - `cuda` is a default feature of the window and the server, so a plain `cargo install` or `cargo build` runs speech on an NVIDIA card. Mac, Android, web and arm Linux builds pass `--no-default-features`.
 - The built in agent's web, code, background job, skills directory and checklist tools come from egui_bench 0.8, which now has them for every bench app; agentbench keeps running them as the user in the worktree. Its own copies are gone.
 
 ### Added
 - `find_skills` for the built in agent: searches the skills.sh directory and gives each result's install count, page and install command, so an agent short of know-how can look for a skill. It only searches; the brief tells the agent to ask you before installing one.
 - `agentbench chat`, a terminal chat with any agent, for odd jobs that belong to no repository. It opens in your home folder like a chat from the window, shares the server, and shows the same transcript: markdown, tool calls (ctrl+o opens their output), thinking, questions you answer with the arrow keys, and the model, context fill and cost in the status line. `-c` carries on with the latest chat, `/resume` picks an older one, and the same slash commands work (`/model`, `/thinking`, `/compact`, `/title`, `/new`, `/close`). `--agent`, `--model` and `--project` choose where it goes, and `--url` with `--token` uses a server on another machine. Leaving does not stop the agent.
+- LSP diagnostics the agent gets after an edit show in the transcript.
+- In the composer, up recalls the last message and ctrl+c clears it. End, or the latest button, jumps to the bottom of the chat.
 
 ## [0.4.0] - 2026-10-24
 
