@@ -787,6 +787,7 @@ pub mod tests {
             text: "which?".into(),
             options: options.iter().map(|s| s.to_string()).collect(),
             multiple,
+            secret: false,
         }
     }
 

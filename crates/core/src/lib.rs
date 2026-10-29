@@ -308,6 +308,8 @@ impl Usage {
     }
 }
 
+pub const SECRET_SHOWN: &str = "(secret given)";
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Question {
     pub text: String,
@@ -316,6 +318,9 @@ pub struct Question {
     /// More than one option may be picked.
     #[serde(default)]
     pub multiple: bool,
+    /// The answer is a secret: typed masked, never kept in the transcript.
+    #[serde(default)]
+    pub secret: bool,
 }
 
 /// A file kept with a chat message: what the transcript shows, not the bytes.

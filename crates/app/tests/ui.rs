@@ -558,6 +558,7 @@ impl agentbench_server::agent::Agent for Planner {
             text: text.into(),
             options: options.iter().map(|o| o.to_string()).collect(),
             multiple,
+            secret: false,
         };
         let a = io
             .ask_many(vec![

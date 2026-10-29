@@ -10,6 +10,7 @@ mod pi;
 mod process;
 pub mod screenshot;
 pub mod search;
+pub mod secrets;
 
 pub use async_trait::async_trait;
 pub use claude::Claude;

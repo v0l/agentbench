@@ -66,7 +66,9 @@ impl App {
                     }
                     let hint =
                         if q.options.is_empty() { "type an answer" } else { "or type an answer" };
-                    let r = if quick {
+                    let r = if q.secret {
+                        secret(ui, &mut slot.typed)
+                    } else if quick {
                         let ready = !slot.typed.trim().is_empty();
                         let mut go = false;
                         let r = field_then(ui, &mut slot.typed, hint, 90.0, |ui| {

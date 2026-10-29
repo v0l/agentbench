@@ -181,6 +181,7 @@ pub struct Native {
     pub titles: Option<crate::titles::Titles>,
     /// Commands the agents left running with `bash` and `background`.
     pub jobs: egui_bench::agent::jobs::Jobs,
+    pub secrets: super::secrets::Secrets,
     /// Language servers, for the `code_*` tools and the errors shown after an edit.
     pub code: std::sync::Arc<super::code::Code>,
     /// Whisper, for a sound file `read_file` is asked for: the model gets the words, since most
@@ -216,6 +217,7 @@ impl Default for Native {
             patience: Patience::default(),
             titles: None,
             jobs: Default::default(),
+            secrets: Default::default(),
             code: std::sync::Arc::new(super::code::Code::new(super::code::unconfined(
                 super::code::Settings::default(),
             ))),
@@ -492,6 +494,19 @@ fn agentbench_specs() -> Vec<Spec> {
             ),
         ),
         Spec::new(
+            "request_secret",
+            "Ask the user for a password, token or API key. You never see it. It is kept for this chat only, and you use it by writing {{secret:NAME}} \
+             inside any tool argument (a bash command, text typed into the browser, a web_fetch header); the harness fills in the value and removes it from the output. \
+             Do not try to print, encode or save it.",
+            object(
+                json!({
+                    "name": string("A short name such as GITHUB_TOKEN: letters, digits, _ - ."),
+                    "reason": string("What it is for, shown to the user"),
+                }),
+                &["name"],
+            ),
+        ),
+        Spec::new(
             "ask_user",
             "Ask the user a question and wait for the answer. Give options when the answer is one of a few choices, \
              and set multiple when they may pick more than one. To ask several things at once, pass questions, a list of \
@@ -530,7 +545,7 @@ fn question_of(v: &Value) -> Option<Question> {
         .map(|o| o.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
     let multiple = v.get("multiple").and_then(Value::as_bool).unwrap_or(false);
-    Some(Question { text, options, multiple })
+    Some(Question { text, options, multiple, secret: false })
 }
 
 fn bash_spec() -> Spec {
@@ -1237,6 +1252,7 @@ impl Agent for Native {
 
     fn end(&self, session: agentbench_core::SessionId) {
         self.browsers.close(&session.to_string());
+        self.secrets.forget(&session.to_string());
     }
 
     fn jobs(&self, session: agentbench_core::SessionId) -> Vec<agentbench_core::Job> {
@@ -1245,12 +1261,12 @@ impl Agent for Native {
             .into_iter()
             .map(|j| agentbench_core::Job {
                 handle: j.handle,
-                command: j.command,
                 running: j.running,
                 exit: j.exit,
                 seconds: j.seconds,
                 dropped: j.dropped,
-                text: j.text,
+                text: self.secrets.scrub(&session.to_string(), &j.text),
+                command: self.secrets.scrub(&session.to_string(), &j.command),
             })
             .collect()
     }
@@ -1387,10 +1403,17 @@ impl Agent for Native {
                     input: input.clone(),
                 });
                 let name = files::canonical(&call.name);
-                let limit = if name == "ask_user" { Duration::MAX } else { self.patience.tool };
+                let session_key = turn.context.session.to_string();
+                let limit = if matches!(name, "ask_user" | "request_secret") {
+                    Duration::MAX
+                } else {
+                    self.patience.tool
+                };
                 let result = match parsed {
                     Err(e) => Err(e),
-                    Ok(args) => tokio::time::timeout(limit, async { match name {
+                    Ok(args) => tokio::time::timeout(limit, async {
+                        let args = self.secrets.fill(&session_key, &args)?;
+                        match name {
                         "switch_model" => {
                             switch(
                                 &base,
@@ -1458,6 +1481,9 @@ impl Agent for Native {
                         ))
                     }),
                 };
+                let result = result
+                    .map(|o| self.secrets.scrub(&session_key, &o))
+                    .map_err(|e| self.secrets.scrub(&session_key, &e));
                 failures = if result.is_err() && name != "switch_model" { failures + 1 } else { 0 };
                 let result = match result {
                     Err(e) if failures >= STRUGGLE && !nudged => {
@@ -2044,6 +2070,34 @@ impl Native {
                     .call("start_session", args, cx.session)
                     .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
             }
+            "request_secret" => {
+                let name = files::text(args, &["name"]).ok_or("missing `name`")?;
+                if !super::secrets::valid_name(name) {
+                    return Err("`name` is letters, digits, _ - . only, up to 64".into());
+                }
+                let key = cx.session.to_string();
+                if !self.secrets.has(&key, name) {
+                    let why = files::text(args, &["reason"]).unwrap_or_default();
+                    let answer = io
+                        .ask(Question {
+                            text: format!(
+                                "{} asks for the secret {name}. {why}\n\nThe agent never sees it: it can only put it in a tool call as the placeholder.",
+                                cx.project
+                            ),
+                            secret: true,
+                            ..Question::default()
+                        })
+                        .await?;
+                    if answer.trim().is_empty() {
+                        return Err("the user gave no secret".into());
+                    }
+                    self.secrets.set(&key, name, answer.trim());
+                }
+                Ok(format!(
+                    "{name} is available for this chat. Write {} in any tool argument (a bash command, a browser type text, a web_fetch header) and the harness puts the value there. You never see the value and it is removed from tool output.",
+                    super::secrets::placeholder(name)
+                ))
+            }
             "ask_user" => {
                 let asked: Vec<Question> = args
                     .get("questions")
@@ -2112,6 +2166,7 @@ async fn confirm_project(args: &Value, cx: &Context, io: &dyn Io) -> Result<(), 
         ),
         options: vec![ALLOW_ONCE.into(), always.clone(), ALLOW_ALWAYS_ANY.into(), DENY.into()],
         multiple: false,
+        secret: false,
     };
     let answer = io.ask(question).await?;
     let scope = match answer.trim() {
@@ -2922,6 +2977,36 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(tool["content"], "The user answered: blue");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_secret_is_used_by_the_command_and_never_reaches_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![
+            vec![call("c1", "request_secret", json!({"name": "TOKEN", "reason": "deploy"}))],
+            vec![call(
+                "c2",
+                "bash",
+                json!({"command": "echo got {{secret:TOKEN}}; echo {{secret:TOKEN}} | base64"}),
+            )],
+            vec![call("c3", "bash", json!({"command": "echo {{secret:NOPE}}"}))],
+            vec![say("done")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        io.answers.lock().unwrap().push("s3cr3t-value".into());
+        run(&native, dir.path(), "deploy", &io).await.unwrap();
+        let mut last = Vec::new();
+        while let Ok(req) = asked.try_recv() {
+            assert!(!req.to_string().contains("s3cr3t-value"), "the model saw the value");
+            assert!(!req.to_string().contains("czNjcjN0LXZhbHVl"), "the model saw it encoded");
+            last = tool_results(&req);
+        }
+        assert!(last[0].contains("TOKEN is available"), "{last:?}");
+        assert!(last[1].contains("got {{secret:TOKEN}}"), "{last:?}");
+        assert!(last[2].contains("no secret called"), "{last:?}");
+        assert!(!format!("{:?}", io.events()).contains("s3cr3t-value"));
     }
 
     #[tokio::test]

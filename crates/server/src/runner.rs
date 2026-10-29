@@ -969,7 +969,11 @@ impl Io for Sink {
             .wait(&id, open, |a| Entry::Question {
                 id: id.clone(),
                 question: question.clone(),
-                answer: Some(a.join(", ")),
+                answer: Some(if question.secret {
+                    agentbench_core::SECRET_SHOWN.into()
+                } else {
+                    a.join(", ")
+                }),
             })
             .await?;
         Ok(answers.join(", "))
@@ -1373,6 +1377,60 @@ mod tests {
         assert_eq!(msgs.last().unwrap().text(), "you picked blue");
     }
 
+    struct SecretAsker;
+
+    #[async_trait]
+    impl Agent for SecretAsker {
+        fn name(&self) -> &str {
+            "secretive"
+        }
+        fn label(&self) -> &str {
+            "Secretive"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            let a = io
+                .ask(Question { text: "key?".into(), secret: true, ..Question::default() })
+                .await?;
+            io.emit(Event::Text { delta: format!("{} chars", a.len()) });
+            io.emit(Event::Done);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_secret_answer_reaches_the_agent_but_not_the_transcript() {
+        let (runner, s) = setup(Box::new(SecretAsker));
+        runner.send(&s, "go").unwrap();
+        let mut qid = None;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            qid =
+                runner.store().messages(s.id, 0).unwrap().into_iter().find_map(|m| match m.entry {
+                    Entry::Question { id, .. } => Some(id),
+                    _ => None,
+                });
+            if qid.is_some() {
+                break;
+            }
+        }
+        runner.answer(s.id, &qid.expect("a question"), vec!["hunter22".into()]).unwrap();
+        wait_idle(&runner, s.id).await;
+        let msgs: Vec<Entry> =
+            runner.store().messages(s.id, 0).unwrap().into_iter().map(|m| m.entry).collect();
+        assert!(!format!("{msgs:?}").contains("hunter22"));
+        assert!(msgs.iter().any(|e| matches!(e, Entry::Question { answer: Some(a), .. } if a == agentbench_core::SECRET_SHOWN)));
+        assert_eq!(msgs.last().unwrap().text(), "8 chars");
+    }
+
     struct Pair;
 
     #[async_trait]
@@ -1398,6 +1456,7 @@ mod tests {
                 text: t.into(),
                 options: vec!["a".into(), "b".into()],
                 multiple,
+                secret: false,
             };
             let a = io.ask_many(vec![q("one?", false), q("two?", true)]).await?;
             io.emit(Event::Text { delta: a.join("+") });
