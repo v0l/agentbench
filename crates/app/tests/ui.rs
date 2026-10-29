@@ -114,7 +114,7 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn agentbench_server::agent::Agent>>)
         .unwrap();
     store.add_session(side.id, "echo", "#3 Fix the login loop", None, None).unwrap();
     let second = store.add_session(side.id, "echo", "review the fix", None, None).unwrap();
-    store.set_status(second.id, agentbench_core::SessionStatus::Running).unwrap();
+    store.set_status(second.id, agentbench_core::SessionStatus::Stopped).unwrap();
     store
         .add_message(
             session.id,
