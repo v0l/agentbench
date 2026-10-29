@@ -377,18 +377,63 @@ impl Cdp {
 struct Live {
     cdp: Cdp,
     target: String,
-    _child: Child,
-    dir: PathBuf,
+    tab: String,
+    _child: Option<Child>,
+    dir: Option<PathBuf>,
     used: Instant,
 }
 
 impl Drop for Live {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if let Some(dir) = &self.dir {
+            let _ = std::fs::remove_dir_all(dir);
+        } else {
+            let close = json!({ "id": 0, "method": "Target.closeTarget", "params": { "targetId": self.tab } });
+            let _ = self.cdp.out.send(Message::text(close.to_string()));
+        }
     }
 }
 
+pub fn endpoint(setting: &str) -> Option<String> {
+    let s = setting.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s.starts_with("ws://") || s.starts_with("wss://") {
+        return Some(s.to_string());
+    }
+    let host = s.trim_start_matches("http://").trim_end_matches('/');
+    let host = if host.chars().all(|c| c.is_ascii_digit()) {
+        format!("127.0.0.1:{host}")
+    } else {
+        host.to_string()
+    };
+    Some(format!("ws://{host}/devtools/browser"))
+}
+
+async fn attach(url: &str) -> Result<Live, String> {
+    let cdp = Cdp::connect(url).await?;
+    let made = cdp
+        .call(None, "Target.createTarget", json!({ "url": "about:blank", "background": true }))
+        .await?;
+    let tab = made["targetId"].as_str().ok_or("no browser tab")?.to_string();
+    let target = session_for(&cdp, &tab).await?;
+    Ok(Live { cdp, target, tab, _child: None, dir: None, used: Instant::now() })
+}
+
+async fn session_for(cdp: &Cdp, tab: &str) -> Result<String, String> {
+    let attached = cdp
+        .call(None, "Target.attachToTarget", json!({ "targetId": tab, "flatten": true }))
+        .await?;
+    let target = attached["sessionId"].as_str().ok_or("no browser session")?.to_string();
+    cdp.call(Some(&target), "Page.enable", json!({})).await?;
+    Ok(target)
+}
+
 async fn launch() -> Result<Live, String> {
+    if let Some(url) = std::env::var("AGENTBENCH_BROWSER").ok().and_then(|v| endpoint(&v)) {
+        return attach(&url).await;
+    }
     let chrome = screenshot::browser()
         .ok_or("browser needs Chrome, Chromium or Edge, and none was found on the path")?;
     let dir = std::env::temp_dir().join(format!("agentbench-browser-{}", uuid::Uuid::new_v4()));
@@ -438,18 +483,22 @@ async fn start(chrome: &std::path::Path, dir: &std::path::Path) -> Result<Live, 
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
     let cdp = Cdp::connect(&found).await?;
     let made = cdp.call(None, "Target.createTarget", json!({ "url": "about:blank" })).await?;
-    let id = made["targetId"].as_str().ok_or("no browser tab")?;
-    let attached =
-        cdp.call(None, "Target.attachToTarget", json!({ "targetId": id, "flatten": true })).await?;
-    let target = attached["sessionId"].as_str().ok_or("no browser session")?.to_string();
-    cdp.call(Some(&target), "Page.enable", json!({})).await?;
+    let tab = made["targetId"].as_str().ok_or("no browser tab")?.to_string();
+    let target = session_for(&cdp, &tab).await?;
     cdp.call(
         Some(&target),
         "Emulation.setDeviceMetricsOverride",
         json!({ "width": WIDTH, "height": HEIGHT, "deviceScaleFactor": 1, "mobile": false }),
     )
     .await?;
-    Ok(Live { cdp, target, _child: child, dir: dir.to_path_buf(), used: Instant::now() })
+    Ok(Live {
+        cdp,
+        target,
+        tab,
+        _child: Some(child),
+        dir: Some(dir.to_path_buf()),
+        used: Instant::now(),
+    })
 }
 
 impl Live {
@@ -934,6 +983,20 @@ mod tests {
         assert_eq!(address(&ws, "about:blank").unwrap(), "about:blank");
         assert!(address(&ws, "a.html").unwrap().starts_with("file://"));
         assert!(address(&ws, "ftp://x").is_err());
+    }
+
+    #[test]
+    fn the_browser_setting_becomes_a_websocket_address() {
+        assert_eq!(endpoint("9222").as_deref(), Some("ws://127.0.0.1:9222/devtools/browser"));
+        assert_eq!(
+            endpoint("http://127.0.0.1:35215/").as_deref(),
+            Some("ws://127.0.0.1:35215/devtools/browser")
+        );
+        assert_eq!(
+            endpoint("ws://h:1/devtools/browser/x").as_deref(),
+            Some("ws://h:1/devtools/browser/x")
+        );
+        assert_eq!(endpoint("  "), None);
     }
 
     #[test]
