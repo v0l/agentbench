@@ -152,6 +152,30 @@ output_tokens = "/usage/output"
 The pointers are JSON pointers into each line. `{prompt}` in `args` passes the
 prompt as an argument instead of stdin.
 
+### MCP servers
+
+The native agent can use MCP servers, local (stdio) or remote (streamable HTTP). It reads them
+from `~/.agents/mcp.json` and then from `.mcp.json` in the worktree, where a server of the same
+name replaces the global one, in the format other clients use:
+
+```json
+{
+  "mcpServers": {
+    "kicad": { "command": "node", "args": ["~/git/KiCAD-MCP-Server/dist/index.js"] },
+    "docs": { "url": "https://bun.com/docs/mcp" },
+    "ha": { "url": "https://ha.example/api/mcp", "headers": { "Authorization": "Bearer ${HA_TOKEN}" } }
+  }
+}
+```
+
+Their tools sit behind one `mcp` tool, so a dozen servers do not add hundreds of tools to every
+request: with no arguments it lists the servers, with `server` it starts that one and lists its
+tools, and with `server`, `tool` and `args` it calls one. A server starts the first time a chat
+uses it, in that chat's worktree, and stops after 30 idle minutes. Pictures a tool sends back are
+shown to the model. `${VAR}` is filled in from the server's environment, and `timeout` sets a
+call's limit in seconds (300 by default). The old SSE transport and OAuth sign-in are not
+supported. MCP servers run as you, with no sandbox, so add only ones you trust.
+
 ### Code tools
 
 The native agent can read code by its units instead of by raw text, through whatever
