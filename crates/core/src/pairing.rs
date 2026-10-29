@@ -2,8 +2,6 @@
 //! QR code can carry. `agentbench://pair?url=https%3A%2F%2Fagentbench.example.com&token=…`.
 
 const SCHEME: &str = "agentbench://pair";
-/// The scheme before the app was renamed; old codes and links still pair.
-const OLD_SCHEME: &str = "foreman://pair";
 
 /// Where a server is and the token that lets a window in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,7 +20,7 @@ impl Pairing {
     /// not a pairing.
     pub fn parse(text: &str) -> Option<Pairing> {
         let text = text.trim();
-        let query = text.strip_prefix(SCHEME).or_else(|| text.strip_prefix(OLD_SCHEME))?;
+        let query = text.strip_prefix(SCHEME)?;
         let query = query.strip_prefix('?')?;
         let (mut url, mut token) = (None, None);
         for pair in query.split('&') {
@@ -74,10 +72,13 @@ mod tests {
 
     #[test]
     fn a_link_carries_the_address_and_token_and_reads_back() {
-        let p = Pairing { url: "https://agentbench.harkin.network".into(), token: "a/b+c=d&e".into() };
+        let p =
+            Pairing { url: "https://agentbench.harkin.network".into(), token: "a/b+c=d&e".into() };
         let link = p.link();
         assert!(
-            link.starts_with("agentbench://pair?url=https%3A%2F%2Fagentbench.harkin.network&token=")
+            link.starts_with(
+                "agentbench://pair?url=https%3A%2F%2Fagentbench.harkin.network&token="
+            )
         );
         assert!(!link.contains("a/b"), "the token is escaped: {link}");
         assert_eq!(Pairing::parse(&link), Some(p));

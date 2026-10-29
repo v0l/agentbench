@@ -1904,7 +1904,7 @@ fn long_markdown_wraps_inside_a_tile() {
     // A table and more text after it in one message: the text must keep wrapping.
     add(Entry::Assistant {
         text: format!(
-            "Done.\n\n| repo | tag | what |\n|---|---|---|\n| foreman | `v0.2.0` | {long} |\n\n- **Builds:** {long}\n- **Name:** {long} with `code`\n\n{long}"
+            "Done.\n\n| repo | tag | what |\n|---|---|---|\n| agentbench | `v0.2.0` | {long} |\n\n- **Builds:** {long}\n- **Name:** {long} with `code`\n\n{long}"
         ),
     });
     let mut h = harness(rig.url.clone());

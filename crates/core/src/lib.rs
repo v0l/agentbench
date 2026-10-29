@@ -100,7 +100,6 @@ pub struct Worktree {
     pub head: Option<String>,
     pub main: bool,
     pub missing: bool,
-    #[serde(alias = "created_by_foreman")]
     pub created_by_agentbench: bool,
     pub created_at: i64,
 }

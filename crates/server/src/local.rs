@@ -1,4 +1,4 @@
-use crate::{Config, DEFAULT_LISTEN, home, home_file, store::Store, token};
+use crate::{Config, DEFAULT_LISTEN, home, store::Store, token};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,9 +14,8 @@ pub struct Local {
 impl Local {
     pub fn open(home_dir: Option<PathBuf>) -> Result<Local, String> {
         let home = home_dir.unwrap_or_else(home);
-        let config = Config::load(&home_file(&home, "agentbench.toml", "foreman.toml"))?;
-        let store =
-            Store::open(&home_file(&home, "agentbench.db", "foreman.db")).map_err(|e| e.0)?;
+        let config = Config::load(&home.join("agentbench.toml"))?;
+        let store = Store::open(&home.join("agentbench.db")).map_err(|e| e.0)?;
         let token = token(&store).map_err(|e| e.0)?;
         let listen = config
             .listen

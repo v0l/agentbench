@@ -263,11 +263,7 @@ impl Context {
         if let Some(i) = self.issue {
             pairs.push(("ISSUE", i.to_string()));
         }
-        // Also under the old FOREMAN_ names, for scripts and skills written before the rename.
-        ["AGENTBENCH", "FOREMAN"]
-            .iter()
-            .flat_map(|p| pairs.iter().map(move |(k, v)| (format!("{p}_{k}"), v.clone())))
-            .collect()
+        pairs.into_iter().map(|(k, v)| (format!("AGENTBENCH_{k}"), v)).collect()
     }
 }
 

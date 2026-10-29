@@ -57,7 +57,6 @@ pub fn local_server(home: Option<std::path::PathBuf>) -> LocalServer {
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn run_native(home: Option<std::path::PathBuf>) -> eframe::Result<()> {
-    keep_old_settings();
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([420.0, 480.0])
@@ -75,18 +74,6 @@ pub fn run_native(home: Option<std::path::PathBuf>) -> eframe::Result<()> {
             Ok(Box::new(App::with_local(&cc.egui_ctx, cc.storage, None, Some(local_server(home)))))
         }),
     )
-}
-
-/// The window's own settings used to be kept in a folder named for the old app name. Copy them to
-/// the new one the first time, so the server address, fonts and tiles survive the rename.
-#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-fn keep_old_settings() {
-    let data = agentbench_server::data_dir();
-    let (old, new) =
-        (data.join("foreman").join("app.ron"), data.join("agentbench").join("app.ron"));
-    if old.is_file() && !new.exists() && std::fs::create_dir_all(data.join("agentbench")).is_ok() {
-        let _ = std::fs::copy(old, new);
-    }
 }
 
 #[cfg(target_os = "android")]

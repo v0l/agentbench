@@ -285,8 +285,7 @@ pub(super) fn short_path(path: &str) -> String {
 /// The chat a `agentbench://open?session=…` link names, as a notification's tap carries.
 pub(super) fn chat_in_link(link: &str) -> Option<SessionId> {
     let link = link.trim();
-    let query =
-        link.strip_prefix("agentbench://open?").or_else(|| link.strip_prefix("foreman://open?"))?;
+    let query = link.strip_prefix("agentbench://open?")?;
     query.split('&').find_map(|kv| kv.strip_prefix("session=")).and_then(|v| v.parse().ok())
 }
 
