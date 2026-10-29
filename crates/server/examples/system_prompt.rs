@@ -51,6 +51,7 @@ fn main() -> Result<(), String> {
         history: &[],
         context: &context,
     };
-    print!("{}", system(&turn, &model));
+    let mcp = agentbench_server::agent::native::mcp_settings();
+    print!("{}", system(&turn, &model, &egui_bench::agent::mcp::Mcp::new(mcp)));
     Ok(())
 }

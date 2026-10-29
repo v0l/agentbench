@@ -1904,9 +1904,7 @@ dependencies = [
 
 [[package]]
 name = "egui_bench"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18957bab485a920671ef52060d8b57ec666bda78312bac949d8a9581f448d781"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",

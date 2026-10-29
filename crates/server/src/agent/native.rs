@@ -1,5 +1,6 @@
 use super::{Agent, Context, Event, Io, Turn, async_trait, brief, files, media};
 use agentbench_core::{Entry, Question, SUMMARY_PREAMBLE, Said, Sent, Usage};
+use egui_bench::agent::mcp::Mcp;
 use egui_bench::agent::skillset;
 use egui_bench::agent::tools::{self, Spec, integer, object, string};
 use egui_bench::agent::workspace::Workspace;
@@ -186,6 +187,7 @@ pub struct Native {
     /// models behind a router take no audio and refuse the turn if they are sent some.
     pub speech: Option<crate::speech::Speech>,
     pub browsers: super::browser::Browsers,
+    pub mcp: Arc<Mcp>,
 }
 
 /// How long the model server may stay silent before a request is given up and sent again.
@@ -219,7 +221,16 @@ impl Default for Native {
             ))),
             speech: None,
             browsers: Default::default(),
+            mcp: Arc::new(Mcp::new(mcp_settings())),
         }
+    }
+}
+
+pub fn mcp_settings() -> egui_bench::agent::mcp::Settings {
+    egui_bench::agent::mcp::Settings {
+        project_files: vec![".mcp.json".into()],
+        client: "agentbench".into(),
+        ..Default::default()
     }
 }
 
@@ -776,14 +787,19 @@ fn levels(base: &Model) -> Vec<&'static str> {
     agentbench_core::LEVELS.into_iter().filter(|l| base.level(l).is_some()).collect()
 }
 
-fn offered(base: &Model) -> Vec<Spec> {
+fn offered(base: &Model, mcp: bool) -> Vec<Spec> {
     let any = !levels(base).is_empty();
-    specs().into_iter().filter(|t| any || t.name != "switch_model").collect()
+    let mut all: Vec<Spec> =
+        specs().into_iter().filter(|t| any || t.name != "switch_model").collect();
+    if mcp {
+        all.push(egui_bench::agent::mcp::spec());
+    }
+    all
 }
 
-fn tool_list(base: &Model) -> Value {
+fn tool_list(base: &Model, mcp: bool) -> Value {
     Value::Array(
-        offered(base)
+        offered(base, mcp)
             .into_iter()
             .map(|t| {
                 json!({
@@ -822,7 +838,8 @@ fn instructions(dir: &Path) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-pub fn system(turn: &Turn, base: &Model) -> String {
+pub fn system(turn: &Turn, base: &Model, mcp: &Mcp) -> String {
+    let servers = mcp.section(turn.cwd);
     let skills = skillset::discover(&skillset::roots(turn.cwd), &[]);
     let mut out = format!("Working directory: {}\n\n", turn.cwd.display());
     out.push_str(&brief(turn.context));
@@ -840,9 +857,12 @@ pub fn system(turn: &Turn, base: &Model) -> String {
     if let Some(text) = instructions(turn.cwd) {
         out.push_str(&section("project_instructions", &text));
     }
-    out.push_str(&tool_section(&offered(base)));
+    out.push_str(&tool_section(&offered(base, servers.is_some())));
     if !skills.is_empty() {
         out.push_str(&section("skills", &skillset::listing(&skills)));
+    }
+    if let Some(text) = servers {
+        out.push_str(&section("mcp_servers", &text));
     }
     out
 }
@@ -1226,7 +1246,7 @@ impl Agent for Native {
             if turn.context.home { Vec::new() } else { self.usable_languages(workspace.root()) };
         let mut messages = Log::new(io, history(turn.history));
         if !messages.first().is_some_and(|m| m["role"] == "system") {
-            let mut prompt = system(turn, &base);
+            let mut prompt = system(turn, &base, &self.mcp);
             prompt.push_str(&code_section(&languages));
             prompt.push_str(&model_levels_section(&base, &model));
             let mut opening = vec![json!({ "role": "system", "content": prompt })];
@@ -1244,7 +1264,7 @@ impl Agent for Native {
         let mut failures = 0usize;
         let mut nudged = false;
         messages.prompt(user_message(turn.prompt, turn.files).await);
-        let tools = tool_list(&base);
+        let tools = tool_list(&base, self.mcp.configured(workspace.root()));
         let mut broken = still_broken(turn.history);
         io.emit(Event::Usage(serving(&model, self.patience.probe).await));
         if !turn.context.home {
@@ -1338,6 +1358,12 @@ impl Agent for Native {
                                 .act(&turn.context.session.to_string(), &workspace, &args, io.stop())
                                 .await
                         }
+                        egui_bench::agent::mcp::NAME => {
+                            self.mcp.run(&args, workspace.root(), io.stop()).await.map(|a| {
+                                attached.extend(a.images.iter().map(|i| i.part()));
+                                a.text
+                            })
+                        }
                         "screenshot" => {
                             super::screenshot::take(&workspace, &args, io.stop()).await.map(|m| {
                                 attached.extend(m.parts);
@@ -1405,7 +1431,7 @@ impl Agent for Native {
             if !attached.is_empty() {
                 let mut content = vec![json!({
                     "type": "text",
-                    "text": "The media from read_file or screenshot, as the tool results above described:",
+                    "text": "The media from read_file, screenshot or mcp, as the tool results above described:",
                 })];
                 content.extend(attached);
                 messages.push(json!({ "role": "user", "content": content }));
