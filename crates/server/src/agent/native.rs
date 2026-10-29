@@ -602,6 +602,19 @@ fn browser_spec() -> Spec {
     )
 }
 
+fn set_browser_target_spec() -> Spec {
+    Spec::new(
+        "set_browser_target",
+        "Choose which browser the browser tool drives: headlesschrome (the default, a private headless browser started on demand) \
+         or ip:port, the remote debugging address of the user's own running browser, with their logins and tabs. \
+         Chromium browsers write the port to DevToolsActivePort in their profile folder. It opens its own tab and leaves the user's tabs alone.",
+        object(
+            json!({ "target": string("headlesschrome, or ip:port such as 127.0.0.1:35215") }),
+            &["target"],
+        ),
+    )
+}
+
 fn file_specs() -> Vec<Spec> {
     let mut specs: Vec<Spec> = tools::builtin()
         .into_iter()
@@ -759,6 +772,7 @@ pub fn specs() -> Vec<Spec> {
     all.push(bash_spec());
     all.extend(job_specs());
     all.push(browser_spec());
+    all.push(set_browser_target_spec());
     all.push(screenshot_spec());
     all.extend(web_specs());
     all.extend(skill_specs());
@@ -1341,6 +1355,13 @@ impl Agent for Native {
                                 }),
                                 None => self.tool(name, &args, &workspace, turn.context, io).await,
                             }
+                        }
+                        "set_browser_target" => {
+                            let mut args = args.clone();
+                            args["action"] = json!("connect");
+                            self.browsers
+                                .act(&turn.context.session.to_string(), &workspace, &args, io.stop())
+                                .await
                         }
                         "browser" => {
                             self.browsers
@@ -2905,6 +2926,7 @@ mod tests {
             "bash_kill",
             "screenshot",
             "browser",
+            "set_browser_target",
             "todo_write",
             "start_session",
             "wait_for_session",
