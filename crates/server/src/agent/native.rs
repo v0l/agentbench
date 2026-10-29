@@ -964,6 +964,15 @@ fn history(entries: &[Entry]) -> Vec<Value> {
                 .as_array()
                 .is_some_and(|c| c.iter().any(|c| c["id"] == message["tool_call_id"]))
         });
+        let answered = call.is_some_and(|at| {
+            out[at + 1..]
+                .iter()
+                .take_while(|m| m["role"] == "tool")
+                .any(|m| m["tool_call_id"] == message["tool_call_id"])
+        });
+        if message["role"] == "tool" && answered {
+            continue;
+        }
         match call {
             Some(at) if late => {
                 let after = out[at + 1..].iter().take_while(|m| m["role"] == "tool").count();
@@ -3188,6 +3197,25 @@ mod tests {
         let answer = json!({"role": "tool", "tool_call_id": "a", "content": "no result"});
         let entries = [row(call.clone()), row(prompt.clone()), row(answer.clone())];
         assert_eq!(history(&entries), [call, answer, prompt]);
+    }
+
+    #[test]
+    fn a_call_answered_for_a_cut_off_turn_and_again_when_it_finishes_is_replayed_once() {
+        let row = |messages: Vec<Value>| Entry::Wire {
+            messages: messages
+                .into_iter()
+                .map(|message| Sent { message, said: Said::Plain })
+                .collect(),
+        };
+        let call = json!({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+        ]});
+        let cut = json!({"role": "tool", "tool_call_id": "a", "content": "no result: the turn ended first"});
+        let prompt = json!({"role": "user", "content": "carry on"});
+        let finished = json!({"role": "tool", "tool_call_id": "a", "content": "done"});
+        let entries =
+            [row(vec![call.clone()]), row(vec![cut.clone(), prompt.clone()]), row(vec![finished])];
+        assert_eq!(history(&entries), [call, cut, prompt]);
     }
 
     #[test]
