@@ -264,7 +264,65 @@ struct Settings {
     speech_models: Option<Option<Vec<(String, String)>>>,
 }
 
+struct TerminalView {
+    session: SessionId,
+    screen: Option<agentbench_core::Screen>,
+    asked: Option<web_time::Instant>,
+    size: (u16, u16),
+}
+
+impl TerminalView {
+    fn new(session: SessionId) -> TerminalView {
+        TerminalView { session, screen: None, asked: None, size: (0, 0) }
+    }
+}
+
+fn terminal_bytes(events: &[egui::Event]) -> String {
+    let mut out = String::new();
+    for e in events {
+        match e {
+            egui::Event::Text(t) | egui::Event::Paste(t) => {
+                out.push_str(&t.replace("\r\n", "\r").replace('\n', "\r"))
+            }
+            egui::Event::Copy => out.push('\x03'),
+            egui::Event::Cut => out.push('\x18'),
+            egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                use egui::Key as K;
+                if modifiers.ctrl && !modifiers.shift {
+                    if let Some(c) = key.name().chars().next().filter(|_| key.name().len() == 1) {
+                        let c = c.to_ascii_lowercase();
+                        if c.is_ascii_lowercase() && !matches!(c, 'c' | 'x' | 'v') {
+                            out.push((c as u8 - b'a' + 1) as char);
+                        }
+                    }
+                    continue;
+                }
+                out.push_str(match key {
+                    K::Enter => "\r",
+                    K::Backspace => "\x7f",
+                    K::Tab if modifiers.shift => "\x1b[Z",
+                    K::Tab => "\t",
+                    K::Escape => "\x1b",
+                    K::ArrowUp => "\x1b[A",
+                    K::ArrowDown => "\x1b[B",
+                    K::ArrowRight => "\x1b[C",
+                    K::ArrowLeft => "\x1b[D",
+                    K::Home => "\x1b[H",
+                    K::End => "\x1b[F",
+                    K::Delete => "\x1b[3~",
+                    K::PageUp => "\x1b[5~",
+                    K::PageDown => "\x1b[6~",
+                    _ => "",
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 const CONSOLE_EVERY: Duration = Duration::from_secs(1);
+const TERMINAL_EVERY: Duration = Duration::from_millis(150);
 
 struct Console {
     session: SessionId,
@@ -444,6 +502,7 @@ pub struct App {
     new_worktree: Option<(Id, String)>,
     confirm: Option<Confirm>,
     console: Option<Console>,
+    terminal: Option<TerminalView>,
     settings: Option<Settings>,
     save_requested: bool,
     tray: crate::attach::Tray,
@@ -562,6 +621,7 @@ impl App {
             new_worktree: None,
             confirm: None,
             console: None,
+            terminal: None,
             settings: None,
             save_requested: false,
             tray: crate::attach::Tray::default(),
@@ -1238,6 +1298,12 @@ impl App {
             Reply::Interrupted(sid, queued) => {
                 self.notice = Some((true, "stopping".into()));
                 self.restore_queued(sid, &queued);
+            }
+            Reply::Screen(sid, screen) => {
+                if let Some(t) = self.terminal.as_mut().filter(|t| t.session == sid) {
+                    t.screen = Some(screen);
+                    t.asked = None;
+                }
             }
             Reply::Jobs(sid, jobs) => {
                 if let Some(c) = self.console.as_mut().filter(|c| c.session == sid) {
@@ -2052,6 +2118,27 @@ mod tests {
         app.handle(Reply::Interrupted(a, vec!["first".into(), "second".into()]));
         assert_eq!(app.draft_of(a), "first\nsecond\nhalf typed");
         assert_eq!(app.refocus, Some(Tile::Chat(a)));
+    }
+
+    #[test]
+    fn terminal_keys_become_what_a_shell_expects() {
+        use egui::{Event, Key, Modifiers};
+        let key = |key, modifiers| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        assert_eq!(
+            terminal_bytes(&[Event::Text("ls".into()), key(Key::Enter, Modifiers::NONE)]),
+            "ls\r"
+        );
+        assert_eq!(terminal_bytes(&[Event::Paste("a\nb".into())]), "a\rb");
+        assert_eq!(terminal_bytes(&[key(Key::ArrowUp, Modifiers::NONE)]), "\x1b[A");
+        assert_eq!(terminal_bytes(&[key(Key::Escape, Modifiers::NONE)]), "\x1b");
+        assert_eq!(terminal_bytes(&[key(Key::D, Modifiers::CTRL)]), "\x04");
+        assert_eq!(terminal_bytes(&[Event::Copy]), "\x03");
     }
 
     #[test]

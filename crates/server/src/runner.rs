@@ -49,6 +49,7 @@ pub struct Runner {
     titles: Option<Titles>,
     pub base: Arc<Mutex<Base>>,
     pub changed: Arc<Notify>,
+    pub terminals: crate::terminal::Terminals,
     /// This runner, as the tracker tools see it, for starting and messaging sessions.
     me: crate::tools::Handle,
 }
@@ -74,6 +75,7 @@ impl Runner {
             titles: None,
             base: Arc::new(Mutex::new(Base::default())),
             changed,
+            terminals: Default::default(),
             me,
         };
         runner.me.set(runner.clone());
@@ -203,6 +205,7 @@ impl Runner {
     }
 
     pub fn end(&self, session: SessionId) {
+        self.terminals.close(session);
         for agent in self.agents.values() {
             agent.end(session);
         }

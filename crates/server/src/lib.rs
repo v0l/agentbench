@@ -8,6 +8,7 @@ pub mod projects;
 pub mod runner;
 pub mod speech;
 pub mod store;
+pub mod terminal;
 pub mod titles;
 pub mod tools;
 pub mod tui;

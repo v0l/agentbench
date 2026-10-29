@@ -44,6 +44,7 @@ pub enum Reply {
     Messages(SessionId, Vec<Message>),
     Interrupted(SessionId, Vec<String>),
     Jobs(SessionId, Vec<agentbench_core::Job>),
+    Screen(SessionId, agentbench_core::Screen),
     Comments(Id, Vec<Comment>),
     Done(String),
     Failed(String),
@@ -471,6 +472,20 @@ impl Client {
     pub fn jobs(&mut self, session: SessionId) {
         let req = self.request(Method::GET, &format!("/api/sessions/{session}/jobs"), None);
         self.send(req, move |j| Reply::Jobs(session, j));
+    }
+
+    pub fn terminal(&mut self, session: SessionId) {
+        let req = self.request(Method::GET, &format!("/api/sessions/{session}/terminal"), None);
+        self.send(req, move |s| Reply::Screen(session, s));
+    }
+
+    pub fn terminal_send(&mut self, session: SessionId, data: &str, rows: u16, cols: u16) {
+        let input = agentbench_core::TerminalInput { data: data.to_string(), rows, cols };
+        self.act(Method::POST, &format!("/api/sessions/{session}/terminal"), Some(&input), "");
+    }
+
+    pub fn terminal_close(&mut self, session: SessionId) {
+        self.act::<()>(Method::DELETE, &format!("/api/sessions/{session}/terminal"), None, "");
     }
 
     pub fn kill_job(&mut self, session: SessionId, handle: &str) {

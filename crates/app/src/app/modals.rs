@@ -10,6 +10,7 @@ impl App {
         self.worktree_modal(ctx);
         self.confirm_modal(ctx);
         self.console_modal(ctx);
+        self.terminal_modal(ctx);
         self.settings_modal(ctx);
         self.scan_modal(ctx);
     }
@@ -72,6 +73,89 @@ impl App {
             self.scan_view = None;
         } else {
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    pub(super) fn terminal_modal(&mut self, ctx: &egui::Context) {
+        let Some(t) = &mut self.terminal else {
+            return;
+        };
+        let session = t.session;
+        let events = ctx.input(|i| i.events.clone());
+        let data = terminal_bytes(&events);
+        let now = web_time::Instant::now();
+        let font = mono(13.0);
+        let (cell_w, cell_h) = ctx.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+        let width = modal_width(ctx, 900.0);
+        let height = (ctx.content_rect().height() * 0.6).clamp(200.0, 560.0);
+        let size = (((height / cell_h) as u16).max(5), (((width - 20.0) / cell_w) as u16).max(20));
+        let resize = if size != t.size { size } else { (0, 0) };
+        let ask = t.asked.is_none_or(|a| now.duration_since(a) >= TERMINAL_EVERY);
+        if (!data.is_empty() || resize != (0, 0))
+            && let Some(c) = &mut self.client
+        {
+            c.terminal_send(session, &data, resize.0, resize.1);
+            t.size = size;
+            t.asked = None;
+        }
+        if ask && let Some(c) = &mut self.client {
+            c.terminal(session);
+            t.asked = Some(now);
+        }
+        let screen = t.screen.clone();
+        let mut close = false;
+        let m = egui::Modal::new(egui::Id::new("terminal"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(width);
+                ui.horizontal(|ui| {
+                    modal_title(ui, "Terminal");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        close = ui.add(Key::new("close").outline(FAULT)).clicked();
+                    });
+                });
+                hint(
+                    ui,
+                    "Runs in this chat's folder. The agent never sees what you type or paste here.",
+                );
+                ui.add_space(4.0);
+                egui::Frame::NONE.fill(CHASSIS).inner_margin(6).show(ui, |ui| {
+                    ui.set_min_height(height);
+                    match &screen {
+                        None => hint(ui, "starting"),
+                        Some(s) => {
+                            let text = s.rows.join("\n");
+                            let origin = ui.cursor().min;
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(text).font(font.clone()))
+                                    .wrap_mode(egui::TextWrapMode::Extend),
+                            );
+                            if s.cursor_shown && s.alive {
+                                let at = origin
+                                    + Vec2::new(
+                                        s.cursor_col as f32 * cell_w,
+                                        s.cursor_row as f32 * cell_h,
+                                    );
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(at, Vec2::new(cell_w, cell_h)),
+                                    0.0,
+                                    READOUT.gamma_multiply(0.6),
+                                );
+                            }
+                            if !s.alive {
+                                hint(ui, "the shell has exited");
+                            }
+                        }
+                    }
+                });
+            });
+        if close || m.backdrop_response.clicked() {
+            if let Some(c) = &mut self.client {
+                c.terminal_close(session);
+            }
+            self.terminal = None;
+        } else {
+            ctx.request_repaint_after(TERMINAL_EVERY);
         }
     }
 

@@ -287,6 +287,13 @@ impl App {
                 {
                     self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
                 }
+                if ui
+                    .add(Key::new("terminal").outline(VALUE))
+                    .on_hover_text("a shell in this chat's folder that the agent cannot see")
+                    .clicked()
+                {
+                    self.terminal = Some(TerminalView::new(s.id));
+                }
                 if s.agent == "native"
                     && ui
                         .add(Key::new("console").outline(VALUE))

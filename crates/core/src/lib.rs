@@ -308,6 +308,27 @@ impl Usage {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Screen {
+    pub rows: Vec<String>,
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    pub cursor_shown: bool,
+    pub height: u16,
+    pub width: u16,
+    pub alive: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TerminalInput {
+    #[serde(default)]
+    pub data: String,
+    #[serde(default)]
+    pub rows: u16,
+    #[serde(default)]
+    pub cols: u16,
+}
+
 pub const SECRET_SHOWN: &str = "(secret given)";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

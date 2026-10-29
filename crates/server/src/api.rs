@@ -95,6 +95,10 @@ pub fn router(api: Api) -> Router {
         .route("/api/sessions/{id}", get(session).delete(delete_session))
         .route("/api/sessions/{id}/messages", get(messages).post(send))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
+        .route(
+            "/api/sessions/{id}/terminal",
+            get(terminal_screen).post(terminal_input).delete(terminal_close),
+        )
         .route("/api/sessions/{id}/jobs", get(jobs))
         .route("/api/sessions/{id}/jobs/{handle}/kill", post(kill_job))
         .route("/api/sessions/{id}/answer", post(answer))
@@ -775,6 +779,47 @@ async fn interrupt(
     }))
 }
 
+async fn terminal_screen(
+    State(api): State<Api>,
+    Path(id): Path<SessionId>,
+) -> Reply<agentbench_core::Screen> {
+    let s = api.runner.store().session(id)?;
+    api.runner
+        .terminals
+        .open(id, std::path::Path::new(&s.cwd), None)
+        .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    api.runner
+        .terminals
+        .screen(id)
+        .map(Json)
+        .ok_or_else(|| Failure(StatusCode::NOT_FOUND, "no terminal".into()))
+}
+
+async fn terminal_input(
+    State(api): State<Api>,
+    Path(id): Path<SessionId>,
+    Json(input): Json<agentbench_core::TerminalInput>,
+) -> Result<StatusCode, Failure> {
+    api.runner.store().session(id)?;
+    let t = &api.runner.terminals;
+    if input.rows > 0 && input.cols > 0 {
+        t.resize(id, input.rows, input.cols).map_err(bad)?;
+    }
+    if !input.data.is_empty() {
+        t.write(id, input.data.as_bytes()).map_err(bad)?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn terminal_close(
+    State(api): State<Api>,
+    Path(id): Path<SessionId>,
+) -> Result<StatusCode, Failure> {
+    api.runner.store().session(id)?;
+    api.runner.terminals.close(id);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn jobs(
     State(api): State<Api>,
     Path(id): Path<SessionId>,
@@ -1394,6 +1439,41 @@ mod tests {
             call(&app, "DELETE", &format!("/api/worktrees/{wid}?force=true"), None, T).await.0,
             StatusCode::NO_CONTENT
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_chat_has_a_terminal_that_takes_input_and_shows_a_screen() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, sess) = call(
+            &f.app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "echo", "place": {"kind": "new", "branch": "tty"}, "prompt": "hi"})),
+            T,
+        )
+        .await;
+        let id = sid(&sess);
+        let uri = format!("/api/sessions/{id}/terminal");
+        let (s, screen) = call(&f.app, "GET", &uri, None, T).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(screen["alive"], true);
+        let (s, _) =
+            call(&f.app, "POST", &uri, Some(json!({"data": "echo $((20+22))ok\r"})), T).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+        let mut seen = false;
+        for _ in 0..60 {
+            let (_, screen) = call(&f.app, "GET", &uri, None, T).await;
+            if screen["rows"].to_string().contains("42ok") {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(seen);
+        let (s, _) = call(&f.app, "DELETE", &uri, None, T).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
     }
 
     #[cfg(unix)]
