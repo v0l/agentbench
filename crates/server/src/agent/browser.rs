@@ -434,6 +434,10 @@ async fn launch() -> Result<Live, String> {
     if let Some(url) = std::env::var("AGENTBENCH_BROWSER").ok().and_then(|v| endpoint(&v)) {
         return attach(&url).await;
     }
+    start_own().await
+}
+
+async fn start_own() -> Result<Live, String> {
     let chrome = screenshot::browser()
         .ok_or("browser needs Chrome, Chromium or Edge, and none was found on the path")?;
     let dir = std::env::temp_dir().join(format!("agentbench-browser-{}", uuid::Uuid::new_v4()));
@@ -713,9 +717,10 @@ pub fn action_name(args: &Value) -> Result<&'static str, String> {
         "press" | "key" => "press",
         "scroll" => "scroll",
         "eval" | "evaluate" | "js" => "eval",
+        "connect" => "connect",
         other => {
             return Err(format!(
-                "unknown action {other}: use goto, snapshot, click, type, select, press, scroll or eval"
+                "unknown action {other}: use goto, snapshot, click, type, select, press, scroll, eval or connect"
             ));
         }
     })
@@ -762,6 +767,18 @@ impl Browsers {
         if guard.as_ref().is_some_and(|l| l.cdp.closed.load(Ordering::SeqCst)) {
             *guard = None;
         }
+        if action == "connect" {
+            let setting = text_arg(args, &["address", "url"]).unwrap_or("");
+            let wanted = match setting.trim() {
+                "" | "own" | "default" => None,
+                other => Some(endpoint(other).ok_or("missing `address`")?),
+            };
+            *guard = None;
+            *guard = Some(tokio::select! {
+                l = async { match &wanted { Some(url) => attach(url).await, None => start_own().await } } => l?,
+                _ = stop.cancelled() => return Err("stopped".into()),
+            });
+        }
         if guard.is_none() {
             *guard = Some(tokio::select! {
                 l = launch() => l?,
@@ -797,6 +814,7 @@ async fn run(live: &Live, action: &str, url: Option<&str>, args: &Value) -> Resu
             live.select(reference(args)?, value).await?
         }
         "press" => live.press(text_arg(args, &["key"]).ok_or("missing `key`")?).await?,
+        "connect" => {}
         "scroll" => {
             let direction = text_arg(args, &["direction"]).unwrap_or("down");
             let amount = args.get("amount").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.1, 20.0);
@@ -961,6 +979,7 @@ mod tests {
     fn actions_have_aliases_and_unknown_ones_are_refused() {
         assert_eq!(action_name(&json!({"action": "Fill"})), Ok("type"));
         assert_eq!(action_name(&json!({"action": "navigate"})), Ok("goto"));
+        assert_eq!(action_name(&json!({"action": "connect"})), Ok("connect"));
         assert!(action_name(&json!({"action": "dance"})).unwrap_err().contains("goto, snapshot"));
         assert!(action_name(&json!({})).is_err());
     }
@@ -983,6 +1002,17 @@ mod tests {
         assert_eq!(address(&ws, "about:blank").unwrap(), "about:blank");
         assert!(address(&ws, "a.html").unwrap().starts_with("file://"));
         assert!(address(&ws, "ftp://x").is_err());
+    }
+
+    #[tokio::test]
+    async fn connecting_to_a_dead_address_says_so_and_keeps_the_tool_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = egui_bench::agent::workspace::Workspace::open(dir.path()).unwrap();
+        let stop = CancellationToken::new();
+        let browsers = Browsers::default();
+        let args = json!({"action": "connect", "address": "127.0.0.1:1"});
+        let err = browsers.act("s", &ws, &args, &stop).await.unwrap_err();
+        assert!(err.contains("127.0.0.1:1"), "{err}");
     }
 
     #[test]

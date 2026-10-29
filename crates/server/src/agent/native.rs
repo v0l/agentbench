@@ -602,6 +602,19 @@ fn browser_spec() -> Spec {
     )
 }
 
+fn browser_connect_spec() -> Spec {
+    Spec::new(
+        "browser_connect",
+        "Point the browser tool at the user's own running browser, with their logins and tabs, instead of a private one. \
+         Give its remote debugging address: a port, host:port or ws:// url (Chromium browsers write the port to DevToolsActivePort \
+         in their profile folder). It opens its own tab and leaves the user's tabs alone. An empty address goes back to a private browser.",
+        object(
+            json!({ "address": string("e.g. 9222, 127.0.0.1:35215 or ws://127.0.0.1:9222/devtools/browser") }),
+            &[],
+        ),
+    )
+}
+
 fn file_specs() -> Vec<Spec> {
     let mut specs: Vec<Spec> = tools::builtin()
         .into_iter()
@@ -759,6 +772,7 @@ pub fn specs() -> Vec<Spec> {
     all.push(bash_spec());
     all.extend(job_specs());
     all.push(browser_spec());
+    all.push(browser_connect_spec());
     all.push(screenshot_spec());
     all.extend(web_specs());
     all.extend(skill_specs());
@@ -1309,6 +1323,13 @@ impl Agent for Native {
                                 }),
                                 None => self.tool(name, &args, &workspace, turn.context, io).await,
                             }
+                        }
+                        "browser_connect" => {
+                            let mut args = args.clone();
+                            args["action"] = json!("connect");
+                            self.browsers
+                                .act(&turn.context.session.to_string(), &workspace, &args, io.stop())
+                                .await
                         }
                         "browser" => {
                             self.browsers
@@ -2868,6 +2889,7 @@ mod tests {
             "bash_kill",
             "screenshot",
             "browser",
+            "browser_connect",
             "todo_write",
             "start_session",
             "wait_for_session",
