@@ -2117,6 +2117,33 @@ mod tests {
     }
 
     #[test]
+    fn a_job_tab_can_be_clicked() {
+        let ctx = egui::Context::default();
+        let rect = std::cell::Cell::new(egui::Rect::NOTHING);
+        let clicked = std::cell::Cell::new(0);
+        let frame = |ctx: &egui::Context, events: Vec<egui::Event>| {
+            let input = egui::RawInput { events, ..Default::default() };
+            ctx.run_ui(input, |ui| {
+                let r = widgets::tab_chip(ui, "job-2 running", OK, false);
+                rect.set(r.rect);
+                clicked.set(clicked.get() + r.clicked() as u32);
+            });
+        };
+        frame(&ctx, vec![]);
+        let at = rect.get().center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&ctx, vec![egui::Event::PointerMoved(at)]);
+        frame(&ctx, vec![button(true)]);
+        frame(&ctx, vec![button(false)]);
+        assert_eq!(clicked.get(), 1);
+    }
+
+    #[test]
     fn terminal_keys_become_what_a_shell_expects() {
         use egui::{Event, Key, Modifiers};
         let key = |key, modifiers| Event::Key {

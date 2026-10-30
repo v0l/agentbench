@@ -185,6 +185,28 @@ pub(super) fn code_block(
 }
 
 /// One choice on its own row, with a tick box for several picks or a dot for one.
+pub(super) fn tab_chip(ui: &mut Ui, text: &str, tint: egui::Color32, on: bool) -> egui::Response {
+    let font = egui::FontId::proportional(11.5);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, tint);
+    let (rect, _) = ui.allocate_exact_size(galley.size() + Vec2::new(16.0, 8.0), Sense::hover());
+    let resp = ui.interact(rect, ui.id().with(("tab", text)), Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, text.to_string())
+    });
+    let fill = if on {
+        tint.gamma_multiply(0.18)
+    } else if resp.hovered() {
+        tint.gamma_multiply(0.08)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let edge = if on || resp.hovered() { tint } else { ETCH };
+    ui.painter().rect_filled(rect, 3.0, fill);
+    ui.painter().rect_stroke(rect, 3.0, Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, tint);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 pub(super) fn option_row(
     ui: &mut Ui,
     label: &str,

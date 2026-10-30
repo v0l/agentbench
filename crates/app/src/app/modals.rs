@@ -122,7 +122,7 @@ impl App {
                     });
                 });
                 ui.horizontal_wrapped(|ui| {
-                    if chip(ui, "shell", READOUT, selected.is_none()).clicked() {
+                    if tab_chip(ui, "shell", READOUT, selected.is_none()).clicked() {
                         selected = None;
                     }
                     for j in &jobs {
@@ -134,7 +134,7 @@ impl App {
                             FAULT
                         };
                         let on = selected.as_deref() == Some(j.handle.as_str());
-                        if chip(ui, &format!("{} {}", j.handle, job_state(j)), tint, on).clicked() {
+                        if tab_chip(ui, &format!("{} {}", j.handle, job_state(j)), tint, on).clicked() {
                             selected = Some(j.handle.clone());
                         }
                     }
