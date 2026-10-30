@@ -950,7 +950,7 @@ impl Io for Sink {
     }
 
     fn steer(&self) -> Option<Steer> {
-        if !self.steerable {
+        if !self.steerable || self.lock().capture {
             return None;
         }
         let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
@@ -1585,6 +1585,107 @@ mod tests {
         assert_eq!(done.agent_session, None, "the agent starts afresh from the summary");
         assert_eq!(done.usage.context, 0, "the new session holds nothing yet");
         assert_eq!((done.usage.model.as_str(), done.usage.host.as_str()), ("big", "gpu.lan"));
+    }
+
+    struct Eager(Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl Agent for Eager {
+        fn name(&self) -> &str {
+            "eager"
+        }
+        fn label(&self) -> &str {
+            "Eager"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn steerable(&self) -> bool {
+            true
+        }
+        fn compact_at(&self) -> u64 {
+            80
+        }
+        async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            let compacting = turn.prompt.starts_with("Summarise");
+            if compacting {
+                io.emit(Event::Text { delta: "A summary.".into() });
+                for _ in 0..30 {
+                    if let Some(steer) = io.steer() {
+                        self.0.lock().unwrap().push(format!("stolen: {}", steer.text));
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                return Ok(());
+            }
+            self.0.lock().unwrap().push(format!("turn: {}", turn.prompt));
+            io.emit(Event::Usage(Usage {
+                context: if turn.prompt == "hello" { 900 } else { 0 },
+                window: 1000,
+                ..Usage::default()
+            }));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_message_sent_during_compaction_waits_for_the_next_turn() {
+        let seen = Arc::new(Eager(Mutex::new(Vec::new())));
+        struct Shared(Arc<Eager>);
+        #[async_trait]
+        impl Agent for Shared {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn label(&self) -> &str {
+                self.0.label()
+            }
+            fn available(&self) -> bool {
+                true
+            }
+            fn about(&self) -> String {
+                "test".into()
+            }
+            fn resumable(&self) -> bool {
+                false
+            }
+            fn steerable(&self) -> bool {
+                true
+            }
+            fn compact_at(&self) -> u64 {
+                80
+            }
+            async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+                self.0.run(turn, io).await
+            }
+        }
+        let (runner, s) = setup(Box::new(Shared(seen.clone())));
+        runner.send(&s, "hello").unwrap();
+        for _ in 0..200 {
+            let started =
+                runner.store().messages(s.id, 0).unwrap().iter().any(
+                    |m| matches!(&m.entry, Entry::Notice { text } if text.contains("compacted")),
+                );
+            if started {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        runner.send(&s, "later").unwrap();
+        wait_idle(&runner, s.id).await;
+        let log = seen.0.lock().unwrap().clone();
+        assert!(!log.iter().any(|l| l.starts_with("stolen")), "{log:?}");
+        assert_eq!(log, ["turn: hello", "turn: later"]);
+        let msgs: Vec<Entry> =
+            runner.store().messages(s.id, 0).unwrap().into_iter().map(|m| m.entry).collect();
+        assert!(msgs.contains(&Entry::Summary { text: "A summary.".into() }), "{msgs:?}");
     }
 
     #[tokio::test]
