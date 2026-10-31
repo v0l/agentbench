@@ -446,7 +446,7 @@ impl App {
         }
         ui.allocate_rect(rect, Sense::hover());
         let at_bottom =
-            scroll.state.offset.y + scroll.inner_rect.height() >= scroll.content_size.y - 4.0;
+            scroll.state.offset().y + scroll.inner_rect.height() >= scroll.content_size.y - 4.0;
         self.follow = at_bottom;
         if !at_bottom {
             self.latest_key(ui, scroll.inner_rect);
@@ -495,7 +495,7 @@ impl App {
             self.jump = None;
             return true;
         }
-        let composer = egui::Id::new(("composer", self.drawing));
+        let composer = egui::Id::unique(("composer", self.drawing));
         let in_composer = ui.memory(|m| m.has_focus(composer));
         let typing = ui.ctx().text_edit_focused() && !(in_composer && self.draft.is_empty());
         self.focused

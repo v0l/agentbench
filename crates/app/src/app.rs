@@ -2127,7 +2127,9 @@ mod tests {
                 let r = widgets::tab_chip(ui, "job-2 running", OK, false);
                 rect.set(r.rect);
                 clicked.set(clicked.get() + r.clicked() as u32);
-            });
+            })
+            .textures_delta
+            .clear();
         };
         frame(&ctx, vec![]);
         let at = rect.get().center();

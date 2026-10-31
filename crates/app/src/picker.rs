@@ -29,7 +29,12 @@ pub struct ModelPicker<'a> {
 
 impl<'a> ModelPicker<'a> {
     pub fn new(id: impl std::hash::Hash + std::fmt::Debug, models: &'a [String]) -> Self {
-        ModelPicker { id: egui::Id::new(("model-picker", id)), models, empty: None, noun: "model" }
+        ModelPicker {
+            id: egui::Id::unique(("model-picker", id)),
+            models,
+            empty: None,
+            noun: "model",
+        }
     }
 
     /// What the list holds, for the labels: "model" by default.

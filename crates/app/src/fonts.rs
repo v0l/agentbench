@@ -201,7 +201,7 @@ mod tests {
         let mut h = 0.0;
         // The fonts are swapped in at the start of the first pass.
         for _ in 0..2 {
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            let mut out = ctx.run_ui(Default::default(), |ui| {
                 let g = ui.painter().layout_no_wrap(
                     "Hg".into(),
                     egui::FontId::proportional(BASE),
@@ -209,6 +209,7 @@ mod tests {
                 );
                 h = g.size().y;
             });
+            out.textures_delta.clear();
         }
         h
     }
@@ -225,7 +226,7 @@ mod tests {
         egui_bench::install(&ctx);
         apply(&ctx, &Typeface::default(), &Installed::load());
         for _ in 0..2 {
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            let mut out = ctx.run_ui(Default::default(), |ui| {
                 for f in [
                     egui_bench::theme::legend_font(12.0),
                     egui_bench::theme::figure(12.0),
@@ -235,6 +236,7 @@ mod tests {
                     let _ = ui.painter().layout_no_wrap("0".into(), f, egui::Color32::WHITE);
                 }
             });
+            out.textures_delta.clear();
         }
     }
 

@@ -45,7 +45,15 @@ pub fn prose_id(
     rows: usize,
     max_height: f32,
 ) -> Response {
-    field_of(ui, text, hint, false, rows, f32::INFINITY, Some(egui::Id::new(id)), max_height)
+    field_of(ui, text, hint, false, rows, f32::INFINITY, Some(egui::Id::unique(id)), max_height)
+}
+
+fn named(ui: &mut Ui, edit: egui::TextEdit<'_>, name: &str) -> Response {
+    let response = ui.add(edit);
+    if !name.is_empty() {
+        ui.ctx().accesskit_node_builder(response.id, |node| node.set_label(name));
+    }
+    clipboard_menu(response)
 }
 
 fn field_of(
@@ -59,6 +67,7 @@ fn field_of(
     max_height: f32,
 ) -> Response {
     let font = egui::FontId::proportional(SIZE);
+    let name = if hint.is_empty() && secret { "secret".to_string() } else { hint.to_string() };
     let hint = egui::RichText::new(hint).font(font.clone()).color(LEGEND.gamma_multiply(0.6));
     egui::Frame::NONE
         .fill(WELL)
@@ -86,10 +95,10 @@ fn field_of(
                 egui::ScrollArea::vertical()
                     .max_height(max_height)
                     .auto_shrink([false, true])
-                    .show(ui, |ui| clipboard_menu(ui.add(edit)))
+                    .show(ui, |ui| named(ui, edit, &name))
                     .inner
             } else {
-                clipboard_menu(ui.add(edit))
+                named(ui, edit, &name)
             }
         })
         .inner

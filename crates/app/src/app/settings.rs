@@ -92,7 +92,7 @@ impl App {
         let installed = self.installed.clone();
         let scanning = self.font_scan.is_some();
         let main_list = self.agent_models.get("native").cloned();
-        let m = egui::Modal::new(egui::Id::new("settings"))
+        let m = egui::Modal::new(egui::Id::unique("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(modal_width(ctx, 540.0));

@@ -53,7 +53,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
             features: --no-default-features --features agentbench/local-speech
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             archive: tar.gz
             # The Apple GPU through Metal, which every Apple Silicon Mac has.

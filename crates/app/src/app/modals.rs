@@ -46,7 +46,7 @@ impl App {
         }
         let mut close = false;
         let view = self.scan_view.clone();
-        let m = egui::Modal::new(egui::Id::new("scan"))
+        let m = egui::Modal::new(egui::Id::unique("scan"))
             .backdrop_color(egui::Color32::from_black_alpha(200))
             .show(ctx, |ui| {
                 ui.set_width(modal_width(ctx, 420.0));
@@ -111,7 +111,7 @@ impl App {
         let mut selected = t.job.clone();
         let mut close = false;
         let mut kill = None;
-        let m = egui::Modal::new(egui::Id::new("terminal"))
+        let m = egui::Modal::new(egui::Id::unique("terminal"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(width);
@@ -234,7 +234,7 @@ impl App {
             return;
         };
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(egui::Id::new("add-project")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
+        let m = egui::Modal::new(egui::Id::unique("add-project")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
             ui.set_width(modal_width(ctx, 500.0));
             modal_title(ui, "Add a project");
             section(ui, "repository", "a folder on the server", |ui| {
@@ -286,7 +286,7 @@ impl App {
             .map(|p| p.name.clone())
             .unwrap_or_default();
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(egui::Id::new("file-issue"))
+        let m = egui::Modal::new(egui::Id::unique("file-issue"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(modal_width(ctx, 520.0));
@@ -356,7 +356,7 @@ impl App {
             .map(|p| p.name.clone())
             .unwrap_or_default();
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(egui::Id::new("start")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
+        let m = egui::Modal::new(egui::Id::unique("start")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
             ui.set_width(modal_width(ctx, 520.0));
             modal_title(ui, &match &issue {
                 Some(i) => format!("Start an agent on #{}", i.id),
@@ -464,7 +464,7 @@ impl App {
             return;
         };
         let (mut go, mut close) = (false, false);
-        let m = egui::Modal::new(egui::Id::new("worktree")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
+        let m = egui::Modal::new(egui::Id::unique("worktree")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
             ui.set_width(modal_width(ctx, 460.0));
             modal_title(ui, "New worktree");
             section(ui, "branch", "checked out beside the repo", |ui| {
@@ -527,7 +527,7 @@ impl App {
         };
         let mut done = false;
         let mut gone = None;
-        let m = egui::Modal::new(egui::Id::new("confirm"))
+        let m = egui::Modal::new(egui::Id::unique("confirm"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
                 ui.set_width(modal_width(ctx, 400.0));

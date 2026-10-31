@@ -56,7 +56,7 @@ impl App {
         let top = 0.0;
         let before = (self.project, self.session, self.tab);
         let width = (screen.width() * 0.86).min(420.0);
-        let id = egui::Id::new("drawer");
+        let id = egui::Id::unique("drawer");
         let m = egui::Modal::new(id)
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .area(egui::Modal::default_area(id).anchor(egui::Align2::LEFT_TOP, Vec2::new(0.0, top)))

@@ -307,7 +307,7 @@ impl App {
             (Some(_), true) => (FAULT, "failed"),
             (Some(_), false) => (LEGEND, ""),
         };
-        let open_id = egui::Id::new(("tool-open", id));
+        let open_id = egui::Id::unique(("tool-open", id));
         let mut open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(error);
         let body = tool_body(name, input);
         // A shell command is the riskiest thing an agent does, so it is always shown whole and
@@ -509,7 +509,7 @@ pub(super) fn plan_panel(
     open_by_default: bool,
 ) {
     let done = plan.iter().filter(|(c, _)| *c == Check::Done).count();
-    let open_id = egui::Id::new(("plan-open", session));
+    let open_id = egui::Id::unique(("plan-open", session));
     let mut open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(open_by_default);
     let doing = plan.iter().find(|(c, _)| *c == Check::Doing).map(|(_, t)| t.as_str());
     rail_block(ui, ETCH, egui::Color32::TRANSPARENT, |ui| {

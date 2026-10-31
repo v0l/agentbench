@@ -722,11 +722,11 @@ fn clicking_a_session_in_the_tree_opens_it() {
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.run_steps(3);
-    click(&mut h, 100.0, 237.0);
+    click(&mut h, 100.0, 247.0);
     h.run_steps(3);
     let hello = rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     assert_eq!(h.state().open(), Some(hello.id), "the first session opens");
-    click(&mut h, 120.0, 303.0);
+    click(&mut h, 120.0, 319.0);
     h.run_steps(3);
     let fix = rig
         .store
@@ -817,6 +817,7 @@ fn a_busy_transcript_reads_cleanly() {
     shot(&mut h, "transcript");
     h.event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
+        source: egui::MouseWheelSource::Unknown,
         delta: egui::vec2(0.0, 2000.0),
         modifiers: egui::Modifiers::NONE,
         phase: egui::TouchPhase::Move,
@@ -944,6 +945,7 @@ fn scrolled_to_the_top(
     h.event(egui::Event::PointerMoved(at));
     h.event(egui::Event::MouseWheel {
         unit: egui::MouseWheelUnit::Point,
+        source: egui::MouseWheelSource::Unknown,
         delta: egui::vec2(0.0, 100_000.0),
         modifiers: egui::Modifiers::NONE,
         phase: egui::TouchPhase::Move,
@@ -1459,12 +1461,24 @@ fn png(w: u32, h: u32) -> Vec<u8> {
     out.into_inner()
 }
 
+#[derive(Debug)]
+struct Dropped {
+    path: std::path::PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Ok(self.bytes.clone())
+    }
+}
+
 fn drop_file(h: &mut Harness<'_, App>, name: &str, bytes: Vec<u8>) {
-    h.input_mut().dropped_files.push(egui::DroppedFile {
-        name: name.into(),
-        bytes: Some(bytes.into()),
-        ..Default::default()
-    });
+    h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped { path: name.into(), bytes }));
     h.step();
 }
 
@@ -1815,19 +1829,19 @@ fn clicking_a_chat_in_the_list_replaces_the_focused_tile() {
     let all = rig.store.sessions().unwrap();
     let hello = all.iter().find(|s| s.title == "say hello").unwrap().id;
     let fix = all.iter().find(|s| s.title == "#3 Fix the login loop").unwrap().id;
-    click(&mut h, 100.0, 237.0);
+    click(&mut h, 100.0, 247.0);
     h.run_steps(3);
     assert_eq!(h.state().tile_chat(0), Some(hello));
     // Focus the empty second tile, then click another chat: it fills that tile.
     h.state_mut().focus_tile(1);
     h.run_steps(2);
-    click(&mut h, 120.0, 303.0);
+    click(&mut h, 120.0, 319.0);
     h.run_steps(3);
     assert_eq!(h.state().tile_chat(0), Some(hello));
     assert_eq!(h.state().tile_chat(1), Some(fix));
     // With the first tile focused, the same click replaces it.
     h.state_mut().focus_tile(0);
-    click(&mut h, 120.0, 303.0);
+    click(&mut h, 120.0, 319.0);
     h.run_steps(3);
     assert_eq!(h.state().focused_tile(), 1, "it was already on screen, so it only took focus");
     shot(&mut h, "columns");
@@ -2059,6 +2073,7 @@ fn time_frames(size: [f32; 2], turns: usize) {
         h.event(egui::Event::PointerMoved(egui::pos2(size[0] * 0.6, size[1] * 0.4)));
         h.event(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
+            source: egui::MouseWheelSource::Unknown,
             delta: egui::vec2(0.0, if (y as u32 / 900) % 2 == 0 { 90.0 } else { -90.0 }),
             modifiers: egui::Modifiers::NONE,
             phase: egui::TouchPhase::Move,
@@ -2098,6 +2113,7 @@ fn a_long_transcript_draws_what_is_scrolled_to() {
         h.event(egui::Event::PointerMoved(egui::pos2(800.0, 300.0)));
         h.event(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Point,
+            source: egui::MouseWheelSource::Unknown,
             delta: egui::vec2(0.0, dy),
             modifiers: egui::Modifiers::NONE,
             phase: egui::TouchPhase::Move,

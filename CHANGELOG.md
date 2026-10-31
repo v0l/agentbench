@@ -6,6 +6,11 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-31
+
+### Changed
+- egui and eframe 0.37, which keeps the window running on Wayland when its workspace is hidden.
+
 ## [0.6.0] - 2026-10-29
 
 ### Added

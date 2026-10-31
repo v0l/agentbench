@@ -67,29 +67,29 @@ impl App {
         }
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for f in dropped {
-            let name = f
-                .path
-                .as_ref()
-                .and_then(|p| p.file_name())
+            let path = f.path().to_path_buf();
+            let name = path
+                .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| f.name.clone());
+                .unwrap_or_else(|| path.display().to_string());
             let tx = self.tray.sender();
-            match (f.bytes, f.path) {
-                (Some(bytes), _) => {
-                    crate::attach::arrive(tx, ctx.clone(), name, bytes.to_vec());
+            let ctx = ctx.clone();
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::spawn_blocking(move || match f.bytes() {
+                Ok(data) => crate::attach::arrive(tx, ctx, name, data),
+                Err(e) => {
+                    let _ = tx.send(crate::attach::Arrived::Failed(format!("{name}: {e}")));
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                (None, Some(path)) => {
-                    let ctx = ctx.clone();
-                    crate::spawn_blocking(move || match std::fs::read(&path) {
-                        Ok(data) => crate::attach::arrive(tx, ctx, name, data),
-                        Err(e) => {
-                            let _ = tx.send(crate::attach::Arrived::Failed(format!("{name}: {e}")));
-                        }
-                    });
+            });
+            #[cfg(target_arch = "wasm32")]
+            wasm_bindgen_futures::spawn_local(async move {
+                match f.bytes_async().await {
+                    Ok(data) => crate::attach::arrive(tx, ctx, name, data),
+                    Err(e) => {
+                        let _ = tx.send(crate::attach::Arrived::Failed(format!("{name}: {e}")));
+                    }
                 }
-                _ => {}
-            }
+            });
         }
     }
 
@@ -154,7 +154,7 @@ impl App {
     }
 
     fn recall_sent(&mut self, ui: &Ui, session: SessionId) {
-        let id = egui::Id::new(("composer", self.drawing));
+        let id = egui::Id::unique(("composer", self.drawing));
         if !ui.memory(|m| m.has_focus(id)) {
             return;
         }
