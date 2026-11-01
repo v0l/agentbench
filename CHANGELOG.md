@@ -6,6 +6,17 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-01
+
+### Added
+- The Issues tab is a board with a column per state, session data on each card (agent, status, model, turns, cost, context), search, label filter and sort, and drag between columns.
+- An issue pane with the description, comments, live transcript and composer, and an "issues first" setting that opens on the board and shows chats inside their issue.
+- Auto-run: with `autorun` on (`PUT /api/settings/autorun`), moving an issue to todo starts an agent on it and moving it to review sends a desktop notice.
+- Orchestration guidance in the agent brief for parents that start worker sessions and workers that report back.
+
+### Fixed
+- Attaching files on Android: the attach key opens the system file picker.
+
 ## [0.6.1] - 2026-10-31
 
 ### Changed

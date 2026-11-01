@@ -746,7 +746,7 @@ fn the_buttons_on_an_issue_card_work() {
     click(&mut h, 283.0, 20.0);
     h.run_steps(3);
     shot(&mut h, "issues-tab");
-    click(&mut h, 1107.0, 170.0);
+    click(&mut h, 614.0, 251.0);
     h.run_steps(3);
     shot(&mut h, "more");
     assert!(h.state().issue_open().is_some(), "more opens the issue");
@@ -2137,4 +2137,39 @@ fn a_long_transcript_draws_what_is_scrolled_to() {
     click(&mut h, 1220.0, 784.0);
     until(&mut h, "the reply", |h| h.state().transcript_len(s.id) >= 202);
     assert!(h.query_by_label_contains("echo: the very last word").is_some(), "follows the bottom");
+}
+
+#[test]
+fn moving_an_issue_to_a_column_changes_its_state_on_the_server() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let id = h.state().overview().unwrap().issues[0].id;
+    h.state_mut().move_issue(id, agentbench_core::IssueState::Review);
+    until(&mut h, "the move", |h| {
+        h.state().overview().unwrap().issues[0].state == agentbench_core::IssueState::Review
+    });
+    assert_eq!(rig.store.issue(id).unwrap().state, agentbench_core::IssueState::Review);
+}
+
+#[test]
+fn with_issues_first_a_chat_opens_inside_its_issue() {
+    let rig = rig();
+    let issue = rig.store.issues().unwrap()[0].id;
+    let side = rig
+        .store
+        .worktrees(None)
+        .unwrap()
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some("fix-login"))
+        .unwrap();
+    let linked = rig.store.add_session(side.id, "echo", "work on readme", None, Some(issue)).unwrap();
+    rig.store.add_message(linked.id, &Entry::user("write it")).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_issues_first(true);
+    h.state_mut().open_session(linked.id, linked.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(linked.id) == 1);
+    shot(&mut h, "issue-pane");
+    assert_eq!(h.state().issue_pane_open(), Some(issue));
 }

@@ -607,7 +607,7 @@ impl Api for StoreApi {
 
 /// Tell whoever sits at the machine, if there is a way to. A headless server has none, and then
 /// the notice in the chat is all there is.
-fn desktop_notice(title: &str, message: &str) {
+pub(crate) fn desktop_notice(title: &str, message: &str) {
     #[cfg(not(test))]
     {
         use std::process::{Command, Stdio};

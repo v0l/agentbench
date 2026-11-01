@@ -222,11 +222,37 @@ pub fn pick(tx: Sender<Arrived>, ctx: egui::Context) {
     });
 }
 
-#[cfg(any(target_arch = "wasm32", target_os = "android"))]
+#[cfg(target_os = "android")]
+pub fn pick(tx: Sender<Arrived>, ctx: egui::Context) {
+    use crate::voice::android::{open_file_picker, picker_busy, take_picked};
+    if let Err(e) = open_file_picker() {
+        let _ = tx.send(Arrived::Failed(format!("could not open the file picker: {e}")));
+        ctx.request_repaint();
+        return;
+    }
+    crate::spawn_blocking(move || {
+        let give_up = web_time::Instant::now() + web_time::Duration::from_secs(600);
+        loop {
+            match take_picked() {
+                Some(f) => match f.data {
+                    Some(data) => arrive(tx.clone(), ctx.clone(), f.name, data),
+                    None => {
+                        let _ = tx.send(Arrived::Failed(format!("could not read {}", f.name)));
+                        ctx.request_repaint();
+                    }
+                },
+                None if !picker_busy() || web_time::Instant::now() > give_up => break,
+                None => std::thread::sleep(std::time::Duration::from_millis(150)),
+            }
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn pick(_tx: Sender<Arrived>, _ctx: egui::Context) {}
 
 pub fn can_pick() -> bool {
-    cfg!(not(any(target_arch = "wasm32", target_os = "android")))
+    cfg!(not(target_arch = "wasm32"))
 }
 
 pub fn size(bytes: u64) -> String {

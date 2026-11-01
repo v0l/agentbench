@@ -79,6 +79,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/settings/model", get(get_model).put(put_model))
         .route("/api/settings/models", post(list_models))
         .route("/api/settings/cross-project", get(get_cross).delete(clear_cross))
+        .route("/api/settings/autorun", get(get_autorun).put(put_autorun))
         .route("/api/settings/title", get(get_title).put(put_title))
         .route("/api/settings/title/models", post(list_title_models))
         .route("/api/agents/{name}/models", get(agent_models))
@@ -617,9 +618,87 @@ async fn update_issue(
     Path(id): Path<Id>,
     Json(patch): Json<IssuePatch>,
 ) -> Reply<agentbench_core::Issue> {
-    let issue = api.runner.store().update_issue(id, &patch)?;
+    let before = api.runner.store().issue(id)?;
+    let mut issue = api.runner.store().update_issue(id, &patch)?;
+    if issue.state != before.state {
+        issue = moved(&api, issue).await?;
+    }
     changed(&api);
     Ok(Json(issue))
+}
+
+const AUTORUN_AGENT: &str = "native";
+
+async fn get_autorun(State(api): State<Api>) -> Reply<serde_json::Value> {
+    let store = api.runner.store();
+    let enabled = store.setting("autorun")?.as_deref() == Some("1");
+    let agent = store.setting("autorun_agent")?.unwrap_or_else(|| AUTORUN_AGENT.into());
+    Ok(Json(json!({ "enabled": enabled, "agent": agent })))
+}
+
+async fn put_autorun(
+    State(api): State<Api>,
+    Json(body): Json<serde_json::Value>,
+) -> Reply<serde_json::Value> {
+    let store = api.runner.store();
+    let enabled = body["enabled"].as_bool().unwrap_or(false);
+    store.set_setting("autorun", if enabled { "1" } else { "0" })?;
+    if let Some(agent) = body["agent"].as_str().filter(|a| !a.trim().is_empty()) {
+        store.set_setting("autorun_agent", agent.trim())?;
+    }
+    get_autorun(State(api)).await
+}
+
+async fn moved(
+    api: &Api,
+    issue: agentbench_core::Issue,
+) -> Result<agentbench_core::Issue, Failure> {
+    let store = api.runner.store();
+    if store.setting("autorun")?.as_deref() != Some("1") {
+        return Ok(issue);
+    }
+    match issue.state {
+        IssueState::Review => {
+            crate::tools::desktop_notice(
+                "ready for review",
+                &format!("#{} {}", issue.id, issue.title),
+            );
+            Ok(issue)
+        }
+        IssueState::Todo => {
+            let running = store.sessions()?.into_iter().any(|s| {
+                s.issue_id == Some(issue.id) && s.status != agentbench_core::SessionStatus::Stopped
+            });
+            if running {
+                return Ok(issue);
+            }
+            let agent = store.setting("autorun_agent")?.unwrap_or_else(|| AUTORUN_AGENT.into());
+            let new = NewSession {
+                project_id: issue.project_id,
+                agent,
+                place: agentbench_core::Place::New { branch: String::new() },
+                issue_id: Some(issue.id),
+                ..Default::default()
+            };
+            match spawn(api, new).await {
+                Ok(_) => Ok(store.update_issue(
+                    issue.id,
+                    &IssuePatch { state: Some(IssueState::Doing), ..Default::default() },
+                )?),
+                Err(e) => {
+                    store.add_comment(
+                        issue.id,
+                        &agentbench_core::NewComment {
+                            author: Some("agentbench".into()),
+                            body: format!("auto-run could not start an agent: {}", e.1),
+                        },
+                    )?;
+                    Ok(issue)
+                }
+            }
+        }
+        _ => Ok(issue),
+    }
 }
 
 async fn delete_issue(State(api): State<Api>, Path(id): Path<Id>) -> Result<StatusCode, Failure> {
@@ -1333,6 +1412,43 @@ mod tests {
             call(&f.app, "GET", &format!("/api/issues/{id}/comments"), None, T).await;
         assert_eq!(comments[0]["body"], "looks good");
         assert_eq!(call(&f.app, "GET", "/api/issues/999", None, T).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn moving_an_issue_to_todo_starts_an_agent_when_autorun_is_on() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, issue) = call(
+            &f.app,
+            "POST",
+            "/api/issues",
+            Some(json!({"project_id": pid, "title": "Say hi", "state": "backlog"})),
+            T,
+        )
+        .await;
+        let id = issue["id"].as_i64().unwrap();
+        let todo = || Some(json!({"state": "todo"}));
+        let url = format!("/api/issues/{id}");
+
+        let (_, got) = call(&f.app, "PATCH", &url, todo(), T).await;
+        assert_eq!(got["state"], "todo", "off by default: nothing starts");
+        assert!(f.api.runner.store().sessions().unwrap().is_empty());
+
+        call(
+            &f.app,
+            "PUT",
+            "/api/settings/autorun",
+            Some(json!({"enabled": true, "agent": "echo"})),
+            T,
+        )
+        .await;
+        call(&f.app, "PATCH", &url, Some(json!({"state": "backlog"})), T).await;
+        let (s, got) = call(&f.app, "PATCH", &url, todo(), T).await;
+        assert_eq!(s, StatusCode::OK, "{got}");
+        assert_eq!(got["state"], "doing");
+        let sessions = f.api.runner.store().sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].issue_id, Some(id));
     }
 
     #[tokio::test]

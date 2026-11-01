@@ -100,6 +100,9 @@ impl App {
         let issues_label = format!("issues {open}");
         let opts: Vec<(Tab, &str)> =
             vec![(Tab::Chat, "agents"), (Tab::Issues, issues_label.as_str())];
+        if self.issues_first && self.tab == Tab::Issues {
+            return;
+        }
         tabs(ui, &mut self.tab, &opts);
     }
 

@@ -155,6 +155,60 @@ impl Fresh {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum Sort {
+    Priority,
+    Updated,
+    Newest,
+}
+
+impl Sort {
+    const ALL: [Sort; 3] = [Sort::Priority, Sort::Updated, Sort::Newest];
+
+    fn label(self) -> &'static str {
+        match self {
+            Sort::Priority => "priority",
+            Sort::Updated => "recently updated",
+            Sort::Newest => "newest",
+        }
+    }
+}
+
+pub fn issue_matches(issue: &Issue, sessions: &[Session], query: &str, label: &str) -> bool {
+    if !label.is_empty() && !issue.labels.iter().any(|l| l == label) {
+        return false;
+    }
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    let hay = format!(
+        "#{} {} {} {} {}",
+        issue.id,
+        issue.title,
+        issue.body,
+        issue.labels.join(" "),
+        sessions
+            .iter()
+            .filter(|s| s.issue_id == Some(issue.id))
+            .map(|s| s.agent.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+    .to_lowercase();
+    query.split_whitespace().all(|word| hay.contains(word))
+}
+
+fn sort_issues(issues: &mut [&Issue], by: Sort) {
+    match by {
+        Sort::Priority => {
+            issues.sort_by(|a, b| b.priority.cmp(&a.priority).then(b.updated_at.cmp(&a.updated_at)))
+        }
+        Sort::Updated => issues.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+        Sort::Newest => issues.sort_by(|a, b| b.id.cmp(&a.id)),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Filter {
     Open,
     All,
@@ -239,6 +293,7 @@ struct Settings {
     thinking: bool,
     /// Whether a phone tells you in the background when a chat needs you or finishes.
     alerts: bool,
+    issues_first: bool,
     /// Set by the scan key, for the window to open the camera.
     scan: bool,
     /// The token of the server this window is connected to, which the code carries.
@@ -462,6 +517,9 @@ pub struct App {
     fresh: Option<Fresh>,
     drafts: HashMap<String, Vec<Slot>>,
     filter: Filter,
+    query: String,
+    label: String,
+    sort: Sort,
     project: Option<Id>,
     session: Option<SessionId>,
     grid: Grid,
@@ -520,6 +578,8 @@ pub struct App {
     fonts_loaded: u32,
     /// Whether a phone tells you in the background when a chat needs you or finishes.
     alerts: bool,
+    issues_first: bool,
+    detail: Option<Id>,
     /// Put the cursor back in this tile's composer: set when speech lands in its draft.
     refocus: Option<Tile>,
     /// How tall each tile's composer was when last drawn, so the transcript leaves it room.
@@ -571,10 +631,17 @@ impl App {
             watching: false,
             offline: None,
             notice: None,
-            tab: Tab::Chat,
+            tab: if storage.and_then(|s| s.get_string("issues_first")).as_deref() == Some("true") {
+                Tab::Issues
+            } else {
+                Tab::Chat
+            },
             fresh: None,
             drafts: HashMap::new(),
             filter: Filter::Open,
+            query: String::new(),
+            label: String::new(),
+            sort: Sort::Priority,
             project: None,
             session: None,
             grid: storage
@@ -639,6 +706,9 @@ impl App {
             fonts_loaded: 0,
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
             alerts: storage.and_then(|s| s.get_string("alerts")).as_deref() != Some("false"),
+            issues_first: storage.and_then(|s| s.get_string("issues_first")).as_deref()
+                == Some("true"),
+            detail: None,
         };
         if !app.remote {
             app.start_local(ctx);
@@ -659,6 +729,7 @@ impl App {
         storage.set_string("external", self.external.clone());
         storage.set_string("thinking", self.thinking.to_string());
         storage.set_string("alerts", self.alerts.to_string());
+        storage.set_string("issues_first", self.issues_first.to_string());
         self.speech.save(storage);
         storage.set_string("grid", self.grid.key().to_string());
         let tiles: Vec<String> =
@@ -1193,6 +1264,9 @@ impl App {
         for sid in self.shown() {
             self.fetch_messages(sid);
         }
+        if let Some(sid) = self.detail_session() {
+            self.fetch_messages(sid);
+        }
     }
 
     /// The chat in tile `at`, if it has one.
@@ -1593,7 +1667,14 @@ impl App {
     pub fn open_session(&mut self, sid: SessionId, project: Id) {
         self.session = Some(sid);
         self.project = Some(project);
-        self.tab = Tab::Chat;
+        let issue = self.session_by_id(sid).and_then(|s| s.issue_id);
+        match issue {
+            Some(id) if self.issues_first => {
+                self.tab = Tab::Issues;
+                self.detail = Some(id);
+            }
+            _ => self.tab = Tab::Chat,
+        }
         self.fresh = None;
         self.panes.entry(sid).or_default().follow = true;
         // The chat replaces the one in the focused tile. One already on screen is only focused.
@@ -1603,7 +1684,34 @@ impl App {
         self.fetch_messages(sid);
     }
 
+    pub fn set_issues_first(&mut self, on: bool) {
+        self.issues_first = on;
+        self.tab = if on { Tab::Issues } else { Tab::Chat };
+    }
+
+    pub fn issue_pane_open(&self) -> Option<Id> {
+        self.detail.filter(|_| self.tab == Tab::Issues)
+    }
+
+    fn detail_session(&self) -> Option<SessionId> {
+        let id = self.detail?;
+        self.overview
+            .as_ref()?
+            .sessions
+            .iter()
+            .filter(|s| s.issue_id == Some(id))
+            .max_by_key(|s| s.created_at)
+            .map(|s| s.id)
+    }
+
     fn issues(&mut self, ui: &mut Ui) {
+        if let Some(id) = self.detail {
+            let found = self.overview.as_ref().and_then(|o| o.issues.iter().find(|i| i.id == id));
+            match found.cloned() {
+                Some(issue) => return self.issue_pane(ui, issue),
+                None => self.detail = None,
+            }
+        }
         let Some(o) = &self.overview else {
             return;
         };
@@ -1619,9 +1727,31 @@ impl App {
             &[(Filter::Open, "open", Some(open)), (Filter::All, "all", Some(all.len()))],
         );
         ui.add_space(8.0);
-        let shown: Vec<&Issue> =
-            all.iter().filter(|i| self.filter == Filter::All || i.state.is_open()).collect();
-        if shown.is_empty() {
+        let mut labels: Vec<String> = all.iter().flat_map(|i| i.labels.clone()).collect();
+        labels.sort();
+        labels.dedup();
+        ui.horizontal(|ui| {
+            ui.allocate_ui(Vec2::new(150.0, KEY_H), |ui| {
+                choice(ui, "sort", &mut self.sort, Sort::ALL.map(|s| (s, s.label().to_string())));
+            });
+            if !labels.is_empty() {
+                ui.allocate_ui(Vec2::new(130.0, KEY_H), |ui| {
+                    let options = std::iter::once((String::new(), "all labels".to_string()))
+                        .chain(labels.iter().map(|l| (l.clone(), l.clone())));
+                    choice(ui, "label", &mut self.label, options);
+                });
+            }
+            field(ui, &mut self.query, "search title, text, label or agent");
+        });
+        ui.add_space(8.0);
+        let sessions_now = o.sessions.clone();
+        let mut shown: Vec<&Issue> = all
+            .iter()
+            .filter(|i| self.filter == Filter::All || i.state.is_open())
+            .filter(|i| issue_matches(i, &sessions_now, &self.query, &self.label))
+            .collect();
+        sort_issues(&mut shown, self.sort);
+        if all.is_empty() {
             section(ui, "nothing to do", "", |ui| {
                 note(
                     ui,
@@ -1632,20 +1762,115 @@ impl App {
             return;
         }
         let sessions = o.sessions.clone();
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for state in IssueState::ALL {
-                let group: Vec<&&Issue> = shown.iter().filter(|i| i.state == state).collect();
-                if group.is_empty() {
-                    continue;
+        let states: Vec<IssueState> = IssueState::ALL
+            .into_iter()
+            .filter(|s| self.filter == Filter::All || s.is_open())
+            .collect();
+        let gap = 10.0;
+        let height = ui.available_height();
+        let width = ((ui.available_width() - gap * (states.len() - 1) as f32)
+            / states.len() as f32)
+            .max(230.0);
+        egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for state in &states {
+                    let group: Vec<&&Issue> = shown.iter().filter(|i| i.state == *state).collect();
+                    let column = ui.allocate_ui_with_layout(
+                        Vec2::new(width, height),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_width(width);
+                            self.board_column(ui, *state, &group, &sessions);
+                        },
+                    );
+                    self.drop_on_column(ui, column.response.rect, *state);
                 }
-                heading(ui, &format!("{} {}", state.as_str(), group.len()));
+            });
+        });
+    }
+
+    fn drop_on_column(&mut self, ui: &mut Ui, rect: egui::Rect, state: IssueState) {
+        let Some(id) = egui::DragAndDrop::payload::<Id>(ui.ctx()) else {
+            return;
+        };
+        if !ui.rect_contains_pointer(rect) {
+            return;
+        }
+        ui.painter().rect_stroke(rect, 2.0, Stroke::new(1.0, READOUT), egui::StrokeKind::Inside);
+        if ui.input(|i| i.pointer.any_released()) {
+            egui::DragAndDrop::clear_payload(ui.ctx());
+            self.move_issue(*id, state);
+        }
+    }
+
+    pub fn move_issue(&mut self, id: Id, state: IssueState) {
+        let current = self
+            .overview
+            .as_ref()
+            .and_then(|o| o.issues.iter().find(|i| i.id == id))
+            .map(|i| i.state);
+        if current.is_some_and(|c| c != state)
+            && let Some(c) = &mut self.client
+        {
+            c.update_issue(id, &IssuePatch { state: Some(state), ..Default::default() });
+        }
+    }
+
+    fn board_column(
+        &mut self,
+        ui: &mut Ui,
+        state: IssueState,
+        group: &[&&Issue],
+        sessions: &[Session],
+    ) {
+        let working = group
+            .iter()
+            .flat_map(|i| sessions.iter().filter(|s| s.issue_id == Some(i.id)))
+            .filter(|s| s.status.busy())
+            .count();
+        heading(ui, &format!("{} {}", state.as_str(), group.len()));
+        if working > 0 {
+            hint(ui, &format!("{working} agent{} working", if working == 1 { "" } else { "s" }));
+        }
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt(("column", state.as_str()))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 for issue in group {
-                    self.issue_card(ui, issue, &sessions);
+                    self.issue_card(ui, issue, sessions);
                     ui.add_space(6.0);
                 }
-                ui.add_space(6.0);
-            }
-        });
+            });
+    }
+
+    fn session_data(ui: &mut Ui, s: &Session) {
+        let (tint, word) = status_look(s.status);
+        let model = if s.usage.model.is_empty() {
+            s.model.clone().unwrap_or_default()
+        } else {
+            s.usage.model.clone()
+        };
+        let mut line = Line::new().value(&s.agent).gap(6.0).value(word).tint(tint).size(10.5);
+        if !model.is_empty() {
+            line = line.gap(6.0).note(model).size(10.5);
+        }
+        line.elided(ui);
+        let mut line = Line::new()
+            .measured(format!("{} turns", s.usage.turns))
+            .size(10.5)
+            .gap(8.0)
+            .measured(format!("${:.2}", s.usage.cost_usd))
+            .size(10.5);
+        if s.usage.window > 0 {
+            line = line
+                .gap(8.0)
+                .measured(format!("ctx {}%", s.usage.context * 100 / s.usage.window))
+                .size(10.5);
+        }
+        line.gap(8.0).note(ago(s.updated_at)).size(10.5).elided(ui);
     }
 
     fn issue_card(&mut self, ui: &mut Ui, issue: &Issue, sessions: &[Session]) {
@@ -1663,6 +1888,15 @@ impl App {
             ui,
             rail,
             |ui| {
+                let grip = ui
+                    .add(
+                        egui::Label::new(egui::RichText::new("::").font(mono(12.0)).color(LEGEND))
+                            .sense(Sense::drag()),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::Grab);
+                if grip.drag_started() {
+                    egui::DragAndDrop::set_payload(ui.ctx(), issue.id);
+                }
                 Line::new()
                     .value(format!("#{}", issue.id))
                     .tint(LEGEND)
@@ -1673,9 +1907,12 @@ impl App {
                     .elided(ui);
             },
             |ui| {
-                ui.horizontal(|ui| {
+                for s in &mine {
+                    Self::session_data(ui, s);
+                }
+                ui.horizontal_wrapped(|ui| {
                     let mut state = issue.state;
-                    ui.allocate_ui(Vec2::new(120.0, KEY_H), |ui| {
+                    ui.allocate_ui(Vec2::new(100.0, KEY_H), |ui| {
                         if choice(
                             ui,
                             ("state", issue.id),
@@ -1690,44 +1927,47 @@ impl App {
                         }
                     });
                     for s in &mine {
-                        let tint = if s.status.busy() { TRACE } else { LEGEND };
-                        if chip(ui, &s.agent, tint, s.status.busy())
+                        let (tint, word) = status_look(s.status);
+                        if chip(ui, &format!("{} {word}", s.agent), tint, s.status.busy())
                             .interact(Sense::click())
                             .clicked()
                         {
                             self.open_session(s.id, s.project_id);
                         }
                     }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
-                                Key::new("start agent")
-                                    .outline(READOUT)
-                                    .id_salt(("start", issue.id)),
-                            )
-                            .clicked()
-                        {
-                            self.open_start(Some(issue));
-                        }
-                        if ui
-                            .add(
-                                Key::new(if open { "less" } else { "more" })
-                                    .outline(VALUE)
-                                    .id_salt(("more", issue.id)),
-                            )
-                            .clicked()
-                        {
-                            if open {
-                                self.issue = None;
-                            } else {
-                                self.issue = Some(issue.id);
-                                self.comment.clear();
-                                if let Some(c) = &mut self.client {
-                                    c.comments(issue.id);
-                                }
+                    if ui
+                        .add(Key::new("start").outline(READOUT).id_salt(("start", issue.id)))
+                        .clicked()
+                    {
+                        self.open_start(Some(issue));
+                    }
+                    if ui
+                        .add(
+                            Key::new(if open { "less" } else { "more" })
+                                .outline(VALUE)
+                                .id_salt(("more", issue.id)),
+                        )
+                        .clicked()
+                    {
+                        if self.issues_first {
+                            self.detail = Some(issue.id);
+                            self.comment.clear();
+                            if let Some(c) = &mut self.client {
+                                c.comments(issue.id);
+                            }
+                            if let Some(sid) = self.detail_session() {
+                                self.fetch_messages(sid);
+                            }
+                        } else if open {
+                            self.issue = None;
+                        } else {
+                            self.issue = Some(issue.id);
+                            self.comment.clear();
+                            if let Some(c) = &mut self.client {
+                                c.comments(issue.id);
                             }
                         }
-                    });
+                    }
                 });
                 if open {
                     self.issue_detail(ui, issue);
@@ -1739,6 +1979,96 @@ impl App {
                 self.confirm = Some(Confirm::Issue(issue.id, issue.title.clone()));
                 ui.close();
             }
+        });
+    }
+
+    fn issue_pane(&mut self, ui: &mut Ui, issue: Issue) {
+        let session = self.detail_session().and_then(|sid| self.session_by_id(sid).cloned());
+        ui.horizontal(|ui| {
+            if ui.add(Key::new("board").outline(VALUE)).clicked() {
+                self.detail = None;
+            }
+            Line::new()
+                .value(format!("#{}", issue.id))
+                .tint(LEGEND)
+                .gap(8.0)
+                .value(&issue.title)
+                .elided(ui);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                match &session {
+                    Some(s) if s.status.busy() => {
+                        if ui.add(Key::new("stop").outline(FAULT)).clicked()
+                            && let Some(c) = &mut self.client
+                        {
+                            c.interrupt(s.id);
+                        }
+                    }
+                    _ => {
+                        let label = if session.is_some() { "new agent" } else { "start agent" };
+                        if ui.add(Key::new(label).solid(READOUT)).clicked() {
+                            self.open_start(Some(&issue));
+                        }
+                    }
+                }
+                let mut state = issue.state;
+                ui.allocate_ui(Vec2::new(110.0, KEY_H), |ui| {
+                    if choice(
+                        ui,
+                        ("pane-state", issue.id),
+                        &mut state,
+                        IssueState::ALL.map(|s| (s, s.as_str().to_string())),
+                    ) && let Some(c) = &mut self.client
+                    {
+                        c.update_issue(
+                            issue.id,
+                            &IssuePatch { state: Some(state), ..Default::default() },
+                        );
+                    }
+                });
+            });
+        });
+        ui.add_space(8.0);
+        let info_w = if self.narrow { ui.available_width() } else { 340.0 };
+        let height = ui.available_height();
+        let layout = if self.narrow {
+            Layout::top_down(Align::Min)
+        } else {
+            Layout::left_to_right(Align::Min)
+        };
+        ui.with_layout(layout, |ui| {
+            let info_h = if self.narrow { 220.0 } else { height };
+            ui.allocate_ui_with_layout(
+                Vec2::new(info_w, info_h),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_width(info_w);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("pane-info", issue.id))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_width(info_w - 12.0);
+                            if let Some(s) = &session {
+                                Self::session_data(ui, s);
+                                ui.add_space(6.0);
+                            }
+                            self.issue_detail(ui, &issue);
+                        });
+                },
+            );
+            ui.add_space(10.0);
+            ui.vertical(|ui| match session {
+                Some(s) => {
+                    let sid = s.id;
+                    let tree = self.worktree(s.worktree_id).cloned();
+                    self.focused = true;
+                    self.compact = false;
+                    self.in_pane(Tile::Chat(sid), |app| app.session_body(ui, s, tree));
+                }
+                None => {
+                    ui.add_space(12.0);
+                    hint(ui, "no agent has worked on this yet");
+                }
+            });
         });
     }
 
@@ -1850,10 +2180,11 @@ impl App {
                 RETRY.saturating_sub(at.elapsed()) + Duration::from_millis(50),
             );
         }
-        if self.tab == Tab::Chat
+        if (self.tab == Tab::Chat || self.detail.is_some())
             && self
                 .shown()
                 .into_iter()
+                .chain(self.detail_session())
                 .any(|id| self.session_by_id(id).is_some_and(|s| s.status.busy()))
         {
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -1894,6 +2225,40 @@ impl eframe::App for App {
 mod tests {
     use super::transcript::{tool_body, tool_summary};
     use super::*;
+
+    fn issue(id: Id, title: &str, labels: &[&str], priority: i64) -> Issue {
+        Issue {
+            id,
+            project_id: 1,
+            title: title.into(),
+            body: String::new(),
+            state: IssueState::Todo,
+            priority,
+            labels: labels.iter().map(|l| l.to_string()).collect(),
+            created_at: 0,
+            updated_at: id,
+        }
+    }
+
+    #[test]
+    fn the_issue_search_matches_words_labels_and_ids() {
+        let a = issue(7, "Fix the login loop", &["bug"], 1);
+        assert!(issue_matches(&a, &[], "login fix", ""));
+        assert!(issue_matches(&a, &[], "#7", ""));
+        assert!(!issue_matches(&a, &[], "logout", ""));
+        assert!(issue_matches(&a, &[], "", "bug"));
+        assert!(!issue_matches(&a, &[], "", "ui"));
+    }
+
+    #[test]
+    fn issues_sort_by_priority_then_recency() {
+        let (a, b, c) = (issue(1, "a", &[], 1), issue(2, "b", &[], 5), issue(3, "c", &[], 1));
+        let mut v = vec![&a, &b, &c];
+        sort_issues(&mut v, Sort::Priority);
+        assert_eq!(v.iter().map(|i| i.id).collect::<Vec<_>>(), [2, 3, 1]);
+        sort_issues(&mut v, Sort::Newest);
+        assert_eq!(v.iter().map(|i| i.id).collect::<Vec<_>>(), [3, 2, 1]);
+    }
 
     #[test]
     fn a_checklist_is_drawn_as_a_list_with_its_progress() {

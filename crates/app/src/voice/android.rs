@@ -78,3 +78,47 @@ pub fn ask(permission: &'static str) -> Result<(), String> {
         Ok(())
     })
 }
+
+pub fn open_file_picker() -> Result<(), String> {
+    with_activity(|env, activity| {
+        env.call_method(activity, jni_str!("pickFiles"), jni_sig!("()V"), &[])?;
+        Ok(())
+    })
+}
+
+pub struct PickedFile {
+    pub name: String,
+    pub data: Option<Vec<u8>>,
+}
+
+pub fn picker_busy() -> bool {
+    with_activity(|env, activity| {
+        env.call_method(activity, jni_str!("pickBusy"), jni_sig!("()Z"), &[])?.z()
+    })
+    .unwrap_or(false)
+}
+
+pub fn take_picked() -> Option<PickedFile> {
+    with_activity(|env, activity| {
+        let got = env
+            .call_method(activity, jni_str!("takePicked"), jni_sig!("()Lio/v0l/agentbench/Picked;"), &[])?
+            .l()?;
+        if got.is_null() {
+            return Ok(None);
+        }
+        let name = env
+            .call_method(&got, jni_str!("getName"), jni_sig!("()Ljava/lang/String;"), &[])?
+            .l()?;
+        let name = env.cast_local::<jni::objects::JString>(name)?.try_to_string(env)?;
+        let data = env.call_method(&got, jni_str!("getData"), jni_sig!("()[B"), &[])?.l()?;
+        let data = if data.is_null() {
+            None
+        } else {
+            let array = env.cast_local::<jni::objects::JByteArray>(data)?;
+            Some(env.convert_byte_array(&array)?)
+        };
+        Ok(Some(PickedFile { name, data }))
+    })
+    .ok()
+    .flatten()
+}

@@ -237,12 +237,29 @@ pub fn brief(c: &Context) -> String {
          - PATCH {url}/api/issues/ID with {{\"state\": \"review\"}} when you finish one, or \"done\" when it is merged.\n\
          - POST {url}/api/issues/ID/comments with {{\"body\"}} to leave a note for the user.\n\
          Other agents may be working in other worktrees of this project. Stay in your own worktree. \
-         When you need another worktree, create it with git worktree add beside the main checkout and agentbench will pick it up.",
+         When you need another worktree, create it with git worktree add beside the main checkout and agentbench will pick it up.\n\n",
         url = c.api_url.trim_end_matches('/'),
         pid = c.project_id,
     ));
+    out.push_str(ORCHESTRATION);
     out
 }
+
+const ORCHESTRATION: &str = "<orchestration>\n\
+When you start sub-sessions, you are the parent.\n\n\
+- Put your own session id (`$AGENTBENCH_SESSION`) in every worker prompt as `PARENT=<id>`.\n\
+- Do not block on `wait_for_session`. After `start_session`, start the next worker or do your own work. Finished workers report to you by message.\n\
+- Keep N workers running (default 3). When a report arrives, start the next todo issue straight away.\n\
+- If nothing is runnable and workers are still busy, use `wait_for_session` on the oldest one as a fallback, with a long timeout.\n\
+- Verify a report with `read_session` before moving the issue to `review`.\n\
+- Stop and `notify_user` if the same issue fails twice, or when `todo` is empty and no workers are running.\n\
+- Record the queue state in an issue comment or `remember` so a fresh parent can resume.\n\n\
+When your prompt contains `PARENT=<id>`, you are a worker.\n\n\
+- Stay in your worktree and on your issue. File out-of-scope work with `file_issue`.\n\
+- When finished, `update_issue state=review`, then as your last action `send_message id=<PARENT>` with one line: `DONE #<issue> <branch> tests:<pass|fail> <one-line result>`.\n\
+- If blocked, send `BLOCKED #<issue> <reason>` instead and stop.\n\
+- Always send exactly one final message, including when you fail.\n\
+</orchestration>";
 
 /// The brief for a chat in the home folder: no repository, branch or worktrees, just a place to
 /// do whatever the user asks.
@@ -424,6 +441,7 @@ mod tests {
         assert!(b.contains("http://127.0.0.1:7420/api/issues"));
         assert!(b.contains("branch main"));
         assert!(b.contains("\"project_id\": 4"));
+        assert!(b.contains("<orchestration>") && b.contains("PARENT=<id>"));
     }
 
     #[test]

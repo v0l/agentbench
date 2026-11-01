@@ -20,6 +20,7 @@ impl App {
             external: self.external.clone(),
             thinking: self.thinking,
             alerts: self.alerts,
+            issues_first: self.issues_first,
             scan: false,
             pair_token: self.client.as_ref().map(|c| c.server.token.clone()).unwrap_or_default(),
             pair_url: self.client.as_ref().map(|c| c.server.url.clone()).unwrap_or_default(),
@@ -373,6 +374,7 @@ impl App {
         }
         // Only this device uses it, so it is kept as it is typed rather than on save.
         self.thinking = st.thinking;
+        self.issues_first = st.issues_first;
         if self.alerts != st.alerts {
             self.alerts = st.alerts;
             self.sync_alerts();
