@@ -5,6 +5,7 @@ pub mod files;
 pub mod media;
 pub mod native;
 mod process;
+pub mod replace;
 pub mod screenshot;
 pub mod search;
 pub mod secrets;
@@ -288,9 +289,7 @@ impl Context {
 }
 
 pub fn defaults() -> Vec<Box<dyn Agent>> {
-    vec![
-        Box::new(Native::default()),
-    ]
+    vec![Box::new(Native::default())]
 }
 
 #[cfg(test)]

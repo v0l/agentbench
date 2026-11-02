@@ -752,6 +752,28 @@ fn file_specs() -> Vec<Spec> {
             &["path", "edits"],
         ),
     ));
+    specs.push(Spec::new(
+        "replace_in_files",
+        "Regex find and replace across one file or a whole folder, like sed -i or a python re.sub loop. \
+         `replacement` may use capture groups ($1, ${name}); pass literal=true to match and insert text as written. \
+         Scope it with path, include and exclude globs. Case insensitive unless case_sensitive is true. \
+         Use dry_run=true to preview. Line endings are kept. The answer lists each file and the changed lines.",
+        object(
+            json!({
+                "pattern": string("A regular expression, matched per line unless it contains \\n"),
+                "replacement": string("The new text; an empty string deletes the matches"),
+                "path": string("A file or folder, relative to the worktree or absolute; default the worktree"),
+                "include": string("Only files matching these globs, e.g. \"*.rs\""),
+                "exclude": string("Skip files matching these globs"),
+                "literal": { "type": "boolean", "description": "Treat pattern and replacement as plain text" },
+                "case_sensitive": { "type": "boolean" },
+                "dot_all": { "type": "boolean", "description": "Let . match newlines" },
+                "limit": { "type": "integer", "description": "Most replacements per file" },
+                "dry_run": { "type": "boolean", "description": "Show the changes without writing them" },
+            }),
+            &["pattern", "replacement"],
+        ),
+    ));
     specs
 }
 
@@ -2013,7 +2035,7 @@ impl Native {
         let number = |keys: &[&str]| files::number(args, keys);
         match name {
             "list_files" | "read_file" | "write_file" | "edit_file" | "search_files"
-            | "load_skill" => {
+            | "replace_in_files" | "load_skill" => {
                 let (name, args, ws) = (name.to_string(), args.clone(), ws.clone());
                 tokio::task::spawn_blocking(move || file_tool(&name, &args, &ws))
                     .await
@@ -2239,6 +2261,7 @@ fn file_tool(name: &str, args: &Value, ws: &Workspace) -> Result<String, String>
         ),
         "edit_file" => files::edit(ws, args),
         "search_files" => super::search::search(ws, args),
+        "replace_in_files" => super::replace::replace(ws, args),
         "load_skill" => {
             let skills = skillset::discover(&skillset::roots(ws.root()), &[]);
             skillset::load(&skills, text("name").as_deref(), text("file").as_deref())

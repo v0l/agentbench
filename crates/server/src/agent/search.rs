@@ -15,11 +15,11 @@ const MAX_FILES: usize = 300;
 const MAX_FILE_BYTES: u64 = 2_000_000;
 const MAX_LINE_CHARS: usize = 300;
 const MAX_CONTEXT: usize = 10;
-const SKIPPED: [&str; 4] = [".git", "target", "node_modules", ".DS_Store"];
+pub(super) const SKIPPED: [&str; 4] = [".git", "target", "node_modules", ".DS_Store"];
 
 const PATTERN: [&str; 3] = ["pattern", "query", "regex"];
-const INCLUDE: [&str; 5] = ["include", "glob", "globs", "file_pattern", "files"];
-const EXCLUDE: [&str; 2] = ["exclude", "exclude_glob"];
+pub(super) const INCLUDE: [&str; 5] = ["include", "glob", "globs", "file_pattern", "files"];
+pub(super) const EXCLUDE: [&str; 2] = ["exclude", "exclude_glob"];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -28,7 +28,7 @@ enum Mode {
     Count,
 }
 
-fn globs(args: &Value, keys: &[&str]) -> Vec<String> {
+pub(super) fn globs(args: &Value, keys: &[&str]) -> Vec<String> {
     let mut out = Vec::new();
     for key in keys {
         match args.get(*key) {
@@ -67,7 +67,7 @@ fn split_globs(text: &str) -> Vec<String> {
     out
 }
 
-fn flag(args: &Value, keys: &[&str]) -> Option<bool> {
+pub(super) fn flag(args: &Value, keys: &[&str]) -> Option<bool> {
     keys.iter().find_map(|k| args.get(*k)?.as_bool())
 }
 

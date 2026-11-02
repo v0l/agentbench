@@ -106,9 +106,7 @@ impl Config {
         native.browsers = agent::browser::Browsers::saved_in(home());
         native.code =
             std::sync::Arc::new(agent::code::Code::new(agent::code::unconfined(self.code.clone())));
-        let mut all: Vec<Box<dyn Agent>> = vec![
-            Box::new(native),
-        ];
+        let mut all: Vec<Box<dyn Agent>> = vec![Box::new(native)];
         for extra in &self.agents {
             all.retain(|a| a.name() != extra.name);
             all.push(Box::new(extra.clone()));

@@ -44,6 +44,7 @@ pub fn canonical(name: &str) -> &str {
         "read" | "Read" | "view" => "read_file",
         "write" | "Write" | "create" => "write_file",
         "edit" | "Edit" | "str_replace" | "replace" => "edit_file",
+        "sed" | "regex_replace" | "replace_all" => "replace_in_files",
         "grep" | "Grep" | "search" => "search_files",
         "ls" | "list" | "LS" => "list_files",
         "Bash" | "shell" | "sh" => "bash",
