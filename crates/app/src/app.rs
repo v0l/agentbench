@@ -342,6 +342,7 @@ enum Page {
 struct Settings {
     page: Page,
     project_filter: String,
+    renaming: Option<(Id, String)>,
     speech: crate::voice::Settings,
     place: Where,
     url: String,
@@ -1019,6 +1020,7 @@ impl App {
         if let Some(st) = &mut self.settings {
             st.page = match page {
                 "speech" => Page::Speech,
+                "projects" => Page::Projects,
                 "agent" => Page::Agent,
                 "titles" => Page::Titles,
                 _ => Page::General,

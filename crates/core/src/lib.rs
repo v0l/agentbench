@@ -825,6 +825,8 @@ pub struct NewProject {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,

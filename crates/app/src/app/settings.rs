@@ -14,6 +14,7 @@ impl App {
         self.settings = Some(Settings {
             page: Page::General,
             project_filter: String::new(),
+            renaming: None,
             speech: self.speech.clone(),
             place: if self.remote || self.local.is_none() { Where::Remote } else { Where::Local },
             url,
@@ -166,7 +167,8 @@ impl App {
                     ui.add_space(8.0);
                     speech_devices(ui, &st.speech, st.audio.as_ref(), can_close);
                 } else if st.page == Page::Projects {
-                    project_action = projects_section(ui, &project_rows, &mut st.project_filter);
+                    project_action =
+                        projects_section(ui, &project_rows, &mut st.project_filter, &mut st.renaming);
                 } else if !can_close && st.place == Where::Remote {
                     hint(ui, "Connect to a server to set up its agents.");
                 } else if let Some(e) = &st.agent_error {
@@ -378,6 +380,14 @@ impl App {
         match project_action {
             Some(ProjectAction::Remove(id, name)) => {
                 self.confirm = Some(Confirm::Project(id, name));
+            }
+            Some(ProjectAction::Rename(id, name)) => {
+                if let Some(c) = &mut self.client {
+                    c.update_project(
+                        id,
+                        &agentbench_core::ProjectPatch { name: Some(name), ..Default::default() },
+                    );
+                }
             }
             Some(ProjectAction::Rescan(id)) => {
                 if let Some(c) = &mut self.client {
@@ -854,12 +864,14 @@ enum ProjectAction {
     Rescan(Id),
     NewWorktree(Id),
     RemoveWorktree(Worktree),
+    Rename(Id, String),
 }
 
 fn projects_section(
     ui: &mut Ui,
     rows: &[(agentbench_core::Project, Vec<Worktree>)],
     filter: &mut String,
+    renaming: &mut Option<(Id, String)>,
 ) -> Option<ProjectAction> {
     let mut action = None;
     field(ui, filter, "filter projects");
@@ -893,7 +905,38 @@ fn projects_section(
                     }
                 });
             }
+            if let Some((id, text)) = renaming.as_mut().filter(|(id, _)| *id == p.id) {
+                let id = *id;
+                let mut done = false;
+                ui.horizontal(|ui| {
+                    let r = field(ui, text, "project name");
+                    r.request_focus();
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let key = ui.add(Key::new("save name").solid(READOUT));
+                    key.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "save name")
+                    });
+                    let save = key.clicked() || enter;
+                    if save && !text.trim().is_empty() {
+                        action = Some(ProjectAction::Rename(id, text.trim().to_string()));
+                        done = true;
+                    }
+                    if ui.add(Key::new("cancel").outline(VALUE)).clicked() {
+                        done = true;
+                    }
+                });
+                if done {
+                    *renaming = None;
+                }
+            }
             ui.horizontal(|ui| {
+                let rename = ui.add(Key::new("rename").outline(VALUE));
+                rename.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "rename project")
+                });
+                if rename.clicked() {
+                    *renaming = Some((p.id, p.name.clone()));
+                }
                 if ui.add(Key::new("new worktree").outline(VALUE)).clicked() {
                     action = Some(ProjectAction::NewWorktree(p.id));
                 }

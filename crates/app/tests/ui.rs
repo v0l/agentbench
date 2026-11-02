@@ -2288,3 +2288,29 @@ fn a_logo_in_the_repo_becomes_the_projects_icon() {
     until(&mut h, "the icon", |h| h.state().icon_state(project.id) == "ready");
     shot(&mut h, "icons");
 }
+
+#[test]
+fn a_project_is_renamed_from_the_settings_projects_page() {
+    let rig = rig();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("settings").click();
+    h.run_steps(3);
+    h.state_mut().settings_page("projects");
+    h.run_steps(3);
+    shot(&mut h, "projects-page");
+    h.get_by_label("rename project").click();
+    h.run_steps(3);
+    h.event(egui::Event::Key {
+        key: egui::Key::A,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    });
+    h.event(egui::Event::Text("Billing".into()));
+    h.run_steps(2);
+    h.get_by_label("save name").click();
+    until(&mut h, "the new name", |_| rig.store.project(project.id).unwrap().name == "Billing");
+}

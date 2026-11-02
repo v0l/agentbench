@@ -3,54 +3,89 @@ use crate::store::{SeenTree, Store, StoreError};
 use agentbench_core::{Id, Project, Worktree};
 use std::path::{Path, PathBuf};
 
-const ICON_DIRS: [&str; 10] = [
-    "",
-    "public",
-    "static",
-    "assets",
-    "web",
-    "web/public",
-    "app",
-    "src",
-    "src/assets",
-    "resources",
-];
 const ICON_STEMS: [&str; 5] = ["favicon", "icon", "logo", "app-icon", "apple-touch-icon"];
-const ICON_EXTS: [(&str, &str); 4] =
-    [("png", "image/png"), ("webp", "image/webp"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg")];
 const ICON_MAX_BYTES: u64 = 1_000_000;
+const ICON_DEPTH: usize = 5;
+const ICON_PX: u32 = 96;
+const ICON_SKIP: [&str; 8] =
+    ["node_modules", "target", ".git", "vendor", "dist", "build", "tests", "test"];
+
+fn stem_rank(stem: &str, home: &str) -> Option<usize> {
+    let named = !home.is_empty()
+        && (stem == home
+            || stem.strip_prefix(home).is_some_and(|rest| {
+                rest.starts_with(['-', '_']) && rest[1..].chars().all(|c| c.is_ascii_digit())
+            }));
+    if named {
+        return Some(ICON_STEMS.len());
+    }
+    ICON_STEMS.iter().position(|s| {
+        stem == *s
+            || stem.starts_with(&format!("{s}-"))
+            || stem.starts_with(&format!("{s}_"))
+            || stem.ends_with(&format!("-{s}"))
+            || stem.ends_with(&format!("_{s}"))
+    })
+}
+
+fn raster(svg: &[u8]) -> Option<Vec<u8>> {
+    let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default()).ok()?;
+    let size = tree.size();
+    let scale = ICON_PX as f32 / size.width().max(size.height()).max(1.0);
+    let (w, h) = (
+        (size.width() * scale).ceil().max(1.0) as u32,
+        (size.height() * scale).ceil().max(1.0) as u32,
+    );
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap.encode_png().ok()
+}
 
 pub fn icon(root: &Path) -> Option<(&'static str, Vec<u8>)> {
-    let mut best: Option<(usize, usize, PathBuf, &'static str)> = None;
-    for (d, dir) in ICON_DIRS.iter().enumerate() {
-        let Ok(entries) = std::fs::read_dir(root.join(dir)) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_lowercase)
-            else {
-                continue;
-            };
-            let Some((stem, ext)) = name.rsplit_once('.') else { continue };
-            let Some((_, mime)) = ICON_EXTS.iter().find(|(e, _)| *e == ext) else { continue };
-            let Some(rank) = ICON_STEMS.iter().position(|s| {
-                stem == *s
-                    || stem.starts_with(&format!("{s}-"))
-                    || stem.starts_with(&format!("{s}_"))
-            }) else {
-                continue;
-            };
-            let small =
-                entry.metadata().map(|m| m.len() <= ICON_MAX_BYTES && m.is_file()).unwrap_or(false);
-            if !small {
-                continue;
-            }
-            if best.as_ref().is_none_or(|(bd, br, bp, _)| (d, rank, &path) < (*bd, *br, bp)) {
-                best = Some((d, rank, path, mime));
-            }
+    let home = root.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_lowercase();
+    let walk = ignore::WalkBuilder::new(root)
+        .max_depth(Some(ICON_DEPTH))
+        .follow_links(false)
+        .filter_entry(|e| !ICON_SKIP.iter().any(|s| e.file_name() == *s))
+        .build();
+    let mut best: Option<(usize, bool, usize, PathBuf, &'static str)> = None;
+    for entry in walk.flatten() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_lowercase) else {
+            continue;
+        };
+        let Some((stem, ext)) = name.rsplit_once('.') else { continue };
+        let mime = match ext {
+            "png" => "image/png",
+            "webp" => "image/webp",
+            "jpg" | "jpeg" => "image/jpeg",
+            "svg" => "image/svg+xml",
+            _ => continue,
+        };
+        let Some(rank) = stem_rank(stem, &home) else { continue };
+        if entry.metadata().map(|m| m.len() > ICON_MAX_BYTES).unwrap_or(true) {
+            continue;
+        }
+        let depth = entry.depth();
+        let vector = mime == "image/svg+xml";
+        let key = (depth, vector, rank);
+        if best.as_ref().is_none_or(|(d, v, r, p, _)| (key, path) < ((*d, *v, *r), p.as_path())) {
+            best = Some((depth, vector, rank, path.to_path_buf(), mime));
         }
     }
-    let (_, _, path, mime) = best?;
-    std::fs::read(path).ok().map(|bytes| (mime, bytes))
+    let (_, _, _, path, mime) = best?;
+    let bytes = std::fs::read(path).ok()?;
+    if mime == "image/svg+xml" {
+        return raster(&bytes).map(|png| ("image/png", png));
+    }
+    Some((mime, bytes))
 }
 
 fn err(e: String) -> StoreError {
@@ -202,16 +237,44 @@ mod tests {
             std::fs::write(f, c).unwrap();
         };
         assert!(super::icon(dir.path()).is_none());
-        w("assets/logo.png", b"logo");
+        w("ui/public/logo.png", b"logo");
         assert_eq!(super::icon(dir.path()).unwrap(), ("image/png", b"logo".to_vec()));
+        w("node_modules/pkg/favicon.png", b"dep");
+        assert_eq!(
+            super::icon(dir.path()).unwrap().1,
+            b"logo".to_vec(),
+            "dependencies are skipped"
+        );
         w("public/Favicon.PNG", b"fav");
-        assert_eq!(super::icon(dir.path()).unwrap().1, b"fav".to_vec(), "root-most dir wins");
+        assert_eq!(super::icon(dir.path()).unwrap().1, b"fav".to_vec(), "the shallower file wins");
         w("icon.jpg", b"top");
         assert_eq!(super::icon(dir.path()).unwrap(), ("image/jpeg", b"top".to_vec()));
-        w("icon-256.png", b"sized");
         w("favicon.webp", b"webp");
         assert_eq!(super::icon(dir.path()).unwrap().1, b"webp".to_vec(), "favicon beats icon");
         w("notes.png", b"x");
+    }
+
+    #[test]
+    fn a_file_named_after_the_project_folder_is_its_logo() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("bench-suite");
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join("assets/bench-suite-256.png"), b"mine").unwrap();
+        std::fs::write(root.join("assets/other-256.png"), b"no").unwrap();
+        assert_eq!(super::icon(&root).unwrap().1, b"mine".to_vec());
+    }
+
+    #[test]
+    fn an_svg_logo_is_drawn_to_a_png() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("favicon.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></svg>"#,
+        )
+        .unwrap();
+        let (mime, bytes) = super::icon(dir.path()).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(&bytes[1..4], b"PNG");
     }
 
     use super::*;

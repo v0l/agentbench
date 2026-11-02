@@ -492,6 +492,13 @@ impl Store {
 
     pub fn update_project(&self, id: Id, patch: &ProjectPatch) -> Result<Project> {
         let mut project = self.project(id)?;
+        if let Some(name) = &patch.name {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(StoreError("a project needs a name".into()));
+            }
+            project.name = name.to_string();
+        }
         if let Some(pinned) = patch.pinned {
             project.pinned = pinned;
         }
@@ -501,8 +508,9 @@ impl Store {
         {
             let db = self.db();
             db.execute(
-                "UPDATE projects SET pinned = ?1, tags = ?2 WHERE id = ?3",
+                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3 WHERE id = ?4",
                 params![
+                    project.name,
                     project.pinned,
                     serde_json::to_string(&project.tags).unwrap_or_else(|_| "[]".into()),
                     id
@@ -1465,15 +1473,32 @@ mod tests {
         let (p, _) = testing::project(&s, "/r");
         assert!(!p.pinned && p.tags.is_empty());
         let patch = ProjectPatch {
+            name: None,
             pinned: Some(true),
             tags: Some(vec![" Infra ".into(), "infra".into(), "".into(), "games".into()]),
         };
         let p = s.update_project(p.id, &patch).unwrap();
         assert!(p.pinned);
         assert_eq!(p.tags, ["infra", "games"]);
-        let p = s.update_project(p.id, &ProjectPatch { pinned: Some(false), tags: None }).unwrap();
+        let p = s
+            .update_project(p.id, &ProjectPatch { pinned: Some(false), ..Default::default() })
+            .unwrap();
         assert!(!p.pinned);
         assert_eq!(s.project(p.id).unwrap().tags, ["infra", "games"]);
+    }
+
+    #[test]
+    fn a_project_can_be_renamed_without_moving() {
+        let s = Store::memory().unwrap();
+        let (p, _) = testing::project(&s, "/r");
+        let renamed = ProjectPatch { name: Some("  Billing API  ".into()), ..Default::default() };
+        let q = s.update_project(p.id, &renamed).unwrap();
+        assert_eq!(q.name, "Billing API");
+        assert_eq!(q.path, p.path);
+        assert_eq!(s.project(p.id).unwrap().name, "Billing API");
+        let blank = ProjectPatch { name: Some("   ".into()), ..Default::default() };
+        assert!(s.update_project(p.id, &blank).is_err());
+        assert_eq!(s.project(p.id).unwrap().name, "Billing API");
     }
 
     #[test]
