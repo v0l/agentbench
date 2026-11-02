@@ -218,9 +218,8 @@ fn until(h: &mut Harness<'_, App>, what: &str, ok: impl Fn(&Harness<'_, App>) ->
 }
 
 fn open_home_row(h: &mut Harness<'_, App>) {
-    h.state_mut().show_projects(true);
+    h.state_mut().blank_chat_in_home();
     h.run_steps(3);
-    h.get_by_label("start chat in ~").click();
 }
 
 fn shot(h: &mut Harness<'_, App>, name: &str) {
@@ -489,7 +488,7 @@ fn a_new_chat_offers_a_dropdown_for_any_agent_that_lists_models() {
     let rig = rig_with(vec![Box::new(Lister)]);
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    click(&mut h, 1220.0, 23.0);
+    h.state_mut().blank_chat_here();
     h.run_steps(3);
     h.state_mut().pick_fresh_agent("lister");
     until(&mut h, "its models", |h| h.state().models_for("lister") == Some(2));
@@ -1360,7 +1359,7 @@ fn new_chat_stays_blank_while_other_agents_work() {
     let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    click(&mut h, 1220.0, 23.0);
+    h.state_mut().blank_chat_here();
     h.run_steps(3);
     assert_eq!(h.state().open(), None, "new chat starts blank");
     let mut other = agentbench::client::Client::new(
@@ -2210,4 +2209,36 @@ fn the_layout_key_opens_a_board_that_sets_columns_and_rows() {
     click(&mut h, 1022.0, 78.0);
     h.run_steps(3);
     assert_eq!(h.state().grid().dims(), (2, 2));
+}
+
+#[test]
+fn new_chat_opens_a_modal_that_picks_the_project() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    click(&mut h, 1220.0, 23.0);
+    h.run_steps(3);
+    assert!(h.state().starting(), "the start modal is open");
+    assert!(h.query_all_by_label_contains("project").count() >= 1, "the modal asks for a project");
+    assert!(h.query_all_by_label_contains("START").count() >= 1, "and has a start key");
+}
+
+#[test]
+fn the_chat_list_keeps_the_order_chats_were_started_in() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    let before = h.state().chat_order();
+    assert!(before.len() >= 3);
+    let mut sorted = rig.store.sessions().unwrap();
+    sorted.sort_by_key(|s| std::cmp::Reverse((s.created_at, s.id.to_string())));
+    assert_eq!(before, sorted.iter().map(|s| s.id).collect::<Vec<_>>());
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(1200) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(h.state().chat_order(), before, "a refresh does not reorder the chats");
 }

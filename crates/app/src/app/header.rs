@@ -104,11 +104,8 @@ impl App {
 
     pub(super) fn key_new_chat(&mut self, ui: &mut Ui) {
         let ready = self.overview.is_some();
-        if ui
-            .add(Key::new("new chat").solid(READOUT).enabled(ready && self.project.is_some()))
-            .clicked()
-        {
-            self.new_chat(None);
+        if ui.add(Key::new("new chat").solid(READOUT).enabled(ready)).clicked() {
+            self.open_start(None);
         }
     }
 

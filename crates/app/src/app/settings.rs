@@ -13,6 +13,7 @@ impl App {
         let asking_agent = self.client.is_some() && !cfg!(target_os = "android");
         self.settings = Some(Settings {
             page: Page::General,
+            project_filter: String::new(),
             speech: self.speech.clone(),
             place: if self.remote || self.local.is_none() { Where::Remote } else { Where::Local },
             url,
@@ -93,6 +94,17 @@ impl App {
         let installed = self.installed.clone();
         let scanning = self.font_scan.is_some();
         let main_list = self.agent_models.get("native").cloned();
+        let project_rows: Vec<(agentbench_core::Project, Vec<Worktree>)> = self
+            .overview
+            .iter()
+            .flat_map(|o| &o.projects)
+            .filter(|p| !p.home)
+            .map(|p| {
+                let trees = self.overview.iter().flat_map(|o| &o.worktrees);
+                (p.clone(), trees.filter(|w| w.project_id == p.id).cloned().collect())
+            })
+            .collect();
+        let mut project_action: Option<ProjectAction> = None;
         let m = egui::Modal::new(egui::Id::unique("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -106,6 +118,7 @@ impl App {
                     vec![
                         (Page::General, "general"),
                         (Page::Speech, "speech"),
+                        (Page::Projects, "projects"),
                         (Page::Agent, "agent"),
                         (Page::Titles, "titles"),
                     ]
@@ -152,6 +165,8 @@ impl App {
                     speech_section(ui, &mut st.speech, st.voices.as_ref(), st.speech_models.as_ref());
                     ui.add_space(8.0);
                     speech_devices(ui, &st.speech, st.audio.as_ref(), can_close);
+                } else if st.page == Page::Projects {
+                    project_action = projects_section(ui, &project_rows, &mut st.project_filter);
                 } else if !can_close && st.place == Where::Remote {
                     hint(ui, "Connect to a server to set up its agents.");
                 } else if let Some(e) = &st.agent_error {
@@ -359,6 +374,23 @@ impl App {
         if std::mem::take(&mut st.scan) {
             let ctx = ctx.clone();
             self.scanner = Some(crate::scan::Scanner::start(move || ctx.request_repaint()));
+        }
+        match project_action {
+            Some(ProjectAction::Remove(id, name)) => {
+                self.confirm = Some(Confirm::Project(id, name));
+            }
+            Some(ProjectAction::Rescan(id)) => {
+                if let Some(c) = &mut self.client {
+                    c.sync_project(id);
+                }
+            }
+            Some(ProjectAction::NewWorktree(id)) => {
+                self.new_worktree = Some((id, String::new()));
+            }
+            Some(ProjectAction::RemoveWorktree(w)) => {
+                self.confirm = Some(Confirm::Worktree(w.id, w.label(), w.missing));
+            }
+            None => {}
         }
         if probe {
             st.asking = true;
@@ -815,4 +847,68 @@ fn speech_devices(
             );
         }
     });
+}
+
+enum ProjectAction {
+    Remove(Id, String),
+    Rescan(Id),
+    NewWorktree(Id),
+    RemoveWorktree(Worktree),
+}
+
+fn projects_section(
+    ui: &mut Ui,
+    rows: &[(agentbench_core::Project, Vec<Worktree>)],
+    filter: &mut String,
+) -> Option<ProjectAction> {
+    let mut action = None;
+    field(ui, filter, "filter projects");
+    ui.add_space(6.0);
+    let needle = filter.trim().to_lowercase();
+    for (p, trees) in rows {
+        if !needle.is_empty()
+            && !p.name.to_lowercase().contains(&needle)
+            && !p.path.to_lowercase().contains(&needle)
+        {
+            continue;
+        }
+        section(ui, &p.name, &short_path(&p.path), |ui| {
+            for w in trees {
+                ui.horizontal(|ui| {
+                    let tint = if w.missing { FAULT } else { VALUE };
+                    Line::new().value(w.label()).tint(tint).size(11.5).show(ui);
+                    if w.main {
+                        chip(ui, "main", LEGEND, false);
+                    }
+                    if w.missing {
+                        chip(ui, "gone", FAULT, true);
+                    }
+                    if !w.main {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let label = if w.missing { "forget" } else { "remove" };
+                            if ui.add(Key::new(label).outline(FAULT)).clicked() {
+                                action = Some(ProjectAction::RemoveWorktree(w.clone()));
+                            }
+                        });
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                if ui.add(Key::new("new worktree").outline(VALUE)).clicked() {
+                    action = Some(ProjectAction::NewWorktree(p.id));
+                }
+                if ui.add(Key::new("rescan").outline(VALUE)).clicked() {
+                    action = Some(ProjectAction::Rescan(p.id));
+                }
+                if ui.add(Key::new("remove project").outline(FAULT)).clicked() {
+                    action = Some(ProjectAction::Remove(p.id, p.name.clone()));
+                }
+            });
+        });
+        ui.add_space(8.0);
+    }
+    if rows.is_empty() {
+        hint(ui, "no projects yet, add one from the chat list");
+    }
+    action
 }

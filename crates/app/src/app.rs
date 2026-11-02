@@ -30,8 +30,6 @@ use self::widgets::*;
 
 const SIDE_W: f32 = 320.0;
 const RETRY: Duration = Duration::from_secs(3);
-const TREE_INDENT: f32 = 16.0;
-const TREE_X: f32 = 5.0;
 /// The most tiles any grid has.
 const SLOTS: usize = Grid::MAX_SIDE * Grid::MAX_SIDE;
 /// The space between tiles of the grid.
@@ -132,6 +130,10 @@ impl Fresh {
     fn new(project: Id, place: PlaceChoice, agent: String) -> Self {
         Fresh { project, place, branch: String::new(), agent, model: String::new() }
     }
+}
+
+fn chat_key(s: &Session) -> std::cmp::Reverse<(i64, String)> {
+    std::cmp::Reverse((s.created_at, s.id.to_string()))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -257,12 +259,14 @@ struct Start {
 enum Page {
     General,
     Speech,
+    Projects,
     Agent,
     Titles,
 }
 
 struct Settings {
     page: Page,
+    project_filter: String,
     speech: crate::voice::Settings,
     place: Where,
     url: String,
@@ -528,8 +532,6 @@ pub struct App {
     focused: bool,
     issue: Option<Id>,
     opened: HashSet<Id>,
-    project_filter: String,
-    projects_open: bool,
     side_filter: String,
     transcripts: HashMap<SessionId, Transcript>,
     comments: HashMap<Id, Vec<Comment>>,
@@ -658,8 +660,6 @@ impl App {
             focused: true,
             issue: None,
             opened: HashSet::new(),
-            project_filter: String::new(),
-            projects_open: true,
             side_filter: String::new(),
             transcripts: HashMap::new(),
             comments: HashMap::new(),
@@ -1186,8 +1186,31 @@ impl App {
         if self.narrow { Grid::Single } else { self.grid }
     }
 
-    pub fn show_projects(&mut self, on: bool) {
-        self.projects_open = on;
+    pub fn blank_chat_in_home(&mut self) {
+        let home = self.overview.as_ref().and_then(|o| {
+            let p = o.projects.iter().find(|p| p.home)?;
+            o.worktrees.iter().find(|w| w.project_id == p.id).cloned()
+        });
+        self.new_chat(home.as_ref());
+    }
+
+    pub fn blank_chat_here(&mut self) {
+        if self.project.is_none() {
+            self.project = self.overview.as_ref().and_then(|o| {
+                o.projects.iter().find(|p| !p.home).or(o.projects.first()).map(|p| p.id)
+            });
+        }
+        self.new_chat(None);
+    }
+
+    pub fn chat_order(&self) -> Vec<SessionId> {
+        let mut all: Vec<&Session> = self.overview.iter().flat_map(|o| &o.sessions).collect();
+        all.sort_by_key(|s| chat_key(s));
+        all.into_iter().map(|s| s.id).collect()
+    }
+
+    pub fn starting(&self) -> bool {
+        self.start.is_some()
     }
 
     pub fn grid(&self) -> Grid {
@@ -1614,7 +1637,10 @@ impl App {
         let Some(o) = &self.overview else {
             return;
         };
-        let project = issue.map(|i| i.project_id).or(self.project);
+        let project = issue
+            .map(|i| i.project_id)
+            .or(self.project)
+            .or_else(|| o.projects.iter().find(|p| !p.home).or(o.projects.first()).map(|p| p.id));
         let Some(project) = project else {
             return;
         };

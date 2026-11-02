@@ -348,6 +348,11 @@ impl App {
             .filter(|w| w.project_id == s.project && !w.missing)
             .cloned()
             .collect();
+        let projects: Vec<(Id, String)> = o
+            .projects
+            .iter()
+            .map(|p| (p.id, if p.home { "~ (no repo)".to_string() } else { p.name.clone() }))
+            .collect();
         let issue = s.issue.and_then(|id| o.issues.iter().find(|i| i.id == id)).cloned();
         let project = o
             .projects
@@ -362,6 +367,19 @@ impl App {
                 Some(i) => format!("Start an agent on #{}", i.id),
                 None => format!("Start an agent in {project}"),
             });
+            if issue.is_none() {
+                section(ui, "project", "where it works", |ui| {
+                    row(ui, "project", |ui| {
+                        let before = s.project;
+                        choice(ui, "start-project", &mut s.project, projects.iter().cloned());
+                        if s.project != before {
+                            s.place = PlaceChoice::Main;
+                            s.branch.clear();
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+            }
             section(ui, "agent", "who does the work", |ui| {
                 row(ui, "agent", |ui| {
                     if choice(ui, "agent", &mut s.agent, agents.iter().map(|a| {
