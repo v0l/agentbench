@@ -260,6 +260,7 @@ When your prompt contains `PARENT=<id>`, you are a worker.\n\n\
 - When finished, `update_issue state=review`, then as your last action `send_message id=<PARENT>` with one line: `DONE #<issue> <branch> tests:<pass|fail> <one-line result>`.\n\
 - If blocked, send `BLOCKED #<issue> <reason>` instead and stop.\n\
 - Always send exactly one final message, including when you fail.\n\
+- Finish the work. Do the tests, the verification and every follow-up you can do yourself before reporting. End with a conclusion in one of two states: rigid (verified, tests pass, nothing left) or needs more work, listing only what you genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). Never end with a todo list of things you could have done.\n\
 </orchestration>";
 
 fn supervisor_brief(c: &Context) -> String {
@@ -273,6 +274,7 @@ fn supervisor_brief(c: &Context) -> String {
          - Record: every ask that deserves an issue gets one (`file_issue` with `project`). Search the issue list first and never duplicate. Keep states honest with `update_issue` and `comment_on_issue`: doing while a session works on it, review when it reports done, done only when verified.\n\
          - Delegate: when work must be done, `start_session` (with `project`, and `issue` when one exists) with a self-contained prompt. Sessions you start are watched for you.\n\
          - Follow: use `watch_session` on any running session you care about. Do not poll and do not block on `wait_for_session`. When a watched session finishes, its status and last reply arrive here as a message. Then read what it did with `read_session`, check it against the issue, update the tracker, and start the next step or tell the user.\n\
+         - Conclusion check: when a watched session finishes, read its last reply and assert it has a conclusion: either rigid (verified, tests pass, nothing left) or needs more work, listing only items the session genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). If the reply contains a todo or leftover list of things the agent could do itself (run tests, write the test, deploy to a test env, merge locally, verify X, add a test for Y), `send_message` the session to do them, do not move the issue to `review` or `done`, and do not relay the list to the user. Never relay a worker's leftover list as the user's todo.\n\
          - Manage: `stop_session`, `close_session` and `rename_session` work on any session. `list_worktrees`, `create_worktree` and `cleanup_worktree` work in any project (pass `project`). Close or clean up only when the user asked or the work is verified merged.\n\
          - Nudge: `send_message` to a stalled or drifting session. `notify_user` only for what needs the user: a decision, a failure you cannot route around, or a finished piece of work.\n\
          - Remember: `remember` keeps the user's standing preferences and decisions.\n\
@@ -476,6 +478,14 @@ mod tests {
         assert!(b.contains("user_asks") && b.contains("watch_session"));
         assert!(b.contains("You are not a coding agent"));
         assert!(!b.contains("demo") && !b.contains("<orchestration>"));
+    }
+
+    #[test]
+    fn the_prompts_require_a_conclusion_not_a_leftover_list() {
+        let worker = brief(&context());
+        assert!(worker.contains("End with a conclusion") && worker.contains("rigid"));
+        let sup = brief(&Context { supervisor: true, ..context() });
+        assert!(sup.contains("Conclusion check") && sup.contains("Never relay a worker's leftover list"));
     }
 
     #[test]
