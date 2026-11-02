@@ -17,8 +17,30 @@ impl App {
             }
             return;
         };
-        let projects = o.projects.clone();
         let worktrees = o.worktrees.clone();
+        let total = o.projects.len();
+        let mut projects: Vec<&Project> = o
+            .projects
+            .iter()
+            .filter(|p| self.project == Some(p.id) || project_matches(p, &self.project_query))
+            .collect();
+        sort_projects(&mut projects, &o.issues, &o.sessions, self.project_sort);
+        let projects: Vec<Project> = projects.into_iter().cloned().collect();
+        if total > 4 {
+            field(ui, &mut self.project_query, "find a project");
+            ui.allocate_ui(Vec2::new(ui.available_width(), KEY_H), |ui| {
+                choice(
+                    ui,
+                    "project-sort",
+                    &mut self.project_sort,
+                    ProjectSort::ALL.map(|s| (s, s.label().to_string())),
+                );
+            });
+            if projects.len() != total {
+                hint(ui, &format!("{} of {total} projects", projects.len()));
+            }
+            ui.add_space(4.0);
+        }
         if projects.is_empty() {
             section(ui, "no projects yet", "", |ui| {
                 note(

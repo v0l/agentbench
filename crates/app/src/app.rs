@@ -5,8 +5,8 @@ use crate::picker::ModelPicker;
 use crate::scan::Scan;
 use agentbench_core::{
     Comment, Entry, Id, Issue, IssuePatch, IssueState, Lsp, LspHealth, Message, NewComment,
-    NewIssue, NewProject, NewSession, NewWorktree, Overview, Place, Question, Session, SessionId,
-    SessionStatus, Worktree,
+    NewIssue, NewProject, NewSession, NewWorktree, Overview, Place, Project, Question, Session,
+    SessionId, SessionStatus, Worktree,
 };
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
@@ -173,7 +173,13 @@ impl Sort {
     }
 }
 
-pub fn issue_matches(issue: &Issue, sessions: &[Session], query: &str, label: &str) -> bool {
+pub fn issue_matches(
+    issue: &Issue,
+    project: &str,
+    sessions: &[Session],
+    query: &str,
+    label: &str,
+) -> bool {
     if !label.is_empty() && !issue.labels.iter().any(|l| l == label) {
         return false;
     }
@@ -182,8 +188,9 @@ pub fn issue_matches(issue: &Issue, sessions: &[Session], query: &str, label: &s
         return true;
     }
     let hay = format!(
-        "#{} {} {} {} {}",
+        "#{} {} {} {} {} {}",
         issue.id,
+        project,
         issue.title,
         issue.body,
         issue.labels.join(" "),
@@ -205,6 +212,67 @@ fn sort_issues(issues: &mut [&Issue], by: Sort) {
         }
         Sort::Updated => issues.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
         Sort::Newest => issues.sort_by(|a, b| b.id.cmp(&a.id)),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Project,
+    Everything,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProjectSort {
+    Name,
+    Open,
+    Recent,
+}
+
+impl ProjectSort {
+    const ALL: [ProjectSort; 3] = [ProjectSort::Name, ProjectSort::Open, ProjectSort::Recent];
+
+    fn label(self) -> &'static str {
+        match self {
+            ProjectSort::Name => "name",
+            ProjectSort::Open => "most open issues",
+            ProjectSort::Recent => "recent activity",
+        }
+    }
+}
+
+pub fn project_matches(project: &Project, query: &str) -> bool {
+    let hay = format!(
+        "{} {} {}",
+        project.name,
+        project.path,
+        project.remote.as_deref().unwrap_or_default()
+    )
+    .to_lowercase();
+    query.to_lowercase().split_whitespace().all(|word| hay.contains(word))
+}
+
+fn sort_projects(
+    projects: &mut [&Project],
+    issues: &[Issue],
+    sessions: &[Session],
+    by: ProjectSort,
+) {
+    let open =
+        |p: &Project| issues.iter().filter(|i| i.project_id == p.id && i.state.is_open()).count();
+    let touched = |p: &Project| {
+        let issue = issues.iter().filter(|i| i.project_id == p.id).map(|i| i.updated_at).max();
+        let session = sessions.iter().filter(|s| s.project_id == p.id).map(|s| s.updated_at).max();
+        issue.max(session).unwrap_or(p.created_at)
+    };
+    let name = |a: &Project, b: &Project| a.name.to_lowercase().cmp(&b.name.to_lowercase());
+    match by {
+        ProjectSort::Name => projects.sort_by(|a, b| b.home.cmp(&a.home).then_with(|| name(a, b))),
+        ProjectSort::Open => {
+            projects.sort_by(|a, b| open(b).cmp(&open(a)).then_with(|| name(a, b)))
+        }
+        ProjectSort::Recent => {
+            projects.sort_by(|a, b| touched(b).cmp(&touched(a)).then_with(|| name(a, b)))
+        }
     }
 }
 
@@ -520,6 +588,10 @@ pub struct App {
     query: String,
     label: String,
     sort: Sort,
+    scope: Scope,
+    project_query: String,
+    project_sort: ProjectSort,
+    only_busy: bool,
     project: Option<Id>,
     session: Option<SessionId>,
     grid: Grid,
@@ -642,6 +714,10 @@ impl App {
             query: String::new(),
             label: String::new(),
             sort: Sort::Priority,
+            scope: Scope::Project,
+            project_query: String::new(),
+            project_sort: ProjectSort::Name,
+            only_busy: false,
             project: None,
             session: None,
             grid: storage
@@ -1719,7 +1795,17 @@ impl App {
             note(ui, "Add a project to file issues against it.", LEGEND);
             return;
         };
-        let all: Vec<Issue> = o.issues.iter().filter(|i| i.project_id == pid).cloned().collect();
+        let everything = self.scope == Scope::Everything;
+        let names: HashMap<Id, String> =
+            o.projects.iter().map(|p| (p.id, p.name.clone())).collect();
+        let all: Vec<Issue> =
+            o.issues.iter().filter(|i| everything || i.project_id == pid).cloned().collect();
+        segments(
+            ui,
+            &mut self.scope,
+            &[(Scope::Project, "this project", None), (Scope::Everything, "all projects", None)],
+        );
+        ui.add_space(8.0);
         let open = all.iter().filter(|i| i.state.is_open()).count();
         segments(
             ui,
@@ -1741,14 +1827,17 @@ impl App {
                     choice(ui, "label", &mut self.label, options);
                 });
             }
-            field(ui, &mut self.query, "search title, text, label or agent");
+            field(ui, &mut self.query, "search title, text, label, project or agent");
         });
         ui.add_space(8.0);
         let sessions_now = o.sessions.clone();
         let mut shown: Vec<&Issue> = all
             .iter()
             .filter(|i| self.filter == Filter::All || i.state.is_open())
-            .filter(|i| issue_matches(i, &sessions_now, &self.query, &self.label))
+            .filter(|i| {
+                let project = names.get(&i.project_id).map_or("", String::as_str);
+                issue_matches(i, project, &sessions_now, &self.query, &self.label)
+            })
             .collect();
         sort_issues(&mut shown, self.sort);
         if all.is_empty() {
@@ -1781,7 +1870,7 @@ impl App {
                         Layout::top_down(Align::Min),
                         |ui| {
                             ui.set_width(width);
-                            self.board_column(ui, *state, &group, &sessions);
+                            self.board_column(ui, *state, &group, &sessions, &names, everything);
                         },
                     );
                     self.drop_on_column(ui, column.response.rect, *state);
@@ -1823,6 +1912,8 @@ impl App {
         state: IssueState,
         group: &[&&Issue],
         sessions: &[Session],
+        names: &HashMap<Id, String>,
+        everything: bool,
     ) {
         let working = group
             .iter()
@@ -1840,7 +1931,8 @@ impl App {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 for issue in group {
-                    self.issue_card(ui, issue, sessions);
+                    let project = if everything { names.get(&issue.project_id) } else { None };
+                    self.issue_card(ui, issue, sessions, project.map(String::as_str));
                     ui.add_space(6.0);
                 }
             });
@@ -1873,7 +1965,13 @@ impl App {
         line.gap(8.0).note(ago(s.updated_at)).size(10.5).elided(ui);
     }
 
-    fn issue_card(&mut self, ui: &mut Ui, issue: &Issue, sessions: &[Session]) {
+    fn issue_card(
+        &mut self,
+        ui: &mut Ui,
+        issue: &Issue,
+        sessions: &[Session],
+        project: Option<&str>,
+    ) {
         let mine: Vec<&Session> =
             sessions.iter().filter(|s| s.issue_id == Some(issue.id)).collect();
         let working = mine.iter().any(|s| s.status.busy());
@@ -1907,6 +2005,9 @@ impl App {
                     .elided(ui);
             },
             |ui| {
+                if let Some(name) = project {
+                    Line::new().note(name).size(10.5).elided(ui);
+                }
                 for s in &mine {
                     Self::session_data(ui, s);
                 }
@@ -2243,11 +2344,63 @@ mod tests {
     #[test]
     fn the_issue_search_matches_words_labels_and_ids() {
         let a = issue(7, "Fix the login loop", &["bug"], 1);
-        assert!(issue_matches(&a, &[], "login fix", ""));
-        assert!(issue_matches(&a, &[], "#7", ""));
-        assert!(!issue_matches(&a, &[], "logout", ""));
-        assert!(issue_matches(&a, &[], "", "bug"));
-        assert!(!issue_matches(&a, &[], "", "ui"));
+        assert!(issue_matches(&a, "", &[], "login fix", ""));
+        assert!(issue_matches(&a, "", &[], "#7", ""));
+        assert!(!issue_matches(&a, "", &[], "logout", ""));
+        assert!(issue_matches(&a, "", &[], "", "bug"));
+        assert!(!issue_matches(&a, "", &[], "", "ui"));
+    }
+
+    fn project(id: Id, name: &str, remote: Option<&str>) -> Project {
+        Project {
+            id,
+            name: name.into(),
+            path: format!("/git/{name}"),
+            branch: None,
+            remote: remote.map(Into::into),
+            created_at: id,
+            home: false,
+        }
+    }
+
+    #[test]
+    fn the_project_search_matches_name_path_and_remote() {
+        let p = project(1, "waveshark", Some("git@github.com:v0l/waveshark.git"));
+        assert!(project_matches(&p, ""));
+        assert!(project_matches(&p, "WAVE"));
+        assert!(project_matches(&p, "v0l shark"));
+        assert!(project_matches(&p, "/git/"));
+        assert!(!project_matches(&p, "gcad"));
+    }
+
+    #[test]
+    fn projects_sort_by_name_open_issues_or_activity() {
+        let (a, b, c) =
+            (project(1, "alpha", None), project(2, "Bravo", None), project(3, "charlie", None));
+        let mut busy = issue(10, "x", &[], 0);
+        busy.project_id = 3;
+        busy.updated_at = 500;
+        let mut also = issue(11, "y", &[], 0);
+        also.project_id = 3;
+        let mut one = issue(12, "z", &[], 0);
+        one.project_id = 2;
+        one.updated_at = 900;
+        let issues = [busy, also, one];
+        let ids = |v: &[&Project]| v.iter().map(|p| p.id).collect::<Vec<_>>();
+        let mut v = vec![&c, &b, &a];
+        sort_projects(&mut v, &issues, &[], ProjectSort::Name);
+        assert_eq!(ids(&v), [1, 2, 3]);
+        sort_projects(&mut v, &issues, &[], ProjectSort::Open);
+        assert_eq!(ids(&v), [3, 2, 1]);
+        sort_projects(&mut v, &issues, &[], ProjectSort::Recent);
+        assert_eq!(ids(&v), [2, 3, 1]);
+    }
+
+    #[test]
+    fn an_issue_search_finds_the_project_name() {
+        let a = issue(7, "Fix the login loop", &[], 1);
+        assert!(issue_matches(&a, "waveshark", &[], "waveshark", ""));
+        assert!(!issue_matches(&a, "gcad", &[], "waveshark", ""));
     }
 
     #[test]

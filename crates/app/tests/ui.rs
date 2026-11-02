@@ -2163,7 +2163,8 @@ fn with_issues_first_a_chat_opens_inside_its_issue() {
         .into_iter()
         .find(|w| w.branch.as_deref() == Some("fix-login"))
         .unwrap();
-    let linked = rig.store.add_session(side.id, "echo", "work on readme", None, Some(issue)).unwrap();
+    let linked =
+        rig.store.add_session(side.id, "echo", "work on readme", None, Some(issue)).unwrap();
     rig.store.add_message(linked.id, &Entry::user("write it")).unwrap();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
