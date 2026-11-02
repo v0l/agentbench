@@ -68,10 +68,8 @@ impl App {
                     self.header_badges(ui);
                 });
                 ui.add_space(4.0);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    self.side(ui);
-                });
+                ui.spacing_mut().item_spacing.y = 4.0;
+                self.side(ui);
             });
         let picked = before != (self.project, self.session, self.tab);
         if m.should_close() || picked {

@@ -29,7 +29,6 @@ pub use self::widgets::status_counts;
 use self::widgets::*;
 
 const SIDE_W: f32 = 320.0;
-const SHOWN_CHATS: usize = 14;
 const RETRY: Duration = Duration::from_secs(3);
 const TREE_INDENT: f32 = 16.0;
 const TREE_X: f32 = 5.0;
@@ -529,7 +528,7 @@ pub struct App {
     focused: bool,
     issue: Option<Id>,
     opened: HashSet<Id>,
-    all_chats: bool,
+    project_filter: String,
     projects_open: bool,
     side_filter: String,
     transcripts: HashMap<SessionId, Transcript>,
@@ -659,8 +658,8 @@ impl App {
             focused: true,
             issue: None,
             opened: HashSet::new(),
-            all_chats: false,
-            projects_open: false,
+            project_filter: String::new(),
+            projects_open: true,
             side_filter: String::new(),
             transcripts: HashMap::new(),
             comments: HashMap::new(),
@@ -2132,10 +2131,8 @@ impl App {
                 .resizable(false)
                 .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(8))
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 4.0;
-                        self.side(ui);
-                    });
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    self.side(ui);
                 });
         }
         egui::CentralPanel::no_frame().show(ui, |ui| {

@@ -28,11 +28,20 @@ impl App {
                 );
             });
         }
-        field(ui, &mut self.side_filter, "filter projects and chats");
+        let total = ui.available_height();
+        field(ui, &mut self.side_filter, "filter chats");
         ui.add_space(4.0);
-        let needle = self.side_filter.trim().to_lowercase();
-        let filtering = !needle.is_empty();
-        self.chat_stack(ui, &needle);
+        let chat_needle = self.side_filter.trim().to_lowercase();
+        let reserve = if self.projects_open { (total * 0.4).max(150.0) } else { 70.0 };
+        let room = (ui.available_height() - reserve).max(60.0);
+        egui::ScrollArea::vertical()
+            .id_salt("chats")
+            .max_height(room)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                self.chat_stack(ui, &chat_needle);
+            });
         ui.add_space(6.0);
         let label =
             format!("{} projects ({})", if self.projects_open { "v" } else { ">" }, projects.len());
@@ -41,8 +50,42 @@ impl App {
         }
         ui.add_space(4.0);
         let listed = self.projects_open || projects.is_empty();
+        if listed {
+            field(ui, &mut self.project_filter, "filter projects");
+            ui.add_space(4.0);
+        }
+        let needle = self.project_filter.trim().to_lowercase();
+        let filtering = !needle.is_empty();
+        let below = (ui.available_height() - 36.0).max(40.0);
+        egui::ScrollArea::vertical()
+            .id_salt("projects")
+            .max_height(below)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                self.project_cards(ui, &projects, &worktrees, &needle, filtering, listed);
+            });
+        let add = ui.add(Key::new("add project").outline(VALUE).min_width(ui.available_width()));
+        add.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add project")
+        });
+        if add.clicked() {
+            self.add_project =
+                Some(AddProject { path: String::new(), name: String::new(), create: false });
+        }
+    }
+
+    fn project_cards(
+        &mut self,
+        ui: &mut Ui,
+        projects: &[agentbench_core::Project],
+        worktrees: &[Worktree],
+        needle: &str,
+        filtering: bool,
+        listed: bool,
+    ) {
         for p in projects.iter().filter(|_| listed) {
-            if filtering && !self.project_matches(p, &worktrees, &needle) {
+            if filtering && !self.project_matches(p, worktrees, needle) {
                 continue;
             }
             let selected = self.project == Some(p.id);
@@ -143,14 +186,6 @@ impl App {
             });
             ui.add_space(8.0);
         }
-        let add = ui.add(Key::new("add project").outline(VALUE).min_width(ui.available_width()));
-        add.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add project")
-        });
-        if add.clicked() {
-            self.add_project =
-                Some(AddProject { path: String::new(), name: String::new(), create: false });
-        }
     }
 
     fn busy_in(&self, project: Id) -> usize {
@@ -221,21 +256,8 @@ impl App {
             hint(ui, if needle.is_empty() { "no chats yet" } else { "no chats match" });
             return;
         }
-        let total = chats.len();
-        let shown =
-            if self.all_chats || !needle.is_empty() { total } else { total.min(SHOWN_CHATS) };
-        for (s, project, branch) in chats.iter().take(shown) {
+        for (s, project, branch) in &chats {
             self.session_row(ui, s, project, branch);
-        }
-        if total > SHOWN_CHATS && needle.is_empty() {
-            let text = if self.all_chats {
-                "show fewer".to_string()
-            } else {
-                format!("show {} more", total - shown)
-            };
-            if Line::new().note(text).size(10.5).show(ui).interact(Sense::click()).clicked() {
-                self.all_chats = !self.all_chats;
-            }
         }
     }
 
@@ -295,12 +317,9 @@ impl App {
         if self.grid_now().slots() > 1 && self.tab == Tab::Chat && self.shown().contains(&s.id) {
             let tint = if on { READOUT } else { LEGEND };
             ui.painter().rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(row.right() - 2.0, row.top() + 1.0),
-                    egui::pos2(row.right(), row.bottom() - 1.0),
-                ),
-                0.0,
-                tint,
+                row.expand2(Vec2::new(4.0, 1.0)),
+                2.0,
+                tint.gamma_multiply(0.12),
             );
         }
         if resp.clicked() && !close {
