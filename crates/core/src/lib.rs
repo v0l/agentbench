@@ -505,6 +505,9 @@ pub enum Said {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         broken: Vec<String>,
     },
+    /// A message kept word for word when the conversation before it was folded into a summary.
+    /// It is replayed to the model but not shown again.
+    Kept,
 }
 
 pub const SUMMARY_PREAMBLE: &str =
@@ -564,6 +567,7 @@ pub fn shown(rows: &[Message]) -> Vec<Message> {
                 for Sent { message, said } in messages {
                     let text = content_text(&message["content"]);
                     match (message["role"].as_str().unwrap_or_default(), said) {
+                        (_, Said::Kept) => {}
                         ("system", _) => entries.push(Entry::Tool {
                             call_id: String::new(),
                             name: SYSTEM_PROMPT.into(),
@@ -601,7 +605,7 @@ pub fn shown(rows: &[Message]) -> Vec<Message> {
                         (_, Said::Diagnostics { broken }) => {
                             entries.push(Entry::Diagnostics { text, broken: broken.clone() })
                         }
-                        (_, Said::Plain) => {}
+                        (_, Said::Plain | Said::Kept) => {}
                     }
                 }
             }

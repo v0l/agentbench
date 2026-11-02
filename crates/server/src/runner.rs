@@ -886,6 +886,7 @@ impl Sink {
             }
         }
         let streamed = match messages.first() {
+            Some(s) if s.said == agentbench_core::Said::Kept => None,
             Some(s) if s.message["role"] == "assistant" => st.text.take().map(|(id, _)| id),
             Some(s) if s.message["role"] == "system" => st.typed.take(),
             _ => typed,

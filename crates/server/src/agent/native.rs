@@ -1240,9 +1240,9 @@ impl<'a> Log<'a> {
         removed
     }
 
-    fn restart(&mut self, opening: Vec<Value>) {
-        self.messages.clear();
-        self.open(opening);
+    fn restart(&mut self, opening: Vec<Sent>) {
+        self.messages = opening.iter().map(|s| s.message.clone()).collect();
+        self.io.emit(Event::Sent(opening));
     }
 
     fn open(&mut self, opening: Vec<Value>) {
@@ -1417,7 +1417,7 @@ impl Agent for Native {
                 crowded.window = window;
                 crowded.past(base.compact_at)
             } {
-                match roll(&model, &mut messages, self.patience, io).await {
+                match roll(&model, &mut messages, window, self.patience, io).await {
                     Ok(()) => crowded.context = 0,
                     Err(e) if io.stopped() => return Err(e),
                     Err(e) => {
@@ -1651,7 +1651,7 @@ impl Agent for Native {
 
 const ROLLING_MIN: usize = 4;
 
-const ROLLING_PROMPT: &str = "The conversation is nearly out of room. Summarise it so you can carry on from the summary alone. \
+const ROLLING_PROMPT: &str = "The conversation is nearly out of room, so the older part is being folded into a summary; the most recent messages are kept as they are. Summarise everything above, including any earlier summary, so you can carry on from the summary and the recent messages. \
 Keep: what the user asked for, decisions made and why, what is done, what is left, the state of any work in progress, \
 the results you still need, and what you were about to do next. Be specific with names, ids and paths. \
 Reply with the summary only, as markdown, no preamble.";
@@ -1685,15 +1685,43 @@ impl Io for Silent<'_> {
     }
 }
 
-/// Fold the conversation so far into a summary and carry on from it, in the middle of a turn.
-/// The summary is kept in the transcript, so the next turn starts from it as well.
+fn size(message: &Value) -> usize {
+    message.to_string().len()
+}
+
+/// Where the recent part of the conversation starts, which stays as it was while everything
+/// before it is folded into the summary. It starts on something other than a tool result, so no
+/// call is cut from its answer. None when nothing recent fits.
+fn tail_start(messages: &[Value], window: u64) -> Option<usize> {
+    let from = usize::from(messages.first().is_some_and(|m| m["role"] == "system"));
+    let total: usize = messages[from..].iter().map(size).sum();
+    let budget = (window as usize * 4 / 5).min(total / 2);
+    let mut kept = 0;
+    let mut start = None;
+    for i in (from + 1..messages.len()).rev() {
+        kept += size(&messages[i]);
+        if kept > budget {
+            break;
+        }
+        if messages[i]["role"] != "tool" {
+            start = Some(i);
+        }
+    }
+    start
+}
+
+/// Fold the older part of the conversation into a summary, and carry on from that and the recent
+/// part left as it was, in the middle of a turn. Each time the last summary is folded into the next,
+/// and both are kept in the transcript, so the next turn starts from them as well.
 async fn roll(
     model: &Model,
     messages: &mut Log<'_>,
+    window: u64,
     patience: Patience,
     io: &dyn Io,
 ) -> Result<(), String> {
-    let mut ask: Vec<Value> = messages.to_vec();
+    let cut = tail_start(messages, window).unwrap_or(messages.len());
+    let mut ask: Vec<Value> = messages[..cut].to_vec();
     ask.push(json!({ "role": "user", "content": ROLLING_PROMPT }));
     let reply = complete(model, &ask, &json!([]), patience, &Silent(io)).await?;
     let text = reply.text.trim().to_string();
@@ -1701,10 +1729,17 @@ async fn roll(
         return Err("the model gave no summary".into());
     }
     let system = messages.first().filter(|m| m["role"] == "system").cloned();
+    let tail: Vec<Value> = messages[cut..].to_vec();
     io.emit(Event::Summary(text.clone()));
-    let mut opening: Vec<Value> = system.into_iter().collect();
-    opening.push(json!({ "role": "user", "content": format!("{SUMMARY_PREAMBLE}\n\n{text}") }));
-    opening.push(json!({ "role": "user", "content": ROLLING_CARRY_ON }));
+    let plain = |message: Value| Sent { message, said: Said::Plain };
+    let mut opening: Vec<Sent> = system.into_iter().map(plain).collect();
+    opening
+        .push(plain(json!({ "role": "user", "content": format!("{SUMMARY_PREAMBLE}\n\n{text}") })));
+    let carry_on = tail.is_empty();
+    opening.extend(tail.into_iter().map(|message| Sent { message, said: Said::Kept }));
+    if carry_on {
+        opening.push(plain(json!({ "role": "user", "content": ROLLING_CARRY_ON })));
+    }
     messages.restart(opening);
     Ok(())
 }
@@ -3740,10 +3775,18 @@ for line in sys.stdin:
         assert!(requests[2].get("tools").is_none(), "the summary needs no tools");
 
         let after = requests[3]["messages"].as_array().unwrap();
-        assert_eq!(after.len(), 3, "{after:?}");
+        assert_eq!(after.len(), 4, "{after:?}");
         assert_eq!(after[0]["role"], "system");
         assert!(after[1]["content"].as_str().unwrap().contains("The user wants a.txt read"));
-        assert_eq!(after[2]["role"], "user");
+        assert_eq!(after[2]["tool_calls"][0]["id"], "c2", "the latest exchange is kept as it was");
+        assert_eq!(after[3]["tool_call_id"], "c2");
+        let summarised = requests[2]["messages"].as_array().unwrap();
+        assert!(
+            !summarised
+                .iter()
+                .any(|m| m["tool_call_id"] == "c2" || m["tool_calls"][0]["id"] == "c2"),
+            "the part that is kept is not folded into the summary"
+        );
 
         let events = io.events();
         assert!(events.iter().any(|e| matches!(e, Event::Summary(t) if t.contains("a.txt"))));
@@ -3752,6 +3795,55 @@ for line in sys.stdin:
                 .iter()
                 .any(|e| matches!(e, Event::Text { delta } if delta.contains("The user wants")))
         );
+    }
+
+    #[tokio::test]
+    async fn the_next_turn_replays_the_summary_and_the_part_kept_word_for_word() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
+        let read = |id: &str| crowded(call(id, "read_file", json!({"path": "a.txt"})));
+        let (url, asked) = stub(vec![
+            vec![read("c1")],
+            vec![read("c2")],
+            vec![say("Summary one.")],
+            vec![say("done")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "read a.txt", &io).await.unwrap();
+        asked.try_iter().for_each(drop);
+
+        let mut entries = vec![Entry::user("read a.txt")];
+        for e in io.events() {
+            match e {
+                Event::Sent(sent) => entries.push(Entry::Wire { messages: sent }),
+                Event::Summary(text) => entries.push(Entry::Summary { text }),
+                _ => {}
+            }
+        }
+        let replayed = history(&entries);
+        let roles: Vec<_> = replayed.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["system", "user", "assistant", "tool", "assistant"], "{replayed:?}");
+        assert!(replayed[1]["content"].as_str().unwrap().contains("Summary one."));
+        assert_eq!(replayed[2]["tool_calls"][0]["id"], "c2");
+        assert_eq!(replayed[3]["tool_call_id"], "c2");
+        let shown: Vec<_> = agentbench_core::shown(
+            &entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| agentbench_core::Message {
+                    id: i as i64,
+                    session_id: context().session,
+                    entry: e.clone(),
+                    created_at: 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let c2_rows = shown
+            .iter()
+            .filter(|m| matches!(&m.entry, Entry::Tool { call_id, .. } if call_id == "c2"))
+            .count();
+        assert_eq!(c2_rows, 1, "a kept message is not shown a second time");
     }
 
     #[tokio::test]
