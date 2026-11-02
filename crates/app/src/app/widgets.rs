@@ -31,54 +31,49 @@ pub(super) fn hamburger(ui: &mut Ui, open: bool) -> egui::Response {
     resp
 }
 
-/// A key for one grid layout, drawn as the tiles it makes.
-pub(super) fn grid_button(ui: &mut Ui, grid: Grid, on: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(26.0, 22.0), Sense::click());
-    let resp = resp.on_hover_text(grid.about());
-    resp.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::Button,
-            true,
-            on,
-            format!("layout {}", grid.key()),
-        )
-    });
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+/// Columns and rows of the chat grid, each with a minus and a plus; returns the grid they now make.
+pub(super) fn grid_steppers(ui: &mut Ui, grid: Grid) -> Option<Grid> {
+    let (mut cols, mut rows) = grid.dims();
+    let mut changed = false;
+    ui.spacing_mut().item_spacing.x = 2.0;
+    for (name, value) in [("rows", &mut rows), ("columns", &mut cols)] {
+        if step_key(ui, "+", &format!("more {name}"), *value < Grid::MAX_SIDE) {
+            *value += 1;
+            changed = true;
+        }
+        ui.label(egui::RichText::new(value.to_string()).size(12.0).color(VALUE));
+        if step_key(ui, "-", &format!("fewer {name}"), *value > 1) {
+            *value -= 1;
+            changed = true;
+        }
+        if name == "rows" {
+            ui.label(egui::RichText::new("x").size(11.0).color(LEGEND));
+        }
     }
-    let tint = if on {
-        READOUT
+    changed.then(|| Grid::new(cols, rows))
+}
+
+fn step_key(ui: &mut Ui, glyph: &str, name: &str, enabled: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(18.0, 22.0), Sense::click());
+    let resp = resp.on_hover_text(name);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
+    let tint = if !enabled {
+        ETCH
     } else if resp.hovered() {
-        VALUE
+        READOUT
     } else {
         LEGEND
     };
-    let p = ui.painter();
-    p.rect_filled(rect, 2.0, if on { tint.gamma_multiply(0.18) } else { WELL });
-    p.rect_stroke(
-        rect,
-        2.0,
-        Stroke::new(1.0, if on || resp.hovered() { tint } else { ETCH }),
-        egui::StrokeKind::Inside,
-    );
-    let (cols, rows) = grid.dims();
-    let art = rect.shrink2(Vec2::new(6.0, 5.0));
-    let gap = 1.5;
-    let (w, h) = (
-        (art.width() - gap * (cols - 1) as f32) / cols as f32,
-        (art.height() - gap * (rows - 1) as f32) / rows as f32,
-    );
-    for r in 0..rows {
-        for c in 0..cols {
-            let at = art.min + Vec2::new(c as f32 * (w + gap), r as f32 * (h + gap));
-            p.rect_filled(egui::Rect::from_min_size(at, Vec2::new(w, h)), 0.5, tint);
-        }
+    if enabled && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    resp
+    let p = ui.painter();
+    p.rect_filled(rect, 2.0, WELL);
+    p.rect_stroke(rect, 2.0, Stroke::new(1.0, tint), egui::StrokeKind::Inside);
+    p.text(rect.center(), egui::Align2::CENTER_CENTER, glyph, egui::FontId::monospace(12.0), tint);
+    enabled && resp.clicked()
 }
 
-/// A small spinning arc, for something that is working. Keeps the frame loop going while visible.
-/// The colour and word a session status is shown with.
 pub(super) fn status_look(status: SessionStatus) -> (egui::Color32, &'static str) {
     match status {
         SessionStatus::Running => (TRACE, "working"),

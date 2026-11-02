@@ -85,11 +85,63 @@ pub fn search(ws: &Workspace, args: &Value) -> Result<String, String> {
     if pattern.is_empty() {
         return Err("`pattern` is empty".into());
     }
-    let source = if flag(args, &["literal", "fixed"]).unwrap_or(false) {
-        regex::escape(pattern)
-    } else {
-        pattern.to_string()
+    let literal = flag(args, &["literal", "fixed"]).unwrap_or(false);
+    let mut attempts: Vec<(String, bool, Option<&str>)> = vec![(pattern.to_string(), true, None)];
+    if !literal && pattern.contains("\\\\") {
+        attempts.push((
+            pattern.replace("\\\\", "\\"),
+            true,
+            Some("the pattern had doubled backslashes, so they were read as single"),
+        ));
+    }
+    attempts.push((
+        pattern.to_string(),
+        false,
+        Some("nothing matched with .gitignore rules applied, so they were turned off"),
+    ));
+    let mut seen = 0;
+    for (i, (text, ignoring, note)) in attempts.iter().enumerate() {
+        match run(ws, args, text, literal, *ignoring) {
+            Ok(Ok(out)) => {
+                return Ok(match note {
+                    Some(note) => format!("[{note}]\n{out}"),
+                    None => out,
+                });
+            }
+            Ok(Err(n)) => {
+                if i == 0 {
+                    seen = n;
+                }
+            }
+            Err(e) => {
+                if i == 0 {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    let scope = match include_text(args) {
+        s if s.is_empty() => String::new(),
+        s => format!(" in {s}"),
     };
+    Ok(format!(
+        "no match for {pattern:?}{scope} ({seen} file{} searched)",
+        if seen == 1 { "" } else { "s" }
+    ))
+}
+
+fn include_text(args: &Value) -> String {
+    globs(args, &INCLUDE).join(", ")
+}
+
+fn run(
+    ws: &Workspace,
+    args: &Value,
+    pattern: &str,
+    literal: bool,
+    ignoring: bool,
+) -> Result<Result<String, usize>, String> {
+    let source = if literal { regex::escape(pattern) } else { pattern.to_string() };
     let case = flag(args, &["case_sensitive"]).unwrap_or(false);
     let re = RegexBuilder::new(&source)
         .case_insensitive(!case)
@@ -119,6 +171,11 @@ pub fn search(ws: &Workspace, args: &Value) -> Result<String, String> {
     let mut walk = WalkBuilder::new(&start);
     walk.hidden(false)
         .require_git(false)
+        .git_ignore(ignoring)
+        .git_global(ignoring)
+        .git_exclude(ignoring)
+        .ignore(ignoring)
+        .parents(ignoring)
         .follow_links(false)
         .max_depth(Some(12))
         .sort_by_file_name(|a, b| a.cmp(b))
@@ -201,12 +258,7 @@ pub fn search(ws: &Workspace, args: &Value) -> Result<String, String> {
         }
     }
     if matched_files == 0 {
-        let scope =
-            if include.is_empty() { String::new() } else { format!(" in {}", include.join(", ")) };
-        return Ok(format!(
-            "no match for {pattern:?}{scope} ({seen} file{} searched)",
-            if seen == 1 { "" } else { "s" }
-        ));
+        return Ok(Err(seen));
     }
     if stopped {
         out.push(format!(
@@ -217,7 +269,7 @@ pub fn search(ws: &Workspace, args: &Value) -> Result<String, String> {
             }
         ));
     }
-    Ok(out.join("\n"))
+    Ok(Ok(out.join("\n")))
 }
 
 #[cfg(test)]
@@ -315,6 +367,22 @@ mod tests {
             out,
             "src/main.rs:1: fn main() {\nsrc/main.rs-2-     run();\n--\nsrc/main.rs:4: }"
         );
+    }
+
+    #[test]
+    fn doubled_backslashes_are_read_as_single() {
+        let (_d, ws) = tree();
+        let out = search(&ws, &json!({"pattern": "run\\\\(\\\\);", "path": "src"})).unwrap();
+        assert!(out.ends_with("src/main.rs:2:     run();"), "{out}");
+        assert!(out.starts_with("[the pattern had doubled backslashes"), "{out}");
+    }
+
+    #[test]
+    fn a_search_in_ignored_files_falls_back_to_them() {
+        let (_d, ws) = tree();
+        let out = search(&ws, &json!({"pattern": "ignored"})).unwrap();
+        assert!(out.ends_with("skip/me.rs:1: TODO ignored"), "{out}");
+        assert!(out.starts_with("[nothing matched with .gitignore"), "{out}");
     }
 
     #[test]

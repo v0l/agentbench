@@ -722,11 +722,11 @@ fn clicking_a_session_in_the_tree_opens_it() {
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.run_steps(3);
-    click(&mut h, 100.0, 247.0);
+    click(&mut h, 100.0, 283.0);
     h.run_steps(3);
     let hello = rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     assert_eq!(h.state().open(), Some(hello.id), "the first session opens");
-    click(&mut h, 120.0, 319.0);
+    click(&mut h, 120.0, 355.0);
     h.run_steps(3);
     let fix = rig
         .store
@@ -1008,7 +1008,7 @@ fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
     // Picking a chat closes it too, and opens the chat.
     h.get_by_label("projects").click();
     h.run_steps(3);
-    click(&mut h, 100.0, 224.0);
+    click(&mut h, 100.0, 260.0);
     h.run_steps(3);
     assert!(!h.state().drawer_open(), "picking a chat closes the drawer");
     assert!(h.state().open().is_some(), "and opens it");
@@ -1333,7 +1333,7 @@ fn the_home_row_opens_a_blank_chat_that_starts_in_the_home_folder() {
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.run_steps(3);
-    click(&mut h, 80.0, 118.0);
+    click(&mut h, 80.0, 154.0);
     h.run_steps(3);
     shot(&mut h, "home-blank");
     assert_eq!(h.state().open(), None, "the row opens a blank chat");
@@ -1391,9 +1391,8 @@ fn each_new_chat_from_the_tree_is_a_new_session() {
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.run_steps(3);
     let mut seen = Vec::new();
-    for word in ["first", "second"] {
-        // The main worktree row in the tree starts a blank chat.
-        click(&mut h, 80.0, 110.0);
+    for (word, row) in [("first", 158.0), ("second", 214.0)] {
+        click(&mut h, 80.0, row);
         h.run_steps(3);
         assert_eq!(h.state().open(), None, "{word}: the row opens a blank chat");
         // Let the overview refresh; a blank chat must not attach itself to an old session.
@@ -1440,7 +1439,7 @@ fn a_new_chat_after_a_deleted_one_shows_none_of_its_messages() {
     other.delete_session(old.id);
     until(&mut h, "the chat to go", |h| h.state().open().is_none());
 
-    click(&mut h, 80.0, 110.0);
+    click(&mut h, 80.0, 146.0);
     h.run_steps(3);
     click(&mut h, 800.0, 330.0);
     h.event(egui::Event::Text("fresh start".into()));
@@ -1487,7 +1486,7 @@ fn a_dropped_picture_is_sent_with_the_message_and_shown_in_the_chat() {
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    click(&mut h, 80.0, 110.0);
+    click(&mut h, 80.0, 146.0);
     h.run_steps(3);
     drop_file(&mut h, "shot.png", png(64, 40));
     drop_file(&mut h, "notes.bin", vec![1, 2, 3]);
@@ -1736,7 +1735,7 @@ fn the_speak_key_sits_in_the_composer_and_says_what_is_missing() {
         App::new(&cc.egui_ctx, Some(&storage), None)
     });
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    click(&mut h, 80.0, 110.0);
+    click(&mut h, 80.0, 146.0);
     h.run_steps(3);
     shot(&mut h, "composer-speak");
     let speak = h.get_by_label("speak");
@@ -1829,19 +1828,19 @@ fn clicking_a_chat_in_the_list_replaces_the_focused_tile() {
     let all = rig.store.sessions().unwrap();
     let hello = all.iter().find(|s| s.title == "say hello").unwrap().id;
     let fix = all.iter().find(|s| s.title == "#3 Fix the login loop").unwrap().id;
-    click(&mut h, 100.0, 247.0);
+    click(&mut h, 100.0, 283.0);
     h.run_steps(3);
     assert_eq!(h.state().tile_chat(0), Some(hello));
     // Focus the empty second tile, then click another chat: it fills that tile.
     h.state_mut().focus_tile(1);
     h.run_steps(2);
-    click(&mut h, 120.0, 319.0);
+    click(&mut h, 120.0, 355.0);
     h.run_steps(3);
     assert_eq!(h.state().tile_chat(0), Some(hello));
     assert_eq!(h.state().tile_chat(1), Some(fix));
     // With the first tile focused, the same click replaces it.
     h.state_mut().focus_tile(0);
-    click(&mut h, 120.0, 319.0);
+    click(&mut h, 120.0, 355.0);
     h.run_steps(3);
     assert_eq!(h.state().focused_tile(), 1, "it was already on screen, so it only took focus");
     shot(&mut h, "columns");
@@ -2172,4 +2171,19 @@ fn with_issues_first_a_chat_opens_inside_its_issue() {
     until(&mut h, "the transcript", |h| h.state().transcript_len(linked.id) == 1);
     shot(&mut h, "issue-pane");
     assert_eq!(h.state().issue_pane_open(), Some(issue));
+}
+
+#[test]
+fn a_grid_of_any_columns_by_rows_holds_that_many_chats() {
+    use agentbench::app::Grid;
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_grid(Grid::new(4, 3));
+    h.run_steps(3);
+    assert_eq!(h.state().grid().dims(), (4, 3));
+    assert_eq!(h.state().grid().slots(), 12);
+    h.state_mut().focus_tile(11);
+    h.run_steps(2);
+    assert_eq!(h.state().focused_tile(), 11);
 }

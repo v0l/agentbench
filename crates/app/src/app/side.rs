@@ -28,7 +28,15 @@ impl App {
                 );
             });
         }
+        field(ui, &mut self.side_filter, "filter projects and chats");
+        ui.add_space(4.0);
+        self.active_chats(ui);
+        let needle = self.side_filter.trim().to_lowercase();
+        let filtering = !needle.is_empty();
         for p in &projects {
+            if filtering && !self.project_matches(p, &worktrees, &needle) {
+                continue;
+            }
             let selected = self.project == Some(p.id);
             let rail = if selected { Some(READOUT) } else { None };
             let trees: Vec<&Worktree> = worktrees.iter().filter(|w| w.project_id == p.id).collect();
@@ -36,7 +44,10 @@ impl App {
             let open = self.overview.as_ref().map_or(0, |o| {
                 o.issues.iter().filter(|i| i.project_id == p.id && i.state.is_open()).count()
             });
-            let collapsed = self.collapsed.contains(&p.id);
+            let busy = self.busy_in(p.id);
+            let crowded = projects.len() > FEW_PROJECTS;
+            let collapsed =
+                crowded && !filtering && !home && busy == 0 && !self.opened.contains(&p.id);
             let mut picked_head = false;
             let mut pick = false;
             let mut menu = None;
@@ -51,6 +62,9 @@ impl App {
                         let count =
                             if home { "no repo".to_string() } else { format!("{open} open") };
                         Line::new().note(count).size(10.5).show(ui);
+                        if busy > 0 {
+                            chip(ui, &format!("{busy} active"), TRACE, false);
+                        }
                     });
                 },
                 |ui| {
@@ -72,6 +86,9 @@ impl App {
             );
             if pick || picked_head {
                 self.project = Some(p.id);
+                if picked_head && !self.opened.remove(&p.id) {
+                    self.opened.insert(p.id);
+                }
             }
             let Some(r) = menu else {
                 continue;
@@ -85,10 +102,10 @@ impl App {
                     )
                     .clicked()
                 {
-                    if collapsed {
-                        self.collapsed.remove(&p.id);
+                    if self.opened.contains(&p.id) {
+                        self.opened.remove(&p.id);
                     } else {
-                        self.collapsed.insert(p.id);
+                        self.opened.insert(p.id);
                     }
                     ui.close();
                 }
@@ -119,6 +136,87 @@ impl App {
         if add.clicked() {
             self.add_project =
                 Some(AddProject { path: String::new(), name: String::new(), create: false });
+        }
+    }
+
+    fn busy_in(&self, project: Id) -> usize {
+        self.overview.as_ref().map_or(0, |o| {
+            o.sessions.iter().filter(|s| s.project_id == project && s.status.busy()).count()
+        })
+    }
+
+    fn project_matches(&self, p: &agentbench_core::Project, worktrees: &[Worktree], needle: &str) -> bool {
+        let has = |text: &str| text.to_lowercase().contains(needle);
+        if has(&p.name) || has(&p.path) {
+            return true;
+        }
+        let Some(o) = &self.overview else {
+            return false;
+        };
+        worktrees.iter().any(|w| w.project_id == p.id && has(&w.label()))
+            || o.sessions.iter().any(|s| s.project_id == p.id && has(&s.title))
+    }
+
+    fn active_chats(&mut self, ui: &mut Ui) {
+        let Some(o) = &self.overview else {
+            return;
+        };
+        let mut active: Vec<(Session, String)> = o
+            .sessions
+            .iter()
+            .filter(|s| s.status.busy())
+            .map(|s| {
+                let project = o.projects.iter().find(|p| p.id == s.project_id);
+                (s.clone(), project.map(|p| p.name.clone()).unwrap_or_default())
+            })
+            .collect();
+        if active.is_empty() {
+            return;
+        }
+        active.sort_by_key(|(s, _)| std::cmp::Reverse(s.updated_at));
+        let needle = self.side_filter.trim().to_lowercase();
+        active.retain(|(s, project)| {
+            needle.is_empty()
+                || s.title.to_lowercase().contains(&needle)
+                || project.to_lowercase().contains(&needle)
+        });
+        if active.is_empty() {
+            return;
+        }
+        ui.add_space(2.0);
+        Line::new().legend(&format!("active ({})", active.len())).show(ui);
+        for (s, project) in &active {
+            self.active_row(ui, s, project);
+        }
+        ui.add_space(8.0);
+    }
+
+    fn active_row(&mut self, ui: &mut Ui, s: &Session, project: &str) {
+        let on = self.session == Some(s.id);
+        let (tint, word) = status_look(s.status);
+        let resp = ui
+            .horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 16.0), Sense::hover());
+                if s.status == SessionStatus::Running {
+                    spinner(ui, rect.center(), 4.5, tint);
+                } else {
+                    ui.painter().circle_filled(rect.center(), 3.0, tint);
+                }
+                ui.allocate_ui(Vec2::new(ui.available_width(), 16.0), |ui| {
+                    Line::new()
+                        .value(&s.title)
+                        .tint(if on { READOUT } else { VALUE })
+                        .size(11.5)
+                        .gap(6.0)
+                        .note(format!("{project} {word}"))
+                        .size(10.5)
+                        .elided(ui)
+                });
+            })
+            .response
+            .interact(Sense::click());
+        if resp.clicked() {
+            self.open_session(s.id, s.project_id);
         }
     }
 

@@ -34,10 +34,8 @@ impl App {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     self.key_new_chat(ui);
                     self.key_file_issue(ui);
-                    for g in Grid::ALL.into_iter().rev() {
-                        if grid_button(ui, g, self.grid == g).clicked() {
-                            self.set_grid(g);
-                        }
+                    if let Some(g) = grid_steppers(ui, self.grid) {
+                        self.set_grid(g);
                     }
                     self.key_settings(ui);
                     self.header_badges(ui);

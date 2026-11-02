@@ -29,11 +29,12 @@ pub use self::widgets::status_counts;
 use self::widgets::*;
 
 const SIDE_W: f32 = 320.0;
+const FEW_PROJECTS: usize = 4;
 const RETRY: Duration = Duration::from_secs(3);
 const TREE_INDENT: f32 = 16.0;
 const TREE_X: f32 = 5.0;
 /// The most tiles any grid has.
-const SLOTS: usize = 6;
+const SLOTS: usize = Grid::MAX_SIDE * Grid::MAX_SIDE;
 /// The space between tiles of the grid.
 const TILE_GAP: f32 = 8.0;
 
@@ -43,63 +44,43 @@ enum Tab {
     Issues,
 }
 
-/// How the chat area is tiled. One tile is focused; opening a chat replaces what it shows.
+/// How the chat area is tiled: columns across and rows down. One tile is focused; opening a chat replaces what it shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Grid {
-    /// One chat filling the area.
-    Single,
-    /// Two chats side by side.
-    Columns,
-    /// Two chats one above the other.
-    Rows,
-    /// Four chats, two by two.
-    Quad,
-    /// Six chats, three across and two down.
-    Six,
+pub struct Grid {
+    cols: usize,
+    rows: usize,
 }
 
+#[allow(non_upper_case_globals)]
 impl Grid {
-    pub const ALL: [Grid; 5] = [Grid::Single, Grid::Columns, Grid::Rows, Grid::Quad, Grid::Six];
+    pub const Single: Grid = Grid { cols: 1, rows: 1 };
+    pub const Columns: Grid = Grid { cols: 2, rows: 1 };
+    pub const Rows: Grid = Grid { cols: 1, rows: 2 };
+    pub const Quad: Grid = Grid { cols: 2, rows: 2 };
+    pub const Six: Grid = Grid { cols: 3, rows: 2 };
+    pub const MAX_SIDE: usize = 6;
 
-    /// Columns and rows.
+    pub fn new(cols: usize, rows: usize) -> Grid {
+        Grid { cols: cols.clamp(1, Grid::MAX_SIDE), rows: rows.clamp(1, Grid::MAX_SIDE) }
+    }
+
     pub fn dims(self) -> (usize, usize) {
-        match self {
-            Grid::Single => (1, 1),
-            Grid::Columns => (2, 1),
-            Grid::Rows => (1, 2),
-            Grid::Quad => (2, 2),
-            Grid::Six => (3, 2),
-        }
+        (self.cols, self.rows)
     }
 
-    /// How many chats are on screen at once.
     pub fn slots(self) -> usize {
-        let (c, r) = self.dims();
-        c * r
+        self.cols * self.rows
     }
 
-    fn key(self) -> &'static str {
-        match self {
-            Grid::Single => "1x1",
-            Grid::Columns => "2x1",
-            Grid::Rows => "1x2",
-            Grid::Quad => "2x2",
-            Grid::Six => "3x2",
-        }
+    fn key(self) -> String {
+        format!("{}x{}", self.cols, self.rows)
     }
 
     fn from_key(key: &str) -> Option<Grid> {
-        Grid::ALL.into_iter().find(|g| g.key() == key)
-    }
-
-    fn about(self) -> &'static str {
-        match self {
-            Grid::Single => "one chat",
-            Grid::Columns => "two chats side by side",
-            Grid::Rows => "two chats, one above the other",
-            Grid::Quad => "four chats in a grid",
-            Grid::Six => "six chats, three across and two down",
-        }
+        let (c, r) = key.split_once('x')?;
+        let (c, r) = (c.parse::<usize>().ok()?, r.parse::<usize>().ok()?);
+        ((1..=Grid::MAX_SIDE).contains(&c) && (1..=Grid::MAX_SIDE).contains(&r))
+            .then_some(Grid { cols: c, rows: r })
     }
 }
 
@@ -547,7 +528,8 @@ pub struct App {
     compact: bool,
     focused: bool,
     issue: Option<Id>,
-    collapsed: HashSet<Id>,
+    opened: HashSet<Id>,
+    side_filter: String,
     transcripts: HashMap<SessionId, Transcript>,
     comments: HashMap<Id, Vec<Comment>>,
     draft: String,
@@ -674,7 +656,8 @@ impl App {
             compact: false,
             focused: true,
             issue: None,
-            collapsed: HashSet::new(),
+            opened: HashSet::new(),
+            side_filter: String::new(),
             transcripts: HashMap::new(),
             comments: HashMap::new(),
             draft: String::new(),
@@ -731,7 +714,7 @@ impl App {
         storage.set_string("alerts", self.alerts.to_string());
         storage.set_string("issues_first", self.issues_first.to_string());
         self.speech.save(storage);
-        storage.set_string("grid", self.grid.key().to_string());
+        storage.set_string("grid", self.grid.key());
         let tiles: Vec<String> =
             self.slots.iter().map(|s| s.map(|s| s.to_string()).unwrap_or_default()).collect();
         storage.set_string("tiles", tiles.join(","));
@@ -1667,6 +1650,7 @@ impl App {
     pub fn open_session(&mut self, sid: SessionId, project: Id) {
         self.session = Some(sid);
         self.project = Some(project);
+        self.opened.insert(project);
         let issue = self.session_by_id(sid).and_then(|s| s.issue_id);
         match issue {
             Some(id) if self.issues_first => {
@@ -2449,11 +2433,18 @@ mod tests {
 
     #[test]
     fn grids_know_their_size() {
-        let sizes: Vec<usize> = Grid::ALL.iter().map(|g| g.slots()).collect();
-        assert_eq!(sizes, vec![1, 2, 2, 4, 6]);
-        for g in Grid::ALL {
-            assert_eq!(Grid::from_key(g.key()), Some(g));
+        let sizes: Vec<usize> =
+            [Grid::Single, Grid::Columns, Grid::Rows, Grid::Quad, Grid::Six, Grid::new(6, 6)]
+                .iter()
+                .map(|g| g.slots())
+                .collect();
+        assert_eq!(sizes, vec![1, 2, 2, 4, 6, 36]);
+        for g in [Grid::Single, Grid::Six, Grid::new(4, 3), Grid::new(6, 6)] {
+            assert_eq!(Grid::from_key(&g.key()), Some(g));
         }
+        assert_eq!(Grid::from_key("7x1"), None);
+        assert_eq!(Grid::from_key("0x2"), None);
+        assert_eq!(Grid::new(9, 0).dims(), (6, 1));
     }
 
     #[test]
