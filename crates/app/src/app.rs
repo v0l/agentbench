@@ -2413,18 +2413,10 @@ impl App {
             }))
             .show(ui, |ui| self.header(ui));
         if let Some((ok, text)) = self.notice.clone() {
-            egui::Panel::bottom("notice")
-                .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin::symmetric(12, 4)))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        status(ui, ok, &text);
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.small_button("x").clicked() {
-                                self.notice = None;
-                            }
-                        });
-                    });
-                });
+            let tone = if ok { Tone::Ok } else { Tone::Fault };
+            if egui_bench::toast::toast(&ctx, "notice", &text, tone) {
+                self.notice = None;
+            }
         }
         if narrow {
             self.drawer_panel(&ctx);
