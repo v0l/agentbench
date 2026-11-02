@@ -111,6 +111,7 @@ pub fn router(api: Api) -> Router {
         .route("/v1/audio/status", get(audio_status))
         .route("/api/sessions/{id}/attachments/{file}", get(attachment))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
+        .layer(tower_http::compression::CompressionLayer::new().gzip(true))
         .layer(middleware::from_fn_with_state(api.clone(), auth));
     Router::new()
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
@@ -837,7 +838,27 @@ async fn messages(
     Query(q): Query<After>,
 ) -> Reply<Vec<agentbench_core::Message>> {
     api.runner.store().session(id)?;
-    Ok(Json(api.runner.store().messages(id, q.after)?))
+    let mut rows = api.runner.store().messages(id, q.after)?;
+    for row in &mut rows {
+        if let agentbench_core::Entry::Wire { messages } = &mut row.entry {
+            for sent in messages {
+                strip_inline_images(&mut sent.message);
+            }
+        }
+    }
+    Ok(Json(rows))
+}
+
+fn strip_inline_images(message: &mut serde_json::Value) {
+    let Some(parts) = message["content"].as_array_mut() else {
+        return;
+    };
+    for part in parts.iter_mut().filter(|p| p["type"] == "image_url") {
+        let url = &mut part["image_url"]["url"];
+        if url.as_str().is_some_and(|u| u.starts_with("data:")) {
+            *url = serde_json::Value::String("data:omitted".into());
+        }
+    }
 }
 
 async fn send(
@@ -1549,6 +1570,74 @@ mod tests {
             assert_eq!(s, StatusCode::OK, "{sess}");
             assert_eq!(sess["cwd"], f.repo.canonicalize().unwrap().to_string_lossy().as_ref());
         }
+    }
+
+    #[tokio::test]
+    async fn the_transcript_leaves_out_inline_image_data() {
+        use agentbench_core::{Entry, Said, Sent};
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, sess) = call(
+            &f.app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "echo", "prompt": "hi"})),
+            T,
+        )
+        .await;
+        let id = sid(&sess);
+        settle(&f.api, id).await;
+        let blob = "A".repeat(200_000);
+        let wire = Entry::Wire {
+            messages: vec![Sent {
+                message: json!({"role": "user", "content": [
+                    {"type": "text", "text": "the screenshot"},
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{blob}")}},
+                ]}),
+                said: Said::Plain,
+            }],
+        };
+        f.api.runner.store().add_message(id, &wire).unwrap();
+        let (_, msgs) = call(&f.app, "GET", &format!("/api/sessions/{id}/messages"), None, T).await;
+        let body = msgs.to_string();
+        assert!(!body.contains("AAAAAAAA"), "{} bytes came back", body.len());
+        assert!(body.contains("the screenshot"));
+        assert!(body.contains("image_url"), "the part stays, so the shape is kept");
+    }
+
+    #[tokio::test]
+    async fn a_big_transcript_is_sent_gzipped_to_a_client_that_accepts_it() {
+        use agentbench_core::{Entry, Said, Sent};
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, sess) = call(
+            &f.app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "echo", "prompt": "hi"})),
+            T,
+        )
+        .await;
+        let id = sid(&sess);
+        settle(&f.api, id).await;
+        let text = "the same line of output\n".repeat(20_000);
+        let wire = Entry::Wire {
+            messages: vec![Sent {
+                message: json!({"role": "user", "content": text}),
+                said: Said::Plain,
+            }],
+        };
+        f.api.runner.store().add_message(id, &wire).unwrap();
+        let req = axum::http::Request::builder()
+            .uri(format!("/api/sessions/{id}/messages"))
+            .header("authorization", "Bearer secret")
+            .header("accept-encoding", "gzip")
+            .body(Body::empty())
+            .unwrap();
+        let res = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.headers().get("content-encoding").map(|v| v.as_bytes()), Some(&b"gzip"[..]));
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.len() < 20_000, "{} bytes on the wire", bytes.len());
     }
 
     #[tokio::test]

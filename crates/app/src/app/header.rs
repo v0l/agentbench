@@ -5,26 +5,19 @@ use super::*;
 impl App {
     pub(super) fn header(&mut self, ui: &mut Ui) {
         if self.narrow {
-            // A phone is too narrow for the title, the tabs and every key on one line, so the
-            // title and the two keys used most come first, then the tabs, then the rest.
             ui.horizontal(|ui| {
                 if hamburger(ui, self.drawer).clicked() {
                     self.drawer = !self.drawer;
                 }
                 self.header_title(ui);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    self.key_new_chat(ui);
-                    self.key_settings(ui);
+                    self.phone_more(ui);
+                    self.key_new_chat_short(ui);
                 });
             });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                // The tabs take what the file issue key leaves, so the key stays on screen.
-                let key = 118.0;
-                let w = (ui.available_width() - key - ui.spacing().item_spacing.x).max(120.0);
-                ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.key_file_issue(ui));
-            });
+            ui.add_space(2.0);
+            let w = ui.available_width();
+            ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
         } else {
             ui.horizontal(|ui| {
                 self.header_title(ui);
@@ -109,6 +102,44 @@ impl App {
         if key.clicked() {
             self.open_start(None);
         }
+    }
+
+    pub(super) fn key_new_chat_short(&mut self, ui: &mut Ui) {
+        let ready = self.overview.is_some();
+        let key = ui.add(Key::new("new").solid(READOUT).enabled(ready));
+        key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ready, "new chat"));
+        if key.clicked() {
+            self.open_start(None);
+        }
+    }
+
+    pub(super) fn phone_more(&mut self, ui: &mut Ui) {
+        let key = ui.add(Key::new("...").outline(VALUE).min_width(36.0));
+        key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "more"));
+        let can_file = self.overview.is_some() && self.project.is_some_and(|p| !self.is_home(p));
+        egui::Popup::from_toggle_button_response(&key).show(|ui| {
+            ui.set_min_width(190.0);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            if let Some(o) = &self.overview {
+                ui.horizontal(|ui| status_badge(ui, &o.sessions));
+                if !self.remote {
+                    chip(ui, "this machine", OK, true);
+                }
+            }
+            if ui.add(Key::new("settings").outline(VALUE).min_width(190.0)).clicked() {
+                self.open_settings();
+                ui.close();
+            }
+            if ui
+                .add(Key::new("file issue").outline(VALUE).enabled(can_file).min_width(190.0))
+                .clicked()
+                && let Some(p) = self.project
+            {
+                self.file_issue =
+                    Some(FileIssue { project: p, title: String::new(), body: String::new() });
+                ui.close();
+            }
+        });
     }
 
     pub(super) fn key_file_issue(&mut self, ui: &mut Ui) {

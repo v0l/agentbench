@@ -23,7 +23,7 @@ serde_json.workspace = true
 axum = { version = "0.8", features = ["multipart"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "signal", "net", "fs"] }
-tower-http = { version = "0.7", features = ["cors", "fs"] }
+tower-http = { version = "0.7", features = ["cors", "fs", "compression-gzip"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.3"

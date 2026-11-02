@@ -280,21 +280,44 @@ impl App {
         let home = self.is_home(s.project_id);
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(Key::new("close").outline(FAULT))
-                    .on_hover_text("stop it and delete this chat")
-                    .clicked()
-                {
-                    self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
-                }
-                if ui
-                    .add(Key::new("terminal").outline(VALUE))
-                    .on_hover_text(
-                        "a shell the agent cannot see, and the output of commands it left running",
-                    )
-                    .clicked()
-                {
-                    self.terminal = Some(TerminalView::new(s.id));
+                if self.narrow {
+                    let more = ui.add(Key::new("...").outline(VALUE).min_width(36.0));
+                    more.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "chat menu")
+                    });
+                    egui::Popup::from_toggle_button_response(&more).show(|ui| {
+                        ui.set_min_width(170.0);
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        if ui.add(Key::new("terminal").outline(VALUE).min_width(170.0)).clicked() {
+                            self.terminal = Some(TerminalView::new(s.id));
+                            ui.close();
+                        }
+                        if ui.add(Key::new("rename chat").outline(VALUE).min_width(170.0)).clicked() {
+                            self.rename_chat = Some((s.id, s.title.clone()));
+                            ui.close();
+                        }
+                        if ui.add(Key::new("close chat").outline(FAULT).min_width(170.0)).clicked() {
+                            self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
+                            ui.close();
+                        }
+                    });
+                } else {
+                    if ui
+                        .add(Key::new("close").outline(FAULT))
+                        .on_hover_text("stop it and delete this chat")
+                        .clicked()
+                    {
+                        self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
+                    }
+                    if ui
+                        .add(Key::new("terminal").outline(VALUE))
+                        .on_hover_text(
+                            "a shell the agent cannot see, and the output of commands it left running",
+                        )
+                        .clicked()
+                    {
+                        self.terminal = Some(TerminalView::new(s.id));
+                    }
                 }
                 if s.status.busy()
                     && ui.add(Key::new("stop").outline(FAULT)).clicked()
