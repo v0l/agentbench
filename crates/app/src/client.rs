@@ -466,6 +466,22 @@ impl Client {
         });
     }
 
+    pub fn project_icon(&self, project: Id, done: impl FnOnce(Option<Vec<u8>>) + Send + 'static) {
+        let req = self
+            .request(Method::GET, &format!("/api/projects/{project}/icon"), None)
+            .header("Accept", "*/*")
+            .timeout(Duration::from_secs(20));
+        let wake = self.wake.clone();
+        crate::spawn(async move {
+            let bytes = match req.send().await {
+                Ok(r) if r.status().is_success() => r.bytes().await.ok().map(|b| b.to_vec()),
+                _ => None,
+            };
+            done(bytes);
+            wake();
+        });
+    }
+
     pub fn interrupt(&mut self, session: SessionId) {
         let req = self.request(Method::POST, &format!("/api/sessions/{session}/interrupt"), None);
         self.send(req, move |r: agentbench_core::Interrupted| {

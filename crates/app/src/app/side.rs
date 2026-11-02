@@ -2,6 +2,8 @@
 
 use super::*;
 
+const ICON: f32 = 24.0;
+
 impl App {
     pub(super) fn side(&mut self, ui: &mut Ui) {
         let Some(o) = &self.overview else {
@@ -74,6 +76,25 @@ impl App {
         }
     }
 
+    fn project_badge(&mut self, ui: &mut Ui, rect: egui::Rect, project: Id, name: &str) {
+        if let Some(Icon::Ready(tex)) = self.project_icon(project) {
+            let tex = tex.clone();
+            egui::Image::new((tex.id(), rect.size())).corner_radius(4.0).paint_at(ui, rect);
+            return;
+        }
+        let hue = name.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
+        let fill = egui::ecolor::Hsva::new(hue as f32 / 360.0, 0.45, 0.55, 1.0);
+        ui.painter().rect_filled(rect, 4.0, egui::Color32::from(fill));
+        let letter = name.chars().find(|c| c.is_alphanumeric()).unwrap_or('~');
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            letter.to_uppercase().to_string(),
+            egui::FontId::proportional(12.0),
+            egui::Color32::WHITE,
+        );
+    }
+
     pub(super) fn session_row(&mut self, ui: &mut Ui, s: &Session, project: &str, branch: &str) {
         let on = self.session == Some(s.id);
         let (tint, word) = status_look(s.status);
@@ -96,16 +117,22 @@ impl App {
         if let Some(fill) = fill {
             ui.painter().rect_filled(row, 3.0, fill);
         }
-        let dot = egui::pos2(row.left() + 11.0, row.top() + 14.0);
+        let badge = egui::Rect::from_min_size(
+            egui::pos2(row.left() + 6.0, row.top() + 7.0),
+            Vec2::splat(ICON),
+        );
+        self.project_badge(ui, badge, s.project_id, project);
+        let dot = badge.right_bottom() - Vec2::splat(1.0);
+        ui.painter().circle_filled(dot, 4.5, CHASSIS);
         if s.status == SessionStatus::Running {
-            spinner(ui, dot, 4.5, tint);
+            spinner(ui, dot, 4.0, tint);
         } else {
             ui.painter().circle_filled(dot, 3.0, tint);
         }
         let mut inner = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(egui::Rect::from_min_max(
-                    egui::pos2(row.left() + 24.0, row.top() + 6.0),
+                    egui::pos2(row.left() + 6.0 + ICON + 8.0, row.top() + 6.0),
                     egui::pos2(row.right() - 8.0, row.bottom() - 4.0),
                 ))
                 .layout(Layout::top_down(Align::Min)),

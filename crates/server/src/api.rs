@@ -86,6 +86,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects", get(list_projects).post(add_project))
         .route("/api/projects/{id}", delete(delete_project).patch(update_project))
         .route("/api/projects/{id}/sync", post(sync_project))
+        .route("/api/projects/{id}/icon", get(project_icon))
         .route("/api/projects/{id}/worktrees", get(list_worktrees).post(add_worktree))
         .route("/api/worktrees/{id}", delete(remove_worktree))
         .route("/api/issues", get(issues).post(add_issue))
@@ -530,6 +531,25 @@ async fn update_project(
     let project = api.runner.store().update_project(id, &patch)?;
     changed(&api);
     Ok(Json(project))
+}
+
+async fn project_icon(State(api): State<Api>, Path(id): Path<Id>) -> Result<Response, Failure> {
+    let project = api.runner.store().project(id)?;
+    let path = std::path::PathBuf::from(project.path);
+    let found = tokio::task::spawn_blocking(move || crate::projects::icon(&path))
+        .await
+        .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let Some((mime, bytes)) = found else {
+        return Err(Failure(StatusCode::NOT_FOUND, "no icon".into()));
+    };
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, mime.to_string()),
+            (axum::http::header::CACHE_CONTROL, "private, max-age=600".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn delete_project(State(api): State<Api>, Path(id): Path<Id>) -> Result<StatusCode, Failure> {

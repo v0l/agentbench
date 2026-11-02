@@ -35,6 +35,12 @@ const SLOTS: usize = Grid::MAX_SIDE * Grid::MAX_SIDE;
 /// The space between tiles of the grid.
 const TILE_GAP: f32 = 8.0;
 
+enum Icon {
+    Loading,
+    Missing,
+    Ready(egui::TextureHandle),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Chat,
@@ -622,6 +628,9 @@ pub struct App {
     settings: Option<Settings>,
     save_requested: bool,
     tray: crate::attach::Tray,
+    icons: HashMap<Id, Icon>,
+    icon_tx: std::sync::mpsc::Sender<(Id, Option<egui::ColorImage>)>,
+    icon_rx: std::sync::mpsc::Receiver<(Id, Option<egui::ColorImage>)>,
     voice: crate::voice::Voice,
     speech: crate::voice::Settings,
     /// Reading a reply aloud, and the message being read.
@@ -677,6 +686,7 @@ impl App {
         let face = Typeface::load(storage);
         let installed = std::sync::Arc::new(Installed::none());
         fonts::apply(ctx, &face, &installed);
+        let icon_channel = std::sync::mpsc::channel();
         let mut app = App {
             client: None,
             face,
@@ -757,6 +767,9 @@ impl App {
             settings: None,
             save_requested: false,
             tray: crate::attach::Tray::default(),
+            icons: HashMap::new(),
+            icon_tx: icon_channel.0,
+            icon_rx: icon_channel.1,
             voice: Default::default(),
             reader: Default::default(),
             reading: None,
@@ -873,6 +886,29 @@ impl App {
     }
 
     /// Whether a project is the built-in home folder, which has no git repo behind it.
+    pub(super) fn project_icon(&mut self, project: Id) -> Option<&Icon> {
+        if !self.icons.contains_key(&project) {
+            self.icons.insert(project, Icon::Loading);
+            if let Some(c) = &self.client {
+                let tx = self.icon_tx.clone();
+                c.project_icon(project, move |bytes| {
+                    let image = bytes.as_deref().and_then(crate::attach::decode);
+                    let _ = tx.send((project, image));
+                });
+            }
+        }
+        self.icons.get(&project)
+    }
+
+    pub fn icon_state(&self, project: Id) -> &'static str {
+        match self.icons.get(&project) {
+            None => "unasked",
+            Some(Icon::Loading) => "loading",
+            Some(Icon::Missing) => "missing",
+            Some(Icon::Ready(_)) => "ready",
+        }
+    }
+
     fn is_home(&self, project: Id) -> bool {
         self.overview.as_ref().is_some_and(|o| o.projects.iter().any(|p| p.id == project && p.home))
     }
@@ -1599,6 +1635,17 @@ impl App {
             self.font_load = None;
             ctx.set_fonts(defs);
             self.fonts_loaded += 1;
+        }
+        while let Ok((id, image)) = self.icon_rx.try_recv() {
+            let icon = match image {
+                Some(img) => Icon::Ready(ctx.load_texture(
+                    format!("project-icon-{id}"),
+                    img,
+                    Default::default(),
+                )),
+                None => Icon::Missing,
+            };
+            self.icons.insert(id, icon);
         }
         if let Some(problem) = self.tray.poll(ctx) {
             self.notice = Some((false, problem));

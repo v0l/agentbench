@@ -2269,3 +2269,22 @@ fn f1_opens_and_closes_the_help() {
     h.run_steps(3);
     assert!(!h.state().helping());
 }
+
+#[test]
+fn a_logo_in_the_repo_becomes_the_projects_icon() {
+    let rig = rig();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap();
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        8,
+        8,
+        image::Rgba([200, 60, 60, 255]),
+    ))
+    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+    .unwrap();
+    std::fs::write(Path::new(&project.path).join("logo.png"), png).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    until(&mut h, "the icon", |h| h.state().icon_state(project.id) == "ready");
+    shot(&mut h, "icons");
+}

@@ -3,6 +3,56 @@ use crate::store::{SeenTree, Store, StoreError};
 use agentbench_core::{Id, Project, Worktree};
 use std::path::{Path, PathBuf};
 
+const ICON_DIRS: [&str; 10] = [
+    "",
+    "public",
+    "static",
+    "assets",
+    "web",
+    "web/public",
+    "app",
+    "src",
+    "src/assets",
+    "resources",
+];
+const ICON_STEMS: [&str; 5] = ["favicon", "icon", "logo", "app-icon", "apple-touch-icon"];
+const ICON_EXTS: [(&str, &str); 4] =
+    [("png", "image/png"), ("webp", "image/webp"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg")];
+const ICON_MAX_BYTES: u64 = 1_000_000;
+
+pub fn icon(root: &Path) -> Option<(&'static str, Vec<u8>)> {
+    let mut best: Option<(usize, usize, PathBuf, &'static str)> = None;
+    for (d, dir) in ICON_DIRS.iter().enumerate() {
+        let Ok(entries) = std::fs::read_dir(root.join(dir)) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_lowercase)
+            else {
+                continue;
+            };
+            let Some((stem, ext)) = name.rsplit_once('.') else { continue };
+            let Some((_, mime)) = ICON_EXTS.iter().find(|(e, _)| *e == ext) else { continue };
+            let Some(rank) = ICON_STEMS.iter().position(|s| {
+                stem == *s
+                    || stem.starts_with(&format!("{s}-"))
+                    || stem.starts_with(&format!("{s}_"))
+            }) else {
+                continue;
+            };
+            let small =
+                entry.metadata().map(|m| m.len() <= ICON_MAX_BYTES && m.is_file()).unwrap_or(false);
+            if !small {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(bd, br, bp, _)| (d, rank, &path) < (*bd, *br, bp)) {
+                best = Some((d, rank, path, mime));
+            }
+        }
+    }
+    let (_, _, path, mime) = best?;
+    std::fs::read(path).ok().map(|bytes| (mime, bytes))
+}
+
 fn err(e: String) -> StoreError {
     StoreError(e)
 }
@@ -143,6 +193,27 @@ pub fn remove_worktree(store: &Store, worktree_id: Id, force: bool) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_repo_logo_is_found_by_name_and_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = |p: &str, c: &[u8]| {
+            let f = dir.path().join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, c).unwrap();
+        };
+        assert!(super::icon(dir.path()).is_none());
+        w("assets/logo.png", b"logo");
+        assert_eq!(super::icon(dir.path()).unwrap(), ("image/png", b"logo".to_vec()));
+        w("public/Favicon.PNG", b"fav");
+        assert_eq!(super::icon(dir.path()).unwrap().1, b"fav".to_vec(), "root-most dir wins");
+        w("icon.jpg", b"top");
+        assert_eq!(super::icon(dir.path()).unwrap(), ("image/jpeg", b"top".to_vec()));
+        w("icon-256.png", b"sized");
+        w("favicon.webp", b"webp");
+        assert_eq!(super::icon(dir.path()).unwrap().1, b"webp".to_vec(), "favicon beats icon");
+        w("notes.png", b"x");
+    }
+
     use super::*;
     use crate::git::testing::repo;
 
