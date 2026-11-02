@@ -552,8 +552,10 @@ fn bash_spec() -> Spec {
     Spec::new(
         "bash",
         "Run a shell command in the worktree and read what it prints: git, cargo, tests, scripts, anything installed. \
-         It runs as the user with their environment, in the worktree. Use the file tools for editing. Do not use it to \
-         read or search source: code_find, code_outline, search_files and read_file do that better.",
+         It runs as the user with their environment, in the worktree. Bash is for builds, tests, git and other programs. \
+         Do not use it to read, search, list, create or edit files (cat, head, sed, grep, find, ls, tee, heredocs, python or perl \
+         one-liners): read_file, search_files, list_files, write_file, edit_file, replace_in_files and the code_* tools do that, \
+         and bash is meant to be restricted to what they cannot do.",
         object(
             json!({
                 "command": string("The command line, run by bash -c"),
