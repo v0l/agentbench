@@ -27,7 +27,7 @@ impl App {
             .max_height(room)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.spacing_mut().item_spacing.y = 2.0;
                 self.chat_stack(ui, &needle);
             });
         if no_projects {
@@ -78,7 +78,7 @@ impl App {
         let on = self.session == Some(s.id);
         let (tint, word) = status_look(s.status);
         let (row, resp) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
         resp.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("chat {}", s.title))
         });
@@ -96,7 +96,7 @@ impl App {
         if let Some(fill) = fill {
             ui.painter().rect_filled(row, 3.0, fill);
         }
-        let dot = egui::pos2(row.left() + 8.0, row.top() + 9.0);
+        let dot = egui::pos2(row.left() + 11.0, row.top() + 14.0);
         if s.status == SessionStatus::Running {
             spinner(ui, dot, 4.5, tint);
         } else {
@@ -105,12 +105,12 @@ impl App {
         let mut inner = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(egui::Rect::from_min_max(
-                    egui::pos2(row.left() + 20.0, row.top() + 1.0),
-                    egui::pos2(row.right() - 4.0, row.bottom()),
+                    egui::pos2(row.left() + 24.0, row.top() + 6.0),
+                    egui::pos2(row.right() - 8.0, row.bottom() - 4.0),
                 ))
                 .layout(Layout::top_down(Align::Min)),
         );
-        inner.spacing_mut().item_spacing.y = 1.0;
+        inner.spacing_mut().item_spacing.y = 0.0;
         Line::new()
             .value(&s.title)
             .tint(if on { READOUT } else { VALUE })
