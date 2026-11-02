@@ -1,23 +1,17 @@
 pub mod browser;
-mod claude;
 pub mod code;
-mod codex;
 mod command;
 pub mod files;
 pub mod media;
 pub mod native;
-mod pi;
 mod process;
 pub mod screenshot;
 pub mod search;
 pub mod secrets;
 
 pub use async_trait::async_trait;
-pub use claude::Claude;
-pub use codex::Codex;
 pub use command::JsonCommand;
 pub use native::Native;
-pub use pi::Pi;
 pub use process::{Cli, Launch};
 pub use tokio_util::sync::CancellationToken;
 
@@ -296,9 +290,6 @@ impl Context {
 pub fn defaults() -> Vec<Box<dyn Agent>> {
     vec![
         Box::new(Native::default()),
-        Box::new(Pi::new("pi")),
-        Box::new(Claude::new("claude")),
-        Box::new(Codex::new("codex")),
     ]
 }
 

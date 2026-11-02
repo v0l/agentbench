@@ -61,7 +61,7 @@ Data lives in `$AGENTBENCH_HOME` (default `~/.local/share/agentbench`):
 agentbench chat                      # a new chat in your home folder
 agentbench chat -c                   # carry on with the latest one
 agentbench chat summarise ~/notes.md # first message given on the command line
-agentbench chat --agent claude --project snort
+agentbench chat --project snort
 ```
 
 It starts the server if it is not running, or use `--url` and `--token` (or
@@ -125,19 +125,10 @@ model = "qwen3.8-27b"
 key = "..."
 ```
 
-`pi`, `claude` and `codex` are built in too. Each turn runs the CLI once in the
-worktree with the prompt on stdin and reads its JSON event stream; a message
-sent while one works runs as the next turn. They are told they run inside
-agentbench and given the API address and token (`AGENTBENCH_URL`, `AGENTBENCH_TOKEN`,
-`AGENTBENCH_SESSION`, `AGENTBENCH_PROJECT`) so they can use the tracker over REST.
-Each keeps its own session files and is resumed by id; agentbench keeps the
-normalized transcript you read.
-
 Any other CLI that prints JSON lines can be added without code:
 
 ```toml
 listen = "127.0.0.1:7420"
-pi = "/opt/pi/bin/pi"
 
 [[agent]]
 name = "aider"
@@ -252,8 +243,8 @@ twenty idle minutes. An empty `command` turns a built-in one off.
 
 Drop files on the chat, paste a picture with ctrl+v, or use **attach**. Up to 8
 files of 20 MB each go with a message and are kept with the chat. The agentbench
-agent is shown pictures, sound and video directly; pi, claude, codex and other
-CLI agents are told where each file was written so they can read it.
+agent is shown pictures, sound and video directly; CLI agents added in the
+config are told where each file was written so they can read it.
 
 ## Chat titles
 
@@ -298,10 +289,6 @@ level with no model is left out.
   down for mechanical work, and the switch takes effect on its next step, in the
   middle of a turn. The chat remembers it, and a notice in the transcript says
   what changed and why.
-
-Other agents (pi, claude, codex) have their own model lists, so `/model` with a
-model id still works for them, but levels and `switch_model` are the agentbench
-agent's.
 
 ## Web and Android
 

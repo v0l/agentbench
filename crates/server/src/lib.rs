@@ -24,12 +24,6 @@ pub struct Config {
     #[serde(default)]
     pub listen: Option<SocketAddr>,
     #[serde(default)]
-    pub pi: Option<PathBuf>,
-    #[serde(default)]
-    pub claude: Option<PathBuf>,
-    #[serde(default)]
-    pub codex: Option<PathBuf>,
-    #[serde(default)]
     pub web: Option<PathBuf>,
     #[serde(default)]
     pub model: agent::native::Model,
@@ -114,9 +108,6 @@ impl Config {
             std::sync::Arc::new(agent::code::Code::new(agent::code::unconfined(self.code.clone())));
         let mut all: Vec<Box<dyn Agent>> = vec![
             Box::new(native),
-            Box::new(agent::Pi::new(self.pi.clone().unwrap_or_else(|| "pi".into()))),
-            Box::new(agent::Claude::new(self.claude.clone().unwrap_or_else(|| "claude".into()))),
-            Box::new(agent::Codex::new(self.codex.clone().unwrap_or_else(|| "codex".into()))),
         ];
         for extra in &self.agents {
             all.retain(|a| a.name() != extra.name);
@@ -289,8 +280,7 @@ mod tests {
         let c: Config = toml::from_str(
             r#"
             listen = "0.0.0.0:9000"
-            pi = "/opt/pi"
-
+            
             [[agent]]
             name = "aider"
             program = "aider"
@@ -307,7 +297,7 @@ mod tests {
         assert_eq!(c.listen, Some("0.0.0.0:9000".parse().unwrap()));
         let agents = c.agents();
         let names: Vec<_> = agents.iter().map(|a| a.name()).collect();
-        assert_eq!(names, ["native", "pi", "claude", "aider", "codex"]);
+        assert_eq!(names, ["native", "aider", "codex"]);
     }
 
     #[test]

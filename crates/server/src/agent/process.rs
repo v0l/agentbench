@@ -6,26 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 const STDERR_KEPT: usize = 4000;
-const LISTING_PATIENCE: Duration = Duration::from_secs(20);
 const TERM_GRACE: Duration = Duration::from_secs(3);
-
-/// Run `program args` for a short listing and return its stdout and stderr together.
-pub(super) async fn listing(program: &Path, args: &[&str]) -> Result<String, String> {
-    let run = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output();
-    let out = tokio::time::timeout(LISTING_PATIENCE, run)
-        .await
-        .map_err(|_| format!("{} took too long to list models", program.display()))?
-        .map_err(|e| format!("could not start {}: {e}", program.display()))?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok(text)
-}
 
 pub struct Launch {
     pub program: PathBuf,
