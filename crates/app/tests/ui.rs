@@ -2290,10 +2290,12 @@ fn the_supervisor_key_opens_one_chat_and_shows_no_project() {
     until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
     let sid = h.state().supervisor_chat().unwrap();
     assert_eq!(h.state().shown(), [sid]);
+    h.run_steps(3);
+    shot(&mut h, "supervisor");
     assert_eq!(h.state().overview().unwrap().sessions.len(), before + 1);
 
-    h.get_by_label("supervisor").click();
     h.run_steps(5);
+    assert!(h.query_by_label_contains("chat Supervisor").is_some(), "now a chat row");
     assert_eq!(h.state().overview().unwrap().sessions.len(), before + 1, "one standing chat");
     assert_eq!(h.state().supervisor_chat(), Some(sid));
 }

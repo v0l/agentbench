@@ -1450,6 +1450,7 @@ mod tests {
         assert_eq!(s, StatusCode::OK, "{first}");
         let (_, again) = open().await;
         assert_eq!(first["id"], again["id"], "one standing chat");
+        assert_eq!(first["title"], "Supervisor");
         assert_eq!(f.api.runner.store().sessions().unwrap().len(), 1);
 
         let (_, overview) = call(&f.app, "GET", "/api/overview", None, T).await;

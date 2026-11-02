@@ -276,8 +276,10 @@ impl App {
     /// worktree as chips like the status box's, and the stop and close keys. The agent, model and
     /// tokens are on hover and in the status line.
     pub(super) fn chat_header(&mut self, ui: &mut Ui, s: &Session, tree: Option<&Worktree>) {
-        let project = self.project_name(s.project_id);
-        let home = self.is_home(s.project_id);
+        let supervisor = self.supervisor_chat() == Some(s.id);
+        let project =
+            if supervisor { "supervisor".to_string() } else { self.project_name(s.project_id) };
+        let home = supervisor || self.is_home(s.project_id);
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if self.narrow {
@@ -343,7 +345,7 @@ impl App {
                         tokens(s.usage.input_tokens + s.usage.cache_read_tokens),
                         tokens(s.usage.output_tokens)
                     );
-                    chip(ui, &project, READOUT, true).on_hover_text(&about);
+                    chip(ui, &project, if supervisor { TRACE } else { READOUT }, true).on_hover_text(&about);
                     if let Some(w) = tree.filter(|_| !home) {
                         chip(ui, &w.label(), VALUE, false).on_hover_text(&about);
                     }

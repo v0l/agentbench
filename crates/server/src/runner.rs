@@ -239,6 +239,7 @@ impl Runner {
         self.start_session(NewSession {
             project_id: project.id,
             agent: agent.to_string(),
+            title: Some("Supervisor".into()),
             ..Default::default()
         })
     }

@@ -20,19 +20,19 @@ impl App {
             return;
         };
         let no_projects = o.projects.iter().all(|p| p.builtin());
-        let supervisor = o.supervisor;
-        let key = ui.add(
-            Key::new("supervisor")
-                .outline(if supervisor.is_some() && self.session == supervisor {
-                    READOUT
-                } else {
-                    VALUE
-                })
-                .min_width(ui.available_width()),
-        );
-        key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "supervisor"));
-        if key.clicked() {
-            self.open_supervisor();
+        let existing = o.supervisor.and_then(|id| o.sessions.iter().find(|s| s.id == id).cloned());
+        match existing {
+            Some(s) => self.session_row(ui, &s, "supervisor", ""),
+            None => {
+                let key =
+                    ui.add(Key::new("supervisor").outline(VALUE).min_width(ui.available_width()));
+                key.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "supervisor")
+                });
+                if key.clicked() {
+                    self.open_supervisor();
+                }
+            }
         }
         ui.add_space(4.0);
         let Some(o) = &self.overview else {
