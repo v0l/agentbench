@@ -503,6 +503,7 @@ struct Transcript {
     loading: bool,
     older_loading: bool,
     complete: bool,
+    rebuilds: u32,
     anchor: Option<f32>,
     content_h: f32,
     shift: Option<f32>,
@@ -1295,6 +1296,10 @@ impl App {
         self.notice.as_ref().filter(|(ok, _)| !ok).map(|(_, t)| t.clone())
     }
 
+    pub fn transcript_rebuilds(&self, session: SessionId) -> u32 {
+        self.transcripts.get(&session).map_or(0, |t| t.rebuilds)
+    }
+
     pub fn transcript_len(&self, session: SessionId) -> usize {
         self.transcripts.get(&session).map_or(0, |t| t.messages.len())
     }
@@ -1538,17 +1543,23 @@ impl App {
                 if t.rows.is_empty() && msgs.len() < FIRST_PAGE {
                     t.complete = true;
                 }
+                let mut changed = false;
                 for m in msgs {
                     t.last = t.last.max(m.id);
+                    match t.rows.iter_mut().rev().find(|x| x.id == m.id) {
+                        Some(x) if *x == m => continue,
+                        Some(x) => *x = m.clone(),
+                        None => t.rows.push(m.clone()),
+                    }
                     for i in 0..agentbench_core::SHOWN_PER_ROW {
                         t.heights.forget(m.id * agentbench_core::SHOWN_PER_ROW + i);
                     }
-                    match t.rows.iter_mut().rev().find(|x| x.id == m.id) {
-                        Some(x) => *x = m,
-                        None => t.rows.push(m),
-                    }
+                    changed = true;
                 }
-                t.messages = agentbench_core::shown(&t.rows);
+                if changed || t.messages.is_empty() && !t.rows.is_empty() {
+                    t.messages = agentbench_core::shown(&t.rows);
+                    t.rebuilds += 1;
+                }
             }
             Reply::Comments(iid, c) => {
                 self.comments.insert(iid, c);
@@ -2782,6 +2793,33 @@ mod tests {
         let at = place(&mut slots, 2, 0, id[3]);
         assert_eq!(at, 0);
         assert_eq!(slots, [Some(id[3]), Some(id[1]), None, None]);
+    }
+
+    fn row(id: Id, text: &str) -> Message {
+        Message {
+            id,
+            session_id: SessionId::default(),
+            entry: Entry::Assistant { text: text.into() },
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_refresh_that_changes_nothing_does_not_rebuild_the_transcript() {
+        let mut app = App::new(&egui::Context::default(), None, None);
+        let sid = SessionId::default();
+        let rows: Vec<Message> = (1..=5).map(|i| row(i, &format!("row {i}"))).collect();
+        app.handle(Reply::Messages(sid, rows.clone()));
+        assert_eq!(app.transcript_rebuilds(sid), 1);
+        app.handle(Reply::Messages(sid, rows[2..].to_vec()));
+        assert_eq!(app.transcript_rebuilds(sid), 1, "the same rows again change nothing");
+        let mut edited = rows[4..].to_vec();
+        edited[0] = row(5, "row 5 grew");
+        app.handle(Reply::Messages(sid, edited));
+        assert_eq!(app.transcript_rebuilds(sid), 2, "a row that changed is picked up");
+        app.handle(Reply::Messages(sid, vec![row(6, "row 6")]));
+        assert_eq!(app.transcript_rebuilds(sid), 3, "a new row is picked up");
+        assert_eq!(app.transcript_len(sid), 6);
     }
 
     #[test]
