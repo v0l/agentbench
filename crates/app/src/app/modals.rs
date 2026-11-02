@@ -8,6 +8,7 @@ impl App {
         self.file_issue_modal(ctx);
         self.start_modal(ctx);
         self.worktree_modal(ctx);
+        self.tags_modal(ctx);
         self.confirm_modal(ctx);
         self.terminal_modal(ctx);
         self.settings_modal(ctx);
@@ -510,6 +511,50 @@ impl App {
             self.new_worktree = None;
         } else if close {
             self.new_worktree = None;
+        }
+    }
+
+    pub(super) fn tags_modal(&mut self, ctx: &egui::Context) {
+        let Some((pid, text)) = &mut self.edit_tags else {
+            return;
+        };
+        let (mut go, mut close) = (false, false);
+        let m = egui::Modal::new(egui::Id::unique("tags"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(modal_width(ctx, 460.0));
+                modal_title(ui, "Project groups");
+                section(ui, "groups", "separate with commas", |ui| {
+                    row_help(
+                        ui,
+                        "names",
+                        "Used to filter the project list and the all projects board.",
+                        |ui| {
+                            field(ui, text, "infra, games");
+                        },
+                    );
+                });
+                footer(ui, |ui| {
+                    if ui.add(Key::new("save").solid(READOUT).min_width(100.0)).clicked() {
+                        go = true;
+                    }
+                    if ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if m.should_close() {
+            close = true;
+        }
+        if go {
+            let tags = text.split(',').map(str::to_string).collect();
+            let pid = *pid;
+            if let Some(c) = &mut self.client {
+                c.update_project(pid, &ProjectPatch { tags: Some(tags), ..Default::default() });
+            }
+            self.edit_tags = None;
+        } else if close {
+            self.edit_tags = None;
         }
     }
 

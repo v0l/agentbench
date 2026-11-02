@@ -34,6 +34,15 @@ Read the conversation and reply with a title for it: three to seven words, sente
 saying what the person is trying to get done. No quotes, no markdown, no trailing punctuation. \
 Reply with the title and nothing else.";
 
+const REFRESH_INSTRUCTIONS: &str = "You keep the names of chats between a person and a coding agent \
+up to date. You are given the current title and the latest part of the conversation. If the \
+title still says what the person is trying to get done, reply with it unchanged. If the work has \
+moved on, reply with a new title: three to seven words, sentence case. No quotes, no markdown, \
+no trailing punctuation. Reply with the title and nothing else.";
+
+pub const REFRESH_EVERY: usize = 4;
+const REFRESH_WINDOW: usize = 3;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TitleModel {
     #[serde(default = "yes")]
@@ -141,6 +150,18 @@ impl Titles {
         clean(&raw).ok_or_else(|| format!("the model gave no usable title: {raw:?}"))
     }
 
+    pub async fn refresh(&self, entries: &[Entry], current: &str) -> Result<String, String> {
+        let target = self.target().ok_or("no title model")?;
+        let recent = latest_turns(entries, REFRESH_WINDOW);
+        let transcript = transcript(recent);
+        if transcript.is_empty() {
+            return Err("nothing said yet".into());
+        }
+        let input = format!("Current title: {current}\n\n{transcript}");
+        let raw = ask(&target, REFRESH_INSTRUCTIONS, &input, TOKENS, PATIENCE).await?;
+        clean(&raw).ok_or_else(|| format!("the model gave no usable title: {raw:?}"))
+    }
+
     /// What `prompt` asks for out of `text`, a web page or the like, answered by the same small
     /// model that names chats. Text beyond what the model can take is left off, and the answer
     /// says so.
@@ -167,6 +188,27 @@ impl Titles {
         } else {
             answer
         })
+    }
+}
+
+pub fn user_turns(entries: &[Entry]) -> usize {
+    agentbench_core::since_summary(entries)
+        .iter()
+        .filter(|e| matches!(e, Entry::User { .. }))
+        .count()
+}
+
+fn latest_turns(entries: &[Entry], turns: usize) -> &[Entry] {
+    let entries = agentbench_core::since_summary(entries);
+    let users: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, Entry::User { .. }))
+        .map(|(i, _)| i)
+        .collect();
+    match users.len().checked_sub(turns).and_then(|i| users.get(i)) {
+        Some(&start) => &entries[start..],
+        None => entries,
     }
 }
 

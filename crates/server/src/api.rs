@@ -3,7 +3,7 @@ use crate::runner::Runner;
 use crate::store::StoreError;
 use agentbench_core::{
     Answer, ApiError, Id, IssuePatch, IssueState, NewComment, NewIssue, NewProject, NewSession,
-    NewWorktree, Overview, SendMessage, SessionId,
+    NewWorktree, Overview, ProjectPatch, SendMessage, SessionId,
 };
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -84,7 +84,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/settings/title/models", post(list_title_models))
         .route("/api/agents/{name}/models", get(agent_models))
         .route("/api/projects", get(list_projects).post(add_project))
-        .route("/api/projects/{id}", delete(delete_project))
+        .route("/api/projects/{id}", delete(delete_project).patch(update_project))
         .route("/api/projects/{id}/sync", post(sync_project))
         .route("/api/projects/{id}/worktrees", get(list_worktrees).post(add_worktree))
         .route("/api/worktrees/{id}", delete(remove_worktree))
@@ -518,6 +518,16 @@ async fn add_project(
     })
     .await
     .map_err(|e| bad(e.to_string()))??;
+    changed(&api);
+    Ok(Json(project))
+}
+
+async fn update_project(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+    Json(patch): Json<ProjectPatch>,
+) -> Reply<agentbench_core::Project> {
+    let project = api.runner.store().update_project(id, &patch)?;
     changed(&api);
     Ok(Json(project))
 }

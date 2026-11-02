@@ -89,6 +89,10 @@ pub struct Project {
     /// repository. It has one fixed checkout and is never scanned for worktrees.
     #[serde(default)]
     pub home: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -816,6 +820,14 @@ pub struct NewProject {
     /// Make the folder when it is missing, and `git init` it when it is not a repo yet.
     #[serde(default)]
     pub create: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

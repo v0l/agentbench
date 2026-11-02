@@ -327,6 +327,9 @@ impl App {
                 });
             });
         });
+        if !s.title.trim().is_empty() {
+            Line::new().value(&s.title).size(12.5).elided(ui);
+        }
     }
 
     pub(super) fn session_view(&mut self, ui: &mut Ui, s: Session) {
