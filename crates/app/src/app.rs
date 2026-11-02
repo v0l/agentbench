@@ -1817,11 +1817,16 @@ impl App {
             )
             .cloned()
             .collect();
-        segments(
-            ui,
-            &mut self.scope,
-            &[(Scope::Project, "this project", None), (Scope::Everything, "all projects", None)],
-        );
+        ui.push_id("scope", |ui| {
+            segments(
+                ui,
+                &mut self.scope,
+                &[
+                    (Scope::Project, "this project", None),
+                    (Scope::Everything, "all projects", None),
+                ],
+            );
+        });
         ui.add_space(8.0);
         let open = all.iter().filter(|i| i.state.is_open()).count();
         segments(

@@ -164,6 +164,7 @@ CREATE TABLE notes (
     "ALTER TABLE sessions ADD COLUMN effort TEXT;",
     "ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE projects ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
+    "ALTER TABLE sessions ADD COLUMN title_turns INTEGER NOT NULL DEFAULT 0;",
 ];
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
@@ -256,6 +257,9 @@ fn worktree_row(row: &Row) -> rusqlite::Result<Worktree> {
         created_at: row.get("created_at")?,
     })
 }
+
+pub const TITLE_STAND_IN: i64 = 1;
+pub const TITLE_GENERATED: i64 = 2;
 
 fn clean_tags(tags: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -819,16 +823,47 @@ impl Store {
     /// Mark a session's title as a stand-in (cut from the first message) that a
     /// model may replace once there is a conversation to name.
     pub fn set_title_auto(&self, id: SessionId, auto: bool) -> Result<()> {
-        self.db()
-            .execute("UPDATE sessions SET title_auto = ?1 WHERE id = ?2", params![auto, id])?;
+        self.db().execute(
+            "UPDATE sessions SET title_auto = ?1, title_turns = 0 WHERE id = ?2",
+            params![auto, id],
+        )?;
         Ok(())
     }
 
     pub fn title_is_auto(&self, id: SessionId) -> Result<bool> {
+        Ok(self.title_state(id)?.0 == TITLE_STAND_IN)
+    }
+
+    pub fn title_state(&self, id: SessionId) -> Result<(i64, i64)> {
         self.db()
-            .query_row("SELECT title_auto FROM sessions WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT title_auto, title_turns FROM sessions WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .optional()?
             .ok_or_else(|| not_found("session", id))
+    }
+
+    pub fn set_generated_title(
+        &self,
+        id: SessionId,
+        title: &str,
+        force: bool,
+        turns: usize,
+    ) -> Result<bool> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(StoreError("a title needs some text".into()));
+        }
+        let db = self.db();
+        let n = db.execute(
+            "UPDATE sessions SET title = ?1, title_auto = ?2, title_turns = ?3, updated_at = ?4
+             WHERE id = ?5 AND (title_auto > 0 OR ?6)",
+            params![title, TITLE_GENERATED, turns as i64, now(), id, force],
+        )?;
+        if n > 0 {
+            Store::changed(&db, "session", id)?;
+        }
+        Ok(n > 0)
     }
 
     /// Give a session its real title. Unless `force`, only a stand-in title is
@@ -841,7 +876,7 @@ impl Store {
         let db = self.db();
         let n = db.execute(
             "UPDATE sessions SET title = ?1, title_auto = 0, updated_at = ?2
-             WHERE id = ?3 AND (title_auto = 1 OR ?4)",
+             WHERE id = ?3 AND (title_auto > 0 OR ?4)",
             params![title, now(), id, force],
         )?;
         if n > 0 {

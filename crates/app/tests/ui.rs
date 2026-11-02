@@ -746,7 +746,7 @@ fn the_buttons_on_an_issue_card_work() {
     click(&mut h, 283.0, 20.0);
     h.run_steps(3);
     shot(&mut h, "issues-tab");
-    click(&mut h, 614.0, 251.0);
+    click(&mut h, 614.0, 293.0);
     h.run_steps(3);
     shot(&mut h, "more");
     assert!(h.state().issue_open().is_some(), "more opens the issue");

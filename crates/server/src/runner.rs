@@ -98,9 +98,11 @@ impl Runner {
     /// stand-in in place and is tried again after the next turn.
     fn retitle(&self, session: SessionId, force: bool) {
         let Some(titles) = self.titles.clone() else { return };
-        if titles.target().is_none()
-            || !(force || self.store.title_is_auto(session).unwrap_or(false))
-        {
+        if titles.target().is_none() {
+            return;
+        }
+        let (auto, at) = self.store.title_state(session).unwrap_or_default();
+        if !force && auto == 0 {
             return;
         }
         let (store, changed) = (self.store.clone(), self.changed.clone());
@@ -110,9 +112,22 @@ impl Runner {
                     .into_iter()
                     .map(|m| m.entry)
                     .collect();
-            match titles.title(&entries).await {
+            let turns = crate::titles::user_turns(&entries);
+            let due = auto == crate::store::TITLE_GENERATED
+                && turns >= at as usize + crate::titles::REFRESH_EVERY;
+            if !force && auto == crate::store::TITLE_GENERATED && !due {
+                return;
+            }
+            let current = store.session(session).map(|s| s.title).unwrap_or_default();
+            let named = if auto == crate::store::TITLE_GENERATED {
+                titles.refresh(&entries, &current).await
+            } else {
+                titles.title(&entries).await
+            };
+            match named {
                 Ok(title) => {
-                    if matches!(store.set_title(session, &title, force), Ok(true)) {
+                    if matches!(store.set_generated_title(session, &title, force, turns), Ok(true))
+                    {
                         changed.notify_waiters();
                     }
                 }
@@ -2056,6 +2071,47 @@ mod tests {
             prompt.contains("second question") && !prompt.contains("first question"),
             "{prompt}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_generated_title_is_refreshed_every_few_turns() {
+        let (url, seen) = crate::titles::fake::server(vec![
+            (200, crate::titles::fake::completion("First topic")),
+            (200, crate::titles::fake::completion("Moved on to tests")),
+        ]);
+        let script = r#"read p; echo "{\"text\":\"hi\"}""#;
+        let (runner, s) = titled(url, script_agent("echo", script), true);
+        for n in 1..=5 {
+            let s = runner.store().session(s.id).unwrap();
+            runner.send(&s, &format!("question {n}")).unwrap();
+            wait_idle(&runner, s.id).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let asked = seen.lock().unwrap().len();
+            match n {
+                1..=4 => assert_eq!(asked, 1.min(n), "turn {n}"),
+                _ => assert_eq!(asked, 2, "turn {n}"),
+            }
+        }
+        assert!(title_becomes(&runner, s.id, "Moved on to tests").await);
+        let sent = seen.lock().unwrap();
+        let prompt = sent[1]["messages"][1]["content"].as_str().unwrap();
+        assert!(prompt.contains("Current title: First topic"), "{prompt}");
+        assert!(prompt.contains("question 5") && !prompt.contains("question 1\n"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn a_title_someone_set_by_hand_is_never_refreshed() {
+        let (url, seen) =
+            crate::titles::fake::server(vec![(200, crate::titles::fake::completion("Not this"))]);
+        let script = r#"read p; echo "{\"text\":\"hi\"}""#;
+        let (runner, s) = titled(url, script_agent("echo", script), false);
+        for n in 1..=6 {
+            let s = runner.store().session(s.id).unwrap();
+            runner.send(&s, &format!("q{n}")).unwrap();
+            wait_idle(&runner, s.id).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
