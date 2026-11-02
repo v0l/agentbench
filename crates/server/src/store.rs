@@ -167,6 +167,15 @@ CREATE TABLE notes (
     "ALTER TABLE sessions ADD COLUMN title_turns INTEGER NOT NULL DEFAULT 0;",
 ];
 
+const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
+    ("sessions", "title_auto", "INTEGER NOT NULL DEFAULT 0"),
+    ("projects", "home", "INTEGER NOT NULL DEFAULT 0"),
+    ("sessions", "effort", "TEXT"),
+    ("projects", "pinned", "INTEGER NOT NULL DEFAULT 0"),
+    ("projects", "tags", "TEXT NOT NULL DEFAULT '[]'"),
+    ("sessions", "title_turns", "INTEGER NOT NULL DEFAULT 0"),
+];
+
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
 
 #[derive(Debug)]
@@ -333,6 +342,15 @@ impl Store {
                 "BEGIN; {step}; PRAGMA user_version = {}; COMMIT;",
                 i + 1
             ))?;
+        }
+        for (table, column, definition) in ADDED_COLUMNS {
+            let present = conn
+                .prepare(&format!("PRAGMA table_info({table})"))?
+                .query_map([], |r| r.get::<_, String>(1))?
+                .any(|name| name.map(|n| n == *column).unwrap_or(false));
+            if !present {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition};"))?;
+            }
         }
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Store { conn: Arc::new(Mutex::new(conn)) };
@@ -1499,6 +1517,24 @@ mod tests {
         let blank = ProjectPatch { name: Some("   ".into()), ..Default::default() };
         assert!(s.update_project(p.id, &blank).is_err());
         assert_eq!(s.project(p.id).unwrap().name, "Billing API");
+    }
+
+    #[test]
+    fn a_database_at_the_latest_version_missing_columns_is_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.db");
+        {
+            let s = Store::open(&path).unwrap();
+            s.add_project("demo", "/r", None, None).unwrap();
+        }
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("ALTER TABLE projects DROP COLUMN pinned; ALTER TABLE projects DROP COLUMN tags;")
+                .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let p = s.projects().unwrap().into_iter().find(|p| p.name == "demo").unwrap();
+        assert!(!p.pinned && p.tags.is_empty());
     }
 
     #[test]
