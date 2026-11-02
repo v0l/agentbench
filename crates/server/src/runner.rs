@@ -15,6 +15,7 @@ use tokio::sync::{Notify, oneshot};
 
 const TEXT_FLUSH: Duration = Duration::from_millis(250);
 const TITLE_MAX: usize = 40;
+const SUPERVISOR_MODEL: &str = "high";
 const ANSWER_PATIENCE: Duration = Duration::from_secs(24 * 3600);
 
 /// Questions put to the user, each waiting on the channel its answers arrive on.
@@ -201,7 +202,12 @@ impl Runner {
                     format!("{} on {}", agent.label(), worktree.label())
                 }
             });
-        let model = new.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+        let model = new
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .or(project.supervisor.then_some(SUPERVISOR_MODEL));
         let session =
             store.add_session(worktree.id, agent.name(), title.trim(), model, new.issue_id)?;
         if stand_in {
@@ -230,6 +236,10 @@ impl Runner {
     /// The one standing supervisor chat, made on first use.
     pub fn open_supervisor(&self, agent: &str) -> Result<Session, StoreError> {
         if let Some(s) = self.supervisor_session() {
+            if s.model.is_none() {
+                self.store.set_model(s.id, Some(SUPERVISOR_MODEL))?;
+                return self.store.session(s.id);
+            }
             return Ok(s);
         }
         let project = self
@@ -2319,6 +2329,31 @@ mod tests {
         runner.api.call("close_session", &id, boss.id).unwrap();
         assert!(store.session(worker.id).is_err(), "the chat is gone");
         assert!(store.main_worktree(p.id).is_ok(), "the worktree stays");
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_chat_defaults_to_the_high_model_level_and_workers_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let store = Store::memory().unwrap();
+        let p = crate::projects::add(&store, &main, None, false).unwrap();
+        crate::projects::ensure_supervisor(&store, &dir.path().join("sup")).unwrap();
+        let runner = Runner::new(store.clone(), vec![script_agent("echo", "read p")]);
+
+        let sup = runner.open_supervisor("echo").unwrap();
+        assert_eq!(sup.model.as_deref(), Some("high"));
+        store.set_model(sup.id, None).unwrap();
+        assert_eq!(runner.open_supervisor("echo").unwrap().model.as_deref(), Some("high"));
+
+        let worker = runner
+            .start_session(NewSession {
+                project_id: p.id,
+                agent: "echo".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(worker.model, None);
     }
 
     #[tokio::test]
