@@ -80,6 +80,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/settings/models", post(list_models))
         .route("/api/settings/cross-project", get(get_cross).delete(clear_cross))
         .route("/api/settings/autorun", get(get_autorun).put(put_autorun))
+        .route("/api/autopilot", get(get_autopilot).patch(patch_autopilot))
         .route("/api/settings/title", get(get_title).put(put_title))
         .route("/api/settings/title/models", post(list_title_models))
         .route("/api/agents/{name}/models", get(agent_models))
@@ -294,6 +295,7 @@ async fn overview(State(api): State<Api>) -> Reply<Overview> {
         issues: store.issues()?,
         sessions: api.runner.with_queued(store.sessions()?),
         supervisor: api.runner.supervisor_session().map(|s| s.id),
+        autopilot: Some(crate::autopilot::state(store)),
         cursor: store.cursor()?,
     }))
 }
@@ -663,6 +665,19 @@ async fn update_issue(
     }
     changed(&api);
     Ok(Json(issue))
+}
+
+async fn get_autopilot(State(api): State<Api>) -> Reply<agentbench_core::AutopilotState> {
+    Ok(Json(crate::autopilot::state(api.runner.store())))
+}
+
+async fn patch_autopilot(
+    State(api): State<Api>,
+    Json(patch): Json<agentbench_core::AutopilotPatch>,
+) -> Reply<agentbench_core::AutopilotState> {
+    let state = crate::autopilot::apply(api.runner.store(), &patch)?;
+    changed(&api);
+    Ok(Json(state))
 }
 
 const AUTORUN_AGENT: &str = "native";

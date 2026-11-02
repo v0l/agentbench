@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod api;
+pub mod autopilot;
 pub mod cli;
 pub mod git;
 pub mod http;
@@ -258,6 +259,7 @@ async fn serve_inner(
         runner::Base { url: local_url(listen), token: token.clone() };
     let api = api::Api { runner, token, model, speech, voice };
     api.runner.resume(&stale);
+    autopilot::spawn(api.runner.clone());
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     let listener =
         tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;

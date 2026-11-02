@@ -357,9 +357,52 @@ impl App {
         }
     }
 
+    fn autopilot_panel(&mut self, ui: &mut Ui) {
+        let Some(a) = self.autopilot().cloned() else { return };
+        let status = if !a.enabled {
+            "paused".to_string()
+        } else if a.idle {
+            "idle, no eligible issues".to_string()
+        } else {
+            format!("running, {} of {} workers", a.workers, a.cap)
+        };
+        let mut flip = false;
+        ui.add_space(4.0);
+        rail_block(ui, ETCH, egui::Color32::TRANSPARENT, |ui| {
+            ui.horizontal(|ui| {
+                Line::new()
+                    .legend("autopilot")
+                    .size(10.0)
+                    .tint(LEGEND)
+                    .gap(8.0)
+                    .value(&status)
+                    .size(11.0)
+                    .tint(if a.enabled { READOUT } else { VALUE })
+                    .elided(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = if a.enabled { "pause" } else { "resume" };
+                    let key = ui.add(Key::new(label).outline(if a.enabled { FAULT } else { VALUE }));
+                    key.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "autopilot toggle")
+                    });
+                    flip = key.clicked();
+                });
+            });
+            for line in a.activity.iter().take(4) {
+                Line::new().note(&line.text).size(10.0).elided(ui);
+            }
+        });
+        if flip {
+            self.toggle_autopilot();
+        }
+    }
+
     pub(super) fn session_view(&mut self, ui: &mut Ui, s: Session) {
         let tree = self.worktree(s.worktree_id).cloned();
         self.chat_header(ui, &s, tree.as_ref());
+        if self.supervisor_chat() == Some(s.id) {
+            self.autopilot_panel(ui);
+        }
         self.session_body(ui, s, tree);
     }
 
