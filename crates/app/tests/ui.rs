@@ -2242,3 +2242,30 @@ fn the_chat_list_keeps_the_order_chats_were_started_in() {
     }
     assert_eq!(h.state().chat_order(), before, "a refresh does not reorder the chats");
 }
+
+#[test]
+fn ctrl_n_opens_the_new_chat_modal() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    assert!(!h.state().starting());
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::N);
+    h.run_steps(3);
+    assert!(h.state().starting());
+}
+
+#[test]
+fn f1_opens_and_closes_the_help() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    h.key_press(egui::Key::F1);
+    h.run_steps(3);
+    assert!(h.state().helping());
+    shot(&mut h, "help");
+    h.key_press(egui::Key::F1);
+    h.run_steps(3);
+    assert!(!h.state().helping());
+}

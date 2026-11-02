@@ -615,6 +615,7 @@ pub struct App {
     add_project: Option<AddProject>,
     file_issue: Option<FileIssue>,
     start: Option<Start>,
+    help: bool,
     new_worktree: Option<(Id, String)>,
     confirm: Option<Confirm>,
     terminal: Option<TerminalView>,
@@ -749,6 +750,7 @@ impl App {
             add_project: None,
             file_issue: None,
             start: None,
+            help: false,
             new_worktree: None,
             confirm: None,
             terminal: None,
@@ -1290,6 +1292,10 @@ impl App {
         all.into_iter().map(|s| s.id).collect()
     }
 
+    pub fn helping(&self) -> bool {
+        self.help
+    }
+
     pub fn starting(&self) -> bool {
         self.start.is_some()
     }
@@ -1596,6 +1602,15 @@ impl App {
         }
         if let Some(problem) = self.tray.poll(ctx) {
             self.notice = Some((false, problem));
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
+            self.help = !self.help;
+        }
+        if self.overview.is_some()
+            && self.start.is_none()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N))
+        {
+            self.open_start(None);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::M)) {
             self.toggle_speech(ctx);

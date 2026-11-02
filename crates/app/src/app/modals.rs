@@ -13,6 +13,7 @@ impl App {
         self.terminal_modal(ctx);
         self.settings_modal(ctx);
         self.scan_modal(ctx);
+        self.help_modal(ctx);
     }
 
     /// The camera, looking for a pairing code. Pairs and closes itself when it reads one.
@@ -514,6 +515,51 @@ impl App {
         }
     }
 
+    pub(super) fn help_modal(&mut self, ctx: &egui::Context) {
+        if !self.help {
+            return;
+        }
+        let mut close = false;
+        let m = egui::Modal::new(egui::Id::unique("help"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(modal_width(ctx, 520.0));
+                modal_title(ui, "Help");
+                section(ui, "keys", "press F1 to open or close this", |ui| {
+                    for (keys, what) in SHORTCUTS {
+                        ui.horizontal(|ui| {
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(130.0, 18.0),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.set_min_width(130.0);
+                                    ui.label(
+                                        egui::RichText::new(keys)
+                                            .monospace()
+                                            .size(11.5)
+                                            .color(READOUT),
+                                    );
+                                },
+                            );
+                            ui.label(egui::RichText::new(what).size(11.5).color(VALUE));
+                        });
+                    }
+                });
+                ui.add_space(8.0);
+                section(ui, "the chat list", "on the left", |ui| {
+                    for line in LIST_HELP {
+                        note(ui, line, LEGEND);
+                    }
+                });
+                footer(ui, |ui| {
+                    close = ui.add(Key::new("close").outline(VALUE).min_width(100.0)).clicked();
+                });
+            });
+        if close || m.should_close() {
+            self.help = false;
+        }
+    }
+
     pub(super) fn tags_modal(&mut self, ctx: &egui::Context) {
         let Some((pid, text)) = &mut self.edit_tags else {
             return;
@@ -641,3 +687,23 @@ impl App {
         }
     }
 }
+
+const SHORTCUTS: [(&str, &str); 10] = [
+    ("F1", "this help"),
+    ("Ctrl+N", "new chat: pick the project, agent, model and worktree"),
+    ("Enter", "send the message"),
+    ("Shift+Enter", "a new line in the message"),
+    ("Up / Down", "step through the messages you sent in this chat"),
+    ("Esc", "stop the agent working in the open chat"),
+    ("Ctrl+M", "speak instead of typing"),
+    ("Ctrl+V", "paste text or a picture into the message"),
+    ("Ctrl+C", "clear the draft when no text is selected"),
+    ("Esc in a dialog", "close it"),
+];
+
+const LIST_HELP: [&str; 4] = [
+    "Chats are listed in the order they were started, newest first.",
+    "Click one to open it. In a grid it fills the focused tile.",
+    "Right click a chat to stop it or close it.",
+    "Projects and worktrees are managed in Settings, on the projects page.",
+];

@@ -104,7 +104,9 @@ impl App {
 
     pub(super) fn key_new_chat(&mut self, ui: &mut Ui) {
         let ready = self.overview.is_some();
-        if ui.add(Key::new("new chat").solid(READOUT).enabled(ready)).clicked() {
+        let key = ui.add(Key::new("new chat").solid(READOUT).enabled(ready));
+        let key = key.on_hover_text("ctrl+n");
+        if key.clicked() {
             self.open_start(None);
         }
     }
