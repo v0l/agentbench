@@ -9,15 +9,13 @@ impl App {
                 if hamburger(ui, self.drawer).clicked() {
                     self.drawer = !self.drawer;
                 }
-                self.header_title(ui);
+                let w = (ui.available_width() - 150.0).max(100.0);
+                ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     self.phone_more(ui);
                     self.key_new_chat_short(ui);
                 });
             });
-            ui.add_space(2.0);
-            let w = ui.available_width();
-            ui.allocate_ui(Vec2::new(w, 24.0), |ui| self.header_tabs(ui, w));
         } else {
             ui.horizontal(|ui| {
                 self.header_title(ui);
@@ -106,7 +104,7 @@ impl App {
 
     pub(super) fn key_new_chat_short(&mut self, ui: &mut Ui) {
         let ready = self.overview.is_some();
-        let key = ui.add(Key::new("new").solid(READOUT).enabled(ready));
+        let key = ui.add(Key::new("new").solid(READOUT).enabled(ready).min_width(64.0));
         key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ready, "new chat"));
         if key.clicked() {
             self.open_start(None);
