@@ -706,6 +706,31 @@ impl Api for StoreApi {
                 desktop_notice(&me.title, message.trim());
                 json!({ "notified": true })
             }
+            "autopilot" => {
+                if !sup {
+                    return Err("only the supervisor chat can run the autopilot".into());
+                }
+                let num = |k: &str| args.get(k).and_then(Value::as_u64).map(|n| n as u32);
+                let flag = |k: &str| args.get(k).and_then(Value::as_bool);
+                let project_switch = match args.get("project").filter(|v| !v.is_null()) {
+                    Some(v) => Some(agentbench_core::ProjectSwitch {
+                        id: self.find_project(v)?.id,
+                        enabled: flag("project_enabled"),
+                    }),
+                    None => None,
+                };
+                let patch = agentbench_core::AutopilotPatch {
+                    enabled: flag("enabled"),
+                    cap: num("cap"),
+                    project_cap: num("project_cap"),
+                    stuck_minutes: args.get("stuck_minutes").and_then(Value::as_u64),
+                    max_nudges: num("max_nudges"),
+                    merge: flag("merge"),
+                    project: project_switch,
+                };
+                let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
+                json!(state)
+            }
             "set_model" => {
                 let model = text(args, "model").filter(|m| !m.trim().is_empty());
                 s.set_model(session, model.as_deref().map(str::trim)).map_err(|e| e.0)?;
@@ -717,6 +742,7 @@ impl Api for StoreApi {
         if matches!(
             tool,
             "file_issue"
+                | "autopilot"
                 | "update_issue"
                 | "comment_on_issue"
                 | "create_worktree"
@@ -787,6 +813,26 @@ fn clip(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_supervisor_can_toggle_the_autopilot() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::memory().unwrap();
+        let (p, main) = crate::store::testing::project(&s, "/a");
+        let worker = s.add_session(main.id, "native", "w", None, None).unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
+        let sup_tree = s.main_worktree(sup.id).unwrap();
+        let boss = s.add_session(sup_tree.id, "native", "boss", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        assert!(api.call("autopilot", &json!({"enabled": true}), worker.id).is_err());
+        assert!(!crate::autopilot::state(&s).enabled);
+        let read = api.call("autopilot", &json!({}), boss.id).unwrap();
+        assert_eq!((read["enabled"].clone(), read["cap"].clone()), (json!(false), json!(4)));
+        let on = api.call("autopilot", &json!({"enabled": true, "cap": 3}), boss.id).unwrap();
+        assert_eq!((on["enabled"].clone(), on["cap"].clone()), (json!(true), json!(3)));
+        api.call("autopilot", &json!({"project": p.id, "project_enabled": false}), boss.id).unwrap();
+        assert!(!crate::autopilot::enabled_for(&s, p.id));
+    }
 
     #[test]
     fn the_tracker_tools_stay_inside_the_session_project() {

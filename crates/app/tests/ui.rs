@@ -2301,6 +2301,22 @@ fn the_supervisor_key_opens_one_chat_and_shows_no_project() {
 }
 
 #[test]
+fn the_supervisor_chat_shows_the_autopilot_and_pauses_it_with_one_click() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("supervisor").click();
+    until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+    h.run_steps(3);
+    assert_eq!(h.state().autopilot().map(|a| a.enabled), Some(false));
+    assert!(h.query_by_label_contains("autopilot").is_some(), "the loop state shows");
+    h.get_by_label("autopilot toggle").click();
+    until(&mut h, "autopilot on", |h| h.state().autopilot().is_some_and(|a| a.enabled));
+    h.get_by_label("autopilot toggle").click();
+    until(&mut h, "autopilot paused", |h| h.state().autopilot().is_some_and(|a| !a.enabled));
+}
+
+#[test]
 fn a_logo_in_the_repo_becomes_the_projects_icon() {
     let rig = rig();
     let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();

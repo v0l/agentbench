@@ -272,7 +272,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 22] = [
+pub const AGENTBENCH_TOOLS: [&str; 23] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -295,6 +295,7 @@ pub const AGENTBENCH_TOOLS: [&str; 22] = [
     "remember",
     "recall",
     "notify_user",
+    "autopilot",
 ];
 
 /// How long `wait_for_session` waits when not told, and the longest it may.
@@ -505,6 +506,23 @@ fn agentbench_specs() -> Vec<Spec> {
             "Read the notes kept for this project with remember, optionally only those matching a word.",
             object(
                 json!({ "project": string("Supervisor chat only: the project by name or id"), "topic": string("Only notes whose topic or text has this word") }),
+                &[],
+            ),
+        ),
+        Spec::new(
+            "autopilot",
+            "Supervisor chat only. Read the autopilot loop (its switch, caps, workers and recent activity feed) or change it. The loop starts workers on todo issues by priority up to the caps, sends back replies without a conclusion, blocks issues that need the user, nudges stuck sessions and, when `merge` is on, merges green branches. Call with no arguments to read it.",
+            object(
+                json!({
+                    "enabled": json!({ "type": "boolean", "description": "Turn the loop on or off (global)" }),
+                    "project": string("Only for `project_enabled`: the project by name or id"),
+                    "project_enabled": json!({ "type": "boolean", "description": "Turn the loop on or off for `project`, overriding the global switch" }),
+                    "cap": id("Most workers at once, all projects"),
+                    "project_cap": id("Most workers at once in one project"),
+                    "stuck_minutes": id("Minutes without output before a nudge"),
+                    "max_nudges": id("Nudges before a stuck session is stopped"),
+                    "merge": json!({ "type": "boolean", "description": "Merge green branches into the main checkout and close them" }),
+                }),
                 &[],
             ),
         ),

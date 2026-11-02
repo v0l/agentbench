@@ -275,6 +275,7 @@ fn supervisor_brief(c: &Context) -> String {
          - Delegate: when work must be done, `start_session` (with `project`, and `issue` when one exists) with a self-contained prompt. Sessions you start are watched for you.\n\
          - Follow: use `watch_session` on any running session you care about. Do not poll and do not block on `wait_for_session`. When a watched session finishes, its status and last reply arrive here as a message. Then read what it did with `read_session`, check it against the issue, update the tracker, and start the next step or tell the user.\n\
          - Conclusion check: when a watched session finishes, read its last reply and assert it has a conclusion: either rigid (verified, tests pass, nothing left) or needs more work, listing only items the session genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). If the reply contains a todo or leftover list of things the agent could do itself (run tests, write the test, deploy to a test env, merge locally, verify X, add a test for Y), `send_message` the session to do them, do not move the issue to `review` or `done`, and do not relay the list to the user. Never relay a worker's leftover list as the user's todo.\n\
+         - Autopilot: the `autopilot` tool reads and sets the server's own worker loop (switch, caps, merge, per-project override, activity feed). When it is on, it starts workers on todo issues, applies the conclusion check to their replies, labels issues `needs-user` or `blocked`, nudges stuck sessions and merges green branches when merge is on. Do not duplicate its work on the same issues; when the user asks to pause, resume or change it, call the tool and confirm the new state.\n\
          - Manage: `stop_session`, `close_session` and `rename_session` work on any session. `list_worktrees`, `create_worktree` and `cleanup_worktree` work in any project (pass `project`). Close or clean up only when the user asked or the work is verified merged.\n\
          - Nudge: `send_message` to a stalled or drifting session. `notify_user` only for what needs the user: a decision, a failure you cannot route around, or a finished piece of work.\n\
          - Remember: `remember` keeps the user's standing preferences and decisions.\n\
@@ -475,7 +476,7 @@ mod tests {
     fn the_supervisor_brief_names_its_job_and_not_a_repository() {
         let b = brief(&Context { supervisor: true, ..context() });
         assert!(b.contains("You are the supervisor"), "{b}");
-        assert!(b.contains("user_asks") && b.contains("watch_session"));
+        assert!(b.contains("user_asks") && b.contains("watch_session") && b.contains("`autopilot` tool"));
         assert!(b.contains("You are not a coding agent"));
         assert!(!b.contains("demo") && !b.contains("<orchestration>"));
     }

@@ -152,6 +152,24 @@ pub fn delete_branch(main: &Path, branch: &str) -> Result<(), String> {
     git(main, &["branch", "-d", branch]).map(|_| ())
 }
 
+pub fn current_branch(dir: &Path) -> Option<String> {
+    git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).ok().filter(|b| b != "HEAD")
+}
+
+pub fn merge_branch(main: &Path, branch: &str) -> Result<(), String> {
+    match git(main, &["merge", "--no-edit", branch]) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let _ = git(main, &["merge", "--abort"]);
+            Err(e)
+        }
+    }
+}
+
+pub fn is_merged(main: &Path, branch: &str) -> bool {
+    git(main, &["merge-base", "--is-ancestor", branch, "HEAD"]).is_ok()
+}
+
 pub fn is_dirty(path: &Path) -> Result<bool, String> {
     Ok(!git(path, &["status", "--porcelain"])?.is_empty())
 }

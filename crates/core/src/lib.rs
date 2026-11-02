@@ -992,7 +992,60 @@ pub struct Overview {
     /// The standing supervisor chat, once it has been opened. It belongs to no listed project.
     #[serde(default)]
     pub supervisor: Option<SessionId>,
+    #[serde(default)]
+    pub autopilot: Option<AutopilotState>,
     pub cursor: Id,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Activity {
+    pub id: Id,
+    #[serde(default)]
+    pub project_id: Option<Id>,
+    #[serde(default)]
+    pub issue_id: Option<Id>,
+    pub text: String,
+    pub at: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSwitch {
+    pub id: Id,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AutopilotState {
+    pub enabled: bool,
+    pub cap: u32,
+    pub project_cap: u32,
+    pub stuck_minutes: u64,
+    pub max_nudges: u32,
+    pub merge: bool,
+    #[serde(default)]
+    pub projects: Vec<ProjectSwitch>,
+    pub idle: bool,
+    pub workers: u32,
+    #[serde(default)]
+    pub activity: Vec<Activity>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AutopilotPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_cap: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_minutes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_nudges: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectSwitch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

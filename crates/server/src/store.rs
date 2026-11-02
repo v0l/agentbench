@@ -172,6 +172,25 @@ CREATE TABLE watches (
     PRIMARY KEY (watched, watcher)
 );
 "#,
+    r#"
+CREATE TABLE autopilot_workers (
+    session TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    issue INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    project INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'working',
+    nudges INTEGER NOT NULL DEFAULT 0,
+    reworks INTEGER NOT NULL DEFAULT 0,
+    green INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE autopilot_log (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER,
+    issue_id INTEGER,
+    text TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -202,6 +221,17 @@ impl From<rusqlite::Error> for StoreError {
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Worker {
+    pub session: SessionId,
+    pub issue: Id,
+    pub project: Id,
+    pub state: String,
+    pub nudges: u32,
+    pub reworks: u32,
+    pub green: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SeenTree {
@@ -1023,6 +1053,96 @@ impl Store {
             params![watched, watcher],
         )?;
         Ok(())
+    }
+
+    pub fn add_worker(&self, session: SessionId, issue: Id, project: Id) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "INSERT OR REPLACE INTO autopilot_workers (session, issue, project, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session, issue, project, now()],
+        )?;
+        Store::changed(&db, "autopilot", 0)
+    }
+
+    pub fn workers(&self) -> Result<Vec<Worker>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT session, issue, project, state, nudges, reworks, green
+             FROM autopilot_workers ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Worker {
+                session: r.get(0)?,
+                issue: r.get(1)?,
+                project: r.get(2)?,
+                state: r.get(3)?,
+                nudges: r.get(4)?,
+                reworks: r.get(5)?,
+                green: r.get::<_, i64>(6)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn remove_worker(&self, session: SessionId) -> Result<()> {
+        let db = self.db();
+        db.execute("DELETE FROM autopilot_workers WHERE session = ?1", [session])?;
+        Store::changed(&db, "autopilot", 0)
+    }
+
+    pub fn set_worker(&self, session: SessionId, state: &str, green: bool) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "UPDATE autopilot_workers SET state = ?1, green = ?2 WHERE session = ?3",
+            params![state, green as i64, session],
+        )?;
+        Store::changed(&db, "autopilot", 0)
+    }
+
+    pub fn bump_worker(&self, session: SessionId, column: &str) -> Result<()> {
+        let column = match column {
+            "nudges" => "nudges",
+            "reworks" => "reworks",
+            other => return Err(StoreError(format!("no worker counter {other}"))),
+        };
+        self.db().execute(
+            &format!("UPDATE autopilot_workers SET {column} = {column} + 1 WHERE session = ?1"),
+            [session],
+        )?;
+        Ok(())
+    }
+
+    pub fn log_autopilot(&self, project: Option<Id>, issue: Option<Id>, text: &str) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO autopilot_log (project_id, issue_id, text, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![project, issue, text, now()],
+        )?;
+        db.execute(
+            "DELETE FROM autopilot_log WHERE id <= (SELECT MAX(id) FROM autopilot_log) - 500",
+            [],
+        )?;
+        Store::changed(&db, "autopilot", 0)
+    }
+
+    pub fn autopilot_log(&self, limit: usize) -> Result<Vec<agentbench_core::Activity>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT id, project_id, issue_id, text, created_at FROM autopilot_log
+             ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(agentbench_core::Activity {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+                issue_id: r.get(2)?,
+                text: r.get(3)?,
+                at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn take_watchers(&self, watched: SessionId) -> Result<Vec<SessionId>> {

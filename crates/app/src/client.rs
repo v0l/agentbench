@@ -322,6 +322,10 @@ impl Client {
         self.send(req, Reply::Supervisor);
     }
 
+    pub fn autopilot(&mut self, patch: &agentbench_core::AutopilotPatch) {
+        self.act(Method::PATCH, "/api/autopilot", Some(patch), "");
+    }
+
     pub fn send_message(&mut self, session: SessionId, text: &str) {
         self.send_with(session, text, Vec::new());
     }

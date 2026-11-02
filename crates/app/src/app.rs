@@ -1916,6 +1916,20 @@ impl App {
         });
     }
 
+    pub fn autopilot(&self) -> Option<&agentbench_core::AutopilotState> {
+        self.overview.as_ref().and_then(|o| o.autopilot.as_ref())
+    }
+
+    pub fn toggle_autopilot(&mut self) {
+        let Some(on) = self.autopilot().map(|a| a.enabled) else { return };
+        if let Some(c) = &mut self.client {
+            c.autopilot(&agentbench_core::AutopilotPatch {
+                enabled: Some(!on),
+                ..Default::default()
+            });
+        }
+    }
+
     pub fn supervisor_chat(&self) -> Option<SessionId> {
         self.overview.as_ref().and_then(|o| o.supervisor)
     }
