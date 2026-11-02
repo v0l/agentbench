@@ -2379,3 +2379,27 @@ fn a_chat_can_be_opened_in_a_chosen_tile() {
     assert_eq!(h.state().tile_chat(1), Some(sid));
     assert_eq!(h.state().tile_chat(4), None, "a chat lives in one tile only");
 }
+
+#[test]
+fn the_chat_menu_shows_a_board_of_tiles() {
+    use agentbench::app::Grid;
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_grid(Grid::new(3, 2));
+    h.run_steps(3);
+    let pos = h.get_by_label("chat say hello").rect().center();
+    h.event(egui::Event::PointerMoved(pos));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    h.run_steps(3);
+    shot(&mut h, "chat-menu");
+}

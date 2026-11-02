@@ -160,8 +160,15 @@ impl App {
             .find(|w| w.id == s.worktree_id)
             .cloned();
         let tiles = self.grid_now().slots();
+        let dims = self.grid_now().dims();
+        let board: Vec<Option<(SessionId, String)>> = (0..tiles)
+            .map(|i| {
+                let id = self.slots[i]?;
+                Some((id, self.session_by_id(id).map(|s| s.title.clone()).unwrap_or_default()))
+            })
+            .collect();
         resp.context_menu(|ui| {
-            let width = 170.0;
+            let width = 190.0;
             if s.status.busy() && ui.add(Key::new("stop").outline(FAULT).min_width(width)).clicked()
             {
                 if let Some(c) = &mut self.client {
@@ -190,14 +197,10 @@ impl App {
                 ui.close();
             }
             if tiles > 1 {
-                ui.menu_button("open in tile", |ui| {
-                    for at in 0..tiles {
-                        if ui.button(format!("tile {}", at + 1)).clicked() {
-                            self.open_in_tile(s.id, at);
-                            ui.close();
-                        }
-                    }
-                });
+                if let Some(at) = tile_board(ui, dims, &board, s.id) {
+                    self.open_in_tile(s.id, at);
+                    ui.close();
+                }
             }
             if ui.add(Key::new("rename chat").outline(VALUE).min_width(width)).clicked() {
                 self.rename_chat = Some((s.id, s.title.clone()));
@@ -225,4 +228,68 @@ impl App {
             }
         });
     }
+}
+
+fn tile_board(
+    ui: &mut Ui,
+    (cols, rows): (usize, usize),
+    tiles: &[Option<(SessionId, String)>],
+    chat: SessionId,
+) -> Option<usize> {
+    let (cell, gap) = (22.0, 3.0);
+    ui.add_space(2.0);
+    ui.label(egui::RichText::new("open in tile").size(10.5).color(LEGEND));
+    ui.add_space(2.0);
+    let size = Vec2::new(cols as f32 * (cell + gap) - gap, rows as f32 * (cell + gap) - gap);
+    let (row, _) = ui.allocate_exact_size(Vec2::new(190.0, size.y), Sense::hover());
+    let rect = egui::Rect::from_center_size(row.center(), size);
+    let mut picked = None;
+    for i in 0..cols * rows {
+        let at = rect.min
+            + Vec2::new((i % cols) as f32 * (cell + gap), (i / cols) as f32 * (cell + gap));
+        let cell_rect = egui::Rect::from_min_size(at, Vec2::splat(cell));
+        let resp = ui.interact(cell_rect, ui.id().with(("tile-pick", i)), Sense::click());
+        let here = tiles.get(i).and_then(|t| t.as_ref()).is_some_and(|(id, _)| *id == chat);
+        let taken = tiles.get(i).is_some_and(|t| t.is_some());
+        let tint = if here {
+            READOUT
+        } else if resp.hovered() {
+            VALUE
+        } else if taken {
+            LEGEND
+        } else {
+            LEGEND.gamma_multiply(0.55)
+        };
+        let fill = if here {
+            tint.gamma_multiply(0.25)
+        } else if resp.hovered() {
+            tint.gamma_multiply(0.15)
+        } else {
+            WELL
+        };
+        let p = ui.painter();
+        p.rect_filled(cell_rect, 2.0, fill);
+        p.rect_stroke(cell_rect, 2.0, Stroke::new(1.0, tint), egui::StrokeKind::Inside);
+        p.text(
+            cell_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            (i + 1).to_string(),
+            egui::FontId::monospace(11.0),
+            if here || resp.hovered() { tint } else { VALUE.gamma_multiply(0.8) },
+        );
+        let tip = match tiles.get(i).and_then(|t| t.as_ref()) {
+            Some((_, title)) if !here => format!("tile {}: replaces {title}", i + 1),
+            Some(_) => format!("tile {}: this chat", i + 1),
+            None => format!("tile {}: empty", i + 1),
+        };
+        let resp = resp.on_hover_text(tip);
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            picked = Some(i);
+        }
+    }
+    ui.add_space(4.0);
+    picked
 }
