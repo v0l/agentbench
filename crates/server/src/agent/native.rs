@@ -272,7 +272,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 18] = [
+pub const AGENTBENCH_TOOLS: [&str; 22] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -282,6 +282,10 @@ pub const AGENTBENCH_TOOLS: [&str; 18] = [
     "read_session",
     "session_status",
     "user_asks",
+    "watch_session",
+    "stop_session",
+    "close_session",
+    "rename_session",
     "start_session",
     "send_message",
     "list_projects",
@@ -371,6 +375,29 @@ fn agentbench_specs() -> Vec<Spec> {
             ),
         ),
         Spec::new(
+            "watch_session",
+            "Be told when a running session finishes. When it does, a message with its status and last reply arrives in this chat as a new turn, so you do not have to poll or block. Sessions you start from the supervisor chat are watched automatically. Does nothing for a session that is not running.",
+            object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
+        ),
+        Spec::new(
+            "stop_session",
+            "Stop a session's current turn (supervisor chat only). The chat and its worktree stay.",
+            object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
+        ),
+        Spec::new(
+            "close_session",
+            "Stop a session and delete its chat (supervisor chat only). Its worktree and changes stay. Ask the user first unless they told you to.",
+            object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
+        ),
+        Spec::new(
+            "rename_session",
+            "Give a session a new title.",
+            object(
+                json!({ "id": string("The session id, as list_sessions gives it"), "title": string("The new title") }),
+                &["id", "title"],
+            ),
+        ),
+        Spec::new(
             "user_asks",
             "What the user typed to each session, newest sessions first, with each session's status and issue. The record of what was asked for. In the supervisor chat it covers every project unless `project` is given.",
             object(
@@ -433,13 +460,17 @@ fn agentbench_specs() -> Vec<Spec> {
         Spec::new(
             "list_worktrees",
             "List this project's worktrees: id, branch and path. Use the id with start_session.",
-            object(json!({}), &[]),
+            object(
+                json!({ "project": string("Supervisor chat only: the project by name or id"), }),
+                &[],
+            ),
         ),
         Spec::new(
             "create_worktree",
             "Make a new git worktree for a branch of this project, so work can go on in parallel without disturbing other checkouts. Agentbench keeps track of it.",
             object(
                 json!({
+                    "project": string("Supervisor chat only: the project by name or id"),
                     "branch": string("The branch; made if it does not exist"),
                     "base": string("What to branch from; defaults to the current HEAD"),
                 }),
@@ -451,6 +482,7 @@ fn agentbench_specs() -> Vec<Spec> {
             "Remove a worktree of this project when its work is merged or abandoned: deletes the checkout, every chat session in it, and its branch if that is merged. Refuses the main worktree, the one this session is in, one with a session still working, and one with uncommitted changes unless force is set. Ask the user before forcing or before throwing away unmerged work.",
             object(
                 json!({
+                    "project": string("Supervisor chat only: the project by name or id"),
                     "id": id("The worktree, as list_worktrees gives its id"),
                     "branch": string("Or the worktree's branch"),
                     "force": boolean("Remove it even with uncommitted changes, which are lost"),
@@ -464,14 +496,17 @@ fn agentbench_specs() -> Vec<Spec> {
             "Keep a note about this project that survives across sessions: how to run the tests, a convention, a gotcha. \
              One note per topic; saving a topic again replaces it, and an empty note forgets it. Notes are shown to every session at its start, so keep them short and true.",
             object(
-                json!({ "topic": string("A short name, like `tests` or `style`"), "note": string("The note; empty to forget the topic") }),
+                json!({ "project": string("Supervisor chat only: the project by name or id"), "topic": string("A short name, like `tests` or `style`"), "note": string("The note; empty to forget the topic") }),
                 &["topic"],
             ),
         ),
         Spec::new(
             "recall",
             "Read the notes kept for this project with remember, optionally only those matching a word.",
-            object(json!({ "topic": string("Only notes whose topic or text has this word") }), &[]),
+            object(
+                json!({ "project": string("Supervisor chat only: the project by name or id"), "topic": string("Only notes whose topic or text has this word") }),
+                &[],
+            ),
         ),
         Spec::new(
             "notify_user",

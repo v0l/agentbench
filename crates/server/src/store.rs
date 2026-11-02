@@ -165,6 +165,13 @@ CREATE TABLE notes (
     "ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE projects ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
     "ALTER TABLE sessions ADD COLUMN title_turns INTEGER NOT NULL DEFAULT 0;",
+    r#"
+CREATE TABLE watches (
+    watched TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    watcher TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    PRIMARY KEY (watched, watcher)
+);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -1010,6 +1017,25 @@ impl Store {
 
     /// Keep a note under a topic, replacing what was there. An empty note forgets the topic.
     /// Answers whether anything changed.
+    pub fn add_watch(&self, watched: SessionId, watcher: SessionId) -> Result<()> {
+        self.db().execute(
+            "INSERT OR IGNORE INTO watches (watched, watcher) VALUES (?1, ?2)",
+            params![watched, watcher],
+        )?;
+        Ok(())
+    }
+
+    pub fn take_watchers(&self, watched: SessionId) -> Result<Vec<SessionId>> {
+        let db = self.db();
+        let mut stmt = db.prepare("SELECT watcher FROM watches WHERE watched = ?1")?;
+        let found = stmt
+            .query_map([watched], |r| r.get::<_, SessionId>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        db.execute("DELETE FROM watches WHERE watched = ?1", [watched])?;
+        Ok(found)
+    }
+
     pub fn set_note(&self, project_id: Id, topic: &str, body: &str) -> Result<bool> {
         let db = self.db();
         let n = if body.trim().is_empty() {

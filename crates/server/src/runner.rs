@@ -586,8 +586,37 @@ impl Runner {
                 runner.not_sent(session_id, "the turn ended first", left);
             }
             runner.changed.notify_waiters();
+            runner.tell_watchers(session_id);
         });
         Ok(())
+    }
+
+    fn tell_watchers(&self, finished: SessionId) {
+        let Ok(watchers) = self.store.take_watchers(finished) else { return };
+        if watchers.is_empty() {
+            return;
+        }
+        let Ok(done) = self.store.session(finished) else { return };
+        let last = agentbench_core::shown(&self.store.messages(finished, 0).unwrap_or_default())
+            .into_iter()
+            .rev()
+            .find_map(|m| match m.entry {
+                Entry::Assistant { text } => Some(text),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let last: String = last.trim().chars().take(1500).collect();
+        let text = format!(
+            "Watched session {finished} (\"{}\", project {}) finished with status {}.\nIts last reply:\n{last}",
+            done.title,
+            done.project_id,
+            done.status.as_str(),
+        );
+        for id in watchers {
+            if let Ok(watcher) = self.store.session(id) {
+                let _ = self.send(&watcher, &text);
+            }
+        }
     }
 
     /// Whether the chat has outgrown the agent's context enough to summarise it now.
@@ -2226,6 +2255,101 @@ mod tests {
         assert_eq!(done.status, SessionStatus::Failed);
         let last = runner.store().messages(s.id, 0).unwrap().pop().unwrap();
         assert!(matches!(&last.entry, Entry::Error { text } if text.contains("could not start")));
+    }
+
+    #[tokio::test]
+    async fn a_watcher_is_told_once_when_the_watched_session_finishes() {
+        let script = r#"read p; sleep 0.2; echo "{\"text\":\"all done\"}""#;
+        let (runner, watched) = setup(script_agent("echo", script));
+        let main = runner.store().main_worktree(watched.project_id).unwrap();
+        let watcher = runner.store().add_session(main.id, "echo", "boss", None, None).unwrap();
+        runner.store().add_watch(watched.id, watcher.id).unwrap();
+
+        runner.send(&watched, "do it").unwrap();
+        wait_idle(&runner, watched.id).await;
+        for _ in 0..200 {
+            if runner.store().messages(watcher.id, 0).unwrap().iter().any(
+                |m| matches!(&m.entry, Entry::User { text, .. } if text.contains("finished with status idle")),
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let told: Vec<String> = runner
+            .store()
+            .messages(watcher.id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::User { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].contains(&format!("Watched session {}", watched.id)), "{told:?}");
+        assert!(told[0].contains("all done"), "{told:?}");
+        assert!(runner.store().take_watchers(watched.id).unwrap().is_empty(), "fires once");
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_stops_and_closes_another_projects_session() {
+        use crate::agent::Api;
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let store = Store::memory().unwrap();
+        let p = crate::projects::add(&store, &main, None, false).unwrap();
+        let tree = store.main_worktree(p.id).unwrap();
+        let sup = crate::projects::ensure_supervisor(&store, &dir.path().join("sup")).unwrap();
+        let sup_tree = store.main_worktree(sup.id).unwrap();
+        let boss = store.add_session(sup_tree.id, "echo", "boss", None, None).unwrap();
+        let worker = store.add_session(tree.id, "echo", "worker", None, None).unwrap();
+        let script = r#"read p; sleep 5; echo "{\"text\":\"late\"}""#;
+        let runner = Runner::new(store.clone(), vec![script_agent("echo", script)]);
+        runner.send(&worker, "slow").unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(runner.is_running(worker.id));
+
+        let id = serde_json::json!({"id": worker.id.to_string()});
+        let out = runner.api.call("stop_session", &id, boss.id).unwrap();
+        assert_eq!(out["was_running"], true);
+        wait_idle(&runner, worker.id).await;
+        assert_eq!(store.session(worker.id).unwrap().status, SessionStatus::Stopped);
+
+        runner.api.call("close_session", &id, boss.id).unwrap();
+        assert!(store.session(worker.id).is_err(), "the chat is gone");
+        assert!(store.main_worktree(p.id).is_ok(), "the worktree stays");
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_hears_back_from_a_session_it_started() {
+        use crate::agent::Api;
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let store = Store::memory().unwrap();
+        let p = crate::projects::add(&store, &main, None, false).unwrap();
+        let sup = crate::projects::ensure_supervisor(&store, &dir.path().join("sup")).unwrap();
+        let sup_tree = store.main_worktree(sup.id).unwrap();
+        let boss = store.add_session(sup_tree.id, "echo", "boss", None, None).unwrap();
+        let script = r#"read p; sleep 0.2; echo "{\"text\":\"built it\"}""#;
+        let runner = Runner::new(store.clone(), vec![script_agent("echo", script)]);
+
+        let out = runner
+            .api
+            .call("start_session", &serde_json::json!({"project": p.id, "prompt": "go"}), boss.id)
+            .unwrap();
+        let child: SessionId = out["session"].as_str().unwrap().parse().unwrap();
+        wait_idle(&runner, child).await;
+        for _ in 0..200 {
+            if !store.messages(boss.id, 0).unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let first = store.messages(boss.id, 0).unwrap().remove(0).entry;
+        assert!(first.text().contains(&format!("Watched session {child}")), "{first:?}");
+        assert!(first.text().contains("built it"));
     }
 
     #[tokio::test]

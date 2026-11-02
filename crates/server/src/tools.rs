@@ -136,6 +136,21 @@ impl StoreApi {
         }
     }
 
+    fn managed(
+        &self,
+        me: &agentbench_core::Session,
+        args: &Value,
+    ) -> Result<agentbench_core::Session, String> {
+        if !self.supervises(me) {
+            return Err("only the supervisor chat can stop or close other sessions".into());
+        }
+        let other = self.store.session(session_id(args)?).map_err(|e| e.0)?;
+        if other.id == me.id {
+            return Err("that is this session".into());
+        }
+        Ok(other)
+    }
+
     fn supervises(&self, me: &agentbench_core::Session) -> bool {
         self.store.project(me.project_id).is_ok_and(|p| p.supervisor)
     }
@@ -179,9 +194,10 @@ impl StoreApi {
         &self,
         args: &Value,
         me: &agentbench_core::Session,
+        scope: Option<Id>,
     ) -> Result<Value, String> {
         let s = &self.store;
-        let trees = s.worktrees(Some(me.project_id)).map_err(|e| e.0)?;
+        let trees = s.worktrees(scope).map_err(|e| e.0)?;
         let tree = match (args.get("id").and_then(Value::as_i64), text(args, "branch")) {
             (Some(id), _) => trees.into_iter().find(|w| w.id == id),
             (None, Some(b)) => trees.into_iter().find(|w| w.label() == b.trim()),
@@ -210,7 +226,7 @@ impl StoreApi {
         }
         let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
         let branch = tree.branch.clone();
-        let project = s.project(me.project_id).map_err(|e| e.0)?;
+        let project = s.project(tree.project_id).map_err(|e| e.0)?;
         crate::projects::remove_worktree(s, tree.id, force).map_err(|e| e.0)?;
         if let Some(r) = &runner {
             for x in &sessions {
@@ -371,6 +387,24 @@ impl Api for StoreApi {
                     })
                     .collect();
                 json!({ "session": other.id, "title": other.title, "status": other.status, "messages": lines })
+            }
+            "watch_session" => {
+                let other = s.session(session_id(args)?).map_err(|e| e.0)?;
+                self.reaches(&me, &other)?;
+                if other.id == session {
+                    return Err("that is this session".into());
+                }
+                let running = self.runner.get().ok().is_some_and(|r| r.is_running(other.id));
+                if !running {
+                    return Ok(json!({
+                        "session": other.id,
+                        "watching": false,
+                        "status": other.status,
+                        "note": "it is not running, so nothing will fire; read it with read_session",
+                    }));
+                }
+                s.add_watch(other.id, session).map_err(|e| e.0)?;
+                json!({ "session": other.id, "watching": true, "status": other.status })
             }
             "user_asks" => {
                 let per = args.get("per_session").and_then(Value::as_u64).unwrap_or(5).clamp(1, 50)
@@ -552,6 +586,9 @@ impl Api for StoreApi {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert((session, started.id));
+                if sup {
+                    s.add_watch(started.id, session).map_err(|e| e.0)?;
+                }
                 json!({
                 "session": started.id,
                 "title": started.title,
@@ -581,12 +618,12 @@ impl Api for StoreApi {
             }
             "list_worktrees" => {
                 let trees: Vec<Value> = s
-                    .worktrees(Some(project))
+                    .worktrees((!everywhere).then_some(project))
                     .map_err(|e| e.0)?
                     .into_iter()
                     .map(|w| {
                         json!({
-                            "id": w.id, "branch": w.label(), "path": w.path,
+                            "id": w.id, "project": w.project_id, "branch": w.label(), "path": w.path,
                             "main": w.main, "missing": w.missing,
                         })
                     })
@@ -594,6 +631,9 @@ impl Api for StoreApi {
                 json!(trees)
             }
             "create_worktree" => {
+                if everywhere {
+                    return Err("name the `project` to make the worktree in".into());
+                }
                 let branch = text(args, "branch").ok_or("missing `branch`")?;
                 let w = crate::projects::add_worktree(
                     s,
@@ -604,7 +644,30 @@ impl Api for StoreApi {
                 .map_err(|e| e.0)?;
                 json!({ "id": w.id, "branch": w.label(), "path": w.path })
             }
-            "cleanup_worktree" => self.cleanup_worktree(args, &me)?,
+            "cleanup_worktree" => {
+                self.cleanup_worktree(args, &me, (!everywhere).then_some(project))?
+            }
+            "stop_session" => {
+                let other = self.managed(&me, args)?;
+                let runner = self.runner.get()?;
+                let was_running = runner.interrupt(other.id);
+                json!({ "stopped": other.id, "was_running": was_running })
+            }
+            "close_session" => {
+                let other = self.managed(&me, args)?;
+                let runner = self.runner.get()?;
+                runner.interrupt(other.id);
+                runner.end(other.id);
+                s.delete_session(other.id).map_err(|e| e.0)?;
+                json!({ "closed": other.id, "title": other.title })
+            }
+            "rename_session" => {
+                let other = s.session(session_id(args)?).map_err(|e| e.0)?;
+                self.reaches(&me, &other)?;
+                let title = text(args, "title").ok_or("missing `title`")?;
+                s.set_title(other.id, &title, true).map_err(|e| e.0)?;
+                json!({ "renamed": other.id, "title": title.trim() })
+            }
             "remember" => {
                 let topic = text(args, "topic").map(|t| t.trim().to_string()).unwrap_or_default();
                 if topic.is_empty() {
@@ -660,6 +723,9 @@ impl Api for StoreApi {
                 | "cleanup_worktree"
                 | "start_session"
                 | "send_message"
+                | "stop_session"
+                | "close_session"
+                | "rename_session"
         ) {
             self.touched();
         }
@@ -811,6 +877,61 @@ mod tests {
             0,
             "a normal session ignores `project` and files in its own"
         );
+    }
+
+    #[test]
+    fn only_the_supervisor_closes_renames_and_sees_worktrees_everywhere() {
+        let s = Store::memory().unwrap();
+        let (p, main) = crate::store::testing::project(&s, "/a");
+        let (_, other_main) = crate::store::testing::project(&s, "/b");
+        let dir = tempfile::tempdir().unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, dir.path()).unwrap();
+        let sup_main = s.main_worktree(sup.id).unwrap();
+        let boss = s.add_session(sup_main.id, "native", "boss", None, None).unwrap();
+        let a = s.add_session(main.id, "native", "a", None, None).unwrap();
+        let b = s.add_session(other_main.id, "native", "b", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let id = |x: &agentbench_core::Session| json!({"id": x.id.to_string()});
+
+        let trees = api.call("list_worktrees", &json!({}), boss.id).unwrap();
+        assert!(trees.as_array().unwrap().len() >= 3, "every project's worktrees: {trees}");
+        let one = api.call("list_worktrees", &json!({"project": p.id}), boss.id).unwrap();
+        assert_eq!(one.as_array().unwrap().len(), 1);
+        assert!(api.call("create_worktree", &json!({"branch": "x"}), boss.id).is_err());
+
+        assert!(api.call("close_session", &id(&b), a.id).is_err(), "not the supervisor");
+        assert!(api.call("stop_session", &id(&b), a.id).is_err());
+        assert!(api.call("close_session", &id(&boss), boss.id).is_err(), "not itself");
+
+        api.call("rename_session", &json!({"id": b.id.to_string(), "title": "better"}), boss.id)
+            .unwrap();
+        assert_eq!(s.session(b.id).unwrap().title, "better");
+        assert!(
+            api.call("rename_session", &json!({"id": b.id.to_string(), "title": "x"}), a.id)
+                .is_err(),
+            "a normal session cannot rename another project's chat"
+        );
+        let e = api.call("close_session", &id(&b), boss.id).unwrap_err();
+        assert!(e.contains("cannot be started"), "{e}");
+    }
+
+    #[test]
+    fn watching_needs_a_running_session_and_a_supervisor_can_reach_any() {
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/a");
+        let dir = tempfile::tempdir().unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, dir.path()).unwrap();
+        let sup_main = s.main_worktree(sup.id).unwrap();
+        let boss = s.add_session(sup_main.id, "native", "boss", None, None).unwrap();
+        let other = s.add_session(main.id, "native", "other", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+
+        let out = api.call("watch_session", &json!({"id": other.id.to_string()}), boss.id).unwrap();
+        assert_eq!(out["watching"], false, "nothing is running, so nothing can fire");
+        assert!(s.take_watchers(other.id).unwrap().is_empty());
+        assert!(api.call("watch_session", &json!({"id": boss.id.to_string()}), boss.id).is_err());
+        let mate = s.add_session(main.id, "native", "mate", None, None).unwrap();
+        assert!(api.call("watch_session", &json!({"id": other.id.to_string()}), mate.id).is_ok());
     }
 
     #[test]
