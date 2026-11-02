@@ -1240,6 +1240,11 @@ impl<'a> Log<'a> {
         removed
     }
 
+    fn restart(&mut self, opening: Vec<Value>) {
+        self.messages.clear();
+        self.open(opening);
+    }
+
     fn open(&mut self, opening: Vec<Value>) {
         let sent = opening.iter().map(|m| Sent { message: m.clone(), said: Said::Plain }).collect();
         self.io.emit(Event::Sent(sent));
@@ -1402,9 +1407,24 @@ impl Agent for Native {
                 io.emit(Event::Usage(Usage { lsp, ..Usage::default() }));
             }
         }
+        let window = window_of(&model, self.patience.probe).await;
+        let mut crowded = Usage::default();
         for _ in 0..model.steps.max(1) {
             if io.stopped() {
                 return Err("stopped".into());
+            }
+            if base.compact_at > 0 && messages.len() > ROLLING_MIN && {
+                crowded.window = window;
+                crowded.past(base.compact_at)
+            } {
+                match roll(&model, &mut messages, self.patience, io).await {
+                    Ok(()) => crowded.context = 0,
+                    Err(e) if io.stopped() => return Err(e),
+                    Err(e) => {
+                        crowded.context = 0;
+                        io.emit(Event::Notice(format!("could not compact the conversation: {e}")));
+                    }
+                }
             }
             let reply = loop {
                 match complete(&model, &messages, &tools, self.patience, io).await {
@@ -1421,6 +1441,7 @@ impl Agent for Native {
             if let Some(mut u) = reply.usage {
                 // The prompt just sent is what the conversation weighs now.
                 u.context = u.input_tokens + u.cache_read_tokens;
+                crowded.context = u.context;
                 io.emit(Event::Usage(Usage { model: String::new(), ..u }));
             }
             let mut message = json!({ "role": "assistant", "content": reply.text });
@@ -1626,6 +1647,66 @@ impl Agent for Native {
         io.emit(Event::Done);
         Ok(())
     }
+}
+
+const ROLLING_MIN: usize = 4;
+
+const ROLLING_PROMPT: &str = "The conversation is nearly out of room. Summarise it so you can carry on from the summary alone. \
+Keep: what the user asked for, decisions made and why, what is done, what is left, the state of any work in progress, \
+the results you still need, and what you were about to do next. Be specific with names, ids and paths. \
+Reply with the summary only, as markdown, no preamble.";
+
+const ROLLING_CARRY_ON: &str =
+    "That was a summary of the earlier conversation. Carry on with what you were doing.";
+
+struct Silent<'a>(&'a dyn Io);
+
+#[async_trait]
+impl Io for Silent<'_> {
+    fn emit(&self, event: Event) {
+        if matches!(event, Event::Usage(_) | Event::Notice(_)) {
+            self.0.emit(event);
+        }
+    }
+    fn stop(&self) -> &tokio_util::sync::CancellationToken {
+        self.0.stop()
+    }
+    fn steer(&self) -> Option<super::Steer> {
+        None
+    }
+    async fn ask(&self, question: Question) -> Result<String, String> {
+        self.0.ask(question).await
+    }
+    async fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String> {
+        self.0.ask_many(questions).await
+    }
+    fn api(&self) -> &dyn super::Api {
+        self.0.api()
+    }
+}
+
+/// Fold the conversation so far into a summary and carry on from it, in the middle of a turn.
+/// The summary is kept in the transcript, so the next turn starts from it as well.
+async fn roll(
+    model: &Model,
+    messages: &mut Log<'_>,
+    patience: Patience,
+    io: &dyn Io,
+) -> Result<(), String> {
+    let mut ask: Vec<Value> = messages.to_vec();
+    ask.push(json!({ "role": "user", "content": ROLLING_PROMPT }));
+    let reply = complete(model, &ask, &json!([]), patience, &Silent(io)).await?;
+    let text = reply.text.trim().to_string();
+    if text.is_empty() {
+        return Err("the model gave no summary".into());
+    }
+    let system = messages.first().filter(|m| m["role"] == "system").cloned();
+    io.emit(Event::Summary(text.clone()));
+    let mut opening: Vec<Value> = system.into_iter().collect();
+    opening.push(json!({ "role": "user", "content": format!("{SUMMARY_PREAMBLE}\n\n{text}") }));
+    opening.push(json!({ "role": "user", "content": ROLLING_CARRY_ON }));
+    messages.restart(opening);
+    Ok(())
 }
 
 /// The model and server a request goes to, for the status line, with the window the server
@@ -1883,10 +1964,12 @@ async fn complete(
     let mut body = json!({
         "model": model.model.trim(),
         "messages": messages,
-        "tools": tools,
         "stream": true,
         "stream_options": { "include_usage": true },
     });
+    if tools.as_array().is_none_or(|t| !t.is_empty()) {
+        body["tools"] = tools.clone();
+    }
     let effort = model.effort.trim();
     if !effort.is_empty() {
         body["reasoning_effort"] = json!(effort);
@@ -3625,6 +3708,64 @@ for line in sys.stdin:
                 messages => Entry::Wire { messages },
             })
             .collect()
+    }
+
+    fn crowded(call: Value) -> Value {
+        let mut v = call;
+        v["usage"] = json!({"prompt_tokens": 120_000, "completion_tokens": 5});
+        v
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_fills_the_window_is_summarised_and_carries_on_from_the_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
+        let read = |id: &str| crowded(call(id, "read_file", json!({"path": "a.txt"})));
+        let (url, asked) = stub(vec![
+            vec![read("c1")],
+            vec![read("c2")],
+            vec![say("The user wants a.txt read. Done twice.")],
+            vec![say("all done")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "read a.txt", &io).await.unwrap();
+
+        let requests: Vec<Value> = asked.try_iter().collect();
+        assert_eq!(requests.len(), 4);
+        let summarising = requests[2]["messages"].as_array().unwrap();
+        assert!(
+            summarising.last().unwrap()["content"].as_str().unwrap().contains("nearly out of room")
+        );
+        assert!(requests[2].get("tools").is_none(), "the summary needs no tools");
+
+        let after = requests[3]["messages"].as_array().unwrap();
+        assert_eq!(after.len(), 3, "{after:?}");
+        assert_eq!(after[0]["role"], "system");
+        assert!(after[1]["content"].as_str().unwrap().contains("The user wants a.txt read"));
+        assert_eq!(after[2]["role"], "user");
+
+        let events = io.events();
+        assert!(events.iter().any(|e| matches!(e, Event::Summary(t) if t.contains("a.txt"))));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::Text { delta } if delta.contains("The user wants")))
+        );
+    }
+
+    #[tokio::test]
+    async fn rolling_compaction_stays_off_when_compact_at_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha").unwrap();
+        let read = |id: &str| crowded(call(id, "read_file", json!({"path": "a.txt"})));
+        let (url, asked) = stub(vec![vec![read("c1")], vec![read("c2")], vec![say("ok")]]);
+        let native =
+            Native::new(Model { url, model: "m".into(), compact_at: 0, ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "read a.txt", &io).await.unwrap();
+        assert_eq!(asked.try_iter().count(), 3);
+        assert!(!io.events().iter().any(|e| matches!(e, Event::Summary(_))));
     }
 
     #[test]

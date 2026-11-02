@@ -434,6 +434,7 @@ impl Api for StoreApi {
                     .projects()
                     .map_err(|e| e.0)?
                     .into_iter()
+                    .filter(|p| !p.supervisor)
                     .map(|p| json!({ "id": p.id, "name": p.name, "path": p.path, "you": p.id == project }))
                     .collect();
                 json!(all)

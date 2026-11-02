@@ -20,6 +20,24 @@ impl App {
             return;
         };
         let no_projects = o.projects.iter().all(|p| p.builtin());
+        let supervisor = o.supervisor;
+        let key = ui.add(
+            Key::new("supervisor")
+                .outline(if supervisor.is_some() && self.session == supervisor {
+                    READOUT
+                } else {
+                    VALUE
+                })
+                .min_width(ui.available_width()),
+        );
+        key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "supervisor"));
+        if key.clicked() {
+            self.open_supervisor();
+        }
+        ui.add_space(4.0);
+        let Some(o) = &self.overview else {
+            return;
+        };
         field(ui, &mut self.side_filter, "filter chats");
         ui.add_space(4.0);
         let needle = self.side_filter.trim().to_lowercase();
@@ -53,6 +71,7 @@ impl App {
         let mut chats: Vec<(Session, String, String)> = o
             .sessions
             .iter()
+            .filter(|s| Some(s.id) != o.supervisor)
             .map(|s| {
                 let project =
                     o.projects.iter().find(|p| p.id == s.project_id).map(|p| p.name.clone());

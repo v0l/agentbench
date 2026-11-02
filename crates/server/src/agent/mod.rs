@@ -97,6 +97,7 @@ pub enum Event {
     Notice(String),
     Diagnostics { text: String, broken: Vec<String> },
     Sent(Vec<agentbench_core::Sent>),
+    Summary(String),
     Error(String),
     Done,
 }

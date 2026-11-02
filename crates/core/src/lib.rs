@@ -985,6 +985,9 @@ pub struct Overview {
     pub worktrees: Vec<Worktree>,
     pub issues: Vec<Issue>,
     pub sessions: Vec<Session>,
+    /// The standing supervisor chat, once it has been opened. It belongs to no listed project.
+    #[serde(default)]
+    pub supervisor: Option<SessionId>,
     pub cursor: Id,
 }
 

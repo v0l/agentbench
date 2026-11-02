@@ -217,6 +217,32 @@ impl Runner {
         store.session(session.id)
     }
 
+    pub fn supervisor_session(&self) -> Option<Session> {
+        let project = self.store.supervisor_project().ok().flatten()?;
+        self.store
+            .sessions()
+            .ok()?
+            .into_iter()
+            .filter(|s| s.project_id == project.id)
+            .min_by_key(|s| s.created_at)
+    }
+
+    /// The one standing supervisor chat, made on first use.
+    pub fn open_supervisor(&self, agent: &str) -> Result<Session, StoreError> {
+        if let Some(s) = self.supervisor_session() {
+            return Ok(s);
+        }
+        let project = self
+            .store
+            .supervisor_project()?
+            .ok_or_else(|| StoreError("the supervisor is not set up on this server".into()))?;
+        self.start_session(NewSession {
+            project_id: project.id,
+            agent: agent.to_string(),
+            ..Default::default()
+        })
+    }
+
     pub fn agent(&self, name: &str) -> Option<Arc<dyn Agent>> {
         self.agents.get(name).cloned()
     }
@@ -958,6 +984,12 @@ impl Io for Sink {
                 self.entry(Entry::Diagnostics { text, broken });
             }
             Event::Sent(messages) => self.sent(messages),
+            Event::Summary(text) => {
+                self.flush();
+                let _ = self.store.add_message(self.session, &Entry::Summary { text });
+                let _ = self.store.clear_agent_session(self.session);
+                self.changed.notify_waiters();
+            }
             Event::Error(text) => {
                 self.entry(Entry::Error { text });
             }

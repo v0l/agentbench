@@ -29,6 +29,7 @@ impl Server {
 pub enum Reply {
     Overview(Overview),
     Started(agentbench_core::Session),
+    Supervisor(agentbench_core::Session),
     Model(agentbench_core::ModelSettings),
     Title(agentbench_core::TitleSettings),
     /// Where the server runs its speech models. `None` when the server is too old to say.
@@ -313,6 +314,12 @@ impl Client {
     pub fn add_session(&mut self, new: &NewSession) {
         let req = self.request(Method::POST, "/api/sessions", Self::json(new));
         self.send(req, Reply::Started);
+    }
+
+    pub fn open_supervisor(&mut self, agent: &str) {
+        let body = serde_json::json!({ "agent": agent });
+        let req = self.request(Method::POST, "/api/supervisor", Self::json(&body));
+        self.send(req, Reply::Supervisor);
     }
 
     pub fn send_message(&mut self, session: SessionId, text: &str) {

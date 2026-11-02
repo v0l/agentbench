@@ -90,6 +90,7 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn agentbench_server::agent::Agent>>)
     repo(&main);
     let store = Store::open(&dir.path().join("f.db")).unwrap();
     store.set_setting("token", TOKEN).unwrap();
+    agentbench_server::projects::ensure_supervisor(&store, &dir.path().join("supervisor")).unwrap();
     worktree(&main, "request-log");
     worktree(&main, "fix-login");
     let project = agentbench_server::projects::add(&store, &main, None, false).unwrap();
@@ -2273,6 +2274,28 @@ fn f1_opens_and_closes_the_help() {
     h.key_press(egui::Key::F1);
     h.run_steps(3);
     assert!(!h.state().helping());
+}
+
+#[test]
+fn the_supervisor_key_opens_one_chat_and_shows_no_project() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let o = h.state().overview().unwrap();
+    assert!(o.projects.iter().all(|p| !p.supervisor), "the supervisor has no project in the list");
+    assert!(h.state().supervisor_chat().is_none());
+    let before = o.sessions.len();
+
+    h.get_by_label("supervisor").click();
+    until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+    let sid = h.state().supervisor_chat().unwrap();
+    assert_eq!(h.state().shown(), [sid]);
+    assert_eq!(h.state().overview().unwrap().sessions.len(), before + 1);
+
+    h.get_by_label("supervisor").click();
+    h.run_steps(5);
+    assert_eq!(h.state().overview().unwrap().sessions.len(), before + 1, "one standing chat");
+    assert_eq!(h.state().supervisor_chat(), Some(sid));
 }
 
 #[test]

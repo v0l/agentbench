@@ -94,6 +94,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/issues/{id}/comments", get(comments).post(add_comment))
         .route("/api/issues/{id}/start", post(start_issue))
         .route("/api/sessions", get(sessions).post(add_session))
+        .route("/api/supervisor", post(open_supervisor))
         .route("/api/sessions/{id}", get(session).patch(rename_session).delete(delete_session))
         .route("/api/sessions/{id}/messages", get(messages).post(send))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
@@ -280,13 +281,19 @@ fn changed(api: &Api) {
 
 async fn overview(State(api): State<Api>) -> Reply<Overview> {
     let store = api.runner.store();
+    let hidden = store.supervisor_project()?.map(|p| p.id);
     Ok(Json(Overview {
         version: env!("CARGO_PKG_VERSION").to_string(),
         agents: api.runner.agents().iter().map(|a| a.info()).collect(),
-        projects: store.projects()?,
-        worktrees: store.worktrees(None)?,
+        projects: store.projects()?.into_iter().filter(|p| !p.supervisor).collect(),
+        worktrees: store
+            .worktrees(None)?
+            .into_iter()
+            .filter(|w| Some(w.project_id) != hidden)
+            .collect(),
         issues: store.issues()?,
         sessions: api.runner.with_queued(store.sessions()?),
+        supervisor: api.runner.supervisor_session().map(|s| s.id),
         cursor: store.cursor()?,
     }))
 }
@@ -502,7 +509,7 @@ async fn list_models(
 }
 
 async fn list_projects(State(api): State<Api>) -> Reply<Vec<agentbench_core::Project>> {
-    Ok(Json(api.runner.store().projects()?))
+    Ok(Json(api.runner.store().projects()?.into_iter().filter(|p| !p.supervisor).collect()))
 }
 
 async fn add_project(
@@ -787,6 +794,23 @@ async fn spawn(api: &Api, new: NewSession) -> Result<agentbench_core::Session, F
         .await
         .map_err(|e| bad(e.to_string()))?
         .map_err(Failure::from)
+}
+
+#[derive(Deserialize)]
+struct OpenSupervisor {
+    agent: String,
+}
+
+async fn open_supervisor(
+    State(api): State<Api>,
+    Json(open): Json<OpenSupervisor>,
+) -> Reply<agentbench_core::Session> {
+    let runner = api.runner.clone();
+    let session = tokio::task::spawn_blocking(move || runner.open_supervisor(&open.agent))
+        .await
+        .map_err(|e| bad(e.to_string()))?
+        .map_err(Failure::from)?;
+    Ok(Json(session))
 }
 
 async fn add_session(
@@ -1403,6 +1427,33 @@ mod tests {
         assert_eq!(m["high"]["effort"], "medium");
         assert_eq!(m["low"]["effort"], "", "an unknown effort is dropped");
         assert_eq!(shared.get().level("high").unwrap().effort, "medium");
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_chat_is_one_session_and_its_project_is_never_listed() {
+        let f = fixture();
+        let dir = tempfile::tempdir().unwrap();
+        crate::projects::ensure_supervisor(f.api.runner.store(), dir.path()).unwrap();
+        project(&f).await;
+
+        let (_, overview) = call(&f.app, "GET", "/api/overview", None, T).await;
+        assert!(overview["supervisor"].is_null());
+        let names: Vec<_> =
+            overview["projects"].as_array().unwrap().iter().map(|p| p["name"].clone()).collect();
+        assert_eq!(names, [json!("demo")], "the supervisor has no project in the list");
+        let (_, listed) = call(&f.app, "GET", "/api/projects", None, T).await;
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(overview["worktrees"].as_array().unwrap().len(), 1, "nor its folder");
+
+        let open = || call(&f.app, "POST", "/api/supervisor", Some(json!({"agent": "echo"})), T);
+        let (s, first) = open().await;
+        assert_eq!(s, StatusCode::OK, "{first}");
+        let (_, again) = open().await;
+        assert_eq!(first["id"], again["id"], "one standing chat");
+        assert_eq!(f.api.runner.store().sessions().unwrap().len(), 1);
+
+        let (_, overview) = call(&f.app, "GET", "/api/overview", None, T).await;
+        assert_eq!(overview["supervisor"], first["id"]);
     }
 
     #[tokio::test]

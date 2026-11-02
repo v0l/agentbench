@@ -1658,6 +1658,13 @@ impl App {
                 self.asking_models.remove(&agent);
                 self.agent_models.insert(agent, list);
             }
+            Reply::Supervisor(session) => {
+                self.transcripts.remove(&session.id);
+                self.open_supervisor_chat(session.id);
+                if let Some(c) = &mut self.client {
+                    c.overview();
+                }
+            }
             Reply::Started(session) => {
                 self.transcripts.remove(&session.id);
                 if self.awaiting == Some(session.project_id) {
@@ -1907,6 +1914,27 @@ impl App {
             branch: String::new(),
             prompt: String::new(),
         });
+    }
+
+    pub fn supervisor_chat(&self) -> Option<SessionId> {
+        self.overview.as_ref().and_then(|o| o.supervisor)
+    }
+
+    pub fn open_supervisor_chat(&mut self, sid: SessionId) {
+        let project = self.project;
+        self.open_session(sid, project.unwrap_or_default());
+        self.project = project;
+    }
+
+    pub fn open_supervisor(&mut self) {
+        if let Some(sid) = self.supervisor_chat() {
+            self.open_supervisor_chat(sid);
+            return;
+        }
+        let agent = self.default_agent();
+        if let Some(c) = &mut self.client {
+            c.open_supervisor(&agent);
+        }
     }
 
     pub fn open_session(&mut self, sid: SessionId, project: Id) {
