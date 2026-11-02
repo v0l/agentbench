@@ -89,10 +89,20 @@ pub struct Project {
     /// repository. It has one fixed checkout and is never scanned for worktrees.
     #[serde(default)]
     pub home: bool,
+    /// The built-in supervisor chat's project: one plain folder, no repository, whose session
+    /// sees every project, issue and session.
+    #[serde(default)]
+    pub supervisor: bool,
     #[serde(default)]
     pub pinned: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+impl Project {
+    pub fn builtin(&self) -> bool {
+        self.home || self.supervisor
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

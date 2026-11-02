@@ -129,11 +129,15 @@ impl StoreApi {
     ) -> Result<(), String> {
         let child =
             self.children.lock().unwrap_or_else(|e| e.into_inner()).contains(&(me.id, other.id));
-        if other.project_id == me.project_id || child {
+        if other.project_id == me.project_id || child || self.supervises(me) {
             Ok(())
         } else {
             Err("that session belongs to another project".into())
         }
+    }
+
+    fn supervises(&self, me: &agentbench_core::Session) -> bool {
+        self.store.project(me.project_id).is_ok_and(|p| p.supervisor)
     }
 
     fn allowed_projects(&self) -> Vec<Id> {
@@ -238,10 +242,20 @@ impl Api for StoreApi {
     fn call(&self, tool: &str, args: &Value, session: SessionId) -> Result<Value, String> {
         let s = &self.store;
         let me = s.session(session).map_err(|e| e.0)?;
-        let project = me.project_id;
+        let sup = self.supervises(&me);
+        let project = match (sup, args.get("project")) {
+            (true, Some(v))
+                if !v.is_null()
+                    && !matches!(tool, "start_session" | "check_project" | "grant_project") =>
+            {
+                self.find_project(v)?.id
+            }
+            _ => me.project_id,
+        };
+        let everywhere = sup && args.get("project").is_none_or(Value::is_null);
         let own = |issue: Id| -> Result<agentbench_core::Issue, String> {
             let i = s.issue(issue).map_err(|e| e.0)?;
-            if i.project_id != project {
+            if i.project_id != project && !sup {
                 return Err(format!("issue #{issue} belongs to another project"));
             }
             Ok(i)
@@ -253,9 +267,15 @@ impl Api for StoreApi {
                     .issues()
                     .map_err(|e| e.0)?
                     .into_iter()
-                    .filter(|i| i.project_id == project)
+                    .filter(|i| everywhere || i.project_id == project)
                     .filter(|i| filter.is_none_or(|f| i.state == f))
-                    .map(|i| issue_json(&i))
+                    .map(|i| {
+                        let mut out = issue_json(&i);
+                        if sup {
+                            out["project"] = json!(i.project_id);
+                        }
+                        out
+                    })
                     .collect();
                 json!(issues)
             }
@@ -309,17 +329,20 @@ impl Api for StoreApi {
                 json!({ "commented": issue })
             }
             "list_sessions" => {
-                let trees = s.worktrees(Some(project)).map_err(|e| e.0)?;
+                let trees =
+                    s.worktrees(if everywhere { None } else { Some(project) }).map_err(|e| e.0)?;
                 let sessions: Vec<Value> = s
                     .sessions()
                     .map_err(|e| e.0)?
                     .into_iter()
-                    .filter(|x| x.project_id == project)
+                    .filter(|x| everywhere || x.project_id == project)
                     .map(|x| {
                         let branch =
                             trees.iter().find(|w| w.id == x.worktree_id).map(|w| w.label());
                         json!({
                             "id": x.id,
+                            "project": x.project_id,
+                            "updated_at": x.updated_at,
                             "title": x.title,
                             "agent": x.agent,
                             "status": x.status,
@@ -348,6 +371,44 @@ impl Api for StoreApi {
                     })
                     .collect();
                 json!({ "session": other.id, "title": other.title, "status": other.status, "messages": lines })
+            }
+            "user_asks" => {
+                let per = args.get("per_session").and_then(Value::as_u64).unwrap_or(5).clamp(1, 50)
+                    as usize;
+                let limit = args.get("sessions").and_then(Value::as_u64).unwrap_or(30).clamp(1, 200)
+                    as usize;
+                let mut out = Vec::new();
+                for x in s
+                    .sessions()
+                    .map_err(|e| e.0)?
+                    .into_iter()
+                    .filter(|x| everywhere || x.project_id == project)
+                {
+                    if out.len() >= limit {
+                        break;
+                    }
+                    let asks: Vec<Value> = agentbench_core::shown(
+                        &s.messages(x.id, 0).map_err(|e| e.0)?,
+                    )
+                    .into_iter()
+                    .filter(|m| matches!(m.entry, Entry::User { .. }))
+                    .map(|m| json!({ "at": m.created_at, "text": clip(m.entry.text(), 1000) }))
+                    .collect();
+                    if asks.is_empty() {
+                        continue;
+                    }
+                    let skip = asks.len().saturating_sub(per);
+                    out.push(json!({
+                        "session": x.id,
+                        "project": x.project_id,
+                        "title": x.title,
+                        "status": x.status,
+                        "issue": x.issue_id,
+                        "updated_at": x.updated_at,
+                        "asks": asks[skip..],
+                    }));
+                }
+                json!(out)
             }
             "session_status" => {
                 let other = s.session(session_id(args)?).map_err(|e| e.0)?;
@@ -384,7 +445,7 @@ impl Api for StoreApi {
                     "id": p.id,
                     "name": p.name,
                     "path": p.path,
-                    "allowed": p.id == project || self.standing_permission(p.id),
+                    "allowed": sup || p.id == project || self.standing_permission(p.id),
                 })
             }
             "grant_project" => {
@@ -420,7 +481,7 @@ impl Api for StoreApi {
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .remove(&(session, target.id));
-                            if !once && !self.standing_permission(target.id) {
+                            if !once && !sup && !self.standing_permission(target.id) {
                                 return Err(format!(
                                     "starting a session in {} needs the user's permission, which has not been given",
                                     target.name
@@ -698,6 +759,57 @@ mod tests {
         assert_eq!(sessions.as_array().unwrap().len(), 1);
         assert_eq!(sessions[0]["you"], true);
         assert!(api.call("read_session", &json!({"id": elsewhere.id}), me.id).is_err());
+    }
+
+    #[test]
+    fn the_supervisor_sees_and_files_across_projects() {
+        let s = Store::memory().unwrap();
+        let (p, main) = crate::store::testing::project(&s, "/a");
+        let (q, other_main) = crate::store::testing::project(&s, "/b");
+        let dir = tempfile::tempdir().unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, dir.path()).unwrap();
+        let sup_main = s.main_worktree(sup.id).unwrap();
+        let boss = s.add_session(sup_main.id, "native", "boss", None, None).unwrap();
+        let a = s.add_session(main.id, "native", "a", None, None).unwrap();
+        let b = s.add_session(other_main.id, "native", "b", None, None).unwrap();
+        s.add_message(a.id, &Entry::user("fix the login bug")).unwrap();
+        s.add_message(b.id, &Entry::user("add dark mode")).unwrap();
+        s.add_message(b.id, &Entry::Assistant { text: "on it".into() }).unwrap();
+        let api = StoreApi::new(s.clone());
+
+        let all = api.call("list_sessions", &json!({}), boss.id).unwrap();
+        assert_eq!(all.as_array().unwrap().len(), 3);
+        let asks = api.call("user_asks", &json!({}), boss.id).unwrap();
+        let texts: Vec<_> = asks
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|x| x["asks"].as_array().unwrap().iter().map(|a| a["text"].as_str().unwrap()))
+            .collect();
+        assert!(texts.contains(&"fix the login bug") && texts.contains(&"add dark mode"));
+        let only = api.call("user_asks", &json!({"project": q.id}), boss.id).unwrap();
+        assert_eq!(only.as_array().unwrap().len(), 1);
+
+        api.call("read_session", &json!({"id": a.id.to_string()}), boss.id).unwrap();
+        api.call("send_message", &json!({"id": a.id.to_string(), "text": "hi"}), boss.id)
+            .unwrap_err();
+
+        let filed = api
+            .call("file_issue", &json!({"title": "login bug", "project": p.id}), boss.id)
+            .unwrap();
+        assert_eq!(s.issue(filed["filed"].as_i64().unwrap()).unwrap().project_id, p.id);
+        let listed = api.call("list_issues", &json!({}), boss.id).unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        api.call("update_issue", &json!({"id": filed["filed"], "state": "doing"}), boss.id)
+            .unwrap();
+
+        assert!(api.call("read_session", &json!({"id": b.id.to_string()}), a.id).is_err());
+        assert!(api.call("file_issue", &json!({"title": "x", "project": q.id}), a.id).is_ok());
+        assert_eq!(
+            s.issues().unwrap().iter().filter(|i| i.project_id == q.id).count(),
+            0,
+            "a normal session ignores `project` and files in its own"
+        );
     }
 
     #[test]

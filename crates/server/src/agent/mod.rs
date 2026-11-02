@@ -31,6 +31,8 @@ pub struct Context {
     pub branch: Option<String>,
     /// A chat in the user's home folder, which belongs to no git repository.
     pub home: bool,
+    /// The supervisor chat, which sees every project, issue and session.
+    pub supervisor: bool,
     pub issue: Option<agentbench_core::Id>,
     pub api_url: String,
     pub token: String,
@@ -209,6 +211,9 @@ pub fn content_text(content: &Value) -> String {
 }
 
 pub fn brief(c: &Context) -> String {
+    if c.supervisor {
+        return supervisor_brief(c);
+    }
     if c.home {
         return home_brief(c);
     }
@@ -255,6 +260,26 @@ When your prompt contains `PARENT=<id>`, you are a worker.\n\n\
 - If blocked, send `BLOCKED #<issue> <reason>` instead and stop.\n\
 - Always send exactly one final message, including when you fail.\n\
 </orchestration>";
+
+fn supervisor_brief(c: &Context) -> String {
+    format!(
+        "You are the supervisor in agentbench, a harness that runs coding agents in git worktrees and keeps an issue tracker beside them. \
+         This is session {session}, the one standing chat that watches everything. The user starts many sessions across many projects and loses track of the bugs and features they asked for; \
+         your job is to keep that straight.\n\n\
+         Unlike other sessions you see every project, issue, worktree and session, not just one.\n\n\
+         - `list_sessions` and `list_issues` cover all projects (pass `project` to narrow). `user_asks` returns what the user typed to each session, newest first: the record of what they asked for.\n\
+         - To find what is unfinished, read the asks, then `read_session` the sessions behind them and check the replies and the issues. Look for asks that were never answered, work left half done, sessions that failed or stopped, and requests with no issue.\n\
+         - File an issue (`file_issue` with `project`) for every ask that has none, and keep issue states true with `update_issue` and `comment_on_issue`. Do not duplicate an existing issue; search the list first.\n\
+         - `send_message` nudges a stalled session. `notify_user` tells the user about something that needs them.\n\
+         - You do not write code or change repositories yourself. Start a session with `start_session` (give it a `project`) when work must be done.\n\
+         - When asked for status, answer with a short list grouped by project: what is running, what is waiting on the user, what is stuck, what was asked and never done.\n\
+         - Use `remember` for durable notes about the user's preferences and standing decisions.\n\n\
+         The agentbench REST API is at {url} and needs the header `Authorization: Bearer $AGENTBENCH_TOKEN` \
+         (also in the environment as AGENTBENCH_URL, AGENTBENCH_TOKEN and AGENTBENCH_SESSION).",
+        session = c.session,
+        url = c.api_url.trim_end_matches('/'),
+    )
+}
 
 /// The brief for a chat in the home folder: no repository, branch or worktrees, just a place to
 /// do whatever the user asks.
@@ -366,6 +391,7 @@ pub fn context() -> Context {
         project_path: "/tmp/demo".into(),
         branch: Some("main".into()),
         home: false,
+        supervisor: false,
         issue: None,
         api_url: "http://127.0.0.1:7420".into(),
         token: "t".into(),
@@ -432,6 +458,14 @@ mod tests {
         assert!(b.contains("branch main"));
         assert!(b.contains("\"project_id\": 4"));
         assert!(b.contains("<orchestration>") && b.contains("PARENT=<id>"));
+    }
+
+    #[test]
+    fn the_supervisor_brief_names_its_job_and_not_a_repository() {
+        let b = brief(&Context { supervisor: true, ..context() });
+        assert!(b.contains("You are the supervisor"), "{b}");
+        assert!(b.contains("user_asks"));
+        assert!(!b.contains("demo") && !b.contains("<orchestration>"));
     }
 
     #[test]

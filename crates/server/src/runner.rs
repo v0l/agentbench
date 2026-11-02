@@ -165,7 +165,7 @@ impl Runner {
                 }
                 w
             }
-            Place::New { .. } if project.home => {
+            Place::New { .. } if project.builtin() => {
                 return Err(
                     bad("the home folder is not a git repo, so it has no worktrees".into()),
                 );
@@ -193,7 +193,9 @@ impl Runner {
         let title = chosen
             .or_else(|| new.prompt.as_deref().map(|p| agentbench_core::short_title(p, TITLE_MAX)))
             .unwrap_or_else(|| {
-                if project.home {
+                if project.supervisor {
+                    format!("{} supervising", agent.label())
+                } else if project.home {
                     format!("{} in ~", agent.label())
                 } else {
                     format!("{} on {}", agent.label(), worktree.label())
@@ -592,6 +594,7 @@ impl Runner {
         let branch = self.store.worktree(session.worktree_id).ok().and_then(|w| w.branch);
         let base = self.base.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let home = project.as_ref().is_some_and(|p| p.home);
+        let supervisor = project.as_ref().is_some_and(|p| p.supervisor);
         Context {
             session: session.id,
             project_id: session.project_id,
@@ -599,6 +602,7 @@ impl Runner {
             project_path: project.map(|p| p.path).unwrap_or_default(),
             branch,
             home,
+            supervisor,
             issue: session.issue_id,
             api_url: base.url,
             token: base.token,

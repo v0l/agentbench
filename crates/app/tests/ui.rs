@@ -582,7 +582,7 @@ impl agentbench_server::agent::Agent for Planner {
 #[test]
 fn several_questions_are_answered_together_with_multiple_choice() {
     let rig = rig_with(vec![Box::new(Planner)]);
-    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     let mut c = agentbench::client::Client::new(
@@ -655,7 +655,7 @@ fn several_questions_are_answered_together_with_multiple_choice() {
 #[test]
 fn a_question_is_answered_by_clicking_an_option() {
     let rig = rig_with(vec![Box::new(Waiter)]);
-    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     let mut c = agentbench::client::Client::new(
@@ -1356,7 +1356,7 @@ fn the_home_row_opens_a_blank_chat_that_starts_in_the_home_folder() {
 #[test]
 fn new_chat_stays_blank_while_other_agents_work() {
     let rig = rig();
-    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().blank_chat_here();
@@ -1430,7 +1430,7 @@ fn each_new_chat_from_the_tree_is_a_new_session() {
 #[test]
 fn a_new_chat_after_a_deleted_one_shows_none_of_its_messages() {
     let rig = rig();
-    let main = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
+    let main = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
     let tree = rig.store.main_worktree(main).unwrap();
     let old = rig.store.add_session(tree.id, "echo", "old talk", None, None).unwrap();
     for text in ["one", "two", "three"] {
@@ -1684,7 +1684,7 @@ fn escape_stops_the_agent_working_in_the_open_chat() {
         plain: false,
     };
     let rig = rig_with(vec![Box::new(slow)]);
-    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap().id;
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     let mut other = agentbench::client::Client::new(
@@ -2278,7 +2278,7 @@ fn f1_opens_and_closes_the_help() {
 #[test]
 fn a_logo_in_the_repo_becomes_the_projects_icon() {
     let rig = rig();
-    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
     let mut png = Vec::new();
     image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
         8,
@@ -2297,7 +2297,7 @@ fn a_logo_in_the_repo_becomes_the_projects_icon() {
 #[test]
 fn a_project_is_renamed_from_the_settings_projects_page() {
     let rig = rig();
-    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.home).unwrap();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.get_by_label("settings").click();

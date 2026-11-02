@@ -272,7 +272,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 17] = [
+pub const AGENTBENCH_TOOLS: [&str; 18] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -281,6 +281,7 @@ pub const AGENTBENCH_TOOLS: [&str; 17] = [
     "list_sessions",
     "read_session",
     "session_status",
+    "user_asks",
     "start_session",
     "send_message",
     "list_projects",
@@ -305,7 +306,10 @@ fn agentbench_specs() -> Vec<Spec> {
         Spec::new(
             "list_issues",
             "List this project's issues with their state. Pass state to filter: backlog, todo, doing, review or done.",
-            object(json!({ "state": string("Only issues in this state") }), &[]),
+            object(
+                json!({ "state": string("Only issues in this state"), "project": string("Supervisor chat only: the project by name or id. Without it, list tools cover every project"), }),
+                &[],
+            ),
         ),
         Spec::new(
             "get_issue",
@@ -318,6 +322,7 @@ fn agentbench_specs() -> Vec<Spec> {
             object(
                 json!({
                     "title": string("One line"),
+                    "project": string("Supervisor chat only: the project to file it in, by name or id"),
                     "body": string("Details, steps, what done looks like"),
                     "labels": labels_schema(),
                     "state": string("backlog (default), todo, doing, review or done"),
@@ -352,7 +357,10 @@ fn agentbench_specs() -> Vec<Spec> {
         Spec::new(
             "list_sessions",
             "List the agent sessions in this project: which agent, which worktree, what they are doing.",
-            object(json!({}), &[]),
+            object(
+                json!({ "project": string("Supervisor chat only: the project by name or id. Without it, list tools cover every project"), }),
+                &[],
+            ),
         ),
         Spec::new(
             "read_session",
@@ -360,6 +368,18 @@ fn agentbench_specs() -> Vec<Spec> {
             object(
                 json!({ "id": string("The session id, as list_sessions gives it"), "last": id("How many messages, default 20") }),
                 &["id"],
+            ),
+        ),
+        Spec::new(
+            "user_asks",
+            "What the user typed to each session, newest sessions first, with each session's status and issue. The record of what was asked for. In the supervisor chat it covers every project unless `project` is given.",
+            object(
+                json!({
+                    "project": string("Only this project, by name or id (supervisor chat only)"),
+                    "sessions": id("Most sessions to list, default 30"),
+                    "per_session": id("Most recent asks per session, default 5"),
+                }),
+                &[],
             ),
         ),
         Spec::new(

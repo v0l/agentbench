@@ -99,7 +99,7 @@ impl App {
             .overview
             .iter()
             .flat_map(|o| &o.projects)
-            .filter(|p| !p.home)
+            .filter(|p| !p.builtin())
             .map(|p| {
                 let trees = self.overview.iter().flat_map(|o| &o.worktrees);
                 (p.clone(), trees.filter(|w| w.project_id == p.id).cloned().collect())

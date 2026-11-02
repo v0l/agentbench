@@ -240,6 +240,7 @@ async fn serve_inner(
         // A home folder that is a project itself is left alone.
         let _ = projects::ensure_home(&store, &dir);
     }
+    let _ = projects::ensure_supervisor(&store, &home().join("supervisor"));
     let token = token(&store).map_err(|e| e.0)?;
     let (speech, voice) = speech.unwrap_or_else(|| {
         (speech::Speech::new(home().join("models"), &speech_model(&store)), voice::Voice::default())

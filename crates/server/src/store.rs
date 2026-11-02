@@ -170,6 +170,7 @@ CREATE TABLE notes (
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("sessions", "title_auto", "INTEGER NOT NULL DEFAULT 0"),
     ("projects", "home", "INTEGER NOT NULL DEFAULT 0"),
+    ("projects", "supervisor", "INTEGER NOT NULL DEFAULT 0"),
     ("sessions", "effort", "TEXT"),
     ("projects", "pinned", "INTEGER NOT NULL DEFAULT 0"),
     ("projects", "tags", "TEXT NOT NULL DEFAULT '[]'"),
@@ -290,6 +291,7 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
         remote: row.get("remote")?,
         created_at: row.get("created_at")?,
         home: row.get("home")?,
+        supervisor: row.get("supervisor")?,
         pinned: row.get("pinned")?,
         tags: serde_json::from_str(&row.get::<_, String>("tags")?).unwrap_or_default(),
     })
@@ -433,7 +435,8 @@ impl Store {
 
     pub fn projects(&self) -> Result<Vec<Project>> {
         let db = self.db();
-        let mut stmt = db.prepare("SELECT * FROM projects ORDER BY home DESC, name")?;
+        let mut stmt =
+            db.prepare("SELECT * FROM projects ORDER BY home DESC, supervisor DESC, name")?;
         let rows = stmt.query_map([], project_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -486,8 +489,23 @@ impl Store {
             .optional()?)
     }
 
+    pub fn supervisor_project(&self) -> Result<Option<Project>> {
+        Ok(self
+            .db()
+            .query_row("SELECT * FROM projects WHERE supervisor = 1", [], project_row)
+            .optional()?)
+    }
+
     /// Make the home project: `path` as a project and its one, fixed checkout.
     pub fn add_home(&self, name: &str, path: &str) -> Result<Project> {
+        self.add_builtin(name, path, "home")
+    }
+
+    pub fn add_supervisor(&self, name: &str, path: &str) -> Result<Project> {
+        self.add_builtin(name, path, "supervisor")
+    }
+
+    fn add_builtin(&self, name: &str, path: &str, kind: &str) -> Result<Project> {
         if self.project_by_path(path)?.is_some() {
             return Err(StoreError(format!("{path} is already a project")));
         }
@@ -495,7 +513,7 @@ impl Store {
             let db = self.db();
             let t = now();
             db.execute(
-                "INSERT INTO projects (name, path, branch, remote, created_at, home) VALUES (?1, ?2, NULL, NULL, ?3, 1)",
+                &format!("INSERT INTO projects (name, path, branch, remote, created_at, {kind}) VALUES (?1, ?2, NULL, NULL, ?3, 1)"),
                 params![name, path, t],
             )?;
             let id = db.last_insert_rowid();
@@ -542,8 +560,8 @@ impl Store {
     }
 
     pub fn delete_project(&self, id: Id) -> Result<()> {
-        if self.project(id)?.home {
-            return Err(StoreError("the home project is built in and cannot be removed".into()));
+        if self.project(id)?.builtin() {
+            return Err(StoreError("that project is built in and cannot be removed".into()));
         }
         let db = self.db();
         db.execute("DELETE FROM sessions WHERE project_id = ?1", [id])?;

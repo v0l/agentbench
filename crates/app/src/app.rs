@@ -253,7 +253,8 @@ fn sort_projects(
         issue.max(session).unwrap_or(p.created_at)
     };
     let name = |a: &Project, b: &Project| a.name.to_lowercase().cmp(&b.name.to_lowercase());
-    let head = |a: &Project, b: &Project| b.home.cmp(&a.home).then(b.pinned.cmp(&a.pinned));
+    let head =
+        |a: &Project, b: &Project| b.builtin().cmp(&a.builtin()).then(b.pinned.cmp(&a.pinned));
     match by {
         ProjectSort::Name => projects.sort_by(|a, b| head(a, b).then_with(|| name(a, b))),
         ProjectSort::Open => projects.sort_by(|a, b| {
@@ -921,7 +922,9 @@ impl App {
     }
 
     fn is_home(&self, project: Id) -> bool {
-        self.overview.as_ref().is_some_and(|o| o.projects.iter().any(|p| p.id == project && p.home))
+        self.overview
+            .as_ref()
+            .is_some_and(|o| o.projects.iter().any(|p| p.id == project && p.builtin()))
     }
 
     /// Connect to the server a pairing link names, and keep it for next time.
@@ -1332,7 +1335,7 @@ impl App {
     pub fn blank_chat_here(&mut self) {
         if self.project.is_none() {
             self.project = self.overview.as_ref().and_then(|o| {
-                o.projects.iter().find(|p| !p.home).or(o.projects.first()).map(|p| p.id)
+                o.projects.iter().find(|p| !p.builtin()).or(o.projects.first()).map(|p| p.id)
             });
         }
         self.new_chat(None);
@@ -1490,8 +1493,12 @@ impl App {
                 self.offline = None;
                 let cursor = o.cursor;
                 if self.project.is_none_or(|p| !o.projects.iter().any(|x| x.id == p)) {
-                    self.project =
-                        o.projects.iter().find(|p| !p.home).or(o.projects.first()).map(|p| p.id);
+                    self.project = o
+                        .projects
+                        .iter()
+                        .find(|p| !p.builtin())
+                        .or(o.projects.first())
+                        .map(|p| p.id);
                 }
                 if self.session.is_some_and(|s| !o.sessions.iter().any(|x| x.id == s)) {
                     self.session = None;
@@ -1873,10 +1880,9 @@ impl App {
         let Some(o) = &self.overview else {
             return;
         };
-        let project = issue
-            .map(|i| i.project_id)
-            .or(self.project)
-            .or_else(|| o.projects.iter().find(|p| !p.home).or(o.projects.first()).map(|p| p.id));
+        let project = issue.map(|i| i.project_id).or(self.project).or_else(|| {
+            o.projects.iter().find(|p| !p.builtin()).or(o.projects.first()).map(|p| p.id)
+        });
         let Some(project) = project else {
             return;
         };
@@ -2531,6 +2537,7 @@ mod tests {
             remote: remote.map(Into::into),
             created_at: id,
             home: false,
+            supervisor: false,
             pinned: false,
             tags: vec![],
         }

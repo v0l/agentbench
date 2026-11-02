@@ -354,7 +354,18 @@ impl App {
         let projects: Vec<(Id, String)> = o
             .projects
             .iter()
-            .map(|p| (p.id, if p.home { "~ (no repo)".to_string() } else { p.name.clone() }))
+            .map(|p| {
+                (
+                    p.id,
+                    if p.supervisor {
+                        "supervisor".to_string()
+                    } else if p.home {
+                        "~ (no repo)".to_string()
+                    } else {
+                        p.name.clone()
+                    },
+                )
+            })
             .collect();
         let issue = s.issue.and_then(|id| o.issues.iter().find(|i| i.id == id)).cloned();
         let project = o

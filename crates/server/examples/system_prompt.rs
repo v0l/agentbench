@@ -33,6 +33,7 @@ fn main() -> Result<(), String> {
         project_path: cwd.to_string_lossy().into(),
         branch,
         home: false,
+        supervisor: false,
         issue: None,
         api_url: format!(
             "http://127.0.0.1:{}",

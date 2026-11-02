@@ -167,9 +167,17 @@ pub fn ensure_home(store: &Store, dir: &Path) -> Result<Project, StoreError> {
     store.add_home("chats", &dir.to_string_lossy())
 }
 
+pub fn ensure_supervisor(store: &Store, dir: &Path) -> Result<Project, StoreError> {
+    if let Some(p) = store.supervisor_project()? {
+        return Ok(p);
+    }
+    std::fs::create_dir_all(dir).map_err(|e| StoreError(format!("{}: {e}", dir.display())))?;
+    store.add_supervisor("supervisor", &dir.to_string_lossy())
+}
+
 pub fn sync(store: &Store, project_id: Id, created: Option<&Path>) -> Result<bool, StoreError> {
     let project = store.project(project_id)?;
-    if project.home {
+    if project.builtin() {
         return Ok(false);
     }
     let main = PathBuf::from(&project.path);
@@ -196,8 +204,8 @@ pub fn add_worktree(
     base: Option<&str>,
 ) -> Result<Worktree, StoreError> {
     let project = store.project(project_id)?;
-    if project.home {
-        return Err(StoreError("the home folder is not a git repo, so it has no worktrees".into()));
+    if project.builtin() {
+        return Err(StoreError("that folder is not a git repo, so it has no worktrees".into()));
     }
     let main = PathBuf::from(&project.path);
     let branch = branch.trim();
@@ -341,6 +349,23 @@ mod tests {
         add(&s, &repo_dir, None, false).unwrap();
         let names: Vec<_> = s.projects().unwrap().into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["chats", "r"], "the chats card is listed first");
+    }
+
+    #[test]
+    fn the_supervisor_project_is_made_once_and_is_not_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("supervisor");
+        let s = Store::memory().unwrap();
+        let sup = ensure_supervisor(&s, &folder).unwrap();
+        assert!(sup.supervisor && !sup.home);
+        assert!(folder.is_dir());
+        assert_eq!(ensure_supervisor(&s, &folder).unwrap().id, sup.id, "made once");
+        assert!(!sync(&s, sup.id, None).unwrap());
+        assert!(add_worktree(&s, sup.id, "x", None).is_err());
+        assert!(s.delete_project(sup.id).is_err(), "built in");
+        let home = ensure_home(&s, dir.path()).unwrap();
+        let names: Vec<_> = s.projects().unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, [home.name, "supervisor".to_string()]);
     }
 
     #[test]

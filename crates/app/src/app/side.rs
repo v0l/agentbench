@@ -19,7 +19,7 @@ impl App {
             }
             return;
         };
-        let no_projects = o.projects.iter().all(|p| p.home);
+        let no_projects = o.projects.iter().all(|p| p.builtin());
         field(ui, &mut self.side_filter, "filter chats");
         ui.add_space(4.0);
         let needle = self.side_filter.trim().to_lowercase();

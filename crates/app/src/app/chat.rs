@@ -103,7 +103,7 @@ impl App {
         let Some(project) = kept.or(self.project).or(o
             .projects
             .iter()
-            .find(|p| !p.home)
+            .find(|p| !p.builtin())
             .or(o.projects.first())
             .map(|p| p.id))
         else {
@@ -136,7 +136,7 @@ impl App {
         if matches!(fresh.place, PlaceChoice::Existing(id) if !trees.iter().any(|w| w.id == id)) {
             fresh.place = PlaceChoice::Main;
         }
-        let home = o.projects.iter().any(|p| p.id == project && p.home);
+        let home = o.projects.iter().any(|p| p.id == project && p.builtin());
         let here = match fresh.place {
             PlaceChoice::New => None,
             PlaceChoice::Existing(id) => trees.iter().find(|w| w.id == id),
