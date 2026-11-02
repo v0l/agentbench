@@ -94,7 +94,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/issues/{id}/comments", get(comments).post(add_comment))
         .route("/api/issues/{id}/start", post(start_issue))
         .route("/api/sessions", get(sessions).post(add_session))
-        .route("/api/sessions/{id}", get(session).delete(delete_session))
+        .route("/api/sessions/{id}", get(session).patch(rename_session).delete(delete_session))
         .route("/api/sessions/{id}/messages", get(messages).post(send))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
         .route(
@@ -763,6 +763,19 @@ async fn session(
     State(api): State<Api>,
     Path(id): Path<SessionId>,
 ) -> Reply<agentbench_core::Session> {
+    let session = api.runner.store().session(id)?;
+    Ok(Json(api.runner.with_queued(vec![session]).remove(0)))
+}
+
+async fn rename_session(
+    State(api): State<Api>,
+    Path(id): Path<SessionId>,
+    Json(patch): Json<agentbench_core::SessionPatch>,
+) -> Reply<agentbench_core::Session> {
+    if let Some(title) = &patch.title {
+        api.runner.store().set_title(id, title, true)?;
+        changed(&api);
+    }
     let session = api.runner.store().session(id)?;
     Ok(Json(api.runner.with_queued(vec![session]).remove(0)))
 }
@@ -1536,6 +1549,30 @@ mod tests {
             assert_eq!(s, StatusCode::OK, "{sess}");
             assert_eq!(sess["cwd"], f.repo.canonicalize().unwrap().to_string_lossy().as_ref());
         }
+    }
+
+    #[tokio::test]
+    async fn a_chat_is_renamed_and_keeps_the_name() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, sess) = call(
+            &f.app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "echo", "prompt": "hi"})),
+            T,
+        )
+        .await;
+        let id = sess["id"].as_str().unwrap().to_string();
+        let path = format!("/api/sessions/{id}");
+        let (s, renamed) =
+            call(&f.app, "PATCH", &path, Some(json!({"title": "  Billing work "})), T).await;
+        assert_eq!(s, StatusCode::OK, "{renamed}");
+        assert_eq!(renamed["title"], "Billing work");
+        let (s, _) = call(&f.app, "PATCH", &path, Some(json!({"title": "  "})), T).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (_, again) = call(&f.app, "GET", &path, None, T).await;
+        assert_eq!(again["title"], "Billing work");
     }
 
     #[tokio::test]

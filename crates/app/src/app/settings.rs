@@ -926,7 +926,7 @@ fn projects_section(
                     })
                     .inner;
                 r.request_focus();
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let enter = r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (save_clicked || enter) && !text.trim().is_empty() {
                     action = Some(ProjectAction::Rename(id, text.trim().to_string()));
                     done = true;

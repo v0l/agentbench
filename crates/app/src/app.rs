@@ -585,6 +585,7 @@ pub struct App {
     project_sort: ProjectSort,
     tag_filter: String,
     edit_tags: Option<(Id, String)>,
+    rename_chat: Option<(SessionId, String)>,
     only_busy: bool,
     project: Option<Id>,
     session: Option<SessionId>,
@@ -719,6 +720,7 @@ impl App {
             project_sort: ProjectSort::Name,
             tag_filter: String::new(),
             edit_tags: None,
+            rename_chat: None,
             only_busy: false,
             project: None,
             session: None,
@@ -1340,6 +1342,34 @@ impl App {
             st.page = Page::Projects;
             st.renaming = Some((project, name));
         }
+    }
+
+    pub fn start_rename_chat(&mut self, sid: SessionId) {
+        if let Some(title) = self.session_by_id(sid).map(|s| s.title.clone()) {
+            self.rename_chat = Some((sid, title));
+        }
+    }
+
+    pub fn rename_chat_open(&self) -> bool {
+        self.rename_chat.is_some()
+    }
+
+    pub fn open_in_tile(&mut self, sid: SessionId, at: usize) {
+        if at >= self.grid_now().slots() {
+            return;
+        }
+        for x in self.slots.iter_mut().filter(|x| **x == Some(sid)) {
+            *x = None;
+        }
+        self.slots[at] = Some(sid);
+        self.focus_at = at;
+        self.tab = Tab::Chat;
+        self.focus_tile(at);
+        self.session = Some(sid);
+        if let Some(p) = self.session_by_id(sid).map(|s| s.project_id) {
+            self.project = Some(p);
+        }
+        self.fetch_shown();
     }
 
     pub fn helping(&self) -> bool {

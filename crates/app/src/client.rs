@@ -517,6 +517,11 @@ impl Client {
         );
     }
 
+    pub fn rename_session(&mut self, session: SessionId, title: &str) {
+        let patch = agentbench_core::SessionPatch { title: Some(title.to_string()) };
+        self.act(Method::PATCH, &format!("/api/sessions/{session}"), Some(&patch), "");
+    }
+
     pub fn delete_session(&mut self, session: SessionId) {
         self.act::<()>(
             Method::DELETE,

@@ -153,21 +153,73 @@ impl App {
         if resp.clicked() {
             self.open_session(s.id, s.project_id);
         }
+        let tree = self
+            .overview
+            .iter()
+            .flat_map(|o| &o.worktrees)
+            .find(|w| w.id == s.worktree_id)
+            .cloned();
+        let tiles = self.grid_now().slots();
         resp.context_menu(|ui| {
-            if s.status.busy() && ui.add(Key::new("stop").outline(FAULT).min_width(150.0)).clicked()
+            let width = 170.0;
+            if s.status.busy() && ui.add(Key::new("stop").outline(FAULT).min_width(width)).clicked()
             {
                 if let Some(c) = &mut self.client {
                     c.interrupt(s.id);
                 }
                 ui.close();
             }
+            if let Some(w) = tree.as_ref().filter(|w| !w.missing) {
+                if ui.add(Key::new("new chat here").outline(READOUT).min_width(width)).clicked() {
+                    self.new_chat(Some(w));
+                    ui.close();
+                }
+                if ui.add(Key::new("open terminal").outline(VALUE).min_width(width)).clicked() {
+                    self.terminal = Some(TerminalView::new(s.id));
+                    ui.close();
+                }
+            }
+            if let Some(issue) = s.issue_id
+                && ui
+                    .add(Key::new(format!("open issue #{issue}")).outline(VALUE).min_width(width))
+                    .clicked()
+            {
+                self.project = Some(s.project_id);
+                self.tab = Tab::Issues;
+                self.detail = Some(issue);
+                ui.close();
+            }
+            if tiles > 1 {
+                ui.menu_button("open in tile", |ui| {
+                    for at in 0..tiles {
+                        if ui.button(format!("tile {}", at + 1)).clicked() {
+                            self.open_in_tile(s.id, at);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            if ui.add(Key::new("rename chat").outline(VALUE).min_width(width)).clicked() {
+                self.rename_chat = Some((s.id, s.title.clone()));
+                ui.close();
+            }
             if !self.is_home(s.project_id)
-                && ui.add(Key::new("rename project").outline(VALUE).min_width(150.0)).clicked()
+                && ui.add(Key::new("rename project").outline(VALUE).min_width(width)).clicked()
             {
                 self.rename_project_from_chat(s.id);
                 ui.close();
             }
-            if ui.add(Key::new("close chat").outline(FAULT).min_width(150.0)).clicked() {
+            if let Some(w) = tree.as_ref()
+                && ui.add(Key::new("copy worktree path").outline(VALUE).min_width(width)).clicked()
+            {
+                ui.ctx().copy_text(w.path.clone());
+                ui.close();
+            }
+            if ui.add(Key::new("copy chat id").outline(VALUE).min_width(width)).clicked() {
+                ui.ctx().copy_text(s.id.to_string());
+                ui.close();
+            }
+            if ui.add(Key::new("close chat").outline(FAULT).min_width(width)).clicked() {
                 self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
                 ui.close();
             }

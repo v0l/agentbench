@@ -14,6 +14,7 @@ impl App {
         self.settings_modal(ctx);
         self.scan_modal(ctx);
         self.help_modal(ctx);
+        self.rename_chat_modal(ctx);
     }
 
     /// The camera, looking for a pairing code. Pairs and closes itself when it reads one.
@@ -512,6 +513,48 @@ impl App {
             self.new_worktree = None;
         } else if close {
             self.new_worktree = None;
+        }
+    }
+
+    pub(super) fn rename_chat_modal(&mut self, ctx: &egui::Context) {
+        let Some((sid, text)) = &mut self.rename_chat else {
+            return;
+        };
+        let (mut go, mut close) = (false, false);
+        let m = egui::Modal::new(egui::Id::unique("rename-chat"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(modal_width(ctx, 460.0));
+                modal_title(ui, "Rename chat");
+                section(ui, "title", "the name shown in the chat list", |ui| {
+                    let r = field(ui, text, "chat title");
+                    r.request_focus();
+                    go |= r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                });
+                footer(ui, |ui| {
+                    let ready = !text.trim().is_empty();
+                    if ui
+                        .add(Key::new("rename").solid(READOUT).enabled(ready).min_width(100.0))
+                        .clicked()
+                    {
+                        go = true;
+                    }
+                    if ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if m.should_close() {
+            close = true;
+        }
+        if go && !text.trim().is_empty() {
+            let (sid, title) = (*sid, text.trim().to_string());
+            if let Some(c) = &mut self.client {
+                c.rename_session(sid, &title);
+            }
+            self.rename_chat = None;
+        } else if close {
+            self.rename_chat = None;
         }
     }
 

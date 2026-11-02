@@ -2328,3 +2328,54 @@ fn rename_project_from_a_chats_menu_opens_the_name_field() {
     shot(&mut h, "rename-from-chat");
     h.get_by_label("save name");
 }
+
+#[test]
+fn a_chat_is_renamed_from_its_menu_modal() {
+    let rig = rig();
+    let sid =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap().id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    h.state_mut().start_rename_chat(sid);
+    h.run_steps(3);
+    assert!(h.state().rename_chat_open());
+    shot(&mut h, "rename-chat");
+    h.event(egui::Event::Key {
+        key: egui::Key::A,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::COMMAND,
+    });
+    h.event(egui::Event::Text("Greetings".into()));
+    h.run_steps(2);
+    assert!(h.state().rename_chat_open());
+    h.run_steps(3);
+    h.key_press(egui::Key::Enter);
+    until(&mut h, "the new title", |_| rig.store.session(sid).unwrap().title == "Greetings");
+    until(&mut h, "the list", |h| {
+        h.state().overview().is_some_and(|o| o.sessions.iter().any(|s| s.title == "Greetings"))
+    });
+    assert!(!h.state().rename_chat_open());
+}
+
+#[test]
+fn a_chat_can_be_opened_in_a_chosen_tile() {
+    use agentbench::app::Grid;
+    let rig = rig();
+    let sid =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap().id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_grid(Grid::Six);
+    h.run_steps(3);
+    h.state_mut().open_in_tile(sid, 4);
+    h.run_steps(3);
+    assert_eq!(h.state().tile_chat(4), Some(sid));
+    assert_eq!(h.state().focused_tile(), 4);
+    h.state_mut().open_in_tile(sid, 1);
+    h.run_steps(3);
+    assert_eq!(h.state().tile_chat(1), Some(sid));
+    assert_eq!(h.state().tile_chat(4), None, "a chat lives in one tile only");
+}
