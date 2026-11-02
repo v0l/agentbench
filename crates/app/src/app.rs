@@ -29,7 +29,7 @@ pub use self::widgets::status_counts;
 use self::widgets::*;
 
 const SIDE_W: f32 = 320.0;
-const FEW_PROJECTS: usize = 4;
+const SHOWN_CHATS: usize = 14;
 const RETRY: Duration = Duration::from_secs(3);
 const TREE_INDENT: f32 = 16.0;
 const TREE_X: f32 = 5.0;
@@ -529,6 +529,8 @@ pub struct App {
     focused: bool,
     issue: Option<Id>,
     opened: HashSet<Id>,
+    all_chats: bool,
+    projects_open: bool,
     side_filter: String,
     transcripts: HashMap<SessionId, Transcript>,
     comments: HashMap<Id, Vec<Comment>>,
@@ -657,6 +659,8 @@ impl App {
             focused: true,
             issue: None,
             opened: HashSet::new(),
+            all_chats: false,
+            projects_open: false,
             side_filter: String::new(),
             transcripts: HashMap::new(),
             comments: HashMap::new(),
@@ -789,19 +793,6 @@ impl App {
     /// Whether a project is the built-in home folder, which has no git repo behind it.
     fn is_home(&self, project: Id) -> bool {
         self.overview.as_ref().is_some_and(|o| o.projects.iter().any(|p| p.id == project && p.home))
-    }
-
-    fn sessions_of(&self, worktree: Id) -> Vec<&Session> {
-        let mut out: Vec<&Session> = self
-            .overview
-            .iter()
-            .flat_map(|o| &o.sessions)
-            .filter(|s| s.worktree_id == worktree)
-            .collect();
-        // Order by creation, not activity: `updated_at` moves on every message and
-        // status change, which made chats jump around the tree while agents worked.
-        out.sort_by_key(|s| std::cmp::Reverse((s.created_at, s.id)));
-        out
     }
 
     /// Connect to the server a pairing link names, and keep it for next time.
@@ -1194,6 +1185,10 @@ impl App {
     /// The grid in use: a narrow window has no room to tile.
     fn grid_now(&self) -> Grid {
         if self.narrow { Grid::Single } else { self.grid }
+    }
+
+    pub fn show_projects(&mut self, on: bool) {
+        self.projects_open = on;
     }
 
     pub fn grid(&self) -> Grid {

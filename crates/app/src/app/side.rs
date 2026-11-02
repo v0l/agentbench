@@ -30,10 +30,18 @@ impl App {
         }
         field(ui, &mut self.side_filter, "filter projects and chats");
         ui.add_space(4.0);
-        self.active_chats(ui);
         let needle = self.side_filter.trim().to_lowercase();
         let filtering = !needle.is_empty();
-        for p in &projects {
+        self.chat_stack(ui, &needle);
+        ui.add_space(6.0);
+        let label =
+            format!("{} projects ({})", if self.projects_open { "v" } else { ">" }, projects.len());
+        if Line::new().legend(&label).show(ui).interact(Sense::click()).clicked() {
+            self.projects_open = !self.projects_open;
+        }
+        ui.add_space(4.0);
+        let listed = self.projects_open || projects.is_empty();
+        for p in projects.iter().filter(|_| listed) {
             if filtering && !self.project_matches(p, &worktrees, &needle) {
                 continue;
             }
@@ -41,13 +49,12 @@ impl App {
             let rail = if selected { Some(READOUT) } else { None };
             let trees: Vec<&Worktree> = worktrees.iter().filter(|w| w.project_id == p.id).collect();
             let home = p.home;
+            let trees_menu: Vec<Worktree> = trees.iter().map(|w| (*w).clone()).collect();
             let open = self.overview.as_ref().map_or(0, |o| {
                 o.issues.iter().filter(|i| i.project_id == p.id && i.state.is_open()).count()
             });
             let busy = self.busy_in(p.id);
-            let crowded = projects.len() > FEW_PROJECTS;
-            let collapsed =
-                crowded && !filtering && !home && busy == 0 && !self.opened.contains(&p.id);
+            let collapsed = false;
             let mut picked_head = false;
             let mut pick = false;
             let mut menu = None;
@@ -78,10 +85,7 @@ impl App {
                         return;
                     }
                     ui.add_space(2.0);
-                    let last = trees.len().saturating_sub(1);
-                    for (i, w) in trees.iter().enumerate() {
-                        self.worktree_row(ui, w, i == last);
-                    }
+                    self.project_chats(ui, p.id, &trees);
                 },
             );
             if pick || picked_head {
@@ -111,6 +115,16 @@ impl App {
                 }
                 if home {
                     return;
+                }
+                for w in trees_menu.iter().filter(|w| !w.main) {
+                    let label = if w.missing { "forget" } else { "remove" };
+                    let key = Key::new(format!("{label} worktree {}", w.label()))
+                        .outline(FAULT)
+                        .min_width(160.0);
+                    if ui.add(key).clicked() {
+                        self.confirm = Some(Confirm::Worktree(w.id, w.label(), w.missing));
+                        ui.close();
+                    }
                 }
                 if ui.add(Key::new("new worktree").outline(VALUE).min_width(160.0)).clicked() {
                     self.new_worktree = Some((p.id, String::new()));
@@ -162,168 +176,99 @@ impl App {
             || o.sessions.iter().any(|s| s.project_id == p.id && has(&s.title))
     }
 
-    fn active_chats(&mut self, ui: &mut Ui) {
+    fn start_label(&self, project: Id) -> String {
+        let found = self.overview.iter().flat_map(|o| &o.projects).find(|p| p.id == project);
+        found.map_or(String::new(), |p| if p.home { "~".into() } else { p.name.clone() })
+    }
+
+    fn project_chats(&mut self, ui: &mut Ui, project: Id, trees: &[&Worktree]) {
+        let main = trees.iter().find(|w| w.main).or(trees.first()).map(|w| (*w).clone());
+        let Some(w) = main.filter(|w| !w.missing) else {
+            return;
+        };
+        let label = if self.is_home(project) { "new chat in ~" } else { "new chat" };
+        let r = Line::new().value(label).tint(READOUT).size(11.5).show(ui);
+        let r = r.interact(Sense::click());
+        let name = format!("start chat in {}", self.start_label(project));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+        if r.on_hover_text(&w.path).clicked() {
+            self.new_chat(Some(&w));
+        }
+    }
+
+    fn chat_stack(&mut self, ui: &mut Ui, needle: &str) {
         let Some(o) = &self.overview else {
             return;
         };
-        let mut active: Vec<(Session, String)> = o
+        let mut chats: Vec<(Session, String, String)> = o
             .sessions
             .iter()
-            .filter(|s| s.status.busy())
             .map(|s| {
-                let project = o.projects.iter().find(|p| p.id == s.project_id);
-                (s.clone(), project.map(|p| p.name.clone()).unwrap_or_default())
+                let project =
+                    o.projects.iter().find(|p| p.id == s.project_id).map(|p| p.name.clone());
+                let branch = o.worktrees.iter().find(|w| w.id == s.worktree_id).map(|w| w.label());
+                (s.clone(), project.unwrap_or_default(), branch.unwrap_or_default())
+            })
+            .filter(|(s, project, branch)| {
+                needle.is_empty()
+                    || s.title.to_lowercase().contains(needle)
+                    || project.to_lowercase().contains(needle)
+                    || branch.to_lowercase().contains(needle)
             })
             .collect();
-        if active.is_empty() {
+        chats.sort_by_key(|(s, _, _)| (!s.status.busy(), std::cmp::Reverse(s.updated_at)));
+        if chats.is_empty() {
+            hint(ui, if needle.is_empty() { "no chats yet" } else { "no chats match" });
             return;
         }
-        active.sort_by_key(|(s, _)| std::cmp::Reverse(s.updated_at));
-        let needle = self.side_filter.trim().to_lowercase();
-        active.retain(|(s, project)| {
-            needle.is_empty()
-                || s.title.to_lowercase().contains(&needle)
-                || project.to_lowercase().contains(&needle)
-        });
-        if active.is_empty() {
-            return;
+        let total = chats.len();
+        let shown =
+            if self.all_chats || !needle.is_empty() { total } else { total.min(SHOWN_CHATS) };
+        for (s, project, branch) in chats.iter().take(shown) {
+            self.session_row(ui, s, project, branch);
         }
-        ui.add_space(2.0);
-        Line::new().legend(&format!("active ({})", active.len())).show(ui);
-        for (s, project) in &active {
-            self.active_row(ui, s, project);
+        if total > SHOWN_CHATS && needle.is_empty() {
+            let text = if self.all_chats {
+                "show fewer".to_string()
+            } else {
+                format!("show {} more", total - shown)
+            };
+            if Line::new().note(text).size(10.5).show(ui).interact(Sense::click()).clicked() {
+                self.all_chats = !self.all_chats;
+            }
         }
-        ui.add_space(8.0);
     }
 
-    fn active_row(&mut self, ui: &mut Ui, s: &Session, project: &str) {
+    pub(super) fn session_row(&mut self, ui: &mut Ui, s: &Session, project: &str, branch: &str) {
         let on = self.session == Some(s.id);
         let (tint, word) = status_look(s.status);
-        let resp = ui
-            .horizontal(|ui| {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 16.0), Sense::hover());
-                if s.status == SessionStatus::Running {
-                    spinner(ui, rect.center(), 4.5, tint);
-                } else {
-                    ui.painter().circle_filled(rect.center(), 3.0, tint);
-                }
-                ui.allocate_ui(Vec2::new(ui.available_width(), 16.0), |ui| {
-                    Line::new()
-                        .value(&s.title)
-                        .tint(if on { READOUT } else { VALUE })
-                        .size(11.5)
-                        .gap(6.0)
-                        .note(format!("{project} {word}"))
-                        .size(10.5)
-                        .elided(ui)
-                });
-            })
-            .response
-            .interact(Sense::click());
-        if resp.clicked() {
-            self.open_session(s.id, s.project_id);
-        }
-    }
-
-    pub(super) fn worktree_row(&mut self, ui: &mut Ui, w: &Worktree, last: bool) {
-        let home = self.is_home(w.project_id);
-        let sessions: Vec<Session> = self.sessions_of(w.id).into_iter().cloned().collect();
-        let running = sessions.iter().any(|s| s.status.busy());
-        let tint = if w.missing {
-            FAULT
-        } else if running {
-            TRACE
-        } else if w.main || !sessions.is_empty() {
-            VALUE
-        } else {
-            LEGEND
-        };
-        let top = ui.cursor().top();
-        let resp = ui
-            .horizontal(|ui| {
-                ui.add_space(TREE_INDENT);
-                let label = if home { "new chat in ~".to_string() } else { w.label() };
-                let r = Line::new().value(label).tint(tint).size(11.5).show(ui);
-                if w.main && !home {
-                    chip(ui, "main", LEGEND, false);
-                }
-                if w.missing {
-                    chip(ui, "gone", FAULT, true);
-                }
-                r
-            })
-            .response
-            .interact(Sense::click());
-        let row = resp.rect;
-        for (i, s) in sessions.iter().enumerate() {
-            self.session_row(ui, s, i + 1 == sessions.len());
-        }
-        let bottom = ui.min_rect().bottom();
-        let x = row.left() + TREE_X;
-        let p = ui.painter();
-        let stroke = Stroke::new(1.0, ETCH);
-        let elbow = row.center().y;
-        p.vline(x, top..=if last { elbow } else { bottom + ui.spacing().item_spacing.y }, stroke);
-        p.hline(x..=row.left() + TREE_INDENT - 4.0, elbow, stroke);
-        if resp.clicked() && !w.missing {
-            self.new_chat(Some(w));
-        }
-        resp.on_hover_text(&w.path).context_menu(|ui| {
-            if ui
-                .add(
-                    Key::new("new chat here").outline(READOUT).min_width(170.0).enabled(!w.missing),
-                )
-                .clicked()
-            {
-                self.new_chat(Some(w));
-                ui.close();
-            }
-            if !home
-                && ui
-                    .add(Key::new("start in a new worktree").outline(VALUE).min_width(170.0))
-                    .clicked()
-            {
-                self.open_start(None);
-                if let Some(s) = &mut self.start {
-                    s.project = w.project_id;
-                }
-                ui.close();
-            }
-            if !w.main {
-                let label = if w.missing { "forget worktree" } else { "remove worktree" };
-                if ui.add(Key::new(label).outline(FAULT).min_width(170.0)).clicked() {
-                    self.confirm = Some(Confirm::Worktree(w.id, w.label(), w.missing));
-                    ui.close();
-                }
-            }
-        });
-    }
-
-    pub(super) fn session_row(&mut self, ui: &mut Ui, s: &Session, last: bool) {
-        let on = self.session == Some(s.id);
-        let (tint, word) = status_look(s.status);
-        let top = ui.cursor().top();
         let mut close = false;
         let resp = ui
             .horizontal(|ui| {
-                ui.add_space(TREE_INDENT * 2.0);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 16.0), Sense::hover());
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 30.0), Sense::hover());
+                let dot = egui::pos2(rect.center().x, rect.top() + 8.0);
                 if s.status == SessionStatus::Running {
-                    spinner(ui, rect.center(), 4.5, tint);
+                    spinner(ui, dot, 4.5, tint);
                 } else {
-                    ui.painter().circle_filled(rect.center(), 3.0, tint);
+                    ui.painter().circle_filled(dot, 3.0, tint);
                 }
                 let hovered = ui.rect_contains_pointer(ui.max_rect());
                 let reserve = if hovered { 18.0 } else { 0.0 };
-                ui.allocate_ui(Vec2::new(ui.available_width() - reserve, 16.0), |ui| {
+                let size = Vec2::new(ui.available_width() - reserve, 30.0);
+                ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
                     Line::new()
                         .value(&s.title)
                         .tint(if on { READOUT } else { VALUE })
                         .size(11.5)
-                        .gap(6.0)
-                        .note(format!("{} {}", s.agent, word))
-                        .size(10.5)
-                        .elided(ui)
+                        .elided(ui);
+                    let place = if branch.is_empty() || branch == "main" {
+                        project.to_string()
+                    } else {
+                        format!("{project} / {branch}")
+                    };
+                    let when = if s.status.busy() { word.to_string() } else { ago(s.updated_at) };
+                    Line::new().note(format!("{place}  {when}")).size(10.0).elided(ui);
                 });
                 if hovered {
                     let x = ui
@@ -340,16 +285,13 @@ impl App {
             })
             .response
             .interact(Sense::click());
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("chat {}", s.title))
+        });
         if close {
             self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
         }
         let row = resp.rect;
-        let x = row.left() + TREE_INDENT + TREE_X;
-        let stroke = Stroke::new(1.0, ETCH);
-        let elbow = row.center().y;
-        let reach = if last { elbow } else { row.bottom() + ui.spacing().item_spacing.y };
-        ui.painter().vline(x, top - ui.spacing().item_spacing.y..=reach, stroke);
-        ui.painter().hline(x..=row.left() + TREE_INDENT * 2.0 - 2.0, elbow, stroke);
         if self.grid_now().slots() > 1 && self.tab == Tab::Chat && self.shown().contains(&s.id) {
             let tint = if on { READOUT } else { LEGEND };
             ui.painter().rect_filled(
