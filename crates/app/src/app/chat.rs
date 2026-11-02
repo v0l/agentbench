@@ -395,75 +395,76 @@ impl App {
         if jump {
             self.follow = true;
         }
-        let scroll = egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
+            .id_salt(("transcript", s.id))
             .max_height(rect.height())
             .auto_shrink([false, false])
-            .stick_to_bottom(self.follow)
-            .show(&mut inner, |ui| {
-                ui.set_max_width(ui.available_width());
-                if messages.is_empty() {
-                    hint(ui, "no messages yet");
-                }
-                // Heights hold for one width and one look of the entries.
-                heights.keep_for(
-                    (
-                        ui.available_width().to_bits(),
-                        self.thinking as u32 | (self.face.size.to_bits() << 1),
-                        self.fonts_loaded,
-                    ),
-                    ui.available_width(),
+            .stick_to_bottom(self.follow);
+        if let Some(to) = self.transcripts.get_mut(&s.id).and_then(|t| t.shift.take()) {
+            area = area.vertical_scroll_offset(to);
+        }
+        let scroll = area.show(&mut inner, |ui| {
+            ui.set_max_width(ui.available_width());
+            if messages.is_empty() {
+                hint(ui, "no messages yet");
+            }
+            // Heights hold for one width and one look of the entries.
+            heights.keep_for(
+                (
+                    ui.available_width().to_bits(),
+                    self.thinking as u32 | (self.face.size.to_bits() << 1),
+                    self.fonts_loaded,
+                ),
+                ui.available_width(),
+            );
+            let visible = ui.clip_rect().expand2(Vec2::new(0.0, OVERSCAN));
+            for m in &messages {
+                // Each entry gets a ui of the column's width, clipped to it, so one with
+                // something that cannot wrap does not widen the entries after it.
+                let column = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    Vec2::new(ui.available_width(), f32::INFINITY),
                 );
-                let visible = ui.clip_rect().expand2(Vec2::new(0.0, OVERSCAN));
-                for m in &messages {
-                    // Each entry gets a ui of the column's width, clipped to it, so one with
-                    // something that cannot wrap does not widen the entries after it.
-                    let column = egui::Rect::from_min_size(
-                        ui.cursor().min,
-                        Vec2::new(ui.available_width(), f32::INFINITY),
-                    );
-                    // An entry that was measured and is out of sight is not laid out, only
-                    // given the room it took.
-                    if let Some(h) = heights.known(m.id)
-                        && !(egui::Rect::from_min_size(column.min, Vec2::new(column.width(), h)))
-                            .intersects(visible)
-                    {
-                        ui.allocate_space(Vec2::new(column.width(), h));
-                        ui.add_space(6.0);
-                        continue;
-                    }
-                    let mut one = ui.new_child(
-                        egui::UiBuilder::new()
-                            .id(ui.id().with(("entry", m.id)))
-                            .max_rect(column)
-                            .layout(Layout::top_down(Align::Min)),
-                    );
-                    one.set_clip_rect(
-                        egui::Rect::from_min_max(
-                            column.min,
-                            egui::pos2(column.right(), f32::INFINITY),
-                        )
-                        .intersect(ui.clip_rect()),
-                    );
-                    self.entry(&mut one, m, s.id);
-                    let used = one.min_rect();
-                    let h = (used.bottom().max(column.top()) - column.top()).max(0.0);
-                    heights.measured(m.id, h);
-                    ui.allocate_rect(
-                        egui::Rect::from_min_max(
-                            column.min,
-                            egui::pos2(column.right(), column.top() + h),
-                        ),
-                        Sense::hover(),
-                    );
+                // An entry that was measured and is out of sight is not laid out, only
+                // given the room it took.
+                if let Some(h) = heights.known(m.id)
+                    && !(egui::Rect::from_min_size(column.min, Vec2::new(column.width(), h)))
+                        .intersects(visible)
+                {
+                    ui.allocate_space(Vec2::new(column.width(), h));
                     ui.add_space(6.0);
+                    continue;
                 }
-                for (i, text) in s.queued.iter().enumerate() {
-                    self.you(ui, -1 - i as Id, 0, text, &[], s.id, true);
-                }
-                if jump {
-                    ui.scroll_to_cursor(Some(Align::BOTTOM));
-                }
-            });
+                let mut one = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id(ui.id().with(("entry", m.id)))
+                        .max_rect(column)
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                one.set_clip_rect(
+                    egui::Rect::from_min_max(column.min, egui::pos2(column.right(), f32::INFINITY))
+                        .intersect(ui.clip_rect()),
+                );
+                self.entry(&mut one, m, s.id);
+                let used = one.min_rect();
+                let h = (used.bottom().max(column.top()) - column.top()).max(0.0);
+                heights.measured(m.id, h);
+                ui.allocate_rect(
+                    egui::Rect::from_min_max(
+                        column.min,
+                        egui::pos2(column.right(), column.top() + h),
+                    ),
+                    Sense::hover(),
+                );
+                ui.add_space(6.0);
+            }
+            for (i, text) in s.queued.iter().enumerate() {
+                self.you(ui, -1 - i as Id, 0, text, &[], s.id, true);
+            }
+            if jump {
+                ui.scroll_to_cursor(Some(Align::BOTTOM));
+            }
+        });
         if let Some(t) = self.transcripts.get_mut(&s.id) {
             // Messages that arrived while drawing cannot happen, but keep anything that did.
             let arrived = std::mem::replace(&mut t.messages, messages);
@@ -471,6 +472,23 @@ impl App {
             t.heights = heights;
         }
         ui.allocate_rect(rect, Sense::hover());
+        if let Some(before) = self.transcripts.get_mut(&s.id).and_then(|t| t.anchor.take()) {
+            let grew = scroll.content_size.y - before;
+            if grew > 0.0
+                && let Some(t) = self.transcripts.get_mut(&s.id)
+            {
+                t.shift = Some(scroll.state.clamped_offset().y + grew);
+                ui.ctx().request_repaint();
+            }
+        }
+        let near_top =
+            scroll.state.clamped_offset().y < 200.0 && scroll.content_size.y > rect.height();
+        if near_top && !self.follow {
+            self.fetch_older(s.id);
+        }
+        if let Some(t) = self.transcripts.get_mut(&s.id) {
+            t.content_h = scroll.content_size.y;
+        }
         let at_bottom =
             scroll.state.offset().y + scroll.inner_rect.height() >= scroll.content_size.y - 4.0;
         self.follow = at_bottom;

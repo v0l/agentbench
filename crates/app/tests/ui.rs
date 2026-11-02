@@ -2029,7 +2029,7 @@ fn ms(d: Duration) -> f64 {
 fn time_frames(size: [f32; 2], turns: usize) {
     let rig = rig();
     let s = long_chat(&rig, turns);
-    let total = turns * 5;
+    let total = (turns * 5).min(150);
     let mut h = harness_at(rig.url.clone(), size);
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().open_session(s.id, s.project_id);
@@ -2113,10 +2113,11 @@ fn a_long_transcript_draws_what_is_scrolled_to() {
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().open_session(s.id, s.project_id);
-    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 200);
+    until(&mut h, "the latest page", |h| h.state().transcript_len(s.id) == 150);
     h.run_steps(3);
     assert!(h.query_by_label_contains("Turn 39:").is_some(), "the end is in view");
     assert!(h.query_by_label_contains("Turn 0:").is_none(), "the start is not laid out");
+    assert!(h.state().transcript_len(s.id) < 200, "the older rows are not fetched yet");
     let wheel = |h: &mut Harness<'_, App>, dy: f32| {
         h.event(egui::Event::PointerMoved(egui::pos2(800.0, 300.0)));
         h.event(egui::Event::MouseWheel {
@@ -2128,6 +2129,10 @@ fn a_long_transcript_draws_what_is_scrolled_to() {
         });
         h.run_steps(3);
     };
+    for _ in 0..60 {
+        wheel(&mut h, 4000.0);
+    }
+    until(&mut h, "the older rows", |h| h.state().transcript_len(s.id) == 200);
     for _ in 0..60 {
         wheel(&mut h, 4000.0);
     }
@@ -2402,4 +2407,45 @@ fn the_chat_menu_shows_a_board_of_tiles() {
     }
     h.run_steps(3);
     shot(&mut h, "chat-menu");
+}
+
+#[test]
+fn older_rows_arriving_at_the_top_do_not_move_what_is_being_read() {
+    let rig = rig();
+    let s = long_chat(&rig, 40);
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the latest page", |h| h.state().transcript_len(s.id) == 150);
+    h.run_steps(3);
+    let wheel = |h: &mut Harness<'_, App>, dy: f32| {
+        h.event(egui::Event::PointerMoved(egui::pos2(800.0, 300.0)));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            source: egui::MouseWheelSource::Unknown,
+            delta: egui::vec2(0.0, dy),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+        });
+        h.run_steps(3);
+    };
+    let first_turn = |h: &Harness<'_, App>| -> Option<usize> {
+        (0..40).find(|n| h.query_by_label_contains(&format!("Turn {n}:")).is_some())
+    };
+    let mut before = None;
+    for _ in 0..80 {
+        wheel(&mut h, 600.0);
+        if h.state().transcript_len(s.id) == 200 {
+            break;
+        }
+        before = first_turn(&h);
+    }
+    let before = before.expect("some turn was in view before the older rows came");
+    h.run_steps(6);
+    let after = first_turn(&h).expect("some turn is in view after");
+    assert!(
+        after >= before.saturating_sub(1) || after == 0 && before <= 8,
+        "the view jumped from turn {before} to turn {after} when the older rows arrived"
+    );
+    assert_ne!(after, 0, "not thrown to the very top of the older rows");
 }

@@ -42,6 +42,7 @@ pub enum Reply {
     AgentModels(String, Result<Vec<String>, String>),
     Changed(Id),
     Messages(SessionId, Vec<Message>),
+    Older(SessionId, Vec<Message>, usize),
     Interrupted(SessionId, Vec<String>),
     Jobs(SessionId, Vec<agentbench_core::Job>),
     Screen(SessionId, agentbench_core::Screen),
@@ -224,13 +225,22 @@ impl Client {
         self.send(req, |c: Changes| Reply::Changed(c.cursor));
     }
 
-    pub fn messages(&mut self, session: SessionId, after: Id) {
+    pub fn messages(&mut self, session: SessionId, after: Id, limit: usize) {
         let req = self.request(
             Method::GET,
-            &format!("/api/sessions/{session}/messages?after={after}"),
+            &format!("/api/sessions/{session}/messages?after={after}&limit={limit}"),
             None,
         );
         self.send(req, move |m| Reply::Messages(session, m));
+    }
+
+    pub fn older_messages(&mut self, session: SessionId, before: Id, limit: usize) {
+        let req = self.request(
+            Method::GET,
+            &format!("/api/sessions/{session}/messages?before={before}&limit={limit}"),
+            None,
+        );
+        self.send(req, move |m| Reply::Older(session, m, limit));
     }
 
     pub fn comments(&mut self, issue: Id) {

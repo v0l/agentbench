@@ -1104,6 +1104,25 @@ impl Store {
         Store::changed(&db, "message", session_id)
     }
 
+    pub fn messages_page(
+        &self,
+        session_id: SessionId,
+        after: Id,
+        before: Option<Id>,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT * FROM (SELECT * FROM messages WHERE session_id = ?1 AND id > ?2 AND id < ?3 \
+             ORDER BY id DESC LIMIT ?4) ORDER BY id",
+        )?;
+        let rows = stmt.query_map(
+            params![session_id, after, before.unwrap_or(i64::MAX), limit as i64],
+            message_row,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn messages(&self, session_id: SessionId, after: Id) -> Result<Vec<Message>> {
         let db = self.db();
         let mut stmt =

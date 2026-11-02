@@ -501,6 +501,11 @@ struct Transcript {
     messages: Vec<Message>,
     last: Id,
     loading: bool,
+    older_loading: bool,
+    complete: bool,
+    anchor: Option<f32>,
+    content_h: f32,
+    shift: Option<f32>,
     /// How tall each message was when last laid out, so the ones scrolled out of sight are not
     /// laid out again, only given their room. Thrown away when the width or the look changes.
     heights: Heights,
@@ -556,6 +561,8 @@ impl Heights {
 /// How far past the visible part of the transcript entries are still laid out, so a scroll
 /// of a few lines never shows a gap.
 const OVERSCAN: f32 = 300.0;
+const FIRST_PAGE: usize = 150;
+const OLDER_PAGE: usize = 150;
 
 pub struct App {
     client: Option<Client>,
@@ -1514,9 +1521,23 @@ impl App {
                     c.overview();
                 }
             }
+            Reply::Older(sid, msgs, limit) => {
+                let t = self.transcripts.entry(sid).or_default();
+                t.older_loading = false;
+                t.complete = msgs.len() < limit;
+                t.anchor = Some(t.content_h);
+                let mut older: Vec<Message> =
+                    msgs.into_iter().filter(|m| !t.rows.iter().any(|x| x.id == m.id)).collect();
+                older.append(&mut t.rows);
+                t.rows = older;
+                t.messages = agentbench_core::shown(&t.rows);
+            }
             Reply::Messages(sid, msgs) => {
                 let t = self.transcripts.entry(sid).or_default();
                 t.loading = false;
+                if t.rows.is_empty() && msgs.len() < FIRST_PAGE {
+                    t.complete = true;
+                }
                 for m in msgs {
                     t.last = t.last.max(m.id);
                     for i in 0..agentbench_core::SHOWN_PER_ROW {
@@ -1655,10 +1676,27 @@ impl App {
             return;
         }
         t.loading = true;
+        let first = t.rows.is_empty();
         let tail = t.rows.iter().rev().take(3).map(|m| m.id).min().unwrap_or(0);
-        let after = if t.rows.is_empty() { 0 } else { tail.saturating_sub(1) };
+        let after = if first { 0 } else { tail.saturating_sub(1) };
         if let Some(c) = &mut self.client {
-            c.messages(sid, after);
+            c.messages(sid, after, if first { FIRST_PAGE } else { usize::MAX >> 1 });
+        }
+    }
+
+    pub(super) fn fetch_older(&mut self, sid: SessionId) {
+        let Some(t) = self.transcripts.get_mut(&sid) else {
+            return;
+        };
+        if t.older_loading || t.complete || t.loading {
+            return;
+        }
+        let Some(before) = t.rows.first().map(|m| m.id) else {
+            return;
+        };
+        t.older_loading = true;
+        if let Some(c) = &mut self.client {
+            c.older_messages(sid, before, OLDER_PAGE);
         }
     }
 

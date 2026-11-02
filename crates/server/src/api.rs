@@ -830,6 +830,8 @@ async fn delete_session(
 struct After {
     #[serde(default)]
     after: Id,
+    before: Option<Id>,
+    limit: Option<usize>,
 }
 
 async fn messages(
@@ -838,7 +840,15 @@ async fn messages(
     Query(q): Query<After>,
 ) -> Reply<Vec<agentbench_core::Message>> {
     api.runner.store().session(id)?;
-    let mut rows = api.runner.store().messages(id, q.after)?;
+    let mut rows = match (q.limit, q.before) {
+        (None, None) => api.runner.store().messages(id, q.after)?,
+        (limit, before) => api.runner.store().messages_page(
+            id,
+            q.after,
+            before,
+            limit.unwrap_or(usize::MAX >> 1),
+        )?,
+    };
     for row in &mut rows {
         if let agentbench_core::Entry::Wire { messages } = &mut row.entry {
             for sent in messages {
@@ -1570,6 +1580,49 @@ mod tests {
             assert_eq!(s, StatusCode::OK, "{sess}");
             assert_eq!(sess["cwd"], f.repo.canonicalize().unwrap().to_string_lossy().as_ref());
         }
+    }
+
+    #[tokio::test]
+    async fn the_transcript_can_be_read_latest_first_in_pages() {
+        use agentbench_core::Entry;
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, sess) = call(
+            &f.app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "echo", "prompt": "hi"})),
+            T,
+        )
+        .await;
+        let id = sid(&sess);
+        settle(&f.api, id).await;
+        let store = f.api.runner.store();
+        for n in 0..10 {
+            store.add_message(id, &Entry::Notice { text: format!("note {n}") }).unwrap();
+        }
+        let all = store.messages(id, 0).unwrap();
+        let ids: Vec<i64> = all.iter().map(|m| m.id).collect();
+        let get = |q: String| {
+            let app = f.app.clone();
+            async move {
+                let (s, v) =
+                    call(&app, "GET", &format!("/api/sessions/{id}/messages{q}"), None, T).await;
+                assert_eq!(s, StatusCode::OK);
+                v.as_array().unwrap().iter().map(|m| m["id"].as_i64().unwrap()).collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(get(String::new()).await, ids, "no limit still returns everything");
+        let n = ids.len();
+        assert_eq!(get("?limit=3".into()).await, ids[n - 3..], "the latest rows, oldest first");
+        let first_shown = ids[n - 3];
+        assert_eq!(
+            get(format!("?before={first_shown}&limit=4")).await,
+            ids[n - 7..n - 3],
+            "the page just before"
+        );
+        assert_eq!(get(format!("?before={}&limit=50", ids[0])).await, Vec::<i64>::new());
+        assert_eq!(get(format!("?after={}&limit=2", ids[n - 6])).await, ids[n - 2..]);
     }
 
     #[tokio::test]
