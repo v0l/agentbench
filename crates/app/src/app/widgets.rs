@@ -186,6 +186,81 @@ pub(super) fn code_block(
     );
 }
 
+pub(super) fn level_slider(
+    ui: &mut Ui,
+    label: &str,
+    level: agentbench_core::Automation,
+    inherited: bool,
+    width: f32,
+) -> Option<agentbench_core::Automation> {
+    use agentbench_core::Automation;
+    let stops = Automation::ALL.len();
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::click_and_drag());
+    let pad = 7.0;
+    let x_of = |i: usize| rect.left() + pad + (rect.width() - 2.0 * pad) * i as f32 / (stops - 1) as f32;
+    let mut picked = None;
+    if let Some(p) = resp.interact_pointer_pos()
+        && (resp.clicked() || resp.dragged())
+    {
+        let nearest = (0..stops)
+            .min_by(|a, b| (x_of(*a) - p.x).abs().total_cmp(&(x_of(*b) - p.x).abs()))
+            .unwrap_or(0);
+        picked = Some(Automation::from_rank(nearest as u8));
+    }
+    let rank = level.rank() as usize;
+    ui.input(|i| {
+        use egui::accesskit::{Action, ActionData};
+        for r in i.accesskit_action_requests(resp.id, Action::SetValue) {
+            if let Some(ActionData::NumericValue(v)) = r.data {
+                picked = Some(Automation::from_rank(v.round().clamp(0.0, (stops - 1) as f64) as u8));
+            }
+        }
+        if i.has_accesskit_action_request(resp.id, Action::Increment) && rank + 1 < stops {
+            picked = Some(Automation::from_rank(rank as u8 + 1));
+        }
+        if i.has_accesskit_action_request(resp.id, Action::Decrement) && rank > 0 {
+            picked = Some(Automation::from_rank(rank as u8 - 1));
+        }
+    });
+    if resp.has_focus() {
+        ui.input(|i| {
+            if i.key_pressed(egui::Key::ArrowRight) && rank + 1 < stops {
+                picked = Some(Automation::from_rank(rank as u8 + 1));
+            }
+            if i.key_pressed(egui::Key::ArrowLeft) && rank > 0 {
+                picked = Some(Automation::from_rank(rank as u8 - 1));
+            }
+        });
+    }
+    let value = picked.unwrap_or(level);
+    resp.widget_info(|| egui::WidgetInfo::slider(true, value.rank() as f64, label));
+    ui.ctx().accesskit_node_builder(resp.id, |b| {
+        use egui::accesskit::Action;
+        b.set_min_numeric_value(0.0);
+        b.set_max_numeric_value((stops - 1) as f64);
+        b.set_numeric_value_step(1.0);
+        b.set_value(value.label().to_string());
+        b.add_action(Action::SetValue);
+        b.add_action(Action::Increment);
+        b.add_action(Action::Decrement);
+    });
+    let tint = if inherited { READOUT_DIM } else { READOUT };
+    let p = ui.painter();
+    let y = rect.center().y;
+    p.line_segment([egui::pos2(x_of(0), y), egui::pos2(x_of(stops - 1), y)], Stroke::new(2.0, ETCH));
+    p.line_segment([egui::pos2(x_of(0), y), egui::pos2(x_of(value.rank() as usize), y)], Stroke::new(2.0, tint));
+    for i in 0..stops {
+        let lit = i <= value.rank() as usize;
+        p.circle_filled(egui::pos2(x_of(i), y), 2.5, if lit { tint } else { ETCH });
+    }
+    let handle = egui::pos2(x_of(value.rank() as usize), y);
+    let edge = if resp.hovered() || resp.has_focus() { VALUE } else { tint };
+    p.circle_filled(handle, 6.0, WELL);
+    p.circle_stroke(handle, 6.0, Stroke::new(2.0, edge));
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(value.about());
+    picked.filter(|p| *p != level || inherited)
+}
+
 /// One choice on its own row, with a tick box for several picks or a dot for one.
 pub(super) fn tab_chip(ui: &mut Ui, text: &str, tint: egui::Color32, on: bool) -> egui::Response {
     let font = egui::FontId::proportional(11.5);

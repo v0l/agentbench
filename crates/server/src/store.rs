@@ -1,6 +1,6 @@
 use agentbench_core::{
-    Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue, Project,
-    ProjectPatch, Session, SessionId, SessionStatus, Usage, Worktree,
+    Automation, Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue,
+    Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Worktree,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::Path;
@@ -191,6 +191,9 @@ CREATE TABLE autopilot_log (
     created_at INTEGER NOT NULL
 );
 "#,
+    "ALTER TABLE projects ADD COLUMN automation TEXT;
+     ALTER TABLE projects ADD COLUMN risky TEXT NOT NULL DEFAULT '[]';
+     ALTER TABLE projects ADD COLUMN deploy TEXT;",
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -201,6 +204,9 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("projects", "pinned", "INTEGER NOT NULL DEFAULT 0"),
     ("projects", "tags", "TEXT NOT NULL DEFAULT '[]'"),
     ("sessions", "title_turns", "INTEGER NOT NULL DEFAULT 0"),
+    ("projects", "automation", "TEXT"),
+    ("projects", "risky", "TEXT NOT NULL DEFAULT '[]'"),
+    ("projects", "deploy", "TEXT"),
 ];
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
@@ -331,6 +337,12 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
         supervisor: row.get("supervisor")?,
         pinned: row.get("pinned")?,
         tags: serde_json::from_str(&row.get::<_, String>("tags")?).unwrap_or_default(),
+        automation: row
+            .get::<_, Option<String>>("automation")?
+            .as_deref()
+            .and_then(Automation::parse),
+        risky: serde_json::from_str(&row.get::<_, String>("risky")?).unwrap_or_default(),
+        deploy: row.get("deploy")?,
     })
 }
 
@@ -580,14 +592,32 @@ impl Store {
         if let Some(tags) = &patch.tags {
             project.tags = clean_tags(tags);
         }
+        if let Some(level) = patch.automation {
+            project.automation = level;
+        }
+        if let Some(risky) = &patch.risky {
+            let mut kept: Vec<Risky> = Vec::new();
+            for r in risky {
+                if !kept.contains(r) {
+                    kept.push(*r);
+                }
+            }
+            project.risky = kept;
+        }
+        if let Some(deploy) = &patch.deploy {
+            project.deploy = Some(deploy.trim().to_string()).filter(|d| !d.is_empty());
+        }
         {
             let db = self.db();
             db.execute(
-                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3 WHERE id = ?4",
+                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6 WHERE id = ?7",
                 params![
                     project.name,
                     project.pinned,
                     serde_json::to_string(&project.tags).unwrap_or_else(|_| "[]".into()),
+                    project.automation.map(Automation::as_str),
+                    serde_json::to_string(&project.risky).unwrap_or_else(|_| "[]".into()),
+                    project.deploy,
                     id
                 ],
             )?;
@@ -1679,6 +1709,7 @@ mod tests {
             name: None,
             pinned: Some(true),
             tags: Some(vec![" Infra ".into(), "infra".into(), "".into(), "games".into()]),
+            ..Default::default()
         };
         let p = s.update_project(p.id, &patch).unwrap();
         assert!(p.pinned);
@@ -1688,6 +1719,40 @@ mod tests {
             .unwrap();
         assert!(!p.pinned);
         assert_eq!(s.project(p.id).unwrap().tags, ["infra", "games"]);
+    }
+
+    #[test]
+    fn a_projects_automation_level_and_risky_toggles_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.db");
+        let id = {
+            let s = Store::open(&path).unwrap();
+            let p = s.add_project("billing", "/r", None, None).unwrap();
+            assert_eq!((p.automation, p.risky.len(), p.deploy.clone()), (None, 0, None));
+            let patch = ProjectPatch {
+                automation: Some(Some(Automation::FullAuto)),
+                risky: Some(vec![Risky::Deploy, Risky::Deploy, Risky::Publish]),
+                deploy: Some("  ./deploy.sh  ".into()),
+                ..Default::default()
+            };
+            s.update_project(p.id, &patch).unwrap();
+            p.id
+        };
+        let s = Store::open(&path).unwrap();
+        let p = s.project(id).unwrap();
+        assert_eq!(p.automation, Some(Automation::FullAuto));
+        assert_eq!(p.risky, [Risky::Deploy, Risky::Publish]);
+        assert_eq!(p.deploy.as_deref(), Some("./deploy.sh"));
+        let p = s
+            .update_project(id, &ProjectPatch { pinned: Some(true), ..Default::default() })
+            .unwrap();
+        assert_eq!(p.automation, Some(Automation::FullAuto), "untouched by other patches");
+        let cleared = ProjectPatch { automation: Some(None), ..Default::default() };
+        assert_eq!(s.update_project(id, &cleared).unwrap().automation, None);
+        let json: ProjectPatch = serde_json::from_str(r#"{"automation": null}"#).unwrap();
+        assert_eq!(json.automation, Some(None), "null clears, absence keeps");
+        let json: ProjectPatch = serde_json::from_str(r#"{"name": "x"}"#).unwrap();
+        assert_eq!(json.automation, None);
     }
 
     #[test]

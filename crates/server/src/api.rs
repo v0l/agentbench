@@ -538,7 +538,7 @@ async fn update_project(
     Path(id): Path<Id>,
     Json(patch): Json<ProjectPatch>,
 ) -> Reply<agentbench_core::Project> {
-    let project = api.runner.store().update_project(id, &patch)?;
+    let project = crate::autopilot::set_project(api.runner.store(), id, &patch)?;
     changed(&api);
     Ok(Json(project))
 }
@@ -1442,6 +1442,27 @@ mod tests {
         assert_eq!(m["high"]["effort"], "medium");
         assert_eq!(m["low"]["effort"], "", "an unknown effort is dropped");
         assert_eq!(shared.get().level("high").unwrap().effort, "medium");
+    }
+
+    #[tokio::test]
+    async fn levels_and_toggles_are_set_over_the_api_and_shown_in_the_overview() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, o) = call(&f.app, "GET", "/api/overview", None, T).await;
+        assert_eq!(o["autopilot"]["default_level"], "delegate");
+        assert!(o["projects"][0]["automation"].is_null());
+        let uri = format!("/api/projects/{pid}");
+        let (s, p) = call(&f.app, "PATCH", &uri, Some(json!({"automation": "full_auto", "risky": ["deploy"]})), T).await;
+        assert_eq!(s, StatusCode::OK, "{p}");
+        assert_eq!((p["automation"].clone(), p["risky"].clone()), (json!("full_auto"), json!(["deploy"])));
+        let (_, p) = call(&f.app, "PATCH", &uri, Some(json!({"automation": null})), T).await;
+        assert!(p["automation"].is_null(), "null goes back to the default");
+        assert_eq!(p["risky"], json!(["deploy"]));
+        let (s, _) = call(&f.app, "PATCH", &uri, Some(json!({"automation": "turbo"})), T).await;
+        assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+        let (_, a) = call(&f.app, "PATCH", "/api/autopilot", Some(json!({"default_level": "ship"})), T).await;
+        assert_eq!(a["default_level"], "ship");
+        assert!(a["activity"].as_array().unwrap().iter().any(|x| x["text"].as_str().unwrap().contains("default automation level set to ship")));
     }
 
     #[tokio::test]

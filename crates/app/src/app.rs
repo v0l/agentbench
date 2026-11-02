@@ -344,6 +344,7 @@ struct Settings {
     page: Page,
     project_filter: String,
     renaming: Option<(Id, String)>,
+    deploying: Option<(Id, String)>,
     speech: crate::voice::Settings,
     place: Where,
     url: String,
@@ -1920,6 +1921,66 @@ impl App {
         self.overview.as_ref().and_then(|o| o.autopilot.as_ref())
     }
 
+    pub fn default_level(&self) -> agentbench_core::Automation {
+        self.autopilot().map(|a| a.default_level).unwrap_or_default()
+    }
+
+    pub fn project_level(&self, id: Id) -> Option<(agentbench_core::Automation, bool)> {
+        let p = self.overview.as_ref()?.projects.iter().find(|p| p.id == id)?;
+        Some((p.level(self.default_level()), p.automation.is_none()))
+    }
+
+    pub fn set_project_level(&mut self, id: Id, level: Option<agentbench_core::Automation>) {
+        self.patch_project(id, ProjectPatch { automation: Some(level), ..Default::default() });
+    }
+
+    pub fn set_project_risky(&mut self, id: Id, risky: Vec<agentbench_core::Risky>) {
+        self.patch_project(id, ProjectPatch { risky: Some(risky), ..Default::default() });
+    }
+
+    fn patch_project(&mut self, id: Id, patch: ProjectPatch) {
+        if let Some(p) = self.overview.as_mut().and_then(|o| o.projects.iter_mut().find(|p| p.id == id)) {
+            if let Some(l) = patch.automation {
+                p.automation = l;
+            }
+            if let Some(r) = &patch.risky {
+                p.risky = r.clone();
+            }
+        }
+        if let Some(c) = &mut self.client {
+            c.update_project(id, &patch);
+        }
+    }
+
+    pub fn set_default_level(&mut self, level: agentbench_core::Automation) {
+        if let Some(a) = self.overview.as_mut().and_then(|o| o.autopilot.as_mut()) {
+            a.default_level = level;
+        }
+        if let Some(c) = &mut self.client {
+            c.autopilot(&agentbench_core::AutopilotPatch {
+                default_level: Some(level),
+                ..Default::default()
+            });
+        }
+    }
+
+    pub(super) fn level_row(&mut self, ui: &mut Ui, project: &Project, width: f32) {
+        let default = self.default_level();
+        let level = project.level(default);
+        let inherited = project.automation.is_none();
+        let label = format!("{} automation", project.name);
+        let mut picked = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            picked = level_slider(ui, &label, level, inherited, width);
+            let word = if inherited { format!("{} (default)", level.label()) } else { level.label().to_string() };
+            Line::new().set(word).size(11.0).tint(if inherited { READOUT_DIM } else { READOUT }).show(ui);
+        });
+        if let Some(l) = picked {
+            self.set_project_level(project.id, Some(l));
+        }
+    }
+
     pub fn toggle_autopilot(&mut self) {
         let Some(on) = self.autopilot().map(|a| a.enabled) else { return };
         if let Some(c) = &mut self.client {
@@ -1975,6 +2036,11 @@ impl App {
     pub fn set_issues_first(&mut self, on: bool) {
         self.issues_first = on;
         self.tab = if on { Tab::Issues } else { Tab::Chat };
+    }
+
+    pub fn show_all_projects(&mut self) {
+        self.tab = Tab::Issues;
+        self.scope = Scope::Everything;
     }
 
     pub fn issue_pane_open(&self) -> Option<Id> {
@@ -2080,6 +2146,16 @@ impl App {
             return;
         }
         let sessions = o.sessions.clone();
+        if everything {
+            let rows: Vec<Project> = o
+                .projects
+                .iter()
+                .filter(|p| !p.builtin() && tagged.contains(&p.id))
+                .cloned()
+                .collect();
+            self.board_levels(ui, &rows);
+            ui.add_space(8.0);
+        }
         let states: Vec<IssueState> = IssueState::ALL
             .into_iter()
             .filter(|s| self.filter == Filter::All || s.is_open())
@@ -2106,6 +2182,42 @@ impl App {
                 }
             });
         });
+    }
+
+    fn board_levels(&mut self, ui: &mut Ui, projects: &[Project]) {
+        let open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("board_levels"))).unwrap_or(false);
+        let mut flip = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let key = ui.add(Key::new(if open { "hide levels" } else { "levels" }).outline(VALUE));
+            key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "project levels"));
+            flip = key.clicked();
+            if !open {
+                let default = self.default_level();
+                for p in projects {
+                    let level = p.level(default);
+                    let tint = if p.automation.is_none() { READOUT_DIM } else { READOUT };
+                    let text = format!("{} {}", p.name, level.label());
+                    let c = chip(ui, &text, tint, p.automation.is_some()).on_hover_text(level.about());
+                    c.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
+                }
+            }
+        });
+        if open {
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().id_salt("board_levels").max_height(180.0).show(ui, |ui| {
+                for p in projects {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.allocate_ui(Vec2::new(140.0, 18.0), |ui| { ui.set_width(140.0); Line::new().value(&p.name).size(11.0).elided(ui); });
+                        self.level_row(ui, p, 160.0);
+                    });
+                }
+            });
+        }
+        if flip {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("board_levels"), !open));
+        }
     }
 
     fn drop_on_column(&mut self, ui: &mut Ui, rect: egui::Rect, state: IssueState) {
@@ -2582,6 +2694,9 @@ mod tests {
             supervisor: false,
             pinned: false,
             tags: vec![],
+            automation: None,
+            risky: vec![],
+            deploy: None,
         }
     }
 

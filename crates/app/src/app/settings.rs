@@ -1,6 +1,7 @@
 //! The settings dialog and its tabs: server and pairing, speech, appearance.
 
 use super::*;
+use agentbench_core::{Automation, Risky};
 
 impl App {
     pub(super) fn open_settings(&mut self) {
@@ -15,6 +16,7 @@ impl App {
             page: Page::General,
             project_filter: String::new(),
             renaming: None,
+            deploying: None,
             speech: self.speech.clone(),
             place: if self.remote || self.local.is_none() { Where::Remote } else { Where::Local },
             url,
@@ -106,6 +108,7 @@ impl App {
             })
             .collect();
         let mut project_action: Option<ProjectAction> = None;
+        let default_level = self.default_level();
         let m = egui::Modal::new(egui::Id::unique("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -167,8 +170,14 @@ impl App {
                     ui.add_space(8.0);
                     speech_devices(ui, &st.speech, st.audio.as_ref(), can_close);
                 } else if st.page == Page::Projects {
-                    project_action =
-                        projects_section(ui, &project_rows, &mut st.project_filter, &mut st.renaming);
+                    project_action = projects_section(
+                        ui,
+                        &project_rows,
+                        &mut st.project_filter,
+                        &mut st.renaming,
+                        &mut st.deploying,
+                        default_level,
+                    );
                 } else if !can_close && st.place == Where::Remote {
                     hint(ui, "Connect to a server to set up its agents.");
                 } else if let Some(e) = &st.agent_error {
@@ -400,6 +409,12 @@ impl App {
             Some(ProjectAction::RemoveWorktree(w)) => {
                 self.confirm = Some(Confirm::Worktree(w.id, w.label(), w.missing));
             }
+            Some(ProjectAction::Level(id, level)) => self.set_project_level(id, level),
+            Some(ProjectAction::Risky(id, risky)) => self.set_project_risky(id, risky),
+            Some(ProjectAction::Deploy(id, deploy)) => {
+                self.patch_project(id, agentbench_core::ProjectPatch { deploy: Some(deploy), ..Default::default() });
+            }
+            Some(ProjectAction::DefaultLevel(level)) => self.set_default_level(level),
             None => {}
         }
         if probe {
@@ -865,6 +880,94 @@ enum ProjectAction {
     NewWorktree(Id),
     RemoveWorktree(Worktree),
     Rename(Id, String),
+    Level(Id, Option<Automation>),
+    Risky(Id, Vec<Risky>),
+    Deploy(Id, String),
+    DefaultLevel(Automation),
+}
+
+fn automation_rows(
+    ui: &mut Ui,
+    p: &agentbench_core::Project,
+    default: Automation,
+    deploying: &mut Option<(Id, String)>,
+    action: &mut Option<ProjectAction>,
+) {
+    let level = p.level(default);
+    let inherited = p.automation.is_none();
+    row_help(ui, "automation", "What the supervisor may do here without asking. Above this it proposes instead.", |ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if let Some(l) = level_slider(ui, &format!("{} automation", p.name), level, inherited, 170.0) {
+            *action = Some(ProjectAction::Level(p.id, Some(l)));
+        }
+        let word = if inherited { format!("{} (default)", level.label()) } else { level.label().to_string() };
+        Line::new().set(word).size(11.0).tint(if inherited { READOUT_DIM } else { READOUT }).show(ui);
+        if !inherited {
+            let k = ui.add(Key::new("use default").outline(VALUE).id_salt(("default", p.id)));
+            k.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{} use default", p.name)));
+            if k.clicked() {
+                *action = Some(ProjectAction::Level(p.id, None));
+            }
+        }
+    });
+    hint(ui, level.about());
+    row_help(
+        ui,
+        "risky actions",
+        "Only run at full auto, and only the ones switched on here. Off by default.",
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for r in Risky::ALL {
+                    let on = p.risky.contains(&r);
+                    let t = toggle(ui, r.label(), on);
+                    t.widget_info(|| {
+                        egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, format!("{} {}", p.name, r.label()))
+                    });
+                    if t.clicked() {
+                        let mut next: Vec<Risky> = p.risky.iter().copied().filter(|x| *x != r).collect();
+                        if !on {
+                            next.push(r);
+                        }
+                        *action = Some(ProjectAction::Risky(p.id, next));
+                    }
+                }
+            });
+        },
+    );
+    if level != Automation::FullAuto && !p.risky.is_empty() {
+        hint(ui, "These stay off until the project is at full auto.");
+    }
+    match deploying.as_mut().filter(|(id, _)| *id == p.id) {
+        Some((id, text)) => {
+            let id = *id;
+            let mut done = false;
+            let mut save = false;
+            row(ui, "deploy", |ui| {
+                field_then(ui, text, "command run from the main checkout", 150.0, |ui| {
+                    save = ui.add(Key::new("save").solid(READOUT).id_salt(("deploy-save", id))).clicked();
+                    if ui.add(Key::new("cancel").outline(VALUE).id_salt(("deploy-cancel", id))).clicked() {
+                        done = true;
+                    }
+                });
+            });
+            if save {
+                *action = Some(ProjectAction::Deploy(id, text.trim().to_string()));
+                done = true;
+            }
+            if done {
+                *deploying = None;
+            }
+        }
+        None => {
+            row(ui, "deploy", |ui| {
+                Line::new().set(p.deploy.as_deref().unwrap_or("not set")).size(11.0).tint(if p.deploy.is_some() { READOUT } else { LEGEND }).show(ui);
+                let k = ui.add(Key::new("edit").outline(VALUE).id_salt(("deploy-edit", p.id)));
+                if k.clicked() {
+                    *deploying = Some((p.id, p.deploy.clone().unwrap_or_default()));
+                }
+            });
+        }
+    }
 }
 
 fn projects_section(
@@ -872,8 +975,21 @@ fn projects_section(
     rows: &[(agentbench_core::Project, Vec<Worktree>)],
     filter: &mut String,
     renaming: &mut Option<(Id, String)>,
+    deploying: &mut Option<(Id, String)>,
+    default: Automation,
 ) -> Option<ProjectAction> {
     let mut action = None;
+    section(ui, "automation", "for projects with no level of their own", |ui| {
+        row_help(ui, "default", "The level every project follows until it is given its own.", |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if let Some(l) = level_slider(ui, "default automation", default, false, 170.0) {
+                action = Some(ProjectAction::DefaultLevel(l));
+            }
+            Line::new().set(default.label()).size(11.0).show(ui);
+        });
+        hint(ui, default.about());
+    });
+    ui.add_space(8.0);
     field(ui, filter, "filter projects");
     ui.add_space(6.0);
     let needle = filter.trim().to_lowercase();
@@ -885,6 +1001,8 @@ fn projects_section(
             continue;
         }
         section(ui, &p.name, &short_path(&p.path), |ui| {
+            automation_rows(ui, p, default, deploying, &mut action);
+            ui.add_space(4.0);
             for w in trees {
                 ui.horizontal(|ui| {
                     let tint = if w.missing { FAULT } else { VALUE };

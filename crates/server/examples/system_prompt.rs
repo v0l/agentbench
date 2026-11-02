@@ -41,6 +41,7 @@ fn main() -> Result<(), String> {
         ),
         token: "<token>".into(),
         notes,
+        automation: String::new(),
     };
     let turn = Turn {
         prompt: "",

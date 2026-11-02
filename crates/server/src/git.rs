@@ -170,6 +170,16 @@ pub fn is_merged(main: &Path, branch: &str) -> bool {
     git(main, &["merge-base", "--is-ancestor", branch, "HEAD"]).is_ok()
 }
 
+pub fn push_remote(main: &Path) -> Option<String> {
+    let remotes = git(main, &["remote"]).ok()?;
+    let names: Vec<&str> = remotes.lines().map(str::trim).filter(|r| !r.is_empty()).collect();
+    names.iter().find(|r| **r == "origin").or(names.first()).map(|r| r.to_string())
+}
+
+pub fn push(main: &Path, remote: &str, branch: &str) -> Result<(), String> {
+    git(main, &["push", remote, branch]).map(|_| ())
+}
+
 pub fn is_dirty(path: &Path) -> Result<bool, String> {
     Ok(!git(path, &["status", "--porcelain"])?.is_empty())
 }

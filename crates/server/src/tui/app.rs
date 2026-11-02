@@ -721,6 +721,9 @@ pub mod tests {
             supervisor: false,
             pinned: false,
             tags: vec![],
+            automation: None,
+            risky: vec![],
+            deploy: None,
         }
     }
 

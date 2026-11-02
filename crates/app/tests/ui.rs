@@ -2362,6 +2362,74 @@ fn a_project_is_renamed_from_the_settings_projects_page() {
 }
 
 #[test]
+fn the_settings_projects_page_sets_a_level_and_risky_toggles_that_persist() {
+    use agentbench_core::{Automation, Risky};
+    let rig = rig();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("settings").click();
+    h.run_steps(3);
+    h.state_mut().settings_page("projects");
+    h.run_steps(3);
+    assert_eq!(h.state().project_level(project.id), Some((Automation::Delegate, true)));
+    h.get_by_label(&format!("{} automation", project.name)).set_value_accesskit(4.0);
+    until(&mut h, "ship saved", |_| rig.store.project(project.id).unwrap().automation == Some(Automation::Ship));
+    h.get_by_label(&format!("{} deploy to production", project.name)).click();
+    until(&mut h, "deploy on", |_| rig.store.project(project.id).unwrap().risky == [Risky::Deploy]);
+    h.get_by_label(&format!("{} automation", project.name)).increment_accesskit();
+    until(&mut h, "full auto", |_| rig.store.project(project.id).unwrap().automation == Some(Automation::FullAuto));
+    h.run_steps(3);
+    shot(&mut h, "automation-settings");
+    h.get_by_label("default automation").set_value_accesskit(1.0);
+    until(&mut h, "default assist", |h| h.state().autopilot().is_some_and(|a| a.default_level == Automation::Assist));
+    h.get_by_label(&format!("{} use default", project.name)).click();
+    until(&mut h, "back to default", |_| rig.store.project(project.id).unwrap().automation.is_none());
+    until(&mut h, "follows assist", |h| h.state().project_level(project.id) == Some((Automation::Assist, true)));
+    assert_eq!(rig.store.project(project.id).unwrap().risky, [Risky::Deploy], "toggles are kept");
+}
+
+#[test]
+fn the_supervisor_chat_shows_and_sets_the_levels() {
+    use agentbench_core::Automation;
+    let rig = rig();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("supervisor").click();
+    until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+    h.run_steps(3);
+    assert!(h.query_by_label("automation level delegate").is_some(), "the header names the focused project's level");
+    h.get_by_label("automation levels").click();
+    h.run_steps(3);
+    h.get_by_label(&format!("{} automation", project.name)).set_value_accesskit(0.0);
+    until(&mut h, "manual", |_| rig.store.project(project.id).unwrap().automation == Some(Automation::Manual));
+    until(&mut h, "header follows", |h| h.query_by_label("automation level manual").is_some());
+    shot(&mut h, "automation-supervisor");
+}
+
+#[test]
+fn the_all_projects_board_shows_each_projects_level() {
+    use agentbench_core::Automation;
+    let rig = rig();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    rig.store
+        .update_project(project.id, &agentbench_core::ProjectPatch { automation: Some(Some(Automation::Autowork)), ..Default::default() })
+        .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().show_all_projects();
+    h.run_steps(3);
+    shot(&mut h, "automation-board-chips");
+    assert!(h.query_by_label_contains(&format!("{} autowork", project.name)).is_some(), "the board shows the level");
+    h.get_by_label("project levels").click();
+    h.run_steps(3);
+    h.get_by_label(&format!("{} automation", project.name)).decrement_accesskit();
+    until(&mut h, "delegate", |_| rig.store.project(project.id).unwrap().automation == Some(Automation::Delegate));
+    shot(&mut h, "automation-board");
+}
+
+#[test]
 fn rename_project_from_a_chats_menu_opens_the_name_field() {
     let rig = rig();
     let sid =

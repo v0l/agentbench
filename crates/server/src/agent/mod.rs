@@ -38,6 +38,7 @@ pub struct Context {
     pub token: String,
     /// What was remembered about the project with `remember`: topic and note.
     pub notes: Vec<(String, String)>,
+    pub automation: String,
 }
 
 /// A file the user sent with a message, written out where an agent can read it.
@@ -275,7 +276,7 @@ fn supervisor_brief(c: &Context) -> String {
          - Delegate: when work must be done, `start_session` (with `project`, and `issue` when one exists) with a self-contained prompt. Sessions you start are watched for you.\n\
          - Follow: use `watch_session` on any running session you care about. Do not poll and do not block on `wait_for_session`. When a watched session finishes, its status and last reply arrive here as a message. Then read what it did with `read_session`, check it against the issue, update the tracker, and start the next step or tell the user.\n\
          - Conclusion check: when a watched session finishes, read its last reply and assert it has a conclusion: either rigid (verified, tests pass, nothing left) or needs more work, listing only items the session genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). If the reply contains a todo or leftover list of things the agent could do itself (run tests, write the test, deploy to a test env, merge locally, verify X, add a test for Y), `send_message` the session to do them, do not move the issue to `review` or `done`, and do not relay the list to the user. Never relay a worker's leftover list as the user's todo.\n\
-         - Autopilot: the `autopilot` tool reads and sets the server's own worker loop (switch, caps, merge, per-project override, activity feed). When it is on, it starts workers on todo issues, applies the conclusion check to their replies, labels issues `needs-user` or `blocked`, nudges stuck sessions and merges green branches when merge is on. Do not duplicate its work on the same issues; when the user asks to pause, resume or change it, call the tool and confirm the new state.\n\
+         - Autopilot: the `autopilot` tool reads the server's own worker loop (pause switch, caps, activity feed). It starts workers on todo issues in projects at autowork or above, applies the conclusion check to their replies, labels issues `needs-user` or `blocked`, nudges stuck sessions, and in projects at ship or above merges and pushes green branches. Do not duplicate its work on the same issues; when the user asks to pause, resume or change it, call the tool and confirm the new state.\n\
          - Manage: `stop_session`, `close_session` and `rename_session` work on any session. `list_worktrees`, `create_worktree` and `cleanup_worktree` work in any project (pass `project`). Close or clean up only when the user asked or the work is verified merged.\n\
          - Nudge: `send_message` to a stalled or drifting session. `notify_user` only for what needs the user: a decision, a failure you cannot route around, or a finished piece of work.\n\
          - Remember: `remember` keeps the user's standing preferences and decisions.\n\
@@ -286,9 +287,17 @@ fn supervisor_brief(c: &Context) -> String {
          - When a watched session finishes and nothing needs the user, update the tracker and stay quiet.\n\
          - You see everything, so act only on what the user asked or what keeps the tracker true. Do not start unrequested work, and do not remove worktrees or sessions without being asked.\n\
          </answering>\n\n\
+         <automation>\n\
+         Each project has an automation level, or follows the global default. The levels, lowest first: manual (only track and report), assist (file issues, comment, keep states true, propose next work), delegate (start workers on issues the user names, send sessions back, close finished ones), autowork (the autopilot picks todo issues itself), ship (also merge concluded branches into the default branch and push, with `merge_branch`), full_auto (also the risky actions switched on for that project).\n\
+         - The tool layer enforces them. A call above the project's level does not run: it comes back as a proposal, and the user is asked in this chat. Do not try to get round a proposal another way (bash git merge, a different tool); say what you propose and why.\n\
+         - Before any risky action (deploy, prod data changes, external messages, publishing a release, spending money) call `risky_action` for that project and go on only when it says allowed. It is allowed only at full_auto with that action switched on.\n\
+         - When the user gives a standing decision in chat (\"always merge and push here\", \"never touch billing\"), record it with `set_automation`, not a note, and confirm the new level in one line. Raising asks the user to confirm; lowering applies at once.\n\
+         Levels now:\n{automation}\
+         </automation>\n\n\
          The agentbench REST API is at {url} and needs the header `Authorization: Bearer $AGENTBENCH_TOKEN` \
          (also in the environment as AGENTBENCH_URL, AGENTBENCH_TOKEN and AGENTBENCH_SESSION).",
         session = c.session,
+        automation = c.automation,
         url = c.api_url.trim_end_matches('/'),
     )
 }
@@ -408,6 +417,7 @@ pub fn context() -> Context {
         api_url: "http://127.0.0.1:7420".into(),
         token: "t".into(),
         notes: Vec::new(),
+        automation: String::new(),
     }
 }
 
@@ -470,6 +480,15 @@ mod tests {
         assert!(b.contains("branch main"));
         assert!(b.contains("\"project_id\": 4"));
         assert!(b.contains("<orchestration>") && b.contains("PARENT=<id>"));
+    }
+
+    #[test]
+    fn the_supervisor_brief_carries_the_levels_and_says_they_are_enforced() {
+        let b = brief(&Context { supervisor: true, automation: "Global default: delegate.\n- billing (id 2): manual".into(), ..context() });
+        assert!(b.contains("- billing (id 2): manual"), "{b}");
+        assert!(b.contains("set_automation") && b.contains("risky_action") && b.contains("merge_branch"));
+        assert!(b.contains("proposal"));
+        assert!(!brief(&context()).contains("<automation>"), "only the supervisor gets it");
     }
 
     #[test]

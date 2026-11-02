@@ -1,8 +1,9 @@
 use crate::runner::Runner;
 use crate::store::{Store, StoreError, Worker};
 use agentbench_core::{
-    AutopilotPatch, AutopilotState, Entry, Id, Issue, IssuePatch, IssueState, NewComment,
-    NewSession, Place, ProjectSwitch, Session, SessionStatus, issue_prompt,
+    Automation, AutopilotPatch, AutopilotState, Entry, Id, Issue, IssuePatch, IssueState,
+    NewComment, NewSession, Place, Project, ProjectPatch, Risky, Session, SessionStatus,
+    issue_prompt,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -17,6 +18,8 @@ const MAX_NUDGES: &str = "autopilot_max_nudges";
 const MERGE: &str = "autopilot_merge";
 const IDLE: &str = "autopilot_idle";
 const AGENT: &str = "autopilot_agent";
+const DEFAULT_LEVEL: &str = "automation_default";
+const MIGRATED: &str = "automation_migrated";
 
 pub const DEFAULT_CAP: u32 = 4;
 pub const DEFAULT_PROJECT_CAP: u32 = 2;
@@ -25,6 +28,7 @@ pub const DEFAULT_MAX_NUDGES: u32 = 2;
 const MAX_REWORKS: u32 = 3;
 const MAX_STUCK_RESTARTS: u32 = 2;
 const TICK_EVERY: Duration = Duration::from_secs(30);
+const DEPLOY_LIMIT: Duration = Duration::from_secs(20 * 60);
 const NEEDS_USER: &str = "needs-user";
 const BLOCKED: &str = "blocked";
 const AUTHOR: &str = "autopilot";
@@ -41,7 +45,7 @@ fn project_key(id: Id) -> String {
     format!("autopilot_project_{id}")
 }
 
-pub fn project_override(store: &Store, id: Id) -> Option<bool> {
+fn old_override(store: &Store, id: Id) -> Option<bool> {
     match store.setting(&project_key(id)).ok().flatten().as_deref() {
         Some("1") => Some(true),
         Some("0") => Some(false),
@@ -49,19 +53,68 @@ pub fn project_override(store: &Store, id: Id) -> Option<bool> {
     }
 }
 
+pub fn default_level(store: &Store) -> Automation {
+    store
+        .setting(DEFAULT_LEVEL)
+        .ok()
+        .flatten()
+        .and_then(|v| Automation::parse(&v))
+        .unwrap_or_default()
+}
+
+pub fn level_of(store: &Store, project: &Project) -> Automation {
+    project.level(default_level(store))
+}
+
+pub fn level(store: &Store, project: Id) -> Automation {
+    store.project(project).map(|p| level_of(store, &p)).unwrap_or_else(|_| default_level(store))
+}
+
+pub fn allows(store: &Store, project: Id, action: Risky) -> bool {
+    store.project(project).is_ok_and(|p| p.allows(default_level(store), action))
+}
+
 pub fn enabled_for(store: &Store, project: Id) -> bool {
-    project_override(store, project).unwrap_or_else(|| flag(store, ENABLED))
+    flag(store, ENABLED) && level(store, project) >= Automation::Autowork
+}
+
+pub fn migrate(store: &Store) -> Result<(), StoreError> {
+    if flag(store, MIGRATED) {
+        return Ok(());
+    }
+    let global = flag(store, ENABLED);
+    let running = if flag(store, MERGE) { Automation::Ship } else { Automation::Autowork };
+    let projects: Vec<Project> =
+        store.projects()?.into_iter().filter(|p| !p.builtin()).collect();
+    let mut any_on = false;
+    for p in &projects {
+        let set = match (old_override(store, p.id), global) {
+            (Some(true), _) => Some(running),
+            (Some(false), true) => Some(Automation::Delegate),
+            _ => None,
+        };
+        any_on |= set == Some(running);
+        if let Some(level) = set
+            && p.automation.is_none()
+        {
+            store.update_project(
+                p.id,
+                &ProjectPatch { automation: Some(Some(level)), ..Default::default() },
+            )?;
+        }
+        store.delete_setting(&project_key(p.id))?;
+    }
+    if global {
+        store.set_setting(DEFAULT_LEVEL, running.as_str())?;
+    }
+    if any_on {
+        store.set_setting(ENABLED, "1")?;
+    }
+    store.delete_setting(MERGE)?;
+    store.set_setting(MIGRATED, "1")
 }
 
 pub fn state(store: &Store) -> AutopilotState {
-    let projects = store
-        .projects()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|p| !p.builtin())
-        .filter_map(|p| project_override(store, p.id).map(|e| (p.id, e)))
-        .map(|(id, e)| ProjectSwitch { id, enabled: Some(e) })
-        .collect();
     let workers = store.workers().unwrap_or_default();
     AutopilotState {
         enabled: flag(store, ENABLED),
@@ -69,8 +122,7 @@ pub fn state(store: &Store) -> AutopilotState {
         project_cap: number(store, PROJECT_CAP, DEFAULT_PROJECT_CAP),
         stuck_minutes: number(store, STUCK_MINUTES, DEFAULT_STUCK_MINUTES),
         max_nudges: number(store, MAX_NUDGES, DEFAULT_MAX_NUDGES),
-        merge: flag(store, MERGE),
-        projects,
+        default_level: default_level(store),
         idle: flag(store, IDLE),
         workers: workers.iter().filter(|w| is_active(&w.state)).count() as u32,
         activity: store.autopilot_log(30).unwrap_or_default(),
@@ -78,9 +130,8 @@ pub fn state(store: &Store) -> AutopilotState {
 }
 
 pub fn apply(store: &Store, patch: &AutopilotPatch) -> Result<AutopilotState, StoreError> {
-    let on = |b: bool| if b { "1" } else { "0" };
     if let Some(e) = patch.enabled {
-        store.set_setting(ENABLED, on(e))?;
+        store.set_setting(ENABLED, if e { "1" } else { "0" })?;
         store.set_setting(IDLE, "0")?;
         store.log_autopilot(None, None, if e { "autopilot resumed" } else { "autopilot paused" })?;
     }
@@ -96,24 +147,58 @@ pub fn apply(store: &Store, patch: &AutopilotPatch) -> Result<AutopilotState, St
     if let Some(n) = patch.max_nudges {
         store.set_setting(MAX_NUDGES, &n.to_string())?;
     }
-    if let Some(m) = patch.merge {
-        store.set_setting(MERGE, on(m))?;
-    }
-    if let Some(p) = patch.project {
-        let project = store.project(p.id)?;
-        match p.enabled {
-            Some(e) => store.set_setting(&project_key(p.id), on(e))?,
-            None => store.delete_setting(&project_key(p.id))?,
-        }
+    if let Some(l) = patch.default_level {
+        store.set_setting(DEFAULT_LEVEL, l.as_str())?;
         store.set_setting(IDLE, "0")?;
-        let word = match p.enabled {
-            Some(true) => "on",
-            Some(false) => "off",
-            None => "following the global switch",
-        };
-        store.log_autopilot(Some(p.id), None, &format!("autopilot {word} for {}", project.name))?;
+        store.log_autopilot(None, None, &format!("default automation level set to {}", l.label()))?;
     }
     Ok(state(store))
+}
+
+pub fn set_project(
+    store: &Store,
+    id: Id,
+    patch: &ProjectPatch,
+) -> Result<Project, StoreError> {
+    let before = store.project(id)?;
+    let after = store.update_project(id, patch)?;
+    let default = default_level(store);
+    if before.automation != after.automation {
+        let word = match after.automation {
+            Some(l) => l.label().to_string(),
+            None => format!("the default ({})", default.label()),
+        };
+        store.set_setting(IDLE, "0")?;
+        store.log_autopilot(Some(id), None, &format!("{} set to {word}", after.name))?;
+    }
+    if before.risky != after.risky {
+        let on: Vec<&str> = after.risky.iter().map(|r| r.label()).collect();
+        let text = if on.is_empty() { "none".to_string() } else { on.join(", ") };
+        store.log_autopilot(Some(id), None, &format!("{} risky actions: {text}", after.name))?;
+    }
+    Ok(after)
+}
+
+pub fn summary(store: &Store) -> String {
+    let default = default_level(store);
+    let mut out = format!(
+        "Global default: {} ({}). Autopilot loop: {}.\n",
+        default.label(),
+        default.about(),
+        if flag(store, ENABLED) { "on" } else { "paused" }
+    );
+    for p in store.projects().unwrap_or_default().iter().filter(|p| !p.builtin()) {
+        let own = if p.automation.is_some() { "" } else { ", the default" };
+        let risky: Vec<&str> = p.risky.iter().map(|r| r.as_str()).collect();
+        let risky = if risky.is_empty() { "none".to_string() } else { risky.join(", ") };
+        out.push_str(&format!(
+            "- {} (id {}): {}{own}; risky actions on: {risky}\n",
+            p.name,
+            p.id,
+            p.level(default).label()
+        ));
+    }
+    out
 }
 
 fn is_active(state: &str) -> bool {
@@ -452,13 +537,8 @@ impl Autopilot {
 
     pub fn tick_at(&self, now: i64) {
         let store = self.store();
-        let any_override = store
-            .projects()
-            .unwrap_or_default()
-            .iter()
-            .any(|p| project_override(store, p.id) == Some(true));
         let workers = store.workers().unwrap_or_default();
-        if !flag(store, ENABLED) && !any_override && workers.is_empty() {
+        if !flag(store, ENABLED) && workers.is_empty() {
             return;
         }
         for w in &workers {
@@ -488,7 +568,7 @@ impl Autopilot {
             "ready" => {
                 if issue.state == IssueState::Done {
                     let _ = store.remove_worker(w.session);
-                } else if w.green && flag(store, MERGE) {
+                } else if w.green && flag(store, ENABLED) && level(store, w.project) >= Automation::Ship {
                     self.merge(w, &session);
                 }
             }
@@ -590,7 +670,7 @@ impl Autopilot {
                         if green { "" } else { " (no green result, will not merge)" }
                     ),
                 );
-                if !green || !flag(store, MERGE) {
+                if !green || level(store, w.project) < Automation::Ship {
                     self.notify(&format!("#{} is ready for review", w.issue));
                 }
             }
@@ -639,44 +719,38 @@ impl Autopilot {
 
     fn merge(&self, w: &Worker, session: &Session) {
         let store = self.store();
-        let fail = |why: String| {
-            let _ = store.set_worker(w.session, "merge_failed", true);
-            self.comment(w.issue, &format!("autopilot: merge failed: {why}"));
-            self.log(Some(w.project), Some(w.issue), &format!("merge of #{} failed: {}", w.issue, clip(&why, 200)));
-            self.notify(&format!("#{} could not be merged: {}", w.issue, clip(&why, 160)));
-        };
-        let (Ok(project), Ok(tree)) = (store.project(w.project), store.worktree(session.worktree_id))
-        else {
-            return fail("the project or worktree is gone".into());
-        };
-        let Some(branch) = tree.branch.clone().filter(|_| !tree.main) else {
-            self.log_once(Some(w.project), Some(w.issue), &format!("#{} has no branch to merge", w.issue));
-            return;
-        };
-        let main = Path::new(&project.path);
-        if let Some(want) = &project.branch
-            && crate::git::current_branch(main).as_deref() != Some(want.as_str())
-        {
-            return fail(format!("the main checkout is not on {want}"));
+        match ship(store, session) {
+            Ok(shipped) if matches!(shipped.pushed, Some(Err(_))) => {
+                let why = format!("{}; the issue stays in review until it is pushed", shipped.describe());
+                let _ = store.set_worker(w.session, "merge_failed", true);
+                self.comment(w.issue, &format!("autopilot: {why}"));
+                self.log(Some(w.project), Some(w.issue), &format!("#{}: {}", w.issue, clip(&why, 200)));
+                self.notify(&format!("#{} merged but not pushed", w.issue));
+            }
+            Ok(shipped) => {
+                self.runner.interrupt(w.session);
+                self.runner.end(w.session);
+                let _ = store.delete_session(w.session);
+                self.set_state(w.issue, IssueState::Done);
+                self.comment(
+                    w.issue,
+                    &format!("autopilot: {} and closed session {}.", shipped.describe(), w.session),
+                );
+                self.log(Some(w.project), Some(w.issue), &format!("{}, #{} done", shipped.describe(), w.issue));
+                if let Some(Err(e)) = &shipped.deployed {
+                    self.notify(&format!("#{} merged but the deploy failed: {}", w.issue, clip(e, 160)));
+                }
+            }
+            Err(Unshipped::NoBranch) => {
+                self.log_once(Some(w.project), Some(w.issue), &format!("#{} has no branch to merge", w.issue));
+            }
+            Err(Unshipped::Failed(why)) => {
+                let _ = store.set_worker(w.session, "merge_failed", true);
+                self.comment(w.issue, &format!("autopilot: merge failed: {why}"));
+                self.log(Some(w.project), Some(w.issue), &format!("merge of #{} failed: {}", w.issue, clip(&why, 200)));
+                self.notify(&format!("#{} could not be merged: {}", w.issue, clip(&why, 160)));
+            }
         }
-        if crate::git::is_dirty(main).unwrap_or(true) {
-            return fail("the main checkout has uncommitted changes".into());
-        }
-        if crate::git::is_dirty(Path::new(&tree.path)).unwrap_or(false) {
-            return fail(format!("{branch} has uncommitted changes"));
-        }
-        if let Err(e) = crate::git::merge_branch(main, &branch) {
-            return fail(e);
-        }
-        if !crate::git::is_merged(main, &branch) {
-            return fail(format!("{branch} is not in the main branch after the merge"));
-        }
-        self.runner.interrupt(w.session);
-        self.runner.end(w.session);
-        let _ = store.delete_session(w.session);
-        self.set_state(w.issue, IssueState::Done);
-        self.comment(w.issue, &format!("autopilot: merged {branch} into the main branch and closed session {}.", w.session));
-        self.log(Some(w.project), Some(w.issue), &format!("merged {branch}, #{} done", w.issue));
     }
 
     fn start_more(&self) {
@@ -781,6 +855,117 @@ impl Autopilot {
             self.log(None, None, "idle: no eligible issues left");
             self.notify("autopilot is idle: no eligible issues left");
         }
+    }
+}
+
+pub enum Unshipped {
+    NoBranch,
+    Failed(String),
+}
+
+#[derive(Debug)]
+pub struct Shipped {
+    pub branch: String,
+    pub pushed: Option<Result<String, String>>,
+    pub deployed: Option<Result<String, String>>,
+}
+
+impl Shipped {
+    pub fn describe(&self) -> String {
+        let mut out = format!("merged {} into the main branch", self.branch);
+        match &self.pushed {
+            Some(Ok(to)) => out.push_str(&format!(", pushed to {to}")),
+            Some(Err(e)) => out.push_str(&format!(", push failed: {}", clip(e, 200))),
+            None => out.push_str(", no remote to push to"),
+        }
+        match &self.deployed {
+            Some(Ok(_)) => out.push_str(", deployed"),
+            Some(Err(e)) => out.push_str(&format!(", deploy failed: {}", clip(e, 200))),
+            None => {}
+        }
+        out
+    }
+}
+
+pub fn ship(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
+    let fail = |s: String| Unshipped::Failed(s);
+    let (Ok(project), Ok(tree)) =
+        (store.project(session.project_id), store.worktree(session.worktree_id))
+    else {
+        return Err(fail("the project or worktree is gone".into()));
+    };
+    let Some(branch) = tree.branch.clone().filter(|_| !tree.main) else {
+        return Err(Unshipped::NoBranch);
+    };
+    let main = Path::new(&project.path);
+    if let Some(want) = &project.branch
+        && crate::git::current_branch(main).as_deref() != Some(want.as_str())
+    {
+        return Err(fail(format!("the main checkout is not on {want}")));
+    }
+    if crate::git::is_dirty(main).unwrap_or(true) {
+        return Err(fail("the main checkout has uncommitted changes".into()));
+    }
+    if crate::git::is_dirty(Path::new(&tree.path)).unwrap_or(false) {
+        return Err(fail(format!("{branch} has uncommitted changes")));
+    }
+    crate::git::merge_branch(main, &branch).map_err(fail)?;
+    if !crate::git::is_merged(main, &branch) {
+        return Err(fail(format!("{branch} is not in the main branch after the merge")));
+    }
+    let target = project.branch.clone().or_else(|| crate::git::current_branch(main));
+    let pushed = match (crate::git::push_remote(main), target) {
+        (Some(remote), Some(b)) => {
+            Some(crate::git::push(main, &remote, &b).map(|()| format!("{remote}/{b}")))
+        }
+        _ => None,
+    };
+    let deployed = match &project.deploy {
+        Some(cmd) if pushed.as_ref().is_none_or(Result::is_ok)
+            && project.allows(default_level(store), Risky::Deploy) =>
+        {
+            Some(run_deploy(main, cmd, DEPLOY_LIMIT))
+        }
+        _ => None,
+    };
+    Ok(Shipped { branch, pushed, deployed })
+}
+
+pub fn run_deploy(dir: &Path, command: &str, limit: Duration) -> Result<String, String> {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run {command}: {e}"))?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() >= limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{command} ran past {} minutes and was stopped", limit.as_secs() / 60));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<&str> = text.trim().lines().collect();
+    let tail = clip(&lines[lines.len().saturating_sub(20)..].join("\n"), 2000);
+    if out.status.success() {
+        Ok(tail)
+    } else {
+        Err(format!("{command} exited with {}: {tail}", out.status))
     }
 }
 
@@ -913,36 +1098,101 @@ mod tests {
         assert_eq!(reasons, [1, 2, 3, 4]);
     }
 
+    fn set_level(s: &Store, id: Id, level: Option<Automation>) {
+        set_project(s, id, &ProjectPatch { automation: Some(level), ..Default::default() }).unwrap();
+    }
+
     #[test]
-    fn a_project_switch_beats_the_global_one() {
+    fn a_projects_own_level_beats_the_global_default() {
         let s = Store::memory().unwrap();
         let (a, _) = testing::project(&s, "/a");
         let b = s.add_project("other", "/b", Some("main"), None).unwrap();
-        assert!(!enabled_for(&s, a.id));
-        apply(&s, &AutopilotPatch { enabled: Some(true), ..Default::default() }).unwrap();
-        assert!(enabled_for(&s, a.id) && enabled_for(&s, b.id));
-        apply(
-            &s,
-            &AutopilotPatch {
-                project: Some(ProjectSwitch { id: b.id, enabled: Some(false) }),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(enabled_for(&s, a.id) && !enabled_for(&s, b.id));
-        apply(&s, &AutopilotPatch { enabled: Some(false), ..Default::default() }).unwrap();
-        apply(
-            &s,
-            &AutopilotPatch {
-                project: Some(ProjectSwitch { id: a.id, enabled: Some(true) }),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(enabled_for(&s, a.id));
+        assert_eq!(default_level(&s), Automation::Delegate);
+        assert_eq!((level(&s, a.id), level(&s, b.id)), (Automation::Delegate, Automation::Delegate));
+        apply(&s, &AutopilotPatch { default_level: Some(Automation::Ship), ..Default::default() }).unwrap();
+        set_level(&s, b.id, Some(Automation::Manual));
+        assert_eq!((level(&s, a.id), level(&s, b.id)), (Automation::Ship, Automation::Manual));
+        apply(&s, &AutopilotPatch { default_level: Some(Automation::Assist), ..Default::default() }).unwrap();
+        assert_eq!(level(&s, b.id), Automation::Manual, "the default does not move a project's own level");
+        set_level(&s, b.id, None);
+        assert_eq!(level(&s, b.id), Automation::Assist, "cleared, it follows the default again");
         let st = state(&s);
-        assert_eq!((st.cap, st.project_cap, st.enabled), (4, 2, false));
-        assert!(!st.activity.is_empty());
+        assert_eq!((st.cap, st.project_cap, st.enabled, st.default_level), (4, 2, false, Automation::Assist));
+        assert!(st.activity.iter().any(|a| a.text.contains("other set to manual")));
+    }
+
+    #[test]
+    fn the_loop_runs_a_project_only_when_on_and_at_autowork_or_above() {
+        let s = Store::memory().unwrap();
+        let (a, _) = testing::project(&s, "/a");
+        apply(&s, &AutopilotPatch { enabled: Some(true), ..Default::default() }).unwrap();
+        assert!(!enabled_for(&s, a.id), "delegate is below autowork");
+        set_level(&s, a.id, Some(Automation::Autowork));
+        assert!(enabled_for(&s, a.id));
+        apply(&s, &AutopilotPatch { enabled: Some(false), ..Default::default() }).unwrap();
+        assert!(!enabled_for(&s, a.id), "the pause key stops everything");
+    }
+
+    #[test]
+    fn risky_actions_need_full_auto_and_their_own_toggle() {
+        let s = Store::memory().unwrap();
+        let (a, _) = testing::project(&s, "/a");
+        for l in Automation::ALL {
+            set_project(&s, a.id, &ProjectPatch { automation: Some(Some(l)), risky: Some(vec![]), ..Default::default() }).unwrap();
+            for r in Risky::ALL {
+                assert!(!allows(&s, a.id, r), "{r:?} off at {l:?}");
+            }
+            set_project(&s, a.id, &ProjectPatch { risky: Some(vec![Risky::Deploy]), ..Default::default() }).unwrap();
+            for r in Risky::ALL {
+                let want = l == Automation::FullAuto && r == Risky::Deploy;
+                assert_eq!(allows(&s, a.id, r), want, "{r:?} at {l:?}");
+            }
+        }
+        apply(&s, &AutopilotPatch { default_level: Some(Automation::FullAuto), ..Default::default() }).unwrap();
+        set_level(&s, a.id, None);
+        assert!(allows(&s, a.id, Risky::Deploy) && !allows(&s, a.id, Risky::SpendMoney), "toggles are per project even at a full auto default");
+    }
+
+    #[test]
+    fn with_nothing_set_the_migration_leaves_delegate_and_the_loop_off() {
+        let s = Store::memory().unwrap();
+        let (a, _) = testing::project(&s, "/a");
+        migrate(&s).unwrap();
+        let st = state(&s);
+        assert_eq!((st.default_level, st.enabled), (Automation::Delegate, false));
+        assert_eq!(s.project(a.id).unwrap().automation, None);
+    }
+
+    #[test]
+    fn the_old_autopilot_switches_become_levels_once() {
+        let s = Store::memory().unwrap();
+        let (a, _) = testing::project(&s, "/a");
+        let b = s.add_project("b", "/b", Some("main"), None).unwrap();
+        let c = s.add_project("c", "/c", Some("main"), None).unwrap();
+        s.set_setting(&project_key(a.id), "1").unwrap();
+        s.set_setting(&project_key(b.id), "0").unwrap();
+        s.set_setting(MERGE, "1").unwrap();
+        migrate(&s).unwrap();
+        assert_eq!(s.project(a.id).unwrap().automation, Some(Automation::Ship), "on with merge");
+        assert_eq!(s.project(b.id).unwrap().automation, None, "off under a global off changes nothing");
+        assert_eq!(s.project(c.id).unwrap().automation, None);
+        assert_eq!(default_level(&s), Automation::Delegate);
+        assert!(state(&s).enabled, "the loop keeps running the project that was on");
+        assert!(enabled_for(&s, a.id) && !enabled_for(&s, c.id));
+        assert!(s.setting(&project_key(a.id)).unwrap().is_none() && s.setting(MERGE).unwrap().is_none());
+        set_level(&s, a.id, Some(Automation::Assist));
+        migrate(&s).unwrap();
+        assert_eq!(s.project(a.id).unwrap().automation, Some(Automation::Assist), "runs once");
+
+        let s = Store::memory().unwrap();
+        let (a, _) = testing::project(&s, "/a");
+        let b = s.add_project("b", "/b", Some("main"), None).unwrap();
+        s.set_setting(ENABLED, "1").unwrap();
+        s.set_setting(&project_key(b.id), "0").unwrap();
+        migrate(&s).unwrap();
+        assert_eq!(default_level(&s), Automation::Autowork, "a global on becomes the default");
+        assert_eq!(level(&s, a.id), Automation::Autowork);
+        assert_eq!(s.project(b.id).unwrap().automation, Some(Automation::Delegate), "its own off is kept");
     }
 
     #[test]
@@ -1030,6 +1280,115 @@ mod tests {
             &AutopilotPatch { enabled: Some(true), cap: Some(2), project_cap: Some(5), ..Default::default() },
         )
         .unwrap();
+        set_level(&r.store, r.project, Some(Automation::Autowork));
+    }
+
+    fn commit_in(path: &str, file: &str) {
+        std::fs::write(std::path::Path::new(path).join(file), "x").unwrap();
+        for args in [vec!["add", "."], vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "work"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(path).args(&args).status().unwrap().success());
+        }
+    }
+
+    fn bare_remote(r: &Rig) -> std::path::PathBuf {
+        let bare = r._dir.path().join("remote.git");
+        assert!(std::process::Command::new("git").args(["init", "-q", "--bare"]).arg(&bare).status().unwrap().success());
+        assert!(std::process::Command::new("git").arg("-C").arg(&r.repo).args(["remote", "add", "origin"]).arg(&bare).status().unwrap().success());
+        bare
+    }
+
+    fn remote_has(bare: &std::path::Path, file: &str) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(bare)
+            .args(["cat-file", "-e", &format!("main:{file}")])
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    async fn worked_on(r: &Rig) -> (Id, agentbench_core::SessionId) {
+        let a = todo(r, "a", 0, &[]);
+        on(r);
+        r.ap.tick();
+        let w = r.store.workers().unwrap().remove(0);
+        let tree = r.store.worktree(r.store.session(w.session).unwrap().worktree_id).unwrap();
+        settle(r).await;
+        commit_in(&tree.path, "feature.txt");
+        (a, w.session)
+    }
+
+    #[tokio::test]
+    async fn the_loop_skips_projects_below_autowork() {
+        let r = rig(DONE);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        for l in [Automation::Manual, Automation::Assist, Automation::Delegate] {
+            set_level(&r.store, r.project, Some(l));
+            r.ap.tick();
+            assert!(r.store.sessions().unwrap().is_empty(), "nothing started at {l:?}");
+        }
+        set_level(&r.store, r.project, None);
+        apply(&r.store, &AutopilotPatch { default_level: Some(Automation::Autowork), ..Default::default() }).unwrap();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "the default reaches autowork");
+    }
+
+    #[tokio::test]
+    async fn autowork_leaves_a_green_branch_in_review_and_ship_merges_and_pushes_it() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let (a, sid) = worked_on(&r).await;
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review, "autowork does not merge");
+        assert!(!r.repo.join("feature.txt").exists());
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        r.ap.tick();
+        assert!(r.repo.join("feature.txt").exists(), "merged into the main checkout");
+        assert!(remote_has(&bare, "feature.txt"), "pushed");
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.store.session(sid).is_err(), "session closed");
+    }
+
+    #[tokio::test]
+    async fn a_failed_push_keeps_the_issue_in_review() {
+        let r = rig(DONE);
+        let missing = r._dir.path().join("gone.git");
+        assert!(std::process::Command::new("git").arg("-C").arg(&r.repo).args(["remote", "add", "origin"]).arg(&missing).status().unwrap().success());
+        let (a, _) = worked_on(&r).await;
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        r.ap.tick();
+        r.ap.tick();
+        assert!(r.repo.join("feature.txt").exists());
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        assert_eq!(r.store.workers().unwrap()[0].state, "merge_failed");
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("push failed")));
+    }
+
+    #[tokio::test]
+    async fn the_loop_deploys_only_at_full_auto_with_the_deploy_toggle_on() {
+        for (level, toggles, want) in [
+            (Automation::Ship, vec![Risky::Deploy], false),
+            (Automation::FullAuto, vec![], false),
+            (Automation::FullAuto, vec![Risky::Publish], false),
+            (Automation::FullAuto, vec![Risky::Deploy], true),
+        ] {
+            let r = rig(DONE);
+            let mark = r._dir.path().join("deployed");
+            set_project(
+                &r.store,
+                r.project,
+                &ProjectPatch { deploy: Some(format!("touch {}", mark.display())), risky: Some(toggles.clone()), ..Default::default() },
+            )
+            .unwrap();
+            let (a, _) = worked_on(&r).await;
+            set_level(&r.store, r.project, Some(level));
+            r.ap.tick();
+            r.ap.tick();
+            assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+            assert_eq!(mark.exists(), want, "{level:?} with {toggles:?}");
+        }
     }
 
     async fn settle(r: &Rig) {
@@ -1183,35 +1542,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_green_branch_is_merged_verified_and_closed_only_when_merging_is_on() {
-        let r = rig(DONE);
-        let a = todo(&r, "a", 0, &[]);
-        on(&r);
-        r.ap.tick();
-        let w = r.store.workers().unwrap().remove(0);
-        let tree = r.store.worktree(r.store.session(w.session).unwrap().worktree_id).unwrap();
-        settle(&r).await;
-        std::fs::write(std::path::Path::new(&tree.path).join("feature.txt"), "x").unwrap();
-        for args in [vec!["add", "."], vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "work"]] {
-            assert!(std::process::Command::new("git").arg("-C").arg(&tree.path).args(&args).status().unwrap().success());
-        }
-        r.ap.tick();
-        r.ap.tick();
-        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review, "ready for the user, merge is off");
-        assert!(!r.repo.join("feature.txt").exists());
-        apply(&r.store, &AutopilotPatch { merge: Some(true), ..Default::default() }).unwrap();
-        r.ap.tick();
-        assert!(r.repo.join("feature.txt").exists(), "merged into the main checkout");
-        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
-        assert!(r.store.session(w.session).is_err(), "session closed");
-    }
-
-    #[tokio::test]
     async fn a_dirty_main_checkout_stops_the_merge_instead_of_forcing_it() {
         let r = rig(DONE);
         let a = todo(&r, "a", 0, &[]);
         on(&r);
-        apply(&r.store, &AutopilotPatch { merge: Some(true), ..Default::default() }).unwrap();
+        set_level(&r.store, r.project, Some(Automation::Ship));
         r.ap.tick();
         settle(&r).await;
         std::fs::write(r.repo.join("scratch.txt"), "x").unwrap();
@@ -1233,14 +1568,5 @@ mod tests {
         todo(&r, "new", 0, &[]);
         r.ap.tick();
         assert!(!state(&r.store).idle);
-    }
-
-    #[tokio::test]
-    async fn a_project_switch_runs_one_project_while_the_global_switch_is_off() {
-        let r = rig(DONE);
-        let a = todo(&r, "a", 0, &[]);
-        apply(&r.store, &AutopilotPatch { project: Some(ProjectSwitch { id: r.project, enabled: Some(true) }), ..Default::default() }).unwrap();
-        r.ap.tick();
-        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing);
     }
 }

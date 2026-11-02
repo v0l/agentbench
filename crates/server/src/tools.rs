@@ -2,7 +2,8 @@ use crate::agent::Api;
 use crate::runner::Runner;
 use crate::store::Store;
 use agentbench_core::{
-    Entry, Id, IssuePatch, IssueState, NewComment, NewIssue, NewSession, Place, SessionId,
+    Automation, Entry, Id, IssuePatch, IssueState, NewComment, NewIssue, NewSession, Place,
+    Project, ProjectPatch, Risky, SessionId,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -37,12 +38,49 @@ pub struct StoreApi {
     once: Mutex<std::collections::HashSet<(SessionId, Id)>>,
     /// (parent, child): sessions a session started, which it may follow in any project.
     children: Mutex<std::collections::HashSet<(SessionId, SessionId)>>,
+    approved: Mutex<std::collections::HashSet<(SessionId, Id, String)>>,
 }
 
 /// Setting: ids of the projects any session may start sessions in.
 const ALLOWED_PROJECTS: &str = "start_session_projects";
 /// Setting: "1" when any session may start sessions in any project.
 const ALLOWED_ANY: &str = "start_session_any_project";
+
+pub const PROPOSAL: &str = "proposal:";
+
+const SET_AUTOMATION: &str = "set_automation";
+
+pub fn required(tool: &str) -> Option<Automation> {
+    Some(match tool {
+        "file_issue" | "update_issue" | "comment_on_issue" | "remember" | "rename_session" => {
+            Automation::Assist
+        }
+        "start_session" | "send_message" | "stop_session" | "close_session"
+        | "create_worktree" | "cleanup_worktree" => Automation::Delegate,
+        "merge_branch" => Automation::Ship,
+        _ => return None,
+    })
+}
+
+fn risky_key(action: Risky) -> String {
+    format!("risky_action:{}", action.as_str())
+}
+
+fn proposal(what: &str, tool: &str, project: Option<&Project>, needs: &str, level: Automation) -> String {
+    let name = project.map_or("the global default".to_string(), |p| p.name.clone());
+    let detail = json!({
+        "tool": tool,
+        "project": project.map(|p| p.id),
+        "project_name": name,
+        "needs": needs,
+        "level": level.label(),
+        "what": what,
+    });
+    format!(
+        "{PROPOSAL} {what} in {name} needs {needs}, and {name} is at {}. It was not done. Propose it to the user in your reply instead, or ask them to raise the level.\n{detail}",
+        level.label()
+    )
+}
 
 impl StoreApi {
     #[cfg(test)]
@@ -53,6 +91,7 @@ impl StoreApi {
             runner: Handle::default(),
             once: Default::default(),
             children: Default::default(),
+            approved: Default::default(),
         }
     }
 
@@ -67,6 +106,7 @@ impl StoreApi {
             runner,
             once: Default::default(),
             children: Default::default(),
+            approved: Default::default(),
         }
     }
 
@@ -190,6 +230,205 @@ impl StoreApi {
 }
 
 impl StoreApi {
+    fn target(&self, tool: &str, args: &Value, project: Id) -> Option<Project> {
+        let s = &self.store;
+        let pid = match tool {
+            "update_issue" | "comment_on_issue" => s.issue(id(args).ok()?).ok()?.project_id,
+            "send_message" | "stop_session" | "close_session" | "rename_session"
+            | "merge_branch" => s.session(session_id(args).ok()?).ok()?.project_id,
+            "start_session" => match args.get("project").filter(|v| !v.is_null()) {
+                Some(v) => self.find_project(v).ok()?.id,
+                None => project,
+            },
+            "cleanup_worktree" => {
+                let scoped = args.get("project").is_some_and(|v| !v.is_null());
+                let trees = s.worktrees(scoped.then_some(project)).ok()?;
+                let found = match (args.get("id").and_then(Value::as_i64), text(args, "branch")) {
+                    (Some(i), _) => trees.into_iter().find(|w| w.id == i),
+                    (None, Some(b)) => trees.into_iter().find(|w| w.label() == b.trim()),
+                    _ => None,
+                };
+                found.map_or(project, |w| w.project_id)
+            }
+            _ => project,
+        };
+        s.project(pid).ok()
+    }
+
+    fn take_approval(&self, me: SessionId, project: Id, key: &str) -> bool {
+        self.approved
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(me, project, key.to_string()))
+    }
+
+    fn gate(&self, tool: &str, args: &Value, project: Id, me: SessionId) -> Result<(), String> {
+        let Some(needs) = required(tool) else { return Ok(()) };
+        let Some(target) = self.target(tool, args, project).filter(|p| !p.supervisor) else {
+            return Ok(());
+        };
+        let level = crate::autopilot::level_of(&self.store, &target);
+        if level >= needs || self.take_approval(me, target.id, tool) {
+            return Ok(());
+        }
+        Err(proposal(&describe(tool, args), tool, Some(&target), needs.label(), level))
+    }
+
+    fn set_automation(&self, args: &Value, me: SessionId) -> Result<Value, String> {
+        let s = &self.store;
+        let level = match text(args, "level").map(|l| l.trim().to_lowercase()) {
+            None => None,
+            Some(l) if l == "default" || l == "inherit" || l.is_empty() => Some(None),
+            Some(l) => Some(Some(Automation::parse(&l).ok_or_else(|| {
+                format!("{l} is not a level: manual, assist, delegate, autowork, ship or full_auto")
+            })?)),
+        };
+        let risky = match args.get("risky") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) => Some(
+                a.iter()
+                    .map(|v| {
+                        let t = v.as_str().unwrap_or_default();
+                        Risky::parse(t).ok_or_else(|| format!("{t} is not a risky action: deploy, prod_data, external_messages, publish or spend_money"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Some(_) => return Err("`risky` is a list of action names".into()),
+        };
+        let deploy = text(args, "deploy");
+        let default = crate::autopilot::default_level(s);
+        let Some(v) = args.get("project").filter(|v| !v.is_null()) else {
+            if risky.is_some() || deploy.is_some() {
+                return Err("risky actions and the deploy command are set per project; name the `project`".into());
+            }
+            return match level {
+                None => Ok(json!({ "summary": crate::autopilot::summary(s) })),
+                Some(None) => Err("the global default needs a level".into()),
+                Some(Some(l)) => {
+                    if l > default && !self.take_approval(me, 0, SET_AUTOMATION) {
+                        return Err(proposal(
+                            &format!("raise the global default level to {}", l.label()),
+                            SET_AUTOMATION,
+                            None,
+                            "the user's confirmation",
+                            default,
+                        ));
+                    }
+                    let st = crate::autopilot::apply(
+                        s,
+                        &agentbench_core::AutopilotPatch { default_level: Some(l), ..Default::default() },
+                    )
+                    .map_err(|e| e.0)?;
+                    Ok(json!({ "default_level": st.default_level.label(), "summary": crate::autopilot::summary(s) }))
+                }
+            };
+        };
+        let p = self.find_project(v)?;
+        if p.builtin() {
+            return Err(format!("{} is built in and has no automation level", p.name));
+        }
+        if level.is_none() && risky.is_none() && deploy.is_none() {
+            return Ok(json!({ "summary": crate::autopilot::summary(s) }));
+        }
+        let before = p.level(default);
+        let after = level.map_or(before, |l| l.unwrap_or(default));
+        let adds = risky.as_ref().is_some_and(|r| r.iter().any(|x| !p.risky.contains(x)));
+        let new_deploy = deploy.as_ref().is_some_and(|d| Some(d.trim()) != p.deploy.as_deref() && !d.trim().is_empty());
+        if (after > before || adds || new_deploy) && !self.take_approval(me, p.id, SET_AUTOMATION) {
+            let mut what = Vec::new();
+            if after > before {
+                what.push(format!("raise {} to {}", p.name, after.label()));
+            }
+            if adds {
+                let on: Vec<&str> = risky.iter().flatten().filter(|x| !p.risky.contains(x)).map(|x| x.label()).collect();
+                what.push(format!("switch on {}", on.join(", ")));
+            }
+            if new_deploy {
+                what.push(format!("set the deploy command to `{}`", deploy.as_deref().unwrap_or_default().trim()));
+            }
+            return Err(proposal(&what.join(" and "), SET_AUTOMATION, Some(&p), "the user's confirmation", before));
+        }
+        let patch = ProjectPatch { automation: level, risky, deploy, ..Default::default() };
+        let p = crate::autopilot::set_project(s, p.id, &patch).map_err(|e| e.0)?;
+        Ok(json!({
+            "project": p.name,
+            "level": p.level(default).label(),
+            "own_level": p.automation.is_some(),
+            "risky": p.risky.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+            "deploy": p.deploy,
+        }))
+    }
+
+    fn risky_action(&self, args: &Value, me: SessionId) -> Result<Value, String> {
+        let v = args.get("project").filter(|v| !v.is_null()).ok_or("name the `project`")?;
+        let p = self.find_project(v)?;
+        let raw = text(args, "action").ok_or("missing `action`")?;
+        let action = Risky::parse(&raw).ok_or_else(|| {
+            format!("{raw} is not a risky action: deploy, prod_data, external_messages, publish or spend_money")
+        })?;
+        let default = crate::autopilot::default_level(&self.store);
+        let key = risky_key(action);
+        if !p.allows(default, action) && !self.take_approval(me, p.id, &key) {
+            let why = text(args, "reason").map(|r| format!(": {}", clip(r.trim(), 300))).unwrap_or_default();
+            let needs = format!("full auto with {} switched on", action.label());
+            return Err(proposal(&format!("{}{why}", action.label()), &key, Some(&p), &needs, p.level(default)));
+        }
+        let run = (action == Risky::Deploy).then(|| p.deploy.clone()).flatten();
+        Ok(json!({ "allowed": true, "action": action.as_str(), "project": p.name, "cwd": p.path, "run": run }))
+    }
+
+    fn approve(&self, args: &Value, me: SessionId) -> Result<Value, String> {
+        let tool = text(args, "tool").ok_or("missing `tool`")?;
+        let project = match args.get("project").filter(|v| !v.is_null()) {
+            Some(v) => Some(self.find_project(v)?),
+            None => None,
+        };
+        let pid = project.as_ref().map_or(0, |p| p.id);
+        match text(args, "scope").as_deref() {
+            Some("once") => {
+                self.approved.lock().unwrap_or_else(|e| e.into_inner()).insert((me, pid, tool.clone()));
+                Ok(json!({ "approved": tool, "once": true }))
+            }
+            Some("raise") => {
+                let needs = required(&tool).ok_or("only a tool with a level can raise the project to it")?;
+                let p = project.ok_or("name the `project` to raise")?;
+                let default = crate::autopilot::default_level(&self.store);
+                if p.level(default) < needs {
+                    let patch = ProjectPatch { automation: Some(Some(needs)), ..Default::default() };
+                    crate::autopilot::set_project(&self.store, p.id, &patch).map_err(|e| e.0)?;
+                }
+                Ok(json!({ "approved": tool, "level": needs.label() }))
+            }
+            other => Err(format!("{other:?} is not a scope")),
+        }
+    }
+}
+
+fn describe(tool: &str, args: &Value) -> String {
+    let verb = match tool {
+        "file_issue" => "file an issue",
+        "update_issue" => "update an issue",
+        "comment_on_issue" => "comment on an issue",
+        "remember" => "keep a note",
+        "rename_session" => "rename a session",
+        "start_session" => "start a session",
+        "send_message" => "send a message to a session",
+        "stop_session" => "stop a session",
+        "close_session" => "close a session",
+        "create_worktree" => "make a worktree",
+        "cleanup_worktree" => "remove a worktree",
+        "merge_branch" => "merge a branch and push it",
+        other => other,
+    };
+    let mut shown = args.clone();
+    if let Some(o) = shown.as_object_mut() {
+        o.remove("project");
+    }
+    let args = clip(&shown.to_string(), 300);
+    if args == "{}" { verb.to_string() } else { format!("{verb} {args}") }
+}
+
+impl StoreApi {
     fn cleanup_worktree(
         &self,
         args: &Value,
@@ -262,7 +501,7 @@ impl Api for StoreApi {
         let project = match (sup, args.get("project")) {
             (true, Some(v))
                 if !v.is_null()
-                    && !matches!(tool, "start_session" | "check_project" | "grant_project") =>
+                && !matches!(tool, "start_session" | "check_project" | "grant_project" | "set_automation" | "risky_action" | "approve_action") =>
             {
                 self.find_project(v)?.id
             }
@@ -276,6 +515,9 @@ impl Api for StoreApi {
             }
             Ok(i)
         };
+        if sup {
+            self.gate(tool, args, project, session)?;
+        }
         let out = match tool {
             "list_issues" => {
                 let filter = state(args)?;
@@ -712,25 +954,38 @@ impl Api for StoreApi {
                 }
                 let num = |k: &str| args.get(k).and_then(Value::as_u64).map(|n| n as u32);
                 let flag = |k: &str| args.get(k).and_then(Value::as_bool);
-                let project_switch = match args.get("project").filter(|v| !v.is_null()) {
-                    Some(v) => Some(agentbench_core::ProjectSwitch {
-                        id: self.find_project(v)?.id,
-                        enabled: flag("project_enabled"),
-                    }),
-                    None => None,
-                };
                 let patch = agentbench_core::AutopilotPatch {
                     enabled: flag("enabled"),
                     cap: num("cap"),
                     project_cap: num("project_cap"),
                     stuck_minutes: args.get("stuck_minutes").and_then(Value::as_u64),
                     max_nudges: num("max_nudges"),
-                    merge: flag("merge"),
-                    project: project_switch,
+                    default_level: None,
                 };
                 let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
                 json!(state)
             }
+            "merge_branch" | "set_automation" | "risky_action" | "approve_action" if !sup => {
+                return Err(format!("only the supervisor chat can use {tool}"));
+            }
+            "merge_branch" => {
+                let other = s.session(session_id(args)?).map_err(|e| e.0)?;
+                match crate::autopilot::ship(s, &other) {
+                    Ok(done) => json!({
+                        "branch": done.branch,
+                        "pushed": done.pushed.as_ref().map(|r| r.is_ok()),
+                        "deployed": done.deployed.as_ref().map(|r| r.is_ok()),
+                        "summary": done.describe(),
+                    }),
+                    Err(crate::autopilot::Unshipped::NoBranch) => {
+                        return Err("that session works in the main checkout; there is no branch to merge".into());
+                    }
+                    Err(crate::autopilot::Unshipped::Failed(e)) => return Err(format!("merge failed: {e}")),
+                }
+            }
+            "set_automation" => self.set_automation(args, session)?,
+            "risky_action" => self.risky_action(args, session)?,
+            "approve_action" => self.approve(args, session)?,
             "set_model" => {
                 let model = text(args, "model").filter(|m| !m.trim().is_empty());
                 s.set_model(session, model.as_deref().map(str::trim)).map_err(|e| e.0)?;
@@ -743,6 +998,9 @@ impl Api for StoreApi {
             tool,
             "file_issue"
                 | "autopilot"
+                | "merge_branch"
+                | "set_automation"
+                | "approve_action"
                 | "update_issue"
                 | "comment_on_issue"
                 | "create_worktree"
@@ -813,12 +1071,201 @@ fn clip(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentbench_core::{Automation, ProjectPatch, Risky};
+
+    struct Boss {
+        s: Store,
+        api: StoreApi,
+        boss: SessionId,
+        project: Id,
+        worker: SessionId,
+        issue: Id,
+        _dir: tempfile::TempDir,
+    }
+
+    fn boss() -> Boss {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::memory().unwrap();
+        let (p, main) = crate::store::testing::project(&s, "/a");
+        let worker = s.add_session(main.id, "native", "w", None, None).unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
+        let boss = s.add_session(s.main_worktree(sup.id).unwrap().id, "native", "boss", None, None).unwrap();
+        let issue = s.add_issue(&NewIssue { project_id: p.id, title: "x".into(), ..Default::default() }).unwrap();
+        crate::autopilot::migrate(&s).unwrap();
+        Boss { api: StoreApi::new(s.clone()), s, boss: boss.id, project: p.id, worker: worker.id, issue: issue.id, _dir: dir }
+    }
+
+    fn at(b: &Boss, level: Automation) {
+        b.s.update_project(b.project, &ProjectPatch { automation: Some(Some(level)), ..Default::default() }).unwrap();
+    }
+
+    fn calls(b: &Boss) -> Vec<(&'static str, Value, Automation)> {
+        let w = b.worker.to_string();
+        vec![
+            ("list_issues", json!({"project": b.project}), Automation::Manual),
+            ("get_issue", json!({"id": b.issue}), Automation::Manual),
+            ("read_session", json!({"id": w}), Automation::Manual),
+            ("file_issue", json!({"project": b.project, "title": "t"}), Automation::Assist),
+            ("update_issue", json!({"id": b.issue, "state": "todo"}), Automation::Assist),
+            ("comment_on_issue", json!({"id": b.issue, "body": "c"}), Automation::Assist),
+            ("remember", json!({"project": b.project, "topic": "t", "note": "n"}), Automation::Assist),
+            ("rename_session", json!({"id": w, "title": "t"}), Automation::Assist),
+            ("start_session", json!({"project": b.project, "prompt": "go"}), Automation::Delegate),
+            ("send_message", json!({"id": w, "text": "hi"}), Automation::Delegate),
+            ("stop_session", json!({"id": w}), Automation::Delegate),
+            ("close_session", json!({"id": w}), Automation::Delegate),
+            ("create_worktree", json!({"project": b.project, "branch": "x"}), Automation::Delegate),
+            ("cleanup_worktree", json!({"project": b.project, "branch": "x"}), Automation::Delegate),
+            ("merge_branch", json!({"id": w}), Automation::Ship),
+        ]
+    }
+
+    fn proposed(r: &Result<Value, String>) -> bool {
+        matches!(r, Err(e) if e.starts_with(PROPOSAL))
+    }
+
+    #[test]
+    fn each_supervisor_tool_below_its_level_becomes_a_proposal() {
+        let b = boss();
+        for level in Automation::ALL {
+            at(&b, level);
+            for (tool, args, needs) in calls(&b) {
+                let r = b.api.call(tool, &args, b.boss);
+                assert_eq!(proposed(&r), level < needs, "{tool} at {level:?}: {r:?}");
+                if level < needs {
+                    let e = r.unwrap_err();
+                    assert!(e.contains(needs.label()) && e.contains(level.label()), "{e}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_global_default_gates_a_project_with_no_level() {
+        let b = boss();
+        let file = json!({"project": b.project, "title": "t"});
+        assert!(b.api.call("file_issue", &file, b.boss).is_ok(), "delegate by default");
+        crate::autopilot::apply(&b.s, &agentbench_core::AutopilotPatch { default_level: Some(Automation::Manual), ..Default::default() }).unwrap();
+        assert!(proposed(&b.api.call("file_issue", &file, b.boss)));
+        at(&b, Automation::Assist);
+        assert!(b.api.call("file_issue", &file, b.boss).is_ok(), "the project's own level wins");
+    }
+
+    #[test]
+    fn an_approved_proposal_runs_once() {
+        let b = boss();
+        at(&b, Automation::Manual);
+        let c = json!({"id": b.issue, "body": "c"});
+        assert!(proposed(&b.api.call("comment_on_issue", &c, b.boss)));
+        assert!(b.api.call("approve_action", &json!({"tool": "comment_on_issue", "project": b.project, "scope": "once"}), b.worker).is_err(), "only the supervisor's own approvals");
+        b.api.call("approve_action", &json!({"tool": "comment_on_issue", "project": b.project, "scope": "once"}), b.boss).unwrap();
+        assert!(b.api.call("comment_on_issue", &c, b.boss).is_ok());
+        assert!(proposed(&b.api.call("comment_on_issue", &c, b.boss)), "used up");
+        b.api.call("approve_action", &json!({"tool": "comment_on_issue", "project": b.project, "scope": "raise"}), b.boss).unwrap();
+        assert_eq!(b.s.project(b.project).unwrap().automation, Some(Automation::Assist), "raised to what it needs");
+        assert!(b.api.call("comment_on_issue", &c, b.boss).is_ok());
+    }
+
+    #[test]
+    fn workers_are_not_gated_by_the_supervisor_level() {
+        let b = boss();
+        at(&b, Automation::Manual);
+        assert!(b.api.call("file_issue", &json!({"title": "t"}), b.worker).is_ok());
+        assert!(b.api.call("update_issue", &json!({"id": b.issue, "state": "review"}), b.worker).is_ok());
+    }
+
+    #[test]
+    fn risky_actions_are_gated_by_their_toggle_at_every_level() {
+        let b = boss();
+        for level in Automation::ALL {
+            for on in [vec![], vec![Risky::Deploy]] {
+                b.s.update_project(b.project, &ProjectPatch { automation: Some(Some(level)), risky: Some(on.clone()), deploy: Some("echo hi".into()), ..Default::default() }).unwrap();
+                for r in Risky::ALL {
+                    let out = b.api.call("risky_action", &json!({"project": b.project, "action": r.as_str(), "reason": "x"}), b.boss);
+                    let want = level == Automation::FullAuto && on.contains(&r);
+                    assert_eq!(out.is_ok(), want, "{r:?} at {level:?} with {on:?}: {out:?}");
+                    if !want {
+                        assert!(proposed(&out), "{out:?}");
+                    }
+                }
+            }
+        }
+        let ok = b.api.call("risky_action", &json!({"project": b.project, "action": "deploy"}), b.boss).unwrap();
+        assert_eq!(ok["run"], "echo hi");
+        assert!(b.api.call("risky_action", &json!({"project": b.project, "action": "deploy"}), b.worker).is_err(), "supervisor only");
+    }
+
+    #[test]
+    fn a_risky_approval_is_one_action_once_and_never_raises_anything() {
+        let b = boss();
+        at(&b, Automation::Ship);
+        let go = json!({"project": b.project, "action": "publish"});
+        assert!(proposed(&b.api.call("risky_action", &go, b.boss)));
+        assert!(b.api.call("approve_action", &json!({"tool": "risky_action:publish", "project": b.project, "scope": "raise"}), b.boss).is_err());
+        b.api.call("approve_action", &json!({"tool": "risky_action:publish", "project": b.project, "scope": "once"}), b.boss).unwrap();
+        assert!(proposed(&b.api.call("risky_action", &json!({"project": b.project, "action": "deploy"}), b.boss)), "another action");
+        assert!(b.api.call("risky_action", &go, b.boss).is_ok());
+        assert!(proposed(&b.api.call("risky_action", &go, b.boss)));
+        let p = b.s.project(b.project).unwrap();
+        assert_eq!((p.automation, p.risky.len()), (Some(Automation::Ship), 0));
+    }
+
+    #[test]
+    fn lowering_a_level_applies_and_raising_it_needs_the_user() {
+        let b = boss();
+        at(&b, Automation::Ship);
+        let out = b.api.call("set_automation", &json!({"project": b.project, "level": "assist"}), b.boss).unwrap();
+        assert_eq!(out["level"], "assist");
+        assert_eq!(b.s.project(b.project).unwrap().automation, Some(Automation::Assist));
+        let up = json!({"project": b.project, "level": "ship"});
+        assert!(proposed(&b.api.call("set_automation", &up, b.boss)));
+        assert_eq!(b.s.project(b.project).unwrap().automation, Some(Automation::Assist));
+        let toggle = json!({"project": b.project, "risky": ["deploy"]});
+        assert!(proposed(&b.api.call("set_automation", &toggle, b.boss)), "switching a risky action on is a raise");
+        b.api.call("approve_action", &json!({"tool": "set_automation", "project": b.project, "scope": "once"}), b.boss).unwrap();
+        b.api.call("set_automation", &up, b.boss).unwrap();
+        assert_eq!(b.s.project(b.project).unwrap().automation, Some(Automation::Ship));
+        let global = json!({"level": "full_auto"});
+        assert!(proposed(&b.api.call("set_automation", &global, b.boss)));
+        b.api.call("set_automation", &json!({"level": "manual"}), b.boss).unwrap();
+        assert_eq!(crate::autopilot::default_level(&b.s), Automation::Manual);
+        let read = b.api.call("set_automation", &json!({}), b.boss).unwrap();
+        assert!(read["summary"].as_str().unwrap().contains("ship"), "{read}");
+        assert!(b.api.call("set_automation", &json!({"level": "manual"}), b.worker).is_err());
+        assert!(b.api.call("set_automation", &json!({"level": "turbo"}), b.boss).is_err());
+    }
+
+    #[test]
+    fn merge_branch_ships_a_worker_branch_at_ship() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let s = Store::memory().unwrap();
+        let p = crate::projects::add(&s, &main, None, false).unwrap();
+        crate::autopilot::migrate(&s).unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
+        let boss = s.add_session(s.main_worktree(sup.id).unwrap().id, "native", "boss", None, None).unwrap();
+        let tree = crate::projects::add_worktree(&s, p.id, "feat", None).unwrap();
+        std::fs::write(std::path::Path::new(&tree.path).join("f.txt"), "x").unwrap();
+        for args in [vec!["add", "."], vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "w"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&tree.path).args(&args).status().unwrap().success());
+        }
+        let w = s.add_session(tree.id, "native", "w", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let go = json!({"id": w.id.to_string()});
+        assert!(proposed(&api.call("merge_branch", &go, boss.id)));
+        assert!(!main.join("f.txt").exists());
+        s.update_project(p.id, &ProjectPatch { automation: Some(Some(Automation::Ship)), ..Default::default() }).unwrap();
+        let out = api.call("merge_branch", &go, boss.id).unwrap();
+        assert!(main.join("f.txt").exists(), "{out}");
+        assert_eq!(out["branch"], "feat");
+    }
 
     #[test]
     fn only_the_supervisor_can_toggle_the_autopilot() {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::memory().unwrap();
-        let (p, main) = crate::store::testing::project(&s, "/a");
+        let (_, main) = crate::store::testing::project(&s, "/a");
         let worker = s.add_session(main.id, "native", "w", None, None).unwrap();
         let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
         let sup_tree = s.main_worktree(sup.id).unwrap();
@@ -830,8 +1277,6 @@ mod tests {
         assert_eq!((read["enabled"].clone(), read["cap"].clone()), (json!(false), json!(4)));
         let on = api.call("autopilot", &json!({"enabled": true, "cap": 3}), boss.id).unwrap();
         assert_eq!((on["enabled"].clone(), on["cap"].clone()), (json!(true), json!(3)));
-        api.call("autopilot", &json!({"project": p.id, "project_enabled": false}), boss.id).unwrap();
-        assert!(!crate::autopilot::enabled_for(&s, p.id));
     }
 
     #[test]

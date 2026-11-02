@@ -673,6 +673,7 @@ impl Runner {
             api_url: base.url,
             token: base.token,
             notes: self.store.notes(session.project_id).unwrap_or_default(),
+            automation: if supervisor { crate::autopilot::summary(&self.store) } else { String::new() },
         }
     }
 

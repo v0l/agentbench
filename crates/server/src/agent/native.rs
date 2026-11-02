@@ -272,7 +272,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 23] = [
+pub const AGENTBENCH_TOOLS: [&str; 26] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -296,6 +296,9 @@ pub const AGENTBENCH_TOOLS: [&str; 23] = [
     "recall",
     "notify_user",
     "autopilot",
+    "set_automation",
+    "merge_branch",
+    "risky_action",
 ];
 
 /// How long `wait_for_session` waits when not told, and the longest it may.
@@ -511,19 +514,48 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "autopilot",
-            "Supervisor chat only. Read the autopilot loop (its switch, caps, workers and recent activity feed) or change it. The loop starts workers on todo issues by priority up to the caps, sends back replies without a conclusion, blocks issues that need the user, nudges stuck sessions and, when `merge` is on, merges green branches. Call with no arguments to read it.",
+            "Supervisor chat only. Read the autopilot loop (its pause switch, caps, workers and recent activity feed) or change it. The loop starts workers on todo issues by priority up to the caps in projects at autowork or above, sends back replies without a conclusion, blocks issues that need the user, nudges stuck sessions and, in projects at ship or above, merges and pushes green branches. Levels are set with set_automation. Call with no arguments to read it.",
             object(
                 json!({
-                    "enabled": json!({ "type": "boolean", "description": "Turn the loop on or off (global)" }),
-                    "project": string("Only for `project_enabled`: the project by name or id"),
-                    "project_enabled": json!({ "type": "boolean", "description": "Turn the loop on or off for `project`, overriding the global switch" }),
+                    "enabled": json!({ "type": "boolean", "description": "Run or pause the loop everywhere" }),
                     "cap": id("Most workers at once, all projects"),
                     "project_cap": id("Most workers at once in one project"),
                     "stuck_minutes": id("Minutes without output before a nudge"),
                     "max_nudges": id("Nudges before a stuck session is stopped"),
-                    "merge": json!({ "type": "boolean", "description": "Merge green branches into the main checkout and close them" }),
                 }),
                 &[],
+            ),
+        ),
+        Spec::new(
+            "set_automation",
+            "Supervisor chat only. Read or change the automation levels: each project's level (manual, assist, delegate, autowork, ship, full_auto), the global default for projects with none, and a project's risky-action toggles and deploy command. \
+             Lowering applies at once. Raising a level, switching a risky action on or setting a deploy command asks the user to confirm. When the user states a standing decision in chat (\"always merge and push here\"), set it with this tool rather than a note. Call with nothing to read every level.",
+            object(
+                json!({
+                    "project": string("The project by name or id; without it `level` sets the global default"),
+                    "level": string("manual, assist, delegate, autowork, ship or full_auto; `default` makes the project follow the global default"),
+                    "risky": json!({ "type": "array", "items": { "type": "string" }, "description": "The full list of risky actions allowed at full auto: deploy, prod_data, external_messages, publish, spend_money" }),
+                    "deploy": string("The command that deploys the project, run from its main checkout"),
+                }),
+                &[],
+            ),
+        ),
+        Spec::new(
+            "merge_branch",
+            "Supervisor chat only, at ship or above. Merge a session's branch into its project's default branch in the main checkout, verify it, and push. Refuses a dirty checkout. Below ship it becomes a proposal the user can approve.",
+            object(json!({ "id": string("The session whose branch to merge, as list_sessions gives it") }), &["id"]),
+        ),
+        Spec::new(
+            "risky_action",
+            "Supervisor chat only. Ask before any risky action in a project: deploy, prod_data (SQL or admin API writes), external_messages (email, GitHub comments, support replies), publish (releases, store uploads), spend_money. \
+             It is allowed only at full auto with that action switched on for the project; otherwise the user is asked. For deploy, the project's deploy command is run and its output returned. Call it, and only go on when it says allowed.",
+            object(
+                json!({
+                    "project": string("The project by name or id"),
+                    "action": string("deploy, prod_data, external_messages, publish or spend_money"),
+                    "reason": string("What exactly you would do, for the user"),
+                }),
+                &["project", "action"],
             ),
         ),
         Spec::new(
@@ -2281,9 +2313,19 @@ impl Native {
             "find_skills" => egui_bench::agent::skills::find(args, io.stop()).await,
             "start_session" if args.get("project").is_some_and(|p| !p.is_null()) => {
                 confirm_project(args, cx, io).await?;
-                io.api()
-                    .call("start_session", args, cx.session)
+                gated("start_session", args, cx, io)
+                    .await
                     .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+            }
+            "risky_action" => {
+                let out = gated("risky_action", args, cx, io).await?;
+                match (out["run"].as_str(), out["cwd"].as_str()) {
+                    (Some(run), Some(cwd)) => {
+                        let ran = bash(Path::new(cwd), run, Some(BASH_MAX), cx, io).await?;
+                        Ok(format!("{}\n\n{ran}", serde_json::to_string_pretty(&out).unwrap_or_default()))
+                    }
+                    _ => Ok(serde_json::to_string_pretty(&out).unwrap_or_default()),
+                }
             }
             "request_secret" => {
                 let name = files::text(args, &["name"]).ok_or("missing `name`")?;
@@ -2336,9 +2378,8 @@ impl Native {
                     .collect();
                 Ok(format!("The user answered:\n{}", lines.join("\n")))
             }
-            n if AGENTBENCH_TOOLS.contains(&n) => io
-                .api()
-                .call(n, args, cx.session)
+            n if AGENTBENCH_TOOLS.contains(&n) => gated(n, args, cx, io)
+                .await
                 .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default()),
             other => {
                 let names: Vec<String> = specs().into_iter().map(|s| s.name).collect();
@@ -2354,6 +2395,47 @@ impl Native {
 const ALLOW_ONCE: &str = "Allow once";
 const ALLOW_ALWAYS_ANY: &str = "Always allow, any project";
 const DENY: &str = "Deny";
+const DO_ONCE: &str = "Do it this once";
+const NOT_NOW: &str = "No";
+
+async fn gated(tool: &str, args: &Value, cx: &Context, io: &dyn Io) -> Result<Value, String> {
+    let api = io.api();
+    let e = match api.call(tool, args, cx.session) {
+        Err(e) if e.starts_with(crate::tools::PROPOSAL) => e,
+        other => return other,
+    };
+    let detail: Value = e
+        .lines()
+        .last()
+        .and_then(|l| serde_json::from_str(l).ok())
+        .unwrap_or(Value::Null);
+    let key = detail["tool"].as_str().unwrap_or(tool).to_string();
+    let project = detail["project"].clone();
+    let name = detail["project_name"].as_str().unwrap_or("the project").to_string();
+    let needs = detail["needs"].as_str().unwrap_or_default().to_string();
+    let raise = crate::tools::required(&key).map(|l| format!("Raise {name} to {}", l.label()));
+    let mut options = vec![DO_ONCE.to_string()];
+    options.extend(raise.clone());
+    options.push(NOT_NOW.into());
+    let question = Question {
+        text: format!(
+            "The supervisor proposes: {} in {name}.\n\nThat needs {needs}, and {name} is at {}.",
+            detail["what"].as_str().unwrap_or(tool),
+            detail["level"].as_str().unwrap_or_default(),
+        ),
+        options,
+        multiple: false,
+        secret: false,
+    };
+    let scope = match io.ask(question).await {
+        Ok(a) if a.trim() == DO_ONCE => "once",
+        Ok(a) if raise.as_deref() == Some(a.trim()) => "raise",
+        Ok(_) => return Err(format!("{e}\nThe user said no to it; do not try it again unless they ask.")),
+        Err(_) => return Err(e),
+    };
+    api.call("approve_action", &json!({ "tool": key, "project": project, "scope": scope }), cx.session)?;
+    api.call(tool, args, cx.session)
+}
 
 /// Before a session is started in another project, ask the user, unless they have said always.
 /// Only the user's answer records a permission; the model cannot.
@@ -3380,6 +3462,48 @@ mod tests {
             wait_for_session(&json!({"id": "x"}), Duration::ZERO, &context(), &io).await.unwrap();
         assert!(out.contains("still busy"), "{out}");
         assert!(wait_for_session(&json!({}), Duration::ZERO, &context(), &io).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_proposal_asks_the_user_and_runs_only_what_they_allowed() {
+        use agentbench_core::{Automation, ProjectPatch};
+        let dir = tempfile::tempdir().unwrap();
+        let s = crate::store::Store::memory().unwrap();
+        let (p, _) = crate::store::testing::project(&s, "/a");
+        let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
+        let boss = s.add_session(s.main_worktree(sup.id).unwrap().id, "native", "boss", None, None).unwrap();
+        s.update_project(p.id, &ProjectPatch { automation: Some(Some(Automation::Manual)), ..Default::default() }).unwrap();
+        let mut c = context();
+        c.session = boss.id;
+        let api = Arc::new(crate::tools::StoreApi::new(s.clone()));
+        let file = json!({"project": p.id, "title": "found it"});
+        let ask = |answer: &str| {
+            let io = TestIo::new(api.clone());
+            io.answers.lock().unwrap().push(answer.to_string());
+            io
+        };
+        let count = || s.issues().unwrap().len();
+
+        let e = gated("file_issue", &file, &c, &ask("No")).await.unwrap_err();
+        assert!(e.contains("said no") && e.contains("needs assist"), "{e}");
+        assert!(gated("file_issue", &file, &c, &TestIo::new(api.clone())).await.is_err(), "no answer");
+        assert_eq!(count(), 0);
+
+        gated("file_issue", &file, &c, &ask("Do it this once")).await.unwrap();
+        assert_eq!(count(), 1);
+        assert_eq!(s.project(p.id).unwrap().automation, Some(Automation::Manual));
+        assert!(gated("file_issue", &file, &c, &ask("No")).await.is_err(), "once is once");
+
+        let name = s.project(p.id).unwrap().name;
+        gated("file_issue", &file, &c, &ask(&format!("Raise {name} to assist"))).await.unwrap();
+        assert_eq!(s.project(p.id).unwrap().automation, Some(Automation::Assist));
+        gated("file_issue", &file, &c, &TestIo::new(api.clone())).await.unwrap();
+        assert_eq!(count(), 3);
+
+        let up = json!({"project": p.id, "level": "ship"});
+        gated("set_automation", &up, &c, &ask("Do it this once")).await.unwrap();
+        assert_eq!(s.project(p.id).unwrap().automation, Some(Automation::Ship), "a raise confirmed in chat persists");
+        assert!(!AGENTBENCH_TOOLS.contains(&"approve_action"), "the model cannot approve its own proposals");
     }
 
     #[tokio::test]

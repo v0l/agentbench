@@ -97,12 +97,145 @@ pub struct Project {
     pub pinned: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub automation: Option<Automation>,
+    #[serde(default)]
+    pub risky: Vec<Risky>,
+    #[serde(default)]
+    pub deploy: Option<String>,
 }
 
 impl Project {
     pub fn builtin(&self) -> bool {
         self.home || self.supervisor
     }
+
+    pub fn level(&self, default: Automation) -> Automation {
+        self.automation.unwrap_or(default)
+    }
+
+    pub fn allows(&self, default: Automation, action: Risky) -> bool {
+        self.level(default) == Automation::FullAuto && self.risky.contains(&action)
+    }
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Automation {
+    Manual,
+    Assist,
+    #[default]
+    Delegate,
+    Autowork,
+    Ship,
+    FullAuto,
+}
+
+impl Automation {
+    pub const ALL: [Automation; 6] = [
+        Automation::Manual,
+        Automation::Assist,
+        Automation::Delegate,
+        Automation::Autowork,
+        Automation::Ship,
+        Automation::FullAuto,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Automation::Manual => "manual",
+            Automation::Assist => "assist",
+            Automation::Delegate => "delegate",
+            Automation::Autowork => "autowork",
+            Automation::Ship => "ship",
+            Automation::FullAuto => "full_auto",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Automation::FullAuto => "full auto",
+            other => other.as_str(),
+        }
+    }
+
+    pub fn about(self) -> &'static str {
+        match self {
+            Automation::Manual => "only tracks and reports; starts, sends, merges and closes nothing unasked",
+            Automation::Assist => "files issues, comments, keeps states true and proposes next work",
+            Automation::Delegate => "starts workers on named issues, sends sessions back, closes finished ones",
+            Automation::Autowork => "the autopilot picks todo issues by priority and keeps them moving",
+            Automation::Ship => "autowork, and merges concluded branches into the default branch and pushes",
+            Automation::FullAuto => "ship, and the risky actions switched on for the project",
+        }
+    }
+
+    pub fn rank(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_rank(rank: u8) -> Automation {
+        Automation::ALL[usize::from(rank).min(Automation::ALL.len() - 1)]
+    }
+
+    pub fn parse(s: &str) -> Option<Automation> {
+        let t = s.trim().to_lowercase().replace([' ', '-'], "_");
+        if let Ok(n) = t.parse::<u8>() {
+            return (usize::from(n) < Automation::ALL.len()).then(|| Automation::from_rank(n));
+        }
+        let t = if t == "fullauto" || t == "full" { "full_auto".to_string() } else { t };
+        Automation::ALL.into_iter().find(|a| a.as_str() == t)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Risky {
+    Deploy,
+    ProdData,
+    ExternalMessages,
+    Publish,
+    SpendMoney,
+}
+
+impl Risky {
+    pub const ALL: [Risky; 5] =
+        [Risky::Deploy, Risky::ProdData, Risky::ExternalMessages, Risky::Publish, Risky::SpendMoney];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Risky::Deploy => "deploy",
+            Risky::ProdData => "prod_data",
+            Risky::ExternalMessages => "external_messages",
+            Risky::Publish => "publish",
+            Risky::SpendMoney => "spend_money",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Risky::Deploy => "deploy to production",
+            Risky::ProdData => "prod data changes",
+            Risky::ExternalMessages => "external messages",
+            Risky::Publish => "publish releases",
+            Risky::SpendMoney => "spend money",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Risky> {
+        let t = s.trim().to_lowercase().replace([' ', '-'], "_");
+        Risky::ALL.into_iter().find(|r| r.as_str() == t)
+    }
+}
+
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -844,6 +977,12 @@ pub struct ProjectPatch {
     pub pinned: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub automation: Option<Option<Automation>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risky: Option<Vec<Risky>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1008,12 +1147,6 @@ pub struct Activity {
     pub at: i64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ProjectSwitch {
-    pub id: Id,
-    pub enabled: Option<bool>,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AutopilotState {
     pub enabled: bool,
@@ -1021,9 +1154,8 @@ pub struct AutopilotState {
     pub project_cap: u32,
     pub stuck_minutes: u64,
     pub max_nudges: u32,
-    pub merge: bool,
     #[serde(default)]
-    pub projects: Vec<ProjectSwitch>,
+    pub default_level: Automation,
     pub idle: bool,
     pub workers: u32,
     #[serde(default)]
@@ -1043,9 +1175,7 @@ pub struct AutopilotPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_nudges: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<ProjectSwitch>,
+    pub default_level: Option<Automation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

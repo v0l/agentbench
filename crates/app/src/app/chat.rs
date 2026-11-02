@@ -349,6 +349,26 @@ impl App {
                     if let Some(w) = tree.filter(|_| !home) {
                         chip(ui, &w.label(), VALUE, false).on_hover_text(&about);
                     }
+                    let focus = if supervisor { self.project } else { Some(s.project_id) };
+                    if let Some(pid) = focus.filter(|p| !self.is_home(*p))
+                        && let Some((level, inherited)) = self.project_level(pid)
+                    {
+                        let text = if supervisor {
+                            format!("{} {}", self.project_name(pid), level.label())
+                        } else {
+                            level.label().to_string()
+                        };
+                        let tint = if inherited { READOUT_DIM } else { READOUT };
+                        let c = chip(ui, &text, tint, !inherited).on_hover_text(format!(
+                            "automation {}{}: {}",
+                            level.label(),
+                            if inherited { ", the default" } else { "" },
+                            level.about()
+                        ));
+                        c.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("automation level {}", level.label()))
+                        });
+                    }
                 });
             });
         });
@@ -367,6 +387,16 @@ impl App {
             format!("running, {} of {} workers", a.workers, a.cap)
         };
         let mut flip = false;
+        let mut new_default = None;
+        let projects: Vec<Project> = self
+            .overview
+            .iter()
+            .flat_map(|o| &o.projects)
+            .filter(|p| !p.builtin())
+            .cloned()
+            .collect();
+        let levels_open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("levels_open"))).unwrap_or(false);
+        let mut toggle_levels = false;
         ui.add_space(4.0);
         rail_block(ui, ETCH, egui::Color32::TRANSPARENT, |ui| {
             ui.horizontal(|ui| {
@@ -386,12 +416,38 @@ impl App {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "autopilot toggle")
                     });
                     flip = key.clicked();
+                    let more = ui.add(Key::new(if levels_open { "hide levels" } else { "levels" }).outline(VALUE));
+                    more.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "automation levels")
+                    });
+                    toggle_levels = more.clicked();
                 });
             });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().legend("default").size(10.0).tint(LEGEND).elided(ui); });
+                new_default = level_slider(ui, "default automation", a.default_level, false, 150.0);
+                Line::new().set(a.default_level.label()).size(11.0).show(ui);
+            });
+            if levels_open {
+                for p in &projects {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().value(&p.name).size(11.0).elided(ui); });
+                        self.level_row(ui, p, 150.0);
+                    });
+                }
+            }
             for line in a.activity.iter().take(4) {
                 Line::new().note(&line.text).size(10.0).elided(ui);
             }
         });
+        if toggle_levels {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("levels_open"), !levels_open));
+        }
+        if let Some(l) = new_default {
+            self.set_default_level(l);
+        }
         if flip {
             self.toggle_autopilot();
         }
