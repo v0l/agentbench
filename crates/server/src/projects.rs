@@ -52,7 +52,7 @@ pub fn icon(root: &Path) -> Option<(&'static str, Vec<u8>)> {
         .follow_links(false)
         .filter_entry(|e| !ICON_SKIP.iter().any(|s| e.file_name() == *s))
         .build();
-    let mut best: Option<(usize, bool, usize, PathBuf, &'static str)> = None;
+    let mut best: Option<(bool, usize, bool, usize, PathBuf, &'static str)> = None;
     for entry in walk.flatten() {
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
@@ -75,12 +75,19 @@ pub fn icon(root: &Path) -> Option<(&'static str, Vec<u8>)> {
         }
         let depth = entry.depth();
         let vector = mime == "image/svg+xml";
-        let key = (depth, vector, rank);
-        if best.as_ref().is_none_or(|(d, v, r, p, _)| (key, path) < ((*d, *v, *r), p.as_path())) {
-            best = Some((depth, vector, rank, path.to_path_buf(), mime));
+        let in_named_dir = !home.is_empty()
+            && path.strip_prefix(root).ok().and_then(Path::parent).is_some_and(|dirs| {
+                dirs.components().any(|c| c.as_os_str().to_string_lossy().to_lowercase() == home)
+            });
+        let key = (!in_named_dir, depth, vector, rank);
+        if best
+            .as_ref()
+            .is_none_or(|(n, d, v, r, p, _)| (key, path) < ((*n, *d, *v, *r), p.as_path()))
+        {
+            best = Some((key.0, depth, vector, rank, path.to_path_buf(), mime));
         }
     }
-    let (_, _, _, path, mime) = best?;
+    let (_, _, _, _, path, mime) = best?;
     let bytes = std::fs::read(path).ok()?;
     if mime == "image/svg+xml" {
         return raster(&bytes).map(|png| ("image/png", png));
@@ -252,6 +259,20 @@ mod tests {
         w("favicon.webp", b"webp");
         assert_eq!(super::icon(dir.path()).unwrap().1, b"webp".to_vec(), "favicon beats icon");
         w("notes.png", b"x");
+    }
+
+    #[test]
+    fn a_folder_named_after_the_project_beats_its_siblings() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("snort");
+        for app in ["iris", "nostr", "snort"] {
+            let dir = root.join("packages/app/public").join(app);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("favicon.png"), app.as_bytes()).unwrap();
+        }
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/logo.png"), b"shallow").unwrap();
+        assert_eq!(super::icon(&root).unwrap().1, b"snort".to_vec());
     }
 
     #[test]

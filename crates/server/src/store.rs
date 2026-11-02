@@ -349,7 +349,9 @@ impl Store {
                 .query_map([], |r| r.get::<_, String>(1))?
                 .any(|name| name.map(|n| n == *column).unwrap_or(false));
             if !present {
-                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition};"))?;
+                conn.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+                ))?;
             }
         }
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -1529,8 +1531,10 @@ mod tests {
         }
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch("ALTER TABLE projects DROP COLUMN pinned; ALTER TABLE projects DROP COLUMN tags;")
-                .unwrap();
+            conn.execute_batch(
+                "ALTER TABLE projects DROP COLUMN pinned; ALTER TABLE projects DROP COLUMN tags;",
+            )
+            .unwrap();
         }
         let s = Store::open(&path).unwrap();
         let p = s.projects().unwrap().into_iter().find(|p| p.name == "demo").unwrap();
