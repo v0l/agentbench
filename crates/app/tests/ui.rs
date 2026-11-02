@@ -2314,3 +2314,17 @@ fn a_project_is_renamed_from_the_settings_projects_page() {
     h.get_by_label("save name").click();
     until(&mut h, "the new name", |_| rig.store.project(project.id).unwrap().name == "Billing");
 }
+
+#[test]
+fn rename_project_from_a_chats_menu_opens_the_name_field() {
+    let rig = rig();
+    let sid =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap().id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    h.state_mut().rename_project_from_chat(sid);
+    h.run_steps(3);
+    shot(&mut h, "rename-from-chat");
+    h.get_by_label("save name");
+}

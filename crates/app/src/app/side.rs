@@ -161,6 +161,12 @@ impl App {
                 }
                 ui.close();
             }
+            if !self.is_home(s.project_id)
+                && ui.add(Key::new("rename project").outline(VALUE).min_width(150.0)).clicked()
+            {
+                self.rename_project_from_chat(s.id);
+                ui.close();
+            }
             if ui.add(Key::new("close chat").outline(FAULT).min_width(150.0)).clicked() {
                 self.confirm = Some(Confirm::Session(s.id, s.title.clone()));
                 ui.close();

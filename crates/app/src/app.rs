@@ -1330,6 +1330,18 @@ impl App {
         all.into_iter().map(|s| s.id).collect()
     }
 
+    pub fn rename_project_from_chat(&mut self, sid: SessionId) {
+        let Some(project) = self.session_by_id(sid).map(|s| s.project_id) else {
+            return;
+        };
+        let name = self.project_name(project);
+        self.open_settings();
+        if let Some(st) = &mut self.settings {
+            st.page = Page::Projects;
+            st.renaming = Some((project, name));
+        }
+    }
+
     pub fn helping(&self) -> bool {
         self.help
     }

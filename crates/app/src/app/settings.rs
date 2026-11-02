@@ -908,23 +908,29 @@ fn projects_section(
             if let Some((id, text)) = renaming.as_mut().filter(|(id, _)| *id == p.id) {
                 let id = *id;
                 let mut done = false;
-                ui.horizontal(|ui| {
-                    let r = field(ui, text, "project name");
-                    r.request_focus();
-                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let key = ui.add(Key::new("save name").solid(READOUT));
-                    key.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "save name")
-                    });
-                    let save = key.clicked() || enter;
-                    if save && !text.trim().is_empty() {
-                        action = Some(ProjectAction::Rename(id, text.trim().to_string()));
-                        done = true;
-                    }
-                    if ui.add(Key::new("cancel").outline(VALUE)).clicked() {
-                        done = true;
-                    }
-                });
+                let mut save_clicked = false;
+                let r = ui
+                    .horizontal(|ui| {
+                        let w = (ui.available_width() - 220.0).max(120.0);
+                        let r = ui
+                            .allocate_ui(Vec2::new(w, KEY_H), |ui| field(ui, text, "project name"));
+                        let key = ui.add(Key::new("save name").solid(READOUT));
+                        key.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "save name")
+                        });
+                        save_clicked = key.clicked();
+                        if ui.add(Key::new("cancel").outline(VALUE)).clicked() {
+                            done = true;
+                        }
+                        r.inner
+                    })
+                    .inner;
+                r.request_focus();
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (save_clicked || enter) && !text.trim().is_empty() {
+                    action = Some(ProjectAction::Rename(id, text.trim().to_string()));
+                    done = true;
+                }
                 if done {
                     *renaming = None;
                 }
