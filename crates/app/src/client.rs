@@ -1,6 +1,6 @@
 use agentbench_core::{
     Comment, Id, IssuePatch, Message, NewComment, NewIssue, NewProject, NewSession, NewWorktree,
-    Overview, SendMessage, SessionId,
+    Overview, ProjectPatch, SendMessage, SessionId,
 };
 use reqwest::Method;
 use serde::Serialize;
@@ -250,6 +250,10 @@ impl Client {
 
     pub fn remove_project(&mut self, id: Id) {
         self.act::<()>(Method::DELETE, &format!("/api/projects/{id}"), None, "project removed");
+    }
+
+    pub fn update_project(&mut self, id: Id, patch: &ProjectPatch) {
+        self.act(Method::PATCH, &format!("/api/projects/{id}"), Some(patch), "");
     }
 
     pub fn sync_project(&mut self, id: Id) {

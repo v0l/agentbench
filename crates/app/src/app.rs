@@ -5,8 +5,8 @@ use crate::picker::ModelPicker;
 use crate::scan::Scan;
 use agentbench_core::{
     Comment, Entry, Id, Issue, IssuePatch, IssueState, Lsp, LspHealth, Message, NewComment,
-    NewIssue, NewProject, NewSession, NewWorktree, Overview, Place, Project, Question, Session,
-    SessionId, SessionStatus, Worktree,
+    NewIssue, NewProject, NewSession, NewWorktree, Overview, Place, Project, ProjectPatch,
+    Question, Session, SessionId, SessionStatus, Worktree,
 };
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
@@ -246,8 +246,8 @@ pub fn project_matches(project: &Project, query: &str) -> bool {
         project.name,
         project.path,
         project.remote.as_deref().unwrap_or_default()
-    )
-    .to_lowercase();
+    ) + " "
+        + &project.tags.join(" ").to_lowercase();
     query.to_lowercase().split_whitespace().all(|word| hay.contains(word))
 }
 
@@ -265,14 +265,15 @@ fn sort_projects(
         issue.max(session).unwrap_or(p.created_at)
     };
     let name = |a: &Project, b: &Project| a.name.to_lowercase().cmp(&b.name.to_lowercase());
+    let head = |a: &Project, b: &Project| b.home.cmp(&a.home).then(b.pinned.cmp(&a.pinned));
     match by {
-        ProjectSort::Name => projects.sort_by(|a, b| b.home.cmp(&a.home).then_with(|| name(a, b))),
-        ProjectSort::Open => {
-            projects.sort_by(|a, b| open(b).cmp(&open(a)).then_with(|| name(a, b)))
-        }
-        ProjectSort::Recent => {
-            projects.sort_by(|a, b| touched(b).cmp(&touched(a)).then_with(|| name(a, b)))
-        }
+        ProjectSort::Name => projects.sort_by(|a, b| head(a, b).then_with(|| name(a, b))),
+        ProjectSort::Open => projects.sort_by(|a, b| {
+            head(a, b).then_with(|| open(b).cmp(&open(a))).then_with(|| name(a, b))
+        }),
+        ProjectSort::Recent => projects.sort_by(|a, b| {
+            head(a, b).then_with(|| touched(b).cmp(&touched(a))).then_with(|| name(a, b))
+        }),
     }
 }
 
@@ -591,6 +592,8 @@ pub struct App {
     scope: Scope,
     project_query: String,
     project_sort: ProjectSort,
+    tag_filter: String,
+    edit_tags: Option<(Id, String)>,
     only_busy: bool,
     project: Option<Id>,
     session: Option<SessionId>,
@@ -717,6 +720,8 @@ impl App {
             scope: Scope::Project,
             project_query: String::new(),
             project_sort: ProjectSort::Name,
+            tag_filter: String::new(),
+            edit_tags: None,
             only_busy: false,
             project: None,
             session: None,
@@ -1798,8 +1803,20 @@ impl App {
         let everything = self.scope == Scope::Everything;
         let names: HashMap<Id, String> =
             o.projects.iter().map(|p| (p.id, p.name.clone())).collect();
-        let all: Vec<Issue> =
-            o.issues.iter().filter(|i| everything || i.project_id == pid).cloned().collect();
+        let tagged: HashSet<Id> = o
+            .projects
+            .iter()
+            .filter(|p| self.tag_filter.is_empty() || p.tags.contains(&self.tag_filter))
+            .map(|p| p.id)
+            .collect();
+        let all: Vec<Issue> = o
+            .issues
+            .iter()
+            .filter(
+                |i| if everything { tagged.contains(&i.project_id) } else { i.project_id == pid },
+            )
+            .cloned()
+            .collect();
         segments(
             ui,
             &mut self.scope,
@@ -2360,6 +2377,8 @@ mod tests {
             remote: remote.map(Into::into),
             created_at: id,
             home: false,
+            pinned: false,
+            tags: vec![],
         }
     }
 
@@ -2394,6 +2413,20 @@ mod tests {
         assert_eq!(ids(&v), [3, 2, 1]);
         sort_projects(&mut v, &issues, &[], ProjectSort::Recent);
         assert_eq!(ids(&v), [2, 3, 1]);
+    }
+
+    #[test]
+    fn pinned_projects_lead_every_sort_and_tags_are_searched() {
+        let (a, mut b) = (project(1, "alpha", None), project(2, "bravo", None));
+        b.pinned = true;
+        b.tags = vec!["infra".into()];
+        let mut v = vec![&a, &b];
+        for by in ProjectSort::ALL {
+            sort_projects(&mut v, &[], &[], by);
+            assert_eq!(v[0].id, 2);
+        }
+        assert!(project_matches(&b, "infra"));
+        assert!(!project_matches(&a, "infra"));
     }
 
     #[test]

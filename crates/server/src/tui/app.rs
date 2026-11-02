@@ -718,6 +718,8 @@ pub mod tests {
             remote: None,
             created_at: 0,
             home: true,
+            pinned: false,
+            tags: vec![],
         }
     }
 

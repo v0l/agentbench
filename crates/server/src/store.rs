@@ -1,6 +1,6 @@
 use agentbench_core::{
     Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue, Project,
-    Session, SessionId, SessionStatus, Usage, Worktree,
+    ProjectPatch, Session, SessionId, SessionStatus, Usage, Worktree,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::Path;
@@ -162,6 +162,8 @@ CREATE TABLE notes (
 "#,
     "ALTER TABLE projects ADD COLUMN home INTEGER NOT NULL DEFAULT 0;",
     "ALTER TABLE sessions ADD COLUMN effort TEXT;",
+    "ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE projects ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
 ];
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
@@ -255,6 +257,17 @@ fn worktree_row(row: &Row) -> rusqlite::Result<Worktree> {
     })
 }
 
+fn clean_tags(tags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tag in tags {
+        let tag = tag.trim().to_lowercase();
+        if !tag.is_empty() && !out.contains(&tag) {
+            out.push(tag);
+        }
+    }
+    out
+}
+
 fn project_row(row: &Row) -> rusqlite::Result<Project> {
     Ok(Project {
         id: row.get("id")?,
@@ -264,6 +277,8 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
         remote: row.get("remote")?,
         created_at: row.get("created_at")?,
         home: row.get("home")?,
+        pinned: row.get("pinned")?,
+        tags: serde_json::from_str(&row.get::<_, String>("tags")?).unwrap_or_default(),
     })
 }
 
@@ -468,6 +483,29 @@ impl Store {
             Store::changed(&db, "project", id)?;
             id
         };
+        self.project(id)
+    }
+
+    pub fn update_project(&self, id: Id, patch: &ProjectPatch) -> Result<Project> {
+        let mut project = self.project(id)?;
+        if let Some(pinned) = patch.pinned {
+            project.pinned = pinned;
+        }
+        if let Some(tags) = &patch.tags {
+            project.tags = clean_tags(tags);
+        }
+        {
+            let db = self.db();
+            db.execute(
+                "UPDATE projects SET pinned = ?1, tags = ?2 WHERE id = ?3",
+                params![
+                    project.pinned,
+                    serde_json::to_string(&project.tags).unwrap_or_else(|_| "[]".into()),
+                    id
+                ],
+            )?;
+            Store::changed(&db, "project", id)?;
+        }
         self.project(id)
     }
 
@@ -1384,6 +1422,23 @@ mod tests {
         let b = s.add_session(main.id, "x", "b", None, None).unwrap();
         assert_ne!(a.id, b.id);
         assert!(s.messages(b.id, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_project_keeps_its_pin_and_cleaned_tags() {
+        let s = Store::memory().unwrap();
+        let (p, _) = testing::project(&s, "/r");
+        assert!(!p.pinned && p.tags.is_empty());
+        let patch = ProjectPatch {
+            pinned: Some(true),
+            tags: Some(vec![" Infra ".into(), "infra".into(), "".into(), "games".into()]),
+        };
+        let p = s.update_project(p.id, &patch).unwrap();
+        assert!(p.pinned);
+        assert_eq!(p.tags, ["infra", "games"]);
+        let p = s.update_project(p.id, &ProjectPatch { pinned: Some(false), tags: None }).unwrap();
+        assert!(!p.pinned);
+        assert_eq!(s.project(p.id).unwrap().tags, ["infra", "games"]);
     }
 
     #[test]

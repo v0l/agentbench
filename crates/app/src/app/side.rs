@@ -22,7 +22,11 @@ impl App {
         let mut projects: Vec<&Project> = o
             .projects
             .iter()
-            .filter(|p| self.project == Some(p.id) || project_matches(p, &self.project_query))
+            .filter(|p| {
+                self.project == Some(p.id)
+                    || (project_matches(p, &self.project_query)
+                        && (self.tag_filter.is_empty() || p.tags.contains(&self.tag_filter)))
+            })
             .collect();
         sort_projects(&mut projects, &o.issues, &o.sessions, self.project_sort);
         let projects: Vec<Project> = projects.into_iter().cloned().collect();
@@ -36,6 +40,19 @@ impl App {
                     ProjectSort::ALL.map(|s| (s, s.label().to_string())),
                 );
             });
+            let mut tags: Vec<String> = o.projects.iter().flat_map(|p| p.tags.clone()).collect();
+            tags.sort();
+            tags.dedup();
+            if !tags.is_empty() {
+                if !tags.contains(&self.tag_filter) {
+                    self.tag_filter.clear();
+                }
+                ui.allocate_ui(Vec2::new(ui.available_width(), KEY_H), |ui| {
+                    let options = std::iter::once((String::new(), "all groups".to_string()))
+                        .chain(tags.iter().map(|t| (t.clone(), t.clone())));
+                    choice(ui, "project-tag", &mut self.tag_filter, options);
+                });
+            }
             if projects.len() != total {
                 hint(ui, &format!("{} of {total} projects", projects.len()));
             }
@@ -55,8 +72,12 @@ impl App {
             let rail = if selected { Some(READOUT) } else { None };
             let trees: Vec<&Worktree> = worktrees.iter().filter(|w| w.project_id == p.id).collect();
             let home = p.home;
-            let open = self.overview.as_ref().map_or(0, |o| {
-                o.issues.iter().filter(|i| i.project_id == p.id && i.state.is_open()).count()
+            let (open, busy) = self.overview.as_ref().map_or((0, 0), |o| {
+                let open =
+                    o.issues.iter().filter(|i| i.project_id == p.id && i.state.is_open()).count();
+                let busy =
+                    o.sessions.iter().filter(|s| s.project_id == p.id && s.status.busy()).count();
+                (open, busy)
             });
             let collapsed = self.collapsed.contains(&p.id);
             let mut picked_head = false;
@@ -70,14 +91,24 @@ impl App {
                     picked_head = r.clicked();
                     menu = Some(r);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let count =
-                            if home { "no repo".to_string() } else { format!("{open} open") };
+                        let count = if home {
+                            "no repo".to_string()
+                        } else if busy > 0 {
+                            format!("{open} open, {busy} working")
+                        } else {
+                            format!("{open} open")
+                        };
                         Line::new().note(count).size(10.5).show(ui);
                     });
                 },
                 |ui| {
                     let shown =
                         if home { "no repo, starts in ~".to_string() } else { short_path(&p.path) };
+                    let shown = if p.tags.is_empty() {
+                        shown
+                    } else {
+                        format!("{shown}  [{}]", p.tags.join(", "))
+                    };
                     let r = Line::new().note(shown).size(10.5).elided(ui);
                     if r.interact(Sense::click()).clicked() {
                         pick = true;
@@ -116,6 +147,20 @@ impl App {
                 }
                 if home {
                     return;
+                }
+                let pin = if p.pinned { "unpin" } else { "pin to top" };
+                if ui.add(Key::new(pin).outline(VALUE).min_width(160.0)).clicked() {
+                    if let Some(c) = &mut self.client {
+                        c.update_project(
+                            p.id,
+                            &ProjectPatch { pinned: Some(!p.pinned), ..Default::default() },
+                        );
+                    }
+                    ui.close();
+                }
+                if ui.add(Key::new("edit groups").outline(VALUE).min_width(160.0)).clicked() {
+                    self.edit_tags = Some((p.id, p.tags.join(", ")));
+                    ui.close();
                 }
                 if ui.add(Key::new("new worktree").outline(VALUE).min_width(160.0)).clicked() {
                     self.new_worktree = Some((p.id, String::new()));
