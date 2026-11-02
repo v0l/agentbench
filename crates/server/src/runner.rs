@@ -399,6 +399,7 @@ impl Runner {
                 }
                 self.store.add_message(session.id, &Entry::Summary { text: String::new() })?;
                 self.store.clear_agent_session(session.id)?;
+                self.store.set_title_auto(session.id, true)?;
                 note("the agent starts afresh from here; the transcript above is kept".into())
             }
             "model" => {
@@ -2029,6 +2030,32 @@ mod tests {
         let sent = seen.lock().unwrap();
         let prompt = sent[0]["messages"][1]["content"].as_str().unwrap();
         assert!(prompt.contains("Person: hello there") && prompt.contains("Agent: hi"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn clearing_a_chat_names_it_again_from_the_new_conversation() {
+        let (url, seen) = crate::titles::fake::server(vec![
+            (200, crate::titles::fake::completion("First topic")),
+            (200, crate::titles::fake::completion("Second topic")),
+        ]);
+        let script = r#"read p; echo "{\"text\":\"hi\"}""#;
+        let (runner, s) = titled(url, script_agent("echo", script), true);
+        runner.send(&s, "first question").unwrap();
+        wait_idle(&runner, s.id).await;
+        assert!(title_becomes(&runner, s.id, "First topic").await);
+        assert!(!runner.store().title_is_auto(s.id).unwrap());
+        let s = runner.store().session(s.id).unwrap();
+        runner.send(&s, "/clear").unwrap();
+        assert!(runner.store().title_is_auto(s.id).unwrap(), "clearing frees the title");
+        runner.send(&s, "second question").unwrap();
+        wait_idle(&runner, s.id).await;
+        assert!(title_becomes(&runner, s.id, "Second topic").await);
+        let sent = seen.lock().unwrap();
+        let prompt = sent[1]["messages"][1]["content"].as_str().unwrap();
+        assert!(
+            prompt.contains("second question") && !prompt.contains("first question"),
+            "{prompt}"
+        );
     }
 
     #[tokio::test]
