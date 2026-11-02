@@ -31,47 +31,54 @@ pub(super) fn hamburger(ui: &mut Ui, open: bool) -> egui::Response {
     resp
 }
 
-/// Columns and rows of the chat grid, each with a minus and a plus; returns the grid they now make.
-pub(super) fn grid_steppers(ui: &mut Ui, grid: Grid) -> Option<Grid> {
-    let (mut cols, mut rows) = grid.dims();
-    let mut changed = false;
-    ui.spacing_mut().item_spacing.x = 2.0;
-    for (name, value) in [("rows", &mut rows), ("columns", &mut cols)] {
-        if step_key(ui, "+", &format!("more {name}"), *value < Grid::MAX_SIDE) {
-            *value += 1;
-            changed = true;
+/// The chat grid key: shows columns x rows and opens a board to pick a size by hovering over it.
+pub(super) fn grid_picker(ui: &mut Ui, grid: Grid) -> Option<Grid> {
+    let (cols, rows) = grid.dims();
+    let key = ui.add(Key::new(format!("{cols} x {rows}")).outline(VALUE).min_width(64.0));
+    key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "layout"));
+    let mut picked = None;
+    egui::Popup::from_toggle_button_response(&key).show(|ui| {
+        let cell = 20.0;
+        let gap = 3.0;
+        let side = Grid::MAX_SIDE;
+        let span = side as f32 * (cell + gap) - gap;
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(span), Sense::click());
+        let over = resp.hover_pos().map(|p| {
+            let at = |v: f32| (((v / (cell + gap)) as usize) + 1).min(side);
+            (at(p.x - rect.left()), at(p.y - rect.top()))
+        });
+        let (hc, hr) = over.unwrap_or((cols, rows));
+        let painter = ui.painter();
+        for r in 0..side {
+            for c in 0..side {
+                let on = c < hc && r < hr;
+                let at = rect.min + Vec2::new(c as f32 * (cell + gap), r as f32 * (cell + gap));
+                let cell_rect = egui::Rect::from_min_size(at, Vec2::splat(cell));
+                painter.rect_filled(
+                    cell_rect,
+                    2.0,
+                    if on { READOUT.gamma_multiply(0.8) } else { WELL },
+                );
+                painter.rect_stroke(
+                    cell_rect,
+                    2.0,
+                    Stroke::new(1.0, if on { READOUT } else { ETCH }),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
-        ui.label(egui::RichText::new(value.to_string()).size(12.0).color(VALUE));
-        if step_key(ui, "-", &format!("fewer {name}"), *value > 1) {
-            *value -= 1;
-            changed = true;
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!("{hc} x {hr}  ({} chats)", hc * hr))
+                .size(11.5)
+                .color(VALUE),
+        );
+        if resp.clicked() {
+            picked = Some(Grid::new(hc, hr));
+            ui.close();
         }
-        if name == "rows" {
-            ui.label(egui::RichText::new("x").size(11.0).color(LEGEND));
-        }
-    }
-    changed.then(|| Grid::new(cols, rows))
-}
-
-fn step_key(ui: &mut Ui, glyph: &str, name: &str, enabled: bool) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(18.0, 22.0), Sense::click());
-    let resp = resp.on_hover_text(name);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, name));
-    let tint = if !enabled {
-        ETCH
-    } else if resp.hovered() {
-        READOUT
-    } else {
-        LEGEND
-    };
-    if enabled && resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    let p = ui.painter();
-    p.rect_filled(rect, 2.0, WELL);
-    p.rect_stroke(rect, 2.0, Stroke::new(1.0, tint), egui::StrokeKind::Inside);
-    p.text(rect.center(), egui::Align2::CENTER_CENTER, glyph, egui::FontId::monospace(12.0), tint);
-    enabled && resp.clicked()
+    });
+    picked
 }
 
 pub(super) fn status_look(status: SessionStatus) -> (egui::Color32, &'static str) {

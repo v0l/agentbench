@@ -101,7 +101,12 @@ pub fn picker_busy() -> bool {
 pub fn take_picked() -> Option<PickedFile> {
     with_activity(|env, activity| {
         let got = env
-            .call_method(activity, jni_str!("takePicked"), jni_sig!("()Lio/v0l/agentbench/Picked;"), &[])?
+            .call_method(
+                activity,
+                jni_str!("takePicked"),
+                jni_sig!("()Lio/v0l/agentbench/Picked;"),
+                &[],
+            )?
             .l()?;
         if got.is_null() {
             return Ok(None);

@@ -2166,7 +2166,8 @@ fn with_issues_first_a_chat_opens_inside_its_issue() {
         .into_iter()
         .find(|w| w.branch.as_deref() == Some("fix-login"))
         .unwrap();
-    let linked = rig.store.add_session(side.id, "echo", "work on readme", None, Some(issue)).unwrap();
+    let linked =
+        rig.store.add_session(side.id, "echo", "work on readme", None, Some(issue)).unwrap();
     rig.store.add_message(linked.id, &Entry::user("write it")).unwrap();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
@@ -2190,4 +2191,17 @@ fn a_grid_of_any_columns_by_rows_holds_that_many_chats() {
     h.state_mut().focus_tile(11);
     h.run_steps(2);
     assert_eq!(h.state().focused_tile(), 11);
+}
+
+#[test]
+fn the_layout_key_opens_a_board_that_sets_columns_and_rows() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    h.get_by_label("layout").click();
+    h.run_steps(3);
+    click(&mut h, 1022.0, 78.0);
+    h.run_steps(3);
+    assert_eq!(h.state().grid().dims(), (2, 2));
 }

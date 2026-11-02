@@ -34,7 +34,7 @@ impl App {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     self.key_new_chat(ui);
                     self.key_file_issue(ui);
-                    if let Some(g) = grid_steppers(ui, self.grid) {
+                    if let Some(g) = grid_picker(ui, self.grid) {
                         self.set_grid(g);
                     }
                     self.key_settings(ui);

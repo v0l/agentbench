@@ -145,7 +145,12 @@ impl App {
         })
     }
 
-    fn project_matches(&self, p: &agentbench_core::Project, worktrees: &[Worktree], needle: &str) -> bool {
+    fn project_matches(
+        &self,
+        p: &agentbench_core::Project,
+        worktrees: &[Worktree],
+        needle: &str,
+    ) -> bool {
         let has = |text: &str| text.to_lowercase().contains(needle);
         if has(&p.name) || has(&p.path) {
             return true;
