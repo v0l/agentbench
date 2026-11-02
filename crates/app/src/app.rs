@@ -2280,10 +2280,23 @@ impl App {
                     });
                     for s in &mine {
                         let (tint, word) = status_look(s.status);
-                        if chip(ui, &format!("{} {word}", s.agent), tint, s.status.busy())
-                            .interact(Sense::click())
-                            .clicked()
-                        {
+                        let waiting = s.status == SessionStatus::Waiting;
+                        let text = if waiting {
+                            format!("? {} {word}", s.agent)
+                        } else {
+                            format!("{} {word}", s.agent)
+                        };
+                        let chip = chip(ui, &text, tint, s.status.busy()).interact(Sense::click());
+                        if waiting {
+                            chip.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    format!("needs you: {}", s.title),
+                                )
+                            });
+                        }
+                        if chip.clicked() {
                             self.open_session(s.id, s.project_id);
                         }
                     }

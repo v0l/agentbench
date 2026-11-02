@@ -2597,3 +2597,31 @@ fn sessions_waiting_on_the_user_carry_a_marker_that_clears_when_answered() {
     });
     assert_eq!(marker_count(&h), 0);
 }
+
+#[test]
+fn a_waiting_session_on_the_issue_board_carries_the_marker() {
+    let rig = rig_with(vec![Box::new(Waiter)]);
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
+    let issue = rig.store.issues().unwrap()[0].id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    c.add_session(&agentbench_core::NewSession {
+        project_id: project,
+        agent: "waiter".into(),
+        title: Some("board chat".into()),
+        issue_id: Some(issue),
+        prompt: Some("go".into()),
+        ..Default::default()
+    });
+    until(&mut h, "waiting", |h| {
+        h.state().overview().is_some_and(|o| agentbench::waiting_on_you(&o.sessions) == 1)
+    });
+    click(&mut h, 283.0, 20.0);
+    h.run_steps(3);
+    shot(&mut h, "board-needs-you");
+    assert_eq!(marker_count(&h), 2, "one in the side list, one on the issue card");
+}
