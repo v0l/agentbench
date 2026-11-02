@@ -956,6 +956,7 @@ impl Sink {
         self.questions.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), tx);
         let msg = self.entry(open);
         let _ = self.store.set_status(self.session, SessionStatus::Waiting);
+        crate::tools::desktop_notice("needs you", "a chat is waiting for your answer");
         self.changed.notify_waiters();
         let answer = tokio::select! {
             _ = self.stop.cancelled() => Err("stopped".to_string()),
