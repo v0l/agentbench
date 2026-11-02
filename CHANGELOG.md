@@ -6,6 +6,11 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-01
+
+### Added
+- Agents can send you files with the `send_file` tool. They show in the chat with previews (pictures, text, markdown, code) and a save button, which writes to Downloads on Android.
+
 ### Changed
 - The notification at the bottom of the window is now a toast with a fixed width range, and its dismiss button no longer wraps.
 
