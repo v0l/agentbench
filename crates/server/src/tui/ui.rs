@@ -171,6 +171,12 @@ fn entry_lines(m: &Message, expanded: bool, width: usize) -> Vec<Line<'static>> 
             )
         }
         Entry::Notice { text } => wrap(&piece(text, dim()), width, &[], &[]),
+        Entry::File { text, file } => wrap(
+            &piece(&format!("file: {} ({}) {text}", file.name, file.size), dim()),
+            width,
+            &[],
+            &[],
+        ),
         Entry::Diagnostics { text, .. } => tool_lines(
             "diagnostics",
             &serde_json::json!({ "message": "language server" }),

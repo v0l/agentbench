@@ -272,7 +272,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 26] = [
+pub const AGENTBENCH_TOOLS: [&str; 27] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -295,6 +295,7 @@ pub const AGENTBENCH_TOOLS: [&str; 26] = [
     "remember",
     "recall",
     "notify_user",
+    "send_file",
     "autopilot",
     "set_automation",
     "merge_branch",
@@ -562,6 +563,18 @@ fn agentbench_specs() -> Vec<Spec> {
             "notify_user",
             "Tell the user something now, outside the chat: a desktop notification as well as a notice in this chat. Use it when work is done or you are blocked and they may not be watching. ask_user is for questions.",
             object(json!({ "message": string("One short sentence") }), &["message"]),
+        ),
+        Spec::new(
+            "send_file",
+            "Send the user a file from this machine: it appears in the chat with a preview (pictures, text, markdown, code) and a download button, including in the mobile app. Use it for screenshots, reports, logs, builds and anything else the user should see or keep. Up to 20 MB.",
+            object(
+                json!({
+                    "path": string("The file, relative to the worktree or absolute"),
+                    "caption": string("A short line shown with it"),
+                    "name": string("The name to show instead of the file's own"),
+                }),
+                &["path"],
+            ),
         ),
         Spec::new(
             "todo_write",

@@ -189,6 +189,7 @@ impl App {
                 Some(&agentbench_core::diagnostics_findings(text)),
                 false,
             ),
+            Entry::File { text, file } => self.sent_file(ui, m.id, session, text, file),
             Entry::Wire { .. } | Entry::Unknown => {}
             Entry::Summary { text } if text.is_empty() => {
                 heading(ui, "cleared: the agent starts afresh here");
@@ -245,6 +246,107 @@ impl App {
             }
         });
         ui.add_space(4.0);
+    }
+
+    fn sent_file(
+        &mut self,
+        ui: &mut Ui,
+        id: Id,
+        session: SessionId,
+        caption: &str,
+        file: &agentbench_core::Attachment,
+    ) {
+        ui.add_space(6.0);
+        rail_block(ui, OK, PANEL, |ui| {
+            Line::new()
+                .legend("file")
+                .size(10.0)
+                .gap(8.0)
+                .value(file.name.clone())
+                .size(11.0)
+                .gap(8.0)
+                .note(crate::attach::size(file.size))
+                .size(10.0)
+                .show(ui);
+            if !caption.is_empty() {
+                ui.add_space(2.0);
+                markdown::show(ui, &mut self.markdown, caption, id as usize);
+            }
+            ui.add_space(4.0);
+            if file.is_image() {
+                self.attached(ui, session, std::slice::from_ref(file));
+            } else if file.is_text() && self.client.is_some() {
+                self.text_preview(ui, id, session, file);
+            }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let mut act = None;
+                if cfg!(not(target_arch = "wasm32")) {
+                    if ui.add(Key::new("save").outline(VALUE)).clicked() {
+                        act = Some(false);
+                    }
+                    if cfg!(target_os = "android")
+                        && ui.add(Key::new("open").outline(VALUE)).clicked()
+                    {
+                        act = Some(true);
+                    }
+                }
+                if let (Some(view), Some(c)) = (act, &self.client) {
+                    let (tx, ctx) = (self.tray.sender(), ui.ctx().clone());
+                    let (name, mime) = (file.name.clone(), file.mime.clone());
+                    c.attachment(session, file.id, move |bytes| match bytes {
+                        Some(data) => crate::attach::save(tx, ctx, name, mime, data, view),
+                        None => {
+                            let _ = tx.send(crate::attach::Arrived::Failed(format!(
+                                "could not download {name}"
+                            )));
+                            ctx.request_repaint();
+                        }
+                    });
+                }
+            });
+        });
+        ui.add_space(4.0);
+    }
+
+    fn text_preview(
+        &mut self,
+        ui: &mut Ui,
+        id: Id,
+        session: SessionId,
+        file: &agentbench_core::Attachment,
+    ) {
+        let Some(c) = self.client.as_ref() else { return };
+        let ctx = ui.ctx().clone();
+        let body = self.tray.body(session, file, |tx| {
+            let key = (session, file.id);
+            c.attachment(session, file.id, move |bytes| {
+                let text = bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
+                let _ = tx.send((key, text));
+                ctx.request_repaint();
+            });
+        });
+        match body {
+            crate::attach::Body::Ready(text) => {
+                let (shown, more) = crate::attach::excerpt(text);
+                if file.is_markdown() {
+                    markdown::show(ui, &mut self.markdown, &shown, id as usize);
+                } else {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(shown).font(mono(11.5)).color(VALUE))
+                            .wrap(),
+                    );
+                }
+                if more > 0 {
+                    Line::new().note(format!("{more} more lines, save to read them")).size(10.0).show(ui);
+                }
+            }
+            crate::attach::Body::Loading => {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                spinner(ui, r.center(), 8.0, LEGEND);
+            }
+            crate::attach::Body::Failed => {}
+        }
     }
 
     /// The files a message carried: pictures as thumbnails, anything else as a named chip.

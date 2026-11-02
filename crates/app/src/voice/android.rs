@@ -127,3 +127,21 @@ pub fn take_picked() -> Option<PickedFile> {
     .ok()
     .flatten()
 }
+
+pub fn save_download(name: &str, mime: &str, data: &[u8], view: bool) -> Result<(), String> {
+    let failure = with_activity(|env, activity| {
+        let name = env.new_string(name)?;
+        let mime = env.new_string(mime)?;
+        let bytes = env.byte_array_from_slice(data)?;
+        let out = env
+            .call_method(
+                activity,
+                jni_str!("saveDownload"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;[BZ)Ljava/lang/String;"),
+                &[(&name).into(), (&mime).into(), (&bytes).into(), view.into()],
+            )?
+            .l()?;
+        env.cast_local::<jni::objects::JString>(out)?.try_to_string(env)
+    })?;
+    if failure.is_empty() { Ok(()) } else { Err(failure) }
+}

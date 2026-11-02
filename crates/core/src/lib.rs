@@ -541,11 +541,29 @@ pub fn mime_for(name: &str) -> Option<&'static str> {
         "webm" => "video/webm",
         "mov" => "video/quicktime",
         "mkv" => "video/x-matroska",
+        "pdf" => "application/pdf",
+        "txt" | "log" => "text/plain",
+        "md" | "markdown" => "text/markdown",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        "svg" => "image/svg+xml",
+        "zip" => "application/zip",
+        "rs" | "py" | "js" | "ts" | "toml" | "yaml" | "yml" | "sh" | "c" | "h" | "cpp" | "go"
+        | "java" | "kt" | "css" | "xml" | "sql" | "diff" | "patch" => "text/plain",
         _ => return None,
     })
 }
 
 impl Attachment {
+    pub fn is_text(&self) -> bool {
+        self.mime.starts_with("text/") || self.mime == "application/json"
+    }
+
+    pub fn is_markdown(&self) -> bool {
+        self.mime == "text/markdown"
+    }
+
     pub fn is_image(&self) -> bool {
         media_kind(&self.mime) == Some("image")
     }
@@ -586,6 +604,12 @@ pub enum Entry {
     },
     Summary {
         text: String,
+    },
+    /// A file an agent sent the user, kept on the server to download.
+    File {
+        #[serde(default)]
+        text: String,
+        file: Attachment,
     },
     Assistant {
         text: String,
@@ -763,7 +787,8 @@ impl Entry {
             | Entry::Thinking { text }
             | Entry::Error { text }
             | Entry::Notice { text }
-            | Entry::Diagnostics { text, .. } => text,
+            | Entry::Diagnostics { text, .. }
+            | Entry::File { text, .. } => text,
             Entry::Tool { name, .. } => name,
             Entry::Question { question, .. } => &question.text,
             Entry::Questions { questions, .. } => {

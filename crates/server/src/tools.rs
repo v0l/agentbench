@@ -937,6 +937,36 @@ impl Api for StoreApi {
                     .collect();
                 json!(notes)
             }
+            "send_file" => {
+                let path = text(args, "path").filter(|p| !p.trim().is_empty());
+                let path = path.ok_or("missing `path`")?;
+                let full = std::path::Path::new(&me.cwd).join(path.trim());
+                let meta = std::fs::metadata(&full).map_err(|e| format!("{path}: {e}"))?;
+                if !meta.is_file() {
+                    return Err(format!("{path} is not a file"));
+                }
+                if meta.len() > agentbench_core::ATTACHMENT_MAX as u64 {
+                    return Err(format!(
+                        "{path} is over {} MB",
+                        agentbench_core::ATTACHMENT_MAX >> 20
+                    ));
+                }
+                let data = std::fs::read(&full).map_err(|e| format!("{path}: {e}"))?;
+                let name = text(args, "name")
+                    .filter(|n| !n.trim().is_empty())
+                    .or_else(|| {
+                        full.file_name().map(|n| n.to_string_lossy().into_owned())
+                    })
+                    .unwrap_or_else(|| "file".into());
+                let name = name.rsplit(['/', '\\']).next().unwrap_or("file").trim().to_string();
+                let mime = agentbench_core::mime_for(&name).unwrap_or("application/octet-stream");
+                let file = s.add_attachment(session, &name, mime, &data).map_err(|e| e.0)?;
+                let caption = text(args, "caption").unwrap_or_default().trim().to_string();
+                s.add_message(session, &Entry::File { text: caption.clone(), file: file.clone() })
+                    .map_err(|e| e.0)?;
+                desktop_notice(&me.title, &format!("sent you {}", file.name));
+                json!({ "sent": file.name, "size": file.size, "mime": file.mime })
+            }
             "notify_user" => {
                 let message = text(args, "message").filter(|m| !m.trim().is_empty());
                 let message = message.ok_or("missing `message`")?;
@@ -1054,6 +1084,7 @@ fn kind(e: &Entry) -> &'static str {
         Entry::Question { .. } | Entry::Questions { .. } => "question",
         Entry::Error { .. } => "error",
         Entry::Notice { .. } => "notice",
+        Entry::File { .. } => "file",
         Entry::Diagnostics { .. } => "diagnostics",
         Entry::Wire { .. } => "sent",
         Entry::Unknown => "unknown",
@@ -1505,6 +1536,28 @@ mod tests {
         let last = s.messages(me.id, 0).unwrap().pop().unwrap().entry;
         assert_eq!(last, Entry::Notice { text: "notice: blocked on a key".into() });
         assert!(api.call("notify_user", &json!({}), me.id).is_err());
+    }
+
+    #[test]
+    fn send_file_puts_the_file_in_the_chat_to_download() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("report.md"), "# hi").unwrap();
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, dir.path().to_str().unwrap());
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let out = api
+            .call("send_file", &json!({"path": "report.md", "caption": "the report"}), me.id)
+            .unwrap();
+        assert_eq!(out["mime"], "text/markdown");
+        let Entry::File { text, file } = s.messages(me.id, 0).unwrap().pop().unwrap().entry else {
+            panic!("no file entry");
+        };
+        assert_eq!((text.as_str(), file.name.as_str(), file.size), ("the report", "report.md", 4));
+        let (_, bytes) = s.session_attachment(me.id, file.id).unwrap();
+        assert_eq!(bytes, b"# hi");
+        assert!(api.call("send_file", &json!({"path": "nope.txt"}), me.id).is_err());
+        assert!(api.call("send_file", &json!({}), me.id).is_err());
     }
 
     #[test]

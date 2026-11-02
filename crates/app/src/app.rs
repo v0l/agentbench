@@ -1777,8 +1777,8 @@ impl App {
             };
             self.icons.insert(id, icon);
         }
-        if let Some(problem) = self.tray.poll(ctx) {
-            self.notice = Some((false, problem));
+        if let Some(told) = self.tray.poll(ctx) {
+            self.notice = Some(told);
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
             self.help = !self.help;

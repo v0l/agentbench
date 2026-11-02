@@ -33,6 +33,7 @@ impl Pending {
 pub enum Arrived {
     File { name: String, mime: String, data: Vec<u8>, preview: Option<egui::ColorImage> },
     Failed(String),
+    Saved(String),
 }
 
 /// A picture from the transcript, fetched and decoded in the background.
@@ -49,13 +50,55 @@ pub struct Tray {
     thumbs: HashMap<(SessionId, agentbench_core::Id), Thumb>,
     thumb_tx: Sender<((SessionId, agentbench_core::Id), Option<egui::ColorImage>)>,
     thumb_rx: Receiver<((SessionId, agentbench_core::Id), Option<egui::ColorImage>)>,
+    texts: HashMap<Key, Body>,
+    text_tx: Sender<(Key, Option<String>)>,
+    text_rx: Receiver<(Key, Option<String>)>,
+}
+
+type Key = (SessionId, agentbench_core::Id);
+
+pub enum Body {
+    Loading,
+    Ready(std::sync::Arc<str>),
+    Failed,
+}
+
+const PREVIEW_LINES: usize = 40;
+const PREVIEW_CHARS: usize = 6000;
+
+pub fn excerpt(text: &str) -> (String, usize) {
+    let mut out = String::new();
+    let mut lines = text.lines();
+    let mut shown = 0;
+    for line in lines.by_ref().take(PREVIEW_LINES) {
+        if out.len() + line.len() > PREVIEW_CHARS {
+            let room = PREVIEW_CHARS.saturating_sub(out.len());
+            out.push_str(&line[..line.floor_char_boundary(room)]);
+            return (out, text.lines().count().saturating_sub(shown + 1));
+        }
+        out.push_str(line);
+        out.push('\n');
+        shown += 1;
+    }
+    (out.trim_end().to_string(), lines.count())
 }
 
 impl Default for Tray {
     fn default() -> Self {
         let (tx, rx) = channel();
         let (thumb_tx, thumb_rx) = channel();
-        Tray { files: Vec::new(), tx, rx, thumbs: HashMap::new(), thumb_tx, thumb_rx }
+        let (text_tx, text_rx) = channel();
+        Tray {
+            files: Vec::new(),
+            tx,
+            rx,
+            thumbs: HashMap::new(),
+            thumb_tx,
+            thumb_rx,
+            texts: HashMap::new(),
+            text_tx,
+            text_rx,
+        }
     }
 }
 
@@ -68,15 +111,18 @@ impl Tray {
     }
 
     /// Take in whatever finished reading. A message for the user comes back when one failed.
-    pub fn poll(&mut self, ctx: &egui::Context) -> Option<String> {
+    pub fn poll(&mut self, ctx: &egui::Context) -> Option<(bool, String)> {
         let mut problem = None;
         for got in self.rx.try_iter().collect::<Vec<_>>() {
             match got {
                 Arrived::File { name, mime, data, preview } => {
                     if self.files.len() >= agentbench_core::ATTACHMENTS_MAX {
-                        problem = Some(format!(
-                            "at most {} files go with one message",
-                            agentbench_core::ATTACHMENTS_MAX
+                        problem = Some((
+                            false,
+                            format!(
+                                "at most {} files go with one message",
+                                agentbench_core::ATTACHMENTS_MAX
+                            ),
                         ));
                         continue;
                     }
@@ -91,7 +137,8 @@ impl Tray {
                         preview,
                     });
                 }
-                Arrived::Failed(e) => problem = Some(e),
+                Arrived::Failed(e) => problem = Some((false, e)),
+                Arrived::Saved(e) => problem = Some((true, e)),
             }
         }
         for (key, img) in self.thumb_rx.try_iter().collect::<Vec<_>>() {
@@ -105,7 +152,27 @@ impl Tray {
             };
             self.thumbs.insert(key, thumb);
         }
+        for (key, text) in self.text_rx.try_iter().collect::<Vec<_>>() {
+            let body = match text {
+                Some(t) => Body::Ready(t.into()),
+                None => Body::Failed,
+            };
+            self.texts.insert(key, body);
+        }
         problem
+    }
+
+    pub fn body(
+        &mut self,
+        session: SessionId,
+        a: &Attachment,
+        fetch: impl FnOnce(Sender<(Key, Option<String>)>),
+    ) -> &Body {
+        let tx = self.text_tx.clone();
+        self.texts.entry((session, a.id)).or_insert_with(|| {
+            fetch(tx);
+            Body::Loading
+        })
     }
 
     pub fn ready(&self) -> usize {
@@ -222,6 +289,40 @@ pub fn pick(tx: Sender<Arrived>, ctx: egui::Context) {
     });
 }
 
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+pub fn save(tx: Sender<Arrived>, ctx: egui::Context, name: String, _mime: String, data: Vec<u8>, _view: bool) {
+    crate::spawn(async move {
+        let Some(target) = rfd::AsyncFileDialog::new().set_file_name(&name).save_file().await
+        else {
+            return;
+        };
+        let told = match target.write(&data).await {
+            Ok(()) => Arrived::Saved(format!("saved {name}")),
+            Err(e) => Arrived::Failed(format!("could not save {name}: {e}")),
+        };
+        let _ = tx.send(told);
+        ctx.request_repaint();
+    });
+}
+
+#[cfg(target_os = "android")]
+pub fn save(tx: Sender<Arrived>, ctx: egui::Context, name: String, mime: String, data: Vec<u8>, view: bool) {
+    crate::spawn_blocking(move || {
+        let told = match crate::voice::android::save_download(&name, &mime, &data, view) {
+            Ok(()) => Arrived::Saved(format!("saved {name} to Downloads")),
+            Err(e) => Arrived::Failed(format!("could not save {name}: {e}")),
+        };
+        let _ = tx.send(told);
+        ctx.request_repaint();
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn save(tx: Sender<Arrived>, ctx: egui::Context, name: String, _mime: String, _data: Vec<u8>, _view: bool) {
+    let _ = tx.send(Arrived::Failed(format!("{name} cannot be saved from the browser app")));
+    ctx.request_repaint();
+}
+
 #[cfg(target_os = "android")]
 pub fn pick(tx: Sender<Arrived>, ctx: egui::Context) {
     use crate::voice::android::{open_file_picker, picker_busy, take_picked};
@@ -290,6 +391,14 @@ mod tests {
             panic!("refused");
         };
         assert_eq!(mime, "image/png");
+    }
+
+    #[test]
+    fn an_excerpt_stops_at_forty_lines_and_counts_the_rest() {
+        let text = (0..100).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+        let (shown, more) = excerpt(&text);
+        assert_eq!((shown.lines().count(), more), (40, 60));
+        assert_eq!(excerpt("a\nb"), ("a\nb".to_string(), 0));
     }
 
     #[test]

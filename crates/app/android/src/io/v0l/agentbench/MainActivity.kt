@@ -2,7 +2,11 @@ package io.v0l.agentbench
 
 import android.app.NativeActivity
 import android.content.Intent
+import android.content.ContentValues
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -36,6 +40,34 @@ class MainActivity : NativeActivity() {
                 reading -= 1
                 picked.add(Picked("file picker", null))
             }
+        }
+    }
+
+    /** Keep a file in the Downloads folder, and open it in another app when `view`. Returns an
+     *  empty string on success, otherwise what went wrong. */
+    fun saveDownload(name: String, mime: String, data: ByteArray, view: Boolean): String {
+        if (Build.VERSION.SDK_INT < 29) return "saving needs Android 10 or newer"
+        return try {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, mime)
+                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: return "could not create the file"
+            contentResolver.openOutputStream(uri)!!.use { it.write(data) }
+            if (view) runOnUiThread {
+                val show = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try { startActivity(show) } catch (e: Exception) {
+                    android.util.Log.w("agentbench", "nothing opens $mime", e)
+                }
+            }
+            ""
+        } catch (e: Exception) {
+            e.message ?: "could not save"
         }
     }
 
