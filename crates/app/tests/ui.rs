@@ -1391,8 +1391,12 @@ fn each_new_chat_from_the_tree_is_a_new_session() {
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.run_steps(3);
     let mut seen = Vec::new();
-    for (word, row) in [("first", 158.0), ("second", 214.0)] {
-        click(&mut h, 80.0, row);
+    for word in ["first", "second"] {
+        until(&mut h, "no chat working", |h| {
+            h.state().overview().is_some_and(|o| o.sessions.iter().all(|s| !s.status.busy()))
+        });
+        h.run_steps(3);
+        click(&mut h, 80.0, 146.0);
         h.run_steps(3);
         assert_eq!(h.state().open(), None, "{word}: the row opens a blank chat");
         // Let the overview refresh; a blank chat must not attach itself to an old session.
