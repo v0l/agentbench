@@ -2490,3 +2490,110 @@ fn older_rows_arriving_at_the_top_do_not_move_what_is_being_read() {
     );
     assert_ne!(after, 0, "not thrown to the very top of the older rows");
 }
+
+struct SecretWaiter;
+
+#[agentbench_server::agent::async_trait]
+impl agentbench_server::agent::Agent for SecretWaiter {
+    fn name(&self) -> &str {
+        "secretwaiter"
+    }
+    fn label(&self) -> &str {
+        "Secret waiter"
+    }
+    fn available(&self) -> bool {
+        true
+    }
+    fn about(&self) -> String {
+        "test".into()
+    }
+    fn resumable(&self) -> bool {
+        false
+    }
+    async fn run(
+        &self,
+        _turn: &agentbench_server::agent::Turn<'_>,
+        io: &dyn agentbench_server::agent::Io,
+    ) -> Result<(), String> {
+        let q = agentbench_core::Question {
+            text: "api key?".into(),
+            secret: true,
+            ..Default::default()
+        };
+        io.ask(q).await?;
+        io.emit(agentbench_server::agent::Event::Text { delta: "got it".into() });
+        Ok(())
+    }
+}
+
+fn marker_of(title: &str) -> String {
+    format!("needs you: {title}")
+}
+
+fn marker_count(h: &Harness<'_, App>) -> usize {
+    h.query_all(egui_kittest::kittest::By::new().label_contains("needs you: ")).count()
+}
+
+#[test]
+fn sessions_waiting_on_the_user_carry_a_marker_that_clears_when_answered() {
+    let rig = rig_with(vec![Box::new(Waiter), Box::new(SecretWaiter)]);
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    assert_eq!(marker_count(&h), 0);
+    assert_eq!(agentbench::window_title(0), "agentbench");
+
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    for (agent, title) in [("waiter", "licence chat"), ("secretwaiter", "key chat")] {
+        c.add_session(&agentbench_core::NewSession {
+            project_id: project,
+            agent: agent.into(),
+            title: Some(title.into()),
+            prompt: Some("go".into()),
+            ..Default::default()
+        });
+    }
+    until(&mut h, "both waiting", |h| {
+        h.state().overview().is_some_and(|o| agentbench::waiting_on_you(&o.sessions) == 2)
+    });
+    h.get_by_label(&marker_of("licence chat"));
+    h.get_by_label(&marker_of("key chat"));
+    assert_eq!(marker_count(&h), 2);
+    assert_eq!(agentbench::window_title(2), "(2) agentbench: needs you");
+    shot(&mut h, "needs-you");
+
+    let all = h.state().overview().unwrap().sessions.clone();
+    let below = |h: &Harness<'_, App>, t: &str| h.get_by_label(&format!("chat {t}")).rect().top();
+    let lowest_waiting = below(&h, "licence chat").max(below(&h, "key chat"));
+    let idle: Vec<_> = all
+        .iter()
+        .filter(|s| s.status == agentbench_core::SessionStatus::Idle && !s.title.is_empty())
+        .collect();
+    assert!(!idle.is_empty());
+    for s in idle {
+        assert!(below(&h, &s.title) > lowest_waiting, "{} sorts below the waiting chats", s.title);
+    }
+
+    let sessions = h.state().overview().unwrap().sessions.clone();
+    for title in ["licence chat", "key chat"] {
+        let s = sessions.iter().find(|s| s.title == title).unwrap();
+        let q = rig
+            .store
+            .messages(s.id, 0)
+            .unwrap()
+            .into_iter()
+            .find_map(|m| match m.entry {
+                Entry::Question { id, .. } => Some(id),
+                _ => None,
+            })
+            .expect("a question");
+        c.answer(s.id, &q, &["MIT".into()]);
+    }
+    until(&mut h, "none waiting", |h| {
+        h.state().overview().is_some_and(|o| agentbench::waiting_on_you(&o.sessions) == 0)
+    });
+    assert_eq!(marker_count(&h), 0);
+}

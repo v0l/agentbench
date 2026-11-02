@@ -142,6 +142,21 @@ fn chat_key(s: &Session) -> std::cmp::Reverse<(i64, String)> {
     std::cmp::Reverse((s.created_at, s.id.to_string()))
 }
 
+fn list_key(s: &Session) -> (bool, std::cmp::Reverse<(i64, String)>) {
+    (s.status != SessionStatus::Waiting, chat_key(s))
+}
+
+pub fn waiting_on_you(sessions: &[Session]) -> usize {
+    sessions.iter().filter(|s| s.status == SessionStatus::Waiting).count()
+}
+
+pub fn window_title(waiting: usize) -> String {
+    match waiting {
+        0 => "agentbench".into(),
+        n => format!("({n}) agentbench: needs you"),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Sort {
     Priority,
@@ -654,6 +669,7 @@ pub struct App {
     follow: bool,
     jump: Option<Tile>,
     awaiting: Option<Id>,
+    title_sent: String,
     thinking: bool,
     /// How many times the fonts were swapped, so measured transcript heights are dropped.
     fonts_loaded: u32,
@@ -792,6 +808,7 @@ impl App {
             follow: true,
             jump: None,
             awaiting: None,
+            title_sent: String::new(),
             refocus: None,
             composer_h: HashMap::new(),
             drawing: None,
@@ -1727,6 +1744,11 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         self.poll_starting(ctx);
+        let title = window_title(self.overview.as_ref().map_or(0, |o| waiting_on_you(&o.sessions)));
+        if title != self.title_sent {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title_sent = title;
+        }
         if cfg!(target_os = "android") && self.link_checked.elapsed() > Duration::from_secs(1) {
             self.link_checked = Instant::now();
             self.open_launch_link(ctx);

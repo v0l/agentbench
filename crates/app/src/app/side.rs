@@ -85,7 +85,7 @@ impl App {
                     || branch.to_lowercase().contains(needle)
             })
             .collect();
-        chats.sort_by_key(|(s, _, _)| chat_key(s));
+        chats.sort_by_key(|(s, _, _)| list_key(s));
         if chats.is_empty() {
             hint(ui, if needle.is_empty() { "no chats yet" } else { "no chats match" });
             return;
@@ -124,8 +124,11 @@ impl App {
         });
         let tiled =
             self.grid_now().slots() > 1 && self.tab == Tab::Chat && self.shown().contains(&s.id);
+        let waiting = s.status == SessionStatus::Waiting;
         let fill = if on {
             Some(READOUT.gamma_multiply(0.14))
+        } else if waiting {
+            Some(READOUT.gamma_multiply(if resp.hovered() { 0.16 } else { 0.09 }))
         } else if tiled {
             Some(LEGEND.gamma_multiply(0.10))
         } else if resp.hovered() {
@@ -135,6 +138,19 @@ impl App {
         };
         if let Some(fill) = fill {
             ui.painter().rect_filled(row, 3.0, fill);
+        }
+        if waiting {
+            let rail = egui::Rect::from_min_max(row.left_top(), egui::pos2(row.left() + 3.0, row.bottom()));
+            ui.painter().rect_filled(rail, 1.0, READOUT);
+            let pill = needs_you_pill(ui, row);
+            let id = ui.id().with(("needs-you", s.id));
+            ui.interact(pill, id, Sense::hover()).widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Label,
+                    true,
+                    format!("needs you: {}", s.title),
+                )
+            });
         }
         let badge = egui::Rect::from_min_size(
             egui::pos2(row.left() + 6.0, row.top() + 7.0),
@@ -152,7 +168,7 @@ impl App {
             egui::UiBuilder::new()
                 .max_rect(egui::Rect::from_min_max(
                     egui::pos2(row.left() + 6.0 + ICON + 8.0, row.top() + 6.0),
-                    egui::pos2(row.right() - 8.0, row.bottom() - 4.0),
+                    egui::pos2(row.right() - if waiting { 84.0 } else { 8.0 }, row.bottom() - 4.0),
                 ))
                 .layout(Layout::top_down(Align::Min)),
         );
@@ -247,6 +263,24 @@ impl App {
             }
         });
     }
+}
+
+fn needs_you_pill(ui: &Ui, row: egui::Rect) -> egui::Rect {
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(row.right() - 76.0, row.top() + 6.0),
+        Vec2::new(70.0, 16.0),
+    );
+    let p = ui.painter();
+    p.rect_filled(rect, 2.0, READOUT.gamma_multiply(0.2));
+    p.rect_stroke(rect, 2.0, Stroke::new(1.0, READOUT), egui::StrokeKind::Inside);
+    p.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "? NEEDS YOU",
+        legend_font(9.5),
+        READOUT,
+    );
+    rect
 }
 
 fn tile_board(
