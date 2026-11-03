@@ -648,6 +648,9 @@ pub enum Entry {
     Notice {
         text: String,
     },
+    Warning {
+        text: String,
+    },
     Diagnostics {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -683,6 +686,23 @@ pub enum Said {
     /// A message kept word for word when the conversation before it was folded into a summary.
     /// It is replayed to the model but not shown again.
     Kept,
+}
+
+pub const PICTURE_REMOVED: &str = "(picture removed: the model server refused it)";
+
+pub fn remove_pictures(message: &mut Value) -> bool {
+    let mut removed = false;
+    let Some(parts) = message["content"].as_array_mut() else { return false };
+    for part in parts.iter_mut().filter(|p| p["type"] == "image_url") {
+        *part = serde_json::json!({ "type": "text", "text": PICTURE_REMOVED });
+        removed = true;
+    }
+    removed
+}
+
+pub fn remove_pictures_from(entry: &mut Entry) -> bool {
+    let Entry::Wire { messages } = entry else { return false };
+    messages.iter_mut().fold(false, |any, s| remove_pictures(&mut s.message) | any)
 }
 
 pub const SUMMARY_PREAMBLE: &str =
@@ -805,6 +825,7 @@ impl Entry {
             | Entry::Thinking { text }
             | Entry::Error { text }
             | Entry::Notice { text }
+            | Entry::Warning { text }
             | Entry::Diagnostics { text, .. }
             | Entry::File { text, .. } => text,
             Entry::Tool { name, .. } => name,

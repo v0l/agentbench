@@ -1971,6 +1971,41 @@ fn markdown_sits_on_one_baseline_and_links_open() {
     shot(&mut h, "markdown-baseline");
 }
 
+fn near(img: &image::RgbaImage, tint: egui::Color32) -> usize {
+    img.pixels()
+        .filter(|p| {
+            let d = |a: u8, b: u8| (a as i32 - b as i32).abs();
+            d(p[0], tint.r()) < 24 && d(p[1], tint.g()) < 24 && d(p[2], tint.b()) < 24
+        })
+        .count()
+}
+
+fn tinted_chat(entry: Entry) -> (usize, usize) {
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "echo", "tints", None, None).unwrap();
+    rig.store.add_message(s.id, &entry).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, main.project_id);
+    h.run_steps(12);
+    shot(&mut h, "tinted-notice");
+    let img = h.render().expect("rendered");
+    (near(&img, egui_bench::prelude::WARN), near(&img, egui_bench::prelude::FAULT))
+}
+
+#[test]
+fn a_retrying_notice_is_drawn_in_warn_and_a_failure_in_fault() {
+    let text = "https://yalr.v0l.io/v1: the stream broke; retrying in 2s (1/3)";
+    let (base_warn, base_fault) = tinted_chat(Entry::Notice { text: text.into() });
+    let (warn, fault) = tinted_chat(Entry::Warning { text: text.into() });
+    assert!(warn > base_warn + 100, "a warning shows in WARN: {warn} over {base_warn}");
+    assert!(fault <= base_fault + 20, "and not in FAULT: {fault} over {base_fault}");
+    let (warn, fault) = tinted_chat(Entry::Error { text: "the turn failed for good".into() });
+    assert!(fault > base_fault + 100, "a failure shows in FAULT: {fault} over {base_fault}");
+    assert!(warn <= base_warn + 20, "and not in WARN: {warn} over {base_warn}");
+}
+
 #[test]
 fn a_reply_has_a_read_aloud_link() {
     let rig = rig();

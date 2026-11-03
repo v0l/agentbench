@@ -1091,7 +1091,7 @@ fn kind(e: &Entry) -> &'static str {
         Entry::Tool { .. } => "tool",
         Entry::Question { .. } | Entry::Questions { .. } => "question",
         Entry::Error { .. } => "error",
-        Entry::Notice { .. } => "notice",
+        Entry::Notice { .. } | Entry::Warning { .. } => "notice",
         Entry::File { .. } => "file",
         Entry::Diagnostics { .. } => "diagnostics",
         Entry::Wire { .. } => "sent",

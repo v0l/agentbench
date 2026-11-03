@@ -316,7 +316,7 @@ impl Runner {
     fn not_sent(&self, session: SessionId, why: &str, dropped: Vec<Message>) {
         for m in dropped {
             let text = format!("not sent, {why}: {}", m.text);
-            let _ = self.store.add_message(session, &Entry::Notice { text });
+            let _ = self.store.add_message(session, &Entry::Warning { text });
         }
         let _ = self.store.touch_session(session);
         self.changed.notify_waiters();
@@ -914,6 +914,20 @@ impl Sink {
 }
 
 impl Sink {
+    fn pictures_removed(&self) {
+        if self.lock().capture || !self.lock().raw {
+            return;
+        }
+        self.flush();
+        let Ok(rows) = self.store.messages(self.session, 0) else { return };
+        for mut row in rows {
+            if agentbench_core::remove_pictures_from(&mut row.entry) {
+                let _ = self.store.update_message(row.id, &row.entry);
+            }
+        }
+        self.changed.notify_waiters();
+    }
+
     fn sent(&self, mut messages: Vec<agentbench_core::Sent>) {
         if self.lock().capture || !self.lock().raw {
             return;
@@ -1024,6 +1038,10 @@ impl Io for Sink {
             Event::Notice(text) => {
                 self.entry(Entry::Notice { text });
             }
+            Event::Warning(text) => {
+                self.entry(Entry::Warning { text });
+            }
+            Event::PicturesRemoved => self.pictures_removed(),
             Event::Diagnostics { text, broken } => {
                 self.entry(Entry::Diagnostics { text, broken });
             }
@@ -2004,6 +2022,54 @@ mod tests {
             io.emit(Event::Done);
             Ok(())
         }
+    }
+
+    struct Refused;
+
+    #[async_trait::async_trait]
+    impl Agent for Refused {
+        fn name(&self) -> &str {
+            "refused"
+        }
+        fn label(&self) -> &str {
+            "Refused"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn writes_log(&self) -> bool {
+            true
+        }
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            io.emit(Event::Sent(vec![agentbench_core::Sent {
+                message: serde_json::json!({"role": "user", "content": [
+                    {"type": "text", "text": "look"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                ]}),
+                said: agentbench_core::Said::Plain,
+            }]));
+            io.emit(Event::PicturesRemoved);
+            io.emit(Event::Warning("retrying in 2s (1/3)".into()));
+            io.emit(Event::Done);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_removed_picture_is_gone_from_the_stored_rows_and_a_retry_is_a_warning() {
+        let (runner, s) = setup(Box::new(Refused));
+        runner.send(&s, "look").unwrap();
+        wait_idle(&runner, s.id).await;
+        let rows = runner.store().messages(s.id, 0).unwrap();
+        assert!(!serde_json::to_string(&rows).unwrap().contains("image_url"));
+        assert!(serde_json::to_string(&rows).unwrap().contains("picture removed"));
+        assert!(rows.iter().any(|m| matches!(&m.entry, Entry::Warning { text } if text.contains("retrying"))));
     }
 
     #[tokio::test]

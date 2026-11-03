@@ -97,6 +97,8 @@ pub enum Event {
     Steered { text: String },
     Usage(Usage),
     Notice(String),
+    Warning(String),
+    PicturesRemoved,
     Diagnostics { text: String, broken: Vec<String> },
     Sent(Vec<agentbench_core::Sent>),
     Summary(String),

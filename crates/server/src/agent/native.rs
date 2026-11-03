@@ -1334,13 +1334,12 @@ impl<'a> Log<'a> {
     }
 
     fn strip_pictures(&mut self) -> bool {
-        let mut removed = false;
-        for message in &mut self.messages {
-            let Some(parts) = message["content"].as_array_mut() else { continue };
-            for part in parts.iter_mut().filter(|p| p["type"] == "image_url") {
-                *part = json!({ "type": "text", "text": "(picture removed: the model server refused it)" });
-                removed = true;
-            }
+        let removed = self
+            .messages
+            .iter_mut()
+            .fold(false, |any, m| agentbench_core::remove_pictures(m) | any);
+        if removed {
+            self.io.emit(Event::PicturesRemoved);
         }
         removed
     }
@@ -1527,7 +1526,7 @@ impl Agent for Native {
                     Err(e) if io.stopped() => return Err(e),
                     Err(e) => {
                         crowded.context = 0;
-                        io.emit(Event::Notice(format!("could not compact the conversation: {e}")));
+                        io.emit(Event::Warning(format!("could not compact the conversation: {e}")));
                     }
                 }
             }
@@ -1535,7 +1534,7 @@ impl Agent for Native {
                 match complete(&model, &messages, &tools, self.patience, io).await {
                     Ok(reply) => break reply,
                     Err(e) if refused_picture(&e) && messages.strip_pictures() => {
-                        io.emit(Event::Notice(
+                        io.emit(Event::Warning(
                             "the model server refused a picture; removed it and sending the request again"
                                 .into(),
                         ));
@@ -1769,7 +1768,7 @@ struct Silent<'a>(&'a dyn Io);
 #[async_trait]
 impl Io for Silent<'_> {
     fn emit(&self, event: Event) {
-        if matches!(event, Event::Usage(_) | Event::Notice(_)) {
+        if matches!(event, Event::Usage(_) | Event::Notice(_) | Event::Warning(_)) {
             self.0.emit(event);
         }
     }
@@ -2126,7 +2125,7 @@ async fn complete(
                     Some(next) if attempt < RETRIES => {
                         attempt += 1;
                         body["reasoning_effort"] = json!(next);
-                        io.emit(Event::Notice(format!(
+                        io.emit(Event::Warning(format!(
                             "the model ran out of output while thinking; sending the request again with thinking at {next} ({attempt}/{RETRIES})"
                         )));
                         continue;
@@ -2143,7 +2142,7 @@ async fn complete(
         }
         attempt += 1;
         let wait = backoff(attempt);
-        io.emit(Event::Notice(format!(
+        io.emit(Event::Warning(format!(
             "{}: {failure}; retrying in {}s ({attempt}/{RETRIES})",
             model.url,
             wait.as_secs_f32().ceil()
@@ -3956,6 +3955,64 @@ for line in sys.stdin:
         assert!(url.starts_with("data:image/png;base64,"), "{last}");
     }
 
+    fn stored(io: &TestIo) -> Vec<Entry> {
+        let mut rows: Vec<Entry> = Vec::new();
+        for e in io.events() {
+            match e {
+                Event::Sent(messages) => rows.push(Entry::Wire { messages }),
+                Event::PicturesRemoved => {
+                    rows.iter_mut().for_each(|r| {
+                        agentbench_core::remove_pictures_from(r);
+                    });
+                }
+                _ => {}
+            }
+        }
+        rows
+    }
+
+    #[tokio::test]
+    async fn a_refused_picture_is_stripped_once_and_the_next_turn_resends_the_same_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("1.png");
+        std::fs::write(&shot, b"PNGDATA").unwrap();
+        let refusal = json!({"error": {"message": "image dimensions exceed max allowed size"}});
+        let (url, asked) = stub(vec![vec![refusal], vec![say("seen")], vec![say("again")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let c = context();
+        let files = [crate::agent::Attached {
+            name: "screen.png".into(),
+            mime: "image/png".into(),
+            path: shot,
+        }];
+        let turn = |prompt, files, history| Turn {
+            prompt,
+            files,
+            cwd: dir.path(),
+            model: None,
+            effort: None,
+            resume: None,
+            history,
+            context: &c,
+        };
+        let first = TestIo::new(Arc::new(FakeApi));
+        native.run(&turn("look", &files, &[]), &first).await.unwrap();
+        let (refused, retry) = (asked.recv().unwrap(), asked.recv().unwrap());
+        assert!(refused.to_string().contains("image_url"));
+        assert!(!retry.to_string().contains("image_url"));
+        let rows = stored(&first);
+        let second = TestIo::new(Arc::new(FakeApi));
+        native.run(&turn("more", &[], &rows), &second).await.unwrap();
+        let next = asked.recv().unwrap();
+        assert!(!next.to_string().contains("image_url"), "the picture came back");
+        assert!(asked.try_recv().is_err(), "one refusal in total, not one per turn");
+        let before = retry["messages"].as_array().unwrap();
+        let now = next["messages"].as_array().unwrap();
+        assert_eq!(now[..before.len()], before[..], "the prefix changed");
+        assert!(first.events().iter().any(|e| matches!(e, Event::Warning(w) if w.contains("refused a picture"))));
+        assert!(!second.events().iter().any(|e| matches!(e, Event::Warning(_))));
+    }
+
     fn wire(entries: &[Entry]) -> Vec<Entry> {
         entries
             .iter()
@@ -4374,7 +4431,7 @@ for line in sys.stdin:
         let events = io.events();
         let notices = events
             .iter()
-            .filter(|e| matches!(e, Event::Notice(n) if n.contains("retrying")))
+            .filter(|e| matches!(e, Event::Warning(n) if n.contains("retrying")))
             .count();
         assert_eq!(notices, 2);
         assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "hello")));
@@ -4411,7 +4468,7 @@ for line in sys.stdin:
         let notices = io
             .events()
             .iter()
-            .filter(|e| matches!(e, Event::Notice(n) if n.contains("retrying")))
+            .filter(|e| matches!(e, Event::Warning(n) if n.contains("retrying")))
             .count();
         assert_eq!(notices, RETRIES as usize);
     }
@@ -4485,7 +4542,7 @@ for line in sys.stdin:
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
         let events = io.events();
         assert!(
-            events.iter().any(|e| matches!(e, Event::Notice(n) if n.contains("went quiet") && n.contains("retrying"))),
+            events.iter().any(|e| matches!(e, Event::Warning(n) if n.contains("went quiet") && n.contains("retrying"))),
             "{events:?}"
         );
         assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "hello")));
@@ -4550,7 +4607,7 @@ for line in sys.stdin:
         run(&native, dir.path(), "go", &io).await.unwrap();
         let events = io.events();
         assert!(
-            events.iter().any(|e| matches!(e, Event::Notice(n) if n.contains("ended early") && n.contains("retrying"))),
+            events.iter().any(|e| matches!(e, Event::Warning(n) if n.contains("ended early") && n.contains("retrying"))),
             "{events:?}"
         );
         assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "built it")));

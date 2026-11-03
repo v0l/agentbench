@@ -181,6 +181,15 @@ impl App {
                     Line::new().note(text.clone()).size(11.0).wrapped(ui);
                 });
             }
+            Entry::Warning { text } => {
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    Line::new().legend("warning").tint(WARN).size(10.0).gap(6.0).note(text.clone())
+                        .tint(WARN)
+                        .size(11.0)
+                        .wrapped(ui);
+                });
+            }
             Entry::Diagnostics { text, .. } => self.tool_row(
                 ui,
                 m.id,

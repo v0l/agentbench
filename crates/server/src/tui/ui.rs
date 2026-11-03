@@ -171,6 +171,9 @@ fn entry_lines(m: &Message, expanded: bool, width: usize) -> Vec<Line<'static>> 
             )
         }
         Entry::Notice { text } => wrap(&piece(text, dim()), width, &[], &[]),
+        Entry::Warning { text } => {
+            wrap(&piece(text, Style::default().fg(Color::Yellow)), width, &[], &[])
+        }
         Entry::File { text, file } => wrap(
             &piece(&format!("file: {} ({}) {text}", file.name, file.size), dim()),
             width,
