@@ -179,12 +179,20 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn agentbench_server::agent::Agent>>)
     Rig { url: addr.to_string(), store, _dir: dir, _rt: rt }
 }
 
+fn gpu_setup() -> eframe::egui_wgpu::WgpuSetup {
+    let mut setup = egui_kittest::wgpu::default_wgpu_setup();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
+        new.instance_descriptor.flags = eframe::egui_wgpu::wgpu::InstanceFlags::empty();
+    }
+    setup
+}
+
 fn harness(url: String) -> Harness<'static, App> {
     harness_at(url, [1280.0, 800.0])
 }
 
 fn harness_at(url: String, size: [f32; 2]) -> Harness<'static, App> {
-    Harness::builder().with_size(size).wgpu().build_eframe(move |cc| {
+    Harness::builder().with_size(size).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
         let mut storage = Mem::default();
         storage.0.insert("url".into(), url);
         storage.0.insert("token".into(), TOKEN.into());
