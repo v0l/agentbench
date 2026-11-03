@@ -381,7 +381,7 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "watch_session",
-            "Be told when a running session finishes. When it does, a message with its status and last reply arrives in this chat as a new turn, so you do not have to poll or block. Sessions you start from the supervisor chat are watched automatically. Does nothing for a session that is not running.",
+            "Be told when a running session finishes. When it does, a message with the session id and its new state (not the reply; read that with read_session) arrives in this chat as a new turn, so you do not have to poll or block. Sessions you start from the supervisor chat are watched automatically. Does nothing for a session that is not running.",
             object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
         ),
         Spec::new(
@@ -422,7 +422,7 @@ fn agentbench_specs() -> Vec<Spec> {
         Spec::new(
             "start_session",
             "Start another agent session in this project and give it work. Give an `issue` to hand it that issue (it gets its own worktree and the issue moves to doing), or a `prompt` for anything else. \
-             It runs on its own while you carry on; use wait_for_session to wait for it and read_session to see what it did. \
+             It runs on its own while you carry on and is watched for you: a message with its id and new state arrives when it finishes, then use read_session for its full reply. \
              Defaults to your own agent and project. Give each session a job that does not overlap another's files.",
             object(
                 json!({
