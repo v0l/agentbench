@@ -52,7 +52,13 @@ fn bad(text: impl Into<String>) -> Failure {
 type Reply<T> = Result<Json<T>, Failure>;
 
 fn constant_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    // Fold the length difference in so the comparison time does not depend on
+    // the token length either.
+    let mut acc = (a.len() ^ b.len()) as u8;
+    for (x, y) in a.iter().zip(b) {
+        acc |= x ^ y;
+    }
+    acc == 0
 }
 
 async fn auth(State(api): State<Api>, headers: HeaderMap, req: Request, next: Next) -> Response {
