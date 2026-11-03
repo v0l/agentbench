@@ -3,7 +3,7 @@
 use super::transcript::{latest_plan, plan_panel};
 use super::*;
 
-const PANEL_MAX_H: f32 = 140.0;
+const PANEL_MAX_H: f32 = 120.0;
 
 impl App {
     pub(super) fn chat(&mut self, ui: &mut Ui) {
@@ -399,9 +399,15 @@ impl App {
             .collect();
         let levels_open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("levels_open"))).unwrap_or(false);
         let mut toggle_levels = false;
+        let open_id = egui::Id::new("autopilot_open");
+        let open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+        let mut toggle_open = false;
         ui.add_space(4.0);
-        rail_block(ui, ETCH, egui::Color32::TRANSPARENT, |ui| {
+        section_panel(ui, |ui| {
             ui.horizontal(|ui| {
+                let arrow = ui.add(Key::new(if open { "v" } else { ">" }).outline(VALUE));
+                arrow.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "expand supervisor panels"));
+                toggle_open = arrow.clicked();
                 Line::new()
                     .legend("autopilot")
                     .size(10.0)
@@ -425,12 +431,14 @@ impl App {
                     toggle_levels = more.clicked();
                 });
             });
+            if open || levels_open {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().legend("default").size(10.0).tint(LEGEND).elided(ui); });
                 new_default = level_slider(ui, "default automation", a.default_level, false, 150.0);
                 Line::new().set(a.default_level.label()).size(11.0).show(ui);
             });
+            }
             if levels_open {
                 egui::ScrollArea::vertical()
                     .id_salt("levels_scroll")
@@ -446,10 +454,17 @@ impl App {
                         }
                     });
             }
-            for line in a.activity.iter().take(4) {
-                Line::new().note(&line.text).size(10.0).elided(ui);
+            if open {
+                for line in a.activity.iter().take(4) {
+                    Line::new().note(&line.text).size(10.0).elided(ui);
+                }
+                ui.add_space(4.0);
             }
         });
+        ui.add_space(4.0);
+        if toggle_open {
+            ui.ctx().data_mut(|d| d.insert_temp(open_id, !open));
+        }
         if toggle_levels {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("levels_open"), !levels_open));
         }
@@ -463,6 +478,10 @@ impl App {
 
     fn triage_panel(&mut self, ui: &mut Ui) {
         let Some(t) = self.overview.as_ref().and_then(|o| o.triage.clone()) else { return };
+        let autopilot_open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("autopilot_open"))).unwrap_or(false);
+        if t.proposals.is_empty() && !t.running && !autopilot_open {
+            return;
+        }
         let names: std::collections::HashMap<_, _> = self
             .overview
             .iter()
@@ -476,12 +495,12 @@ impl App {
         let mut note: Option<(agentbench_core::Id, String)> = None;
         let projects: Vec<Project> = names_projects(self);
         ui.add_space(4.0);
-        rail_block(ui, ETCH, egui::Color32::TRANSPARENT, |ui| {
+        section_panel(ui, |ui| {
             ui.horizontal(|ui| {
                 let status = if t.running {
                     "reading every project".to_string()
                 } else if t.last_status.is_empty() {
-                    "not run yet".to_string()
+                    "cross-project review, not run yet".to_string()
                 } else {
                     t.last_status.clone()
                 };
@@ -498,7 +517,7 @@ impl App {
                     key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "triage run"));
                     run = key.clicked();
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        Line::new().legend("triage").size(10.0).tint(LEGEND).gap(8.0).value(&count).size(11.0).tint(READOUT).gap(8.0).note(&status).size(10.0).elided(ui);
+                        Line::new().legend("triage review").size(10.0).tint(LEGEND).gap(8.0).value(&count).size(11.0).tint(READOUT).gap(8.0).note(&status).size(10.0).elided(ui);
                     });
                 });
             });
