@@ -554,6 +554,12 @@ async fn start_own() -> Result<Live, String> {
         .ok_or("browser needs Chrome, Chromium or Edge, and none was found on the path")?;
     let dir = std::env::temp_dir().join(format!("agentbench-browser-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // Browser profiles keep cookies and history; keep the folder to the user.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
     let result = start(&chrome, &dir).await;
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
@@ -899,6 +905,11 @@ impl Live {
         let dir =
             std::env::temp_dir().join(format!("agentbench-download-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         self.cdp.forget_events();
         self.cdp
             .call(

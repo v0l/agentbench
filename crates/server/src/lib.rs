@@ -27,6 +27,10 @@ pub struct Config {
     pub listen: Option<SocketAddr>,
     #[serde(default)]
     pub web: Option<PathBuf>,
+    /// Browser origins allowed to call the API cross-origin, e.g. "https://agentbench.example".
+    /// Empty (the default) allows same-origin only.
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
     #[serde(default)]
     pub model: agent::native::Model,
     #[serde(default)]
@@ -181,6 +185,7 @@ pub async fn serve_config(
         Some((speech, voice)),
         listen,
         web,
+        config.cors_origins.clone(),
         shutdown,
     )
     .await
@@ -202,7 +207,7 @@ pub async fn serve_with(
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    serve_inner(store, agents, None, None, None, listen, web, shutdown).await
+    serve_inner(store, agents, None, None, None, listen, web, Vec::new(), shutdown).await
 }
 
 /// Serve with these agents, keeping downloaded models in `models` rather than the data folder:
@@ -217,7 +222,8 @@ pub async fn serve_agents(
 ) -> Result<(), String> {
     let speech = speech::Speech::new(models.clone(), &speech_model(&store));
     let voice = voice::Voice::new(models.join("phonon"));
-    serve_inner(store, agents, model, None, Some((speech, voice)), listen, None, shutdown).await
+    serve_inner(store, agents, model, None, Some((speech, voice)), listen, None, Vec::new(), shutdown)
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -229,6 +235,7 @@ async fn serve_inner(
     speech: Option<(speech::Speech, voice::Voice)>,
     listen: SocketAddr,
     web: Option<PathBuf>,
+    cors_origins: Vec<String>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
     let stale = store.reset_running().map_err(|e| e.0)?;
@@ -267,7 +274,24 @@ async fn serve_inner(
     let listener =
         tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;
     tracing::info!("listening on http://{}", listener.local_addr().map_err(|e| e.to_string())?);
-    let mut app = api::router(api);
+    // Hosts the Host header may name: loopback in its common spellings, plus the address we
+    // listen on when it is a specific one. An unspecified address (0.0.0.0) means the operator
+    // exposed the server on purpose, so the check is skipped there.
+    let hosts = if listen.ip().is_unspecified() {
+        Vec::new()
+    } else {
+        let mut hosts = vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "::1".to_string(),
+            "[::1]".to_string(),
+        ];
+        if !listen.ip().is_loopback() {
+            hosts.push(listen.ip().to_string());
+        }
+        hosts
+    };
+    let mut app = api::router_with(api, &hosts, &cors_origins);
     if let Some(dir) = web.filter(|d| d.join("index.html").is_file()) {
         tracing::info!("serving the web app from {}", dir.display());
         app = app.fallback_service(tower_http::services::ServeDir::new(dir));
