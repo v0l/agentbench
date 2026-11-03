@@ -52,7 +52,14 @@ fn bad(text: impl Into<String>) -> Failure {
 type Reply<T> = Result<Json<T>, Failure>;
 
 fn constant_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    // Length-blind: compare up to the longer input so the answer leaks no length.
+    let mut diff = (a.len() ^ b.len()) as u32;
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= (x ^ y) as u32;
+    }
+    diff == 0
 }
 
 async fn auth(State(api): State<Api>, headers: HeaderMap, req: Request, next: Next) -> Response {
@@ -72,6 +79,15 @@ const BODY_MAX: usize =
     agentbench_core::ATTACHMENTS_MAX * agentbench_core::ATTACHMENT_MAX * 4 / 3 + (1 << 20);
 
 pub fn router(api: Api) -> Router {
+    router_with(api, &[], &[])
+}
+
+/// `hosts`: allowed `Host` header values (bare host, port ignored); empty = no check. Stops
+/// DNS-rebinding, where a web page points a name at 127.0.0.1 and reads back answers.
+/// `cors_origins`: browser origins allowed to call the API cross-origin. Empty = same-origin
+/// only: no `Access-Control-Allow-Origin` is sent, so browsers block other origins while
+/// command-line clients keep working.
+pub fn router_with(api: Api, hosts: &[String], cors_origins: &[String]) -> Router {
     let protected = Router::new()
         .route("/api/overview", get(overview))
         .route("/api/changes", get(changes))
@@ -122,11 +138,58 @@ pub fn router(api: Api) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
         .layer(tower_http::compression::CompressionLayer::new().gzip(true))
         .layer(middleware::from_fn_with_state(api.clone(), auth));
+    let cors = if cors_origins.is_empty() {
+        // Deliberately no origins allowed: tower-http then sends no Access-Control-Allow-Origin,
+        // so a browser on any other origin cannot read answers. curl and the local web app,
+        // which are same-origin or not a browser, are unaffected.
+        tower_http::cors::CorsLayer::new()
+    } else {
+        let origins: Vec<axum::http::HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
+        tower_http::cors::CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::PATCH,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+            ])
+    };
     Router::new()
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
         .merge(protected)
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(cors)
+        .layer(middleware::from_fn_with_state(hosts.to_vec(), host_check))
         .with_state(api)
+}
+
+/// Reject requests whose `Host` header is not one of the expected names.
+/// An empty list skips the check.
+async fn host_check(
+    hosts: axum::extract::State<Vec<String>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !hosts.is_empty() {
+        if let Some(host) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) {
+            let bare = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+            let bare = bare.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+            let full = host.to_ascii_lowercase();
+            let ok = hosts.iter().any(|a| {
+                let a = a.to_ascii_lowercase();
+                a == bare || a == full
+            });
+            if !ok {
+                return (StatusCode::FORBIDDEN, "wrong host").into_response();
+            }
+        }
+    }
+    next.run(req).await
 }
 
 /// OpenAI's speech to text, answered with Whisper on this machine. Takes a multipart form with a
@@ -987,6 +1050,9 @@ async fn delete_session(
     api.runner.interrupt(id);
     api.runner.end(id);
     api.runner.store().delete_session(id)?;
+    // The materialised attachment folder for this session is no longer needed.
+    let dir = std::env::temp_dir().join("agentbench").join(id.to_string());
+    let _ = std::fs::remove_dir_all(dir);
     changed(&api);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1079,6 +1145,8 @@ async fn attachment(
             (axum::http::header::CONTENT_TYPE, a.mime),
             (axum::http::header::CONTENT_DISPOSITION, disposition),
             (axum::http::header::CACHE_CONTROL, "private, max-age=31536000, immutable".into()),
+            // Never let the browser sniff a served attachment into executing.
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
         ],
         data,
     )

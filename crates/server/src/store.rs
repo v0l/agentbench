@@ -443,8 +443,21 @@ impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| StoreError(e.to_string()))?;
+            // The database holds the bearer token and model API keys; keep it and its
+            // folder private to the user, whatever the process umask is.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
         }
-        Store::setup(Connection::open(path)?)
+        let conn = Connection::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        Store::setup(conn)
     }
 
     pub fn memory() -> Result<Store> {
