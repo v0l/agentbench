@@ -164,6 +164,7 @@ pub fn ensure_home(store: &Store, dir: &Path) -> Result<Project, StoreError> {
     if let Some(p) = store.home_project()? {
         return Ok(p);
     }
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     store.add_home("chats", &dir.to_string_lossy())
 }
 
@@ -337,7 +338,7 @@ mod tests {
         assert_eq!(home.name, "chats");
         assert_eq!(ensure_home(&s, dir.path()).unwrap().id, home.id, "made once");
         let tree = s.main_worktree(home.id).unwrap();
-        assert_eq!(Path::new(&tree.path), dir.path());
+        assert_eq!(Path::new(&tree.path), dir.path().canonicalize().unwrap());
 
         assert!(!sync(&s, home.id, None).unwrap(), "never scanned for worktrees");
         assert_eq!(s.worktrees(Some(home.id)).unwrap().len(), 1);

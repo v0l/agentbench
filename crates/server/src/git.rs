@@ -83,7 +83,14 @@ pub fn init(dir: &Path) -> Result<(), String> {
     let commit = ["commit", "-q", "--allow-empty", "-m", "Initial commit"];
     if git(dir, &commit).is_err() {
         // No git identity configured on this machine.
-        let mut args = vec!["-c", "user.name=agentbench", "-c", "user.email=agentbench@localhost"];
+        let mut args = vec![
+            "-c",
+            "user.name=agentbench",
+            "-c",
+            "user.email=agentbench@localhost",
+            "-c",
+            "commit.gpgsign=false",
+        ];
         args.extend(commit);
         git(dir, &args)?;
     }
@@ -197,11 +204,14 @@ pub mod testing {
         std::fs::create_dir_all(dir).unwrap();
         for args in [
             vec!["init", "-q", "-b", "main"],
+            vec!["config", "commit.gpgsign", "false"],
             vec![
                 "-c",
                 "user.name=t",
                 "-c",
                 "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
                 "-q",
                 "--allow-empty",

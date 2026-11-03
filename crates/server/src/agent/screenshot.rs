@@ -119,6 +119,7 @@ async fn shoot(
     stop: &tokio_util::sync::CancellationToken,
 ) -> Result<PathBuf, String> {
     let png = dir.join("shot.png");
+    let log = dir.join("browser.log");
     let mut cmd = Command::new(browser);
     cmd.arg("--headless=new")
         .arg("--disable-gpu")
@@ -134,20 +135,35 @@ async fn shoot(
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?)
         .kill_on_drop(true);
-    let child = cmd.spawn().map_err(|e| format!("{}: {e}", browser.display()))?;
-    let waited = tokio::select! {
-        r = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output()) => r,
-        _ = stop.cancelled() => return Err("stopped".into()),
-    };
-    let out = waited
-        .map_err(|_| "the browser took over 60s to load the page".to_string())?
-        .map_err(|e| e.to_string())?;
+    let mut child = cmd.spawn().map_err(|e| format!("{}: {e}", browser.display()))?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut written_at = None;
+    loop {
+        tokio::select! {
+            r = child.wait() => {
+                r.map_err(|e| e.to_string())?;
+                break;
+            }
+            _ = stop.cancelled() => return Err("stopped".into()),
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        if png.is_file() {
+            let since = *written_at.get_or_insert_with(tokio::time::Instant::now);
+            if since.elapsed() >= Duration::from_secs(1) {
+                let _ = child.kill().await;
+                break;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("the browser took over 60s to load the page".into());
+        }
+    }
     if png.is_file() {
         return Ok(png);
     }
-    let said = String::from_utf8_lossy(&out.stderr);
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
     let said = said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no output");
     Err(format!("the browser took no picture of {url}: {}", said.trim()))
 }
