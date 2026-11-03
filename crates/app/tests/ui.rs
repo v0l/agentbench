@@ -2383,6 +2383,27 @@ fn the_supervisor_chat_shows_the_autopilot_and_pauses_it_with_one_click() {
     until(&mut h, "autopilot paused", |h| h.state().autopilot().is_some_and(|a| !a.enabled));
 }
 
+#[test]
+fn the_autopilot_panel_is_collapsed_by_default_and_hides_an_empty_triage() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("supervisor").click();
+    until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+    h.run_steps(3);
+    assert!(h.query_by_label("autopilot toggle").is_some(), "the one-line summary shows");
+    assert!(h.query_by_label("default automation").is_none(), "details are collapsed");
+    assert!(h.query_by_label("triage run").is_none(), "an empty triage is hidden");
+    h.get_by_label("expand supervisor panels").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("default automation").is_some(), "details expand on click");
+    assert!(h.query_by_label("triage run").is_some(), "triage shows when expanded");
+    h.get_by_label("expand supervisor panels").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("default automation").is_none(), "collapses again");
+    assert!(h.query_by_label("triage run").is_none());
+}
+
 fn crowd_the_supervisor(rig: &Rig) {
     for i in 0..23 {
         let dir = rig._dir.path().join(format!("crowd-{i}"));
