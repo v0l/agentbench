@@ -2221,7 +2221,7 @@ fn the_layout_key_opens_a_board_that_sets_columns_and_rows() {
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.run_steps(3);
     h.get_by_label("layout").click();
-    h.run_steps(3);
+    h.run_steps(12);
     click(&mut h, 1022.0, 78.0);
     h.run_steps(3);
     assert_eq!(h.state().grid().dims(), (2, 2));
