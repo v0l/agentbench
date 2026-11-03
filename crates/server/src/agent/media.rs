@@ -327,6 +327,11 @@ impl Scratch {
     fn new() -> Result<Scratch, String> {
         let dir = std::env::temp_dir().join(format!("agentbench-media-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         Ok(Scratch(dir))
     }
 

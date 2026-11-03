@@ -11,6 +11,10 @@ pub struct Cli {
     pub home: Option<PathBuf>,
     #[arg(long)]
     pub listen: Option<SocketAddr>,
+    /// Allow a non-loopback listen address; the bearer token and the whole chat then leave
+    /// this machine in plaintext.
+    #[arg(long)]
+    pub expose: bool,
     #[arg(long)]
     pub web: Option<PathBuf>,
     #[command(subcommand)]
@@ -105,6 +109,13 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                 .listen
                 .or(config.listen)
                 .unwrap_or_else(|| DEFAULT_LISTEN.parse().expect("default listen address"));
+            if !cli.expose && !listen.ip().is_loopback() {
+                return Err(format!(
+                    "refusing to listen on {listen}: not a loopback address, so the bearer token \
+                     and the whole chat would leave this machine in plaintext; \
+                     pass --expose to accept that"
+                ));
+            }
             let web = cli.web.or(config.web.clone());
             serve_config(store, &config, listen, web, async {
                 let _ = tokio::signal::ctrl_c().await;
