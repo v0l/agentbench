@@ -421,13 +421,29 @@ impl Runner {
     fn materialise(&self, session: SessionId, attachments: &[Attachment]) -> Vec<Attached> {
         let dir = std::env::temp_dir().join("agentbench").join(session.to_string());
         let _ = std::fs::create_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            // Attachments can carry anything a user dropped in; keep the
+            // folder to its owner instead of the umask default.
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
         attachments
             .iter()
             .filter_map(|a| {
                 let path = dir.join(a.file_name());
                 if !path.is_file() {
                     let (_, data) = self.store.attachment(a.id).ok()?;
-                    std::fs::write(&path, data).ok()?;
+                    if std::fs::write(&path, data).is_ok() {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(
+                                &path,
+                                std::fs::Permissions::from_mode(0o600),
+                            );
+                        }
+                    }
                 }
                 Some(Attached { name: a.name.clone(), mime: a.mime.clone(), path })
             })
