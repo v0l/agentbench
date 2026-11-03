@@ -607,17 +607,8 @@ impl Runner {
             return;
         }
         let Ok(done) = self.store.session(finished) else { return };
-        let last = agentbench_core::shown(&self.store.messages(finished, 0).unwrap_or_default())
-            .into_iter()
-            .rev()
-            .find_map(|m| match m.entry {
-                Entry::Assistant { text } => Some(text),
-                _ => None,
-            })
-            .unwrap_or_default();
-        let last: String = last.trim().chars().take(1500).collect();
         let text = format!(
-            "Watched session {finished} (\"{}\", project {}) finished with status {}.\nIts last reply:\n{last}",
+            "Watched session {finished} (\"{}\", project {}) changed state to {}. Read its reply with read_session.",
             done.title,
             done.project_id,
             done.status.as_str(),
@@ -2358,7 +2349,7 @@ mod tests {
         wait_idle(&runner, watched.id).await;
         for _ in 0..200 {
             if runner.store().messages(watcher.id, 0).unwrap().iter().any(
-                |m| matches!(&m.entry, Entry::User { text, .. } if text.contains("finished with status idle")),
+                |m| matches!(&m.entry, Entry::User { text, .. } if text.contains("changed state to idle")),
             ) {
                 break;
             }
@@ -2376,7 +2367,8 @@ mod tests {
             .collect();
         assert_eq!(told.len(), 1, "{told:?}");
         assert!(told[0].contains(&format!("Watched session {}", watched.id)), "{told:?}");
-        assert!(told[0].contains("all done"), "{told:?}");
+        assert!(!told[0].contains("all done"), "{told:?}");
+        assert!(told[0].contains("changed state to idle"), "{told:?}");
         assert!(runner.store().take_watchers(watched.id).unwrap().is_empty(), "fires once");
     }
 
