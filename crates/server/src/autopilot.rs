@@ -25,6 +25,8 @@ pub const DEFAULT_CAP: u32 = 4;
 pub const DEFAULT_PROJECT_CAP: u32 = 2;
 pub const DEFAULT_STUCK_MINUTES: u64 = 15;
 pub const DEFAULT_MAX_NUDGES: u32 = 2;
+const GRACE_MINUTES: &str = "autopilot_grace_minutes";
+pub const DEFAULT_GRACE_MINUTES: u64 = 30;
 const MAX_REWORKS: u32 = 3;
 const MAX_STUCK_RESTARTS: u32 = 2;
 const TICK_EVERY: Duration = Duration::from_secs(30);
@@ -376,6 +378,15 @@ pub fn judge(reply: &str) -> Verdict {
         return Verdict::Asked(last.trim().to_string());
     }
     let lower = reply.to_lowercase();
+    let done_line = lower.lines().rev().find(|l| l.contains("done #") && l.contains("tests:"));
+    if let Some(l) = done_line {
+        if l.contains("tests:pass") {
+            return Verdict::Concluded { green: true };
+        }
+        if l.contains("tests:fail") {
+            return Verdict::Concluded { green: false };
+        }
+    }
     let failed = lower.contains("tests:fail")
         || lower.contains("tests fail")
         || lower.contains("test failed")
@@ -544,7 +555,108 @@ impl Autopilot {
         for w in &workers {
             self.reconcile(w, now);
         }
+        self.sweep(now);
         self.start_more();
+    }
+
+    fn sweep(&self, now: i64) {
+        let store = self.store();
+        if !flag(store, ENABLED) {
+            return;
+        }
+        let supervisor = store.supervisor_project().ok().flatten().map(|p| p.id);
+        let tracked: HashSet<_> = store.workers().unwrap_or_default().iter().map(|w| w.session).collect();
+        let sessions = store.sessions().unwrap_or_default();
+        for s in &sessions {
+            if Some(s.project_id) == supervisor
+                || tracked.contains(&s.id)
+                || self.runner.is_running(s.id)
+                || s.status == SessionStatus::Waiting
+                || level(store, s.project_id) < Automation::Ship
+            {
+                continue;
+            }
+            let reason = match s.issue_id {
+                Some(i) => match store.issue(i) {
+                    Ok(issue) if issue.state == IssueState::Done && self.branch_is_merged(s) => {
+                        format!("#{i} is done and its branch is merged")
+                    }
+                    _ => continue,
+                },
+                None => {
+                    let grace = number(store, GRACE_MINUTES, DEFAULT_GRACE_MINUTES) as i64 * 60_000;
+                    let finished = matches!(s.status, SessionStatus::Idle)
+                        && now - s.updated_at >= grace
+                        && matches!(judge(&last_reply(store, s.id)), Verdict::Concluded { .. });
+                    if !finished || !self.branch_is_merged_or_none(s) {
+                        continue;
+                    }
+                    "it finished with a conclusion and nothing is pending".to_string()
+                }
+            };
+            self.close_finished(s, &reason);
+        }
+    }
+
+    fn branch_is_merged(&self, s: &Session) -> bool {
+        let store = self.store();
+        let (Ok(project), Ok(tree)) = (store.project(s.project_id), store.worktree(s.worktree_id)) else {
+            return false;
+        };
+        match tree.branch.as_deref().filter(|_| !tree.main) {
+            Some(b) => crate::git::is_merged(Path::new(&project.path), b),
+            None => false,
+        }
+    }
+
+    fn branch_is_merged_or_none(&self, s: &Session) -> bool {
+        match self.store().worktree(s.worktree_id) {
+            Ok(tree) if tree.main || tree.branch.is_none() => true,
+            Ok(_) => self.branch_is_merged(s),
+            Err(_) => false,
+        }
+    }
+
+    fn close_finished(&self, s: &Session, reason: &str) {
+        let store = self.store();
+        let Ok(tree) = store.worktree(s.worktree_id) else { return };
+        let others_busy = store
+            .sessions()
+            .unwrap_or_default()
+            .iter()
+            .any(|o| o.id != s.id && o.worktree_id == s.worktree_id && self.runner.is_running(o.id));
+        if others_busy {
+            return;
+        }
+        let project = store.project(s.project_id).ok();
+        let removal = if tree.main {
+            Ok(())
+        } else {
+            crate::projects::remove_worktree(store, tree.id, false)
+        };
+        if let Err(e) = removal {
+            self.log_once(
+                Some(s.project_id),
+                s.issue_id,
+                &format!("could not clean up {}: {}", tree.label(), clip(&e.0, 160)),
+            );
+            return;
+        }
+        self.runner.end(s.id);
+        let _ = store.delete_session(s.id);
+        if let (Some(b), Some(p), false) = (tree.branch.as_deref(), &project, tree.main) {
+            let _ = crate::git::delete_branch(Path::new(&p.path), b);
+        }
+        self.log(
+            Some(s.project_id),
+            s.issue_id,
+            &format!(
+                "closed session {} ({}){}",
+                s.id,
+                reason,
+                if tree.main { String::new() } else { format!(" and removed worktree {}", tree.label()) }
+            ),
+        );
     }
 
     fn reconcile(&self, w: &Worker, now: i64) {
@@ -1316,6 +1428,99 @@ mod tests {
         settle(r).await;
         commit_in(&tree.path, "feature.txt");
         (a, w.session)
+    }
+
+    #[test]
+    fn a_done_line_with_passing_tests_is_green_even_when_the_prose_mentions_failing() {
+        let reply = "Wrote a failing test first, then fixed it.\n\nDONE #168 tests:pass all suites green";
+        assert_eq!(judge(reply), Verdict::Concluded { green: true });
+        assert_eq!(judge("tests passed before\nDONE #9 tests:fail one left"), Verdict::Concluded { green: false });
+    }
+
+    #[tokio::test]
+    async fn a_done_issue_with_a_merged_branch_loses_its_session_and_worktree() {
+        let r = rig(DONE);
+        let (a, sid) = worked_on(&r).await;
+        r.ap.tick();
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        assert!(std::path::Path::new(&tree.path).exists());
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        crate::git::merge_branch(&r.repo, tree.branch.as_deref().unwrap()).unwrap();
+        r.ap.set_state(a, IssueState::Done);
+        r.ap.tick();
+        assert!(r.store.session(sid).is_err(), "session closed");
+        assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
+        assert!(r.store.autopilot_log(50).unwrap().iter().any(|l| l.text.contains("closed session")));
+    }
+
+    #[tokio::test]
+    async fn a_session_waiting_on_the_user_is_never_closed() {
+        let r = rig(DONE);
+        let (a, sid) = worked_on(&r).await;
+        r.ap.tick();
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        crate::git::merge_branch(&r.repo, tree.branch.as_deref().unwrap()).unwrap();
+        r.ap.set_state(a, IssueState::Done);
+        r.store.set_status(sid, SessionStatus::Waiting).unwrap();
+        r.ap.tick();
+        assert!(r.store.session(sid).is_ok(), "still open");
+        assert!(std::path::Path::new(&tree.path).exists());
+    }
+
+    #[tokio::test]
+    async fn an_unmerged_branch_keeps_its_session_even_when_the_issue_is_done() {
+        let r = rig(DONE);
+        let (a, sid) = worked_on(&r).await;
+        r.ap.tick();
+        set_level(&r.store, r.project, Some(Automation::Autowork));
+        r.ap.set_state(a, IssueState::Done);
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        r.ap.tick();
+        assert!(r.store.session(sid).is_ok());
+    }
+
+    #[tokio::test]
+    async fn below_ship_nothing_is_closed() {
+        let r = rig(DONE);
+        let (a, sid) = worked_on(&r).await;
+        r.ap.tick();
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        crate::git::merge_branch(&r.repo, tree.branch.as_deref().unwrap()).unwrap();
+        r.ap.set_state(a, IssueState::Done);
+        r.ap.tick();
+        assert!(r.store.session(sid).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_finished_session_with_no_issue_is_closed_after_the_grace_period() {
+        let r = rig(DONE);
+        on(&r);
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        let tree = r.store.main_worktree(r.project).unwrap();
+        let s = r
+            .ap
+            .runner
+            .start_session(NewSession {
+                project_id: r.project,
+                agent: "echo".into(),
+                place: Place::Existing { worktree_id: tree.id },
+                prompt: Some("go".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        for _ in 0..200 {
+            if !r.ap.runner.is_running(s.id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let at = r.store.session(s.id).unwrap().updated_at;
+        r.ap.tick_at(at + 60_000);
+        assert!(r.store.session(s.id).is_ok(), "within the grace period");
+        r.ap.tick_at(at + 31 * 60_000);
+        assert!(r.store.session(s.id).is_err(), "closed after it");
     }
 
     #[tokio::test]
