@@ -282,6 +282,7 @@ fn changed(api: &Api) {
 
 async fn overview(State(api): State<Api>) -> Reply<Overview> {
     let store = api.runner.store();
+    let cursor = store.cursor()?;
     let hidden = store.supervisor_project()?.map(|p| p.id);
     Ok(Json(Overview {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -296,7 +297,7 @@ async fn overview(State(api): State<Api>) -> Reply<Overview> {
         sessions: api.runner.with_queued(store.sessions()?),
         supervisor: api.runner.supervisor_session().map(|s| s.id),
         autopilot: Some(crate::autopilot::state(store)),
-        cursor: store.cursor()?,
+        cursor,
     }))
 }
 
