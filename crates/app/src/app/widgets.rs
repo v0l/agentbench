@@ -160,6 +160,18 @@ pub(super) fn rail_block(
     );
 }
 
+pub(super) fn section_panel(ui: &mut Ui, body: impl FnOnce(&mut Ui)) {
+    egui::Frame::NONE
+        .fill(CHASSIS)
+        .stroke(Stroke::new(1.0, ETCH))
+        .corner_radius(3)
+        .inner_margin(Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui);
+        });
+}
+
 pub(super) fn code_block(
     ui: &mut Ui,
     text: &str,
