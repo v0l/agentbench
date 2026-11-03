@@ -523,6 +523,7 @@ struct Transcript {
     rebuilds: u32,
     anchor: Option<f32>,
     content_h: f32,
+    view_h: f32,
     shift: Option<f32>,
     /// How tall each message was when last laid out, so the ones scrolled out of sight are not
     /// laid out again, only given their room. Thrown away when the width or the look changes.
@@ -678,6 +679,7 @@ pub struct App {
     /// Whether a phone tells you in the background when a chat needs you or finishes.
     alerts: bool,
     issues_first: bool,
+    triage_open: bool,
     detail: Option<Id>,
     /// Put the cursor back in this tile's composer: set when speech lands in its draft.
     refocus: Option<Tile>,
@@ -822,6 +824,8 @@ impl App {
             alerts: storage.and_then(|s| s.get_string("alerts")).as_deref() != Some("false"),
             issues_first: storage.and_then(|s| s.get_string("issues_first")).as_deref()
                 == Some("true"),
+            triage_open: storage.and_then(|s| s.get_string("triage_open")).as_deref()
+                == Some("true"),
             detail: None,
         };
         if !app.remote {
@@ -844,6 +848,7 @@ impl App {
         storage.set_string("thinking", self.thinking.to_string());
         storage.set_string("alerts", self.alerts.to_string());
         storage.set_string("issues_first", self.issues_first.to_string());
+        storage.set_string("triage_open", self.triage_open.to_string());
         self.speech.save(storage);
         storage.set_string("grid", self.grid.key());
         let tiles: Vec<String> =
@@ -1325,6 +1330,14 @@ impl App {
 
     pub fn transcript_len(&self, session: SessionId) -> usize {
         self.transcripts.get(&session).map_or(0, |t| t.messages.len())
+    }
+
+    pub fn transcript_view_height(&self, session: SessionId) -> f32 {
+        self.transcripts.get(&session).map_or(0.0, |t| t.view_h)
+    }
+
+    pub fn triage_open(&self) -> bool {
+        self.triage_open
     }
 
     pub fn overview(&self) -> Option<&Overview> {

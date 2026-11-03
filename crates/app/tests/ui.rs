@@ -2383,6 +2383,73 @@ fn the_supervisor_chat_shows_the_autopilot_and_pauses_it_with_one_click() {
     until(&mut h, "autopilot paused", |h| h.state().autopilot().is_some_and(|a| !a.enabled));
 }
 
+fn crowd_the_supervisor(rig: &Rig) {
+    for i in 0..23 {
+        let dir = rig._dir.path().join(format!("crowd-{i}"));
+        repo(&dir);
+        agentbench_server::projects::add(&rig.store, &dir, None, false).unwrap();
+    }
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    for i in 0..5 {
+        let proposal = agentbench_core::Proposal {
+            id: 0,
+            kind: agentbench_core::ProposalKind::Stale,
+            summary: format!("Close stale issue number {i}"),
+            issues: vec![i as i64],
+            sessions: vec![],
+            projects: vec![project.id],
+            changes: vec![],
+            state: agentbench_core::ProposalState::Pending,
+            created_at: 0,
+        };
+        rig.store.add_proposal(&format!("crowd:{i}"), &proposal).unwrap();
+    }
+}
+
+fn open_crowded_supervisor(h: &mut Harness<'_, App>) -> agentbench_core::SessionId {
+    until(h, "the overview", |h| h.state().overview().is_some_and(|o| o.projects.len() >= 24));
+    h.get_by_label("supervisor").click();
+    until(h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+    until(h, "the triage", |h| {
+        h.state().overview().and_then(|o| o.triage.as_ref()).is_some_and(|t| t.proposals.len() == 5)
+    });
+    h.run_steps(5);
+    h.state().supervisor_chat().unwrap()
+}
+
+#[test]
+fn the_supervisor_transcript_keeps_half_the_window_with_24_projects_and_proposals() {
+    let rig = rig();
+    crowd_the_supervisor(&rig);
+    let mut h = harness(rig.url.clone());
+    let sid = open_crowded_supervisor(&mut h);
+    shot(&mut h, "supervisor-crowded");
+    assert!(!h.state().triage_open(), "collapsed by default");
+    let view = h.state().transcript_view_height(sid);
+    assert!(view >= 400.0, "transcript is {view}px of an 800px window");
+    assert!(h.query_by_label("triage run").is_some(), "run now stays on the one line");
+    assert!(h.query_by_label_contains("triage details, 5 proposals").is_some(), "the count shows");
+}
+
+#[test]
+fn an_expanded_triage_panel_scrolls_and_leaves_the_transcript_visible() {
+    let rig = rig();
+    crowd_the_supervisor(&rig);
+    let mut h = harness(rig.url.clone());
+    let sid = open_crowded_supervisor(&mut h);
+    h.get_by_label_contains("triage details").click();
+    h.run_steps(5);
+    assert!(h.state().triage_open());
+    shot(&mut h, "supervisor-crowded-open");
+    let view = h.state().transcript_view_height(sid);
+    assert!(view >= 250.0, "transcript is {view}px with the panel open");
+    h.get_by_label("automation levels").click();
+    h.run_steps(5);
+    let view = h.state().transcript_view_height(sid);
+    assert!(view >= 150.0, "transcript is {view}px with both open");
+    assert!(h.query_by_label("message").is_some() || view > 0.0);
+}
+
 #[test]
 fn a_logo_in_the_repo_becomes_the_projects_icon() {
     let rig = rig();

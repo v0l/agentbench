@@ -3,6 +3,8 @@
 use super::transcript::{latest_plan, plan_panel};
 use super::*;
 
+const PANEL_MAX_H: f32 = 140.0;
+
 impl App {
     pub(super) fn chat(&mut self, ui: &mut Ui) {
         if self.grid_now().slots() == 1 {
@@ -430,13 +432,19 @@ impl App {
                 Line::new().set(a.default_level.label()).size(11.0).show(ui);
             });
             if levels_open {
-                for p in &projects {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().value(&p.name).size(11.0).elided(ui); });
-                        self.level_row(ui, p, 150.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("levels_scroll")
+                    .max_height(PANEL_MAX_H)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for p in &projects {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().value(&p.name).size(11.0).elided(ui); });
+                                self.level_row(ui, p, 150.0);
+                            });
+                        }
                     });
-                }
             }
             for line in a.activity.iter().take(4) {
                 Line::new().note(&line.text).size(10.0).elided(ui);
@@ -462,6 +470,8 @@ impl App {
             .map(|p| (p.id, p.name.clone()))
             .collect();
         let mut run = false;
+        let mut toggle = false;
+        let open = self.triage_open;
         let mut decide: Option<(agentbench_core::Id, bool)> = None;
         let mut note: Option<(agentbench_core::Id, String)> = None;
         let projects: Vec<Project> = names_projects(self);
@@ -475,13 +485,29 @@ impl App {
                 } else {
                     t.last_status.clone()
                 };
-                Line::new().legend("triage").size(10.0).tint(LEGEND).gap(8.0).value(&status).size(11.0).tint(VALUE).elided(ui);
+                let count = match t.proposals.len() {
+                    0 => "no proposals".to_string(),
+                    1 => "1 proposal".to_string(),
+                    n => format!("{n} proposals"),
+                };
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let more = ui.add(Key::new(if open { "hide" } else { "details" }).outline(VALUE));
+                    more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("triage details, {count}")));
+                    toggle = more.clicked();
                     let key = ui.add_enabled(!t.running, Key::new("run now").outline(VALUE));
                     key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "triage run"));
                     run = key.clicked();
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        Line::new().legend("triage").size(10.0).tint(LEGEND).gap(8.0).value(&count).size(11.0).tint(READOUT).gap(8.0).note(&status).size(10.0).elided(ui);
+                    });
                 });
             });
+            if open {
+            egui::ScrollArea::vertical()
+                .id_salt("triage_scroll")
+                .max_height(PANEL_MAX_H)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
             for p in &projects {
                 let id = egui::Id::new(("triage_note", p.id));
                 let mut text = ui.ctx().data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| {
@@ -527,7 +553,12 @@ impl App {
                     });
                 });
             }
+                });
+            }
         });
+        if toggle {
+            self.triage_open = !self.triage_open;
+        }
         if let Some(c) = &mut self.client {
             if run {
                 c.triage_run();
@@ -682,6 +713,7 @@ impl App {
         }
         if let Some(t) = self.transcripts.get_mut(&s.id) {
             t.content_h = scroll.content_size.y;
+            t.view_h = scroll.inner_rect.height();
         }
         let at_bottom =
             scroll.state.offset().y + scroll.inner_rect.height() >= scroll.content_size.y - 4.0;
