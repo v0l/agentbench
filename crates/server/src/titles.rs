@@ -246,7 +246,7 @@ pub fn transcript(entries: &[Entry]) -> String {
     if replied { out.trim_end().to_string() } else { String::new() }
 }
 
-async fn ask(
+pub(crate) async fn ask(
     target: &Target,
     system: &str,
     user: &str,
@@ -299,7 +299,7 @@ async fn ask(
 }
 
 /// An answer without the reasoning block some models put in front of it.
-fn without_thinking(raw: &str) -> String {
+pub(crate) fn without_thinking(raw: &str) -> String {
     let mut text = raw.to_string();
     while let Some(start) = text.find("<think>") {
         match text[start..].find("</think>") {

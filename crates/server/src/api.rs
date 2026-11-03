@@ -81,6 +81,10 @@ pub fn router(api: Api) -> Router {
         .route("/api/settings/cross-project", get(get_cross).delete(clear_cross))
         .route("/api/settings/autorun", get(get_autorun).put(put_autorun))
         .route("/api/autopilot", get(get_autopilot).patch(patch_autopilot))
+        .route("/api/triage", get(get_triage).patch(patch_triage))
+        .route("/api/triage/run", post(run_triage))
+        .route("/api/triage/{id}/accept", post(accept_proposal))
+        .route("/api/triage/{id}/reject", post(reject_proposal))
         .route("/api/settings/title", get(get_title).put(put_title))
         .route("/api/settings/title/models", post(list_title_models))
         .route("/api/agents/{name}/models", get(agent_models))
@@ -297,6 +301,7 @@ async fn overview(State(api): State<Api>) -> Reply<Overview> {
         sessions: api.runner.with_queued(store.sessions()?),
         supervisor: api.runner.supervisor_session().map(|s| s.id),
         autopilot: Some(crate::autopilot::state(store)),
+        triage: Some(crate::triage::state(store)),
         cursor,
     }))
 }
@@ -679,6 +684,74 @@ async fn patch_autopilot(
     let state = crate::autopilot::apply(api.runner.store(), &patch)?;
     changed(&api);
     Ok(Json(state))
+}
+
+async fn get_triage(State(api): State<Api>) -> Reply<agentbench_core::TriageState> {
+    Ok(Json(crate::triage::state(api.runner.store())))
+}
+
+async fn patch_triage(
+    State(api): State<Api>,
+    Json(patch): Json<agentbench_core::TriagePatch>,
+) -> Reply<agentbench_core::TriageState> {
+    let state = crate::triage::apply(api.runner.store(), &patch)?;
+    changed(&api);
+    Ok(Json(state))
+}
+
+async fn run_triage(State(api): State<Api>) -> Reply<agentbench_core::TriageState> {
+    if api.runner.titles().and_then(|t| t.target()).is_none() {
+        return Err(bad("no model to triage with: set one under settings"));
+    }
+    if !crate::triage::start(api.runner.clone()) {
+        return Err(bad("a triage run is already going"));
+    }
+    Ok(Json(crate::triage::state(api.runner.store())))
+}
+
+async fn accept_proposal(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+) -> Reply<agentbench_core::Proposal> {
+    let store = api.runner.store();
+    let proposal = store.proposal(id)?;
+    if proposal.state != agentbench_core::ProposalState::Pending {
+        return Err(bad("that proposal was already decided"));
+    }
+    for change in &proposal.changes {
+        match change {
+            agentbench_core::Change::Update { issue_id, patch } => {
+                let before = store.issue(*issue_id)?;
+                let mut issue = store.update_issue(*issue_id, patch)?;
+                if issue.state != before.state {
+                    issue = moved(&api, issue).await?;
+                }
+                let _ = issue;
+            }
+            agentbench_core::Change::Comment { issue_id, body } => {
+                store.add_comment(
+                    *issue_id,
+                    &NewComment { author: Some("triage".into()), body: body.clone() },
+                )?;
+            }
+            agentbench_core::Change::Create { issue } => {
+                store.add_issue(issue)?;
+            }
+        }
+    }
+    let decided = store.decide_proposal(id, agentbench_core::ProposalState::Accepted)?;
+    changed(&api);
+    Ok(Json(decided))
+}
+
+async fn reject_proposal(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+) -> Reply<agentbench_core::Proposal> {
+    let decided =
+        api.runner.store().decide_proposal(id, agentbench_core::ProposalState::Rejected)?;
+    changed(&api);
+    Ok(Json(decided))
 }
 
 const AUTORUN_AGENT: &str = "native";
@@ -1538,6 +1611,58 @@ mod tests {
         );
         let (s, _) = call(&f.app, "POST", "/api/projects", Some(json!({"path": "/tmp"})), T).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "not a repo");
+    }
+
+    #[tokio::test]
+    async fn accepting_a_proposal_applies_it_and_rejecting_keeps_it_out() {
+        use agentbench_core::{Change, IssuePatch, Proposal, ProposalKind, ProposalState};
+        let f = fixture();
+        let store = f.api.runner.store();
+        let p = store.add_project("other", "/tmp/other", Some("main"), None).unwrap();
+        let mk = |project_id| {
+            store
+                .add_issue(&agentbench_core::NewIssue {
+                    project_id,
+                    title: "dup".into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .id
+        };
+        let (a, b) = (mk(p.id), mk(p.id));
+        let proposal = |change| Proposal {
+            id: 0,
+            kind: ProposalKind::Labels,
+            summary: "s".into(),
+            issues: vec![a],
+            sessions: vec![],
+            projects: vec![p.id],
+            changes: vec![change],
+            state: ProposalState::Pending,
+            created_at: 0,
+        };
+        let patch = IssuePatch { priority: Some(7), labels: Some(vec!["bug".into()]), ..Default::default() };
+        let yes = store.add_proposal("x:1", &proposal(Change::Update { issue_id: a, patch })).unwrap();
+        let no = store
+            .add_proposal("x:2", &proposal(Change::Comment { issue_id: b, body: "nope".into() }))
+            .unwrap();
+        let (st, list) = call(&f.app, "GET", "/api/triage", None, T).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(list["proposals"].as_array().unwrap().len(), 2);
+
+        let (st, _) = call(&f.app, "POST", &format!("/api/triage/{yes}/accept"), None, T).await;
+        assert_eq!(st, StatusCode::OK);
+        let issue = store.issue(a).unwrap();
+        assert_eq!((issue.priority, issue.labels), (7, vec!["bug".to_string()]));
+        let (st, _) = call(&f.app, "POST", &format!("/api/triage/{yes}/accept"), None, T).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "decided once");
+
+        let (st, _) = call(&f.app, "POST", &format!("/api/triage/{no}/reject"), None, T).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(store.comments(b).unwrap().is_empty(), "a rejected proposal changes nothing");
+        assert!(store.proposal_known("x:2").unwrap(), "and is remembered");
+        let (_, list) = call(&f.app, "GET", "/api/triage", None, T).await;
+        assert!(list["proposals"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

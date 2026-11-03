@@ -12,6 +12,7 @@ pub mod store;
 pub mod terminal;
 pub mod titles;
 pub mod tools;
+pub mod triage;
 pub mod tui;
 pub mod voice;
 
@@ -261,6 +262,7 @@ async fn serve_inner(
     let api = api::Api { runner, token, model, speech, voice };
     api.runner.resume(&stale);
     autopilot::spawn(api.runner.clone());
+    triage::spawn(api.runner.clone());
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     let listener =
         tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;

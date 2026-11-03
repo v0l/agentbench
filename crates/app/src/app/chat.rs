@@ -453,11 +453,104 @@ impl App {
         }
     }
 
+    fn triage_panel(&mut self, ui: &mut Ui) {
+        let Some(t) = self.overview.as_ref().and_then(|o| o.triage.clone()) else { return };
+        let names: std::collections::HashMap<_, _> = self
+            .overview
+            .iter()
+            .flat_map(|o| &o.projects)
+            .map(|p| (p.id, p.name.clone()))
+            .collect();
+        let mut run = false;
+        let mut decide: Option<(agentbench_core::Id, bool)> = None;
+        let mut note: Option<(agentbench_core::Id, String)> = None;
+        let projects: Vec<Project> = names_projects(self);
+        ui.add_space(4.0);
+        rail_block(ui, ETCH, egui::Color32::TRANSPARENT, |ui| {
+            ui.horizontal(|ui| {
+                let status = if t.running {
+                    "reading every project".to_string()
+                } else if t.last_status.is_empty() {
+                    "not run yet".to_string()
+                } else {
+                    t.last_status.clone()
+                };
+                Line::new().legend("triage").size(10.0).tint(LEGEND).gap(8.0).value(&status).size(11.0).tint(VALUE).elided(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let key = ui.add_enabled(!t.running, Key::new("run now").outline(VALUE));
+                    key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "triage run"));
+                    run = key.clicked();
+                });
+            });
+            for p in &projects {
+                let id = egui::Id::new(("triage_note", p.id));
+                let mut text = ui.ctx().data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| {
+                    t.notes.iter().find(|(pid, _)| *pid == p.id).map(|(_, n)| n.clone()).unwrap_or_default()
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().value(&p.name).size(11.0).elided(ui); });
+                    let edit = ui.add(egui::TextEdit::singleline(&mut text).hint_text("what matters here").desired_width(220.0));
+                    if edit.changed() {
+                        ui.ctx().data_mut(|d| d.insert_temp(id, text.clone()));
+                    }
+                    if edit.lost_focus() {
+                        note = Some((p.id, text.clone()));
+                    }
+                });
+            }
+            for pr in &t.proposals {
+                ui.add_space(2.0);
+                let where_ = pr.projects.iter().filter_map(|i| names.get(i).cloned()).collect::<Vec<_>>().join(", ");
+                let sessions = if pr.sessions.is_empty() { String::new() } else { format!(", {} sessions", pr.sessions.len()) };
+                let evidence = format!(
+                    "{} across {} project{} ({where_}): issues {}{sessions}",
+                    pr.kind.as_str(),
+                    pr.projects.len(),
+                    if pr.projects.len() == 1 { "" } else { "s" },
+                    pr.issues.iter().map(|i| format!("#{i}")).collect::<Vec<_>>().join(" ")
+                );
+                Line::new().value(&pr.summary).size(11.5).elided(ui);
+                ui.horizontal(|ui| {
+                    Line::new().note(&evidence).size(10.0).elided(ui);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let reject = ui.add(Key::new("reject").outline(FAULT));
+                        reject.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("reject proposal {}", pr.id)));
+                        if reject.clicked() {
+                            decide = Some((pr.id, false));
+                        }
+                        let accept = ui.add(Key::new("accept").outline(READOUT));
+                        accept.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("accept proposal {}", pr.id)));
+                        if accept.clicked() {
+                            decide = Some((pr.id, true));
+                        }
+                    });
+                });
+            }
+        });
+        if let Some(c) = &mut self.client {
+            if run {
+                c.triage_run();
+            }
+            if let Some((id, accept)) = decide {
+                c.triage_decide(id, accept);
+            }
+            if let Some((project, text)) = note {
+                c.triage_patch(&agentbench_core::TriagePatch {
+                    note_project: Some(project),
+                    note: Some(text),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
     pub(super) fn session_view(&mut self, ui: &mut Ui, s: Session) {
         let tree = self.worktree(s.worktree_id).cloned();
         self.chat_header(ui, &s, tree.as_ref());
         if self.supervisor_chat() == Some(s.id) {
             self.autopilot_panel(ui);
+            self.triage_panel(ui);
         }
         self.session_body(ui, s, tree);
     }
@@ -659,4 +752,8 @@ impl App {
             ui.ctx().request_repaint();
         }
     }
+}
+
+fn names_projects(app: &App) -> Vec<Project> {
+    app.overview().iter().flat_map(|o| &o.projects).filter(|p| !p.builtin()).cloned().collect()
 }
