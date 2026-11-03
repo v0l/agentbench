@@ -78,6 +78,13 @@ pub fn router(api: Api) -> Router {
         .route("/api/agents", get(agents))
         .route("/api/settings/model", get(get_model).put(put_model))
         .route("/api/settings/models", post(list_models))
+        .route("/api/onboarding", get(get_onboarding).patch(patch_onboarding))
+        .route("/api/onboarding/providers", get(get_providers).put(put_providers))
+        .route("/api/onboarding/test", post(test_provider))
+        .route("/api/onboarding/models", post(provider_models))
+        .route("/api/onboarding/health", get(provider_health))
+        .route("/api/onboarding/login", post(start_login))
+        .route("/api/onboarding/login/screen", get(login_screen).post(login_input).delete(login_close))
         .route("/api/settings/cross-project", get(get_cross).delete(clear_cross))
         .route("/api/settings/autorun", get(get_autorun).put(put_autorun))
         .route("/api/global-notes", get(get_global_notes).put(put_global_note))
@@ -517,6 +524,124 @@ async fn list_models(
     let url = probe.url.trim().trim_end_matches('/').to_string();
     let list = crate::agent::native::models(&url, &key).await.map_err(bad)?;
     Ok(Json(list))
+}
+
+fn saved_with_keys(api: &Api, mut p: agentbench_core::Provider) -> agentbench_core::Provider {
+    if p.key.trim().is_empty() && p.has_key {
+        let old = crate::providers::saved(api.runner.store());
+        p.key = old.iter().find(|o| o.kind == p.kind).map(|o| o.key.clone()).unwrap_or_default();
+    }
+    p
+}
+
+async fn get_onboarding(State(api): State<Api>) -> Reply<agentbench_core::Onboarding> {
+    let store = api.runner.store().clone();
+    let model_set = api.model.as_ref().is_some_and(|m| !m.get().model.trim().is_empty());
+    let (claude, codex) = tokio::task::spawn_blocking(|| {
+        (crate::providers::detect_claude(), crate::providers::detect_codex())
+    })
+    .await
+    .map_err(|e| bad(e.to_string()))?;
+    Ok(Json(crate::providers::onboarding(&store, model_set, claude, codex)))
+}
+
+async fn patch_onboarding(
+    State(api): State<Api>,
+    Json(patch): Json<agentbench_core::OnboardingPatch>,
+) -> Result<StatusCode, Failure> {
+    let store = api.runner.store();
+    let status = patch.status.unwrap_or_else(|| crate::providers::status(store));
+    crate::providers::set_status(store, &status, patch.step.as_deref())?;
+    changed(&api);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_providers(State(api): State<Api>) -> Reply<Vec<agentbench_core::Provider>> {
+    Ok(Json(crate::providers::masked(&crate::providers::saved(api.runner.store()))))
+}
+
+async fn put_providers(
+    State(api): State<Api>,
+    Json(new): Json<Vec<agentbench_core::Provider>>,
+) -> Reply<Vec<agentbench_core::Provider>> {
+    let store = api.runner.store();
+    let old = crate::providers::saved(store);
+    let list = crate::providers::merged(&old, new);
+    crate::providers::save(store, &list)?;
+    crate::providers::apply(store, api.model.as_ref())?;
+    changed(&api);
+    Ok(Json(crate::providers::masked(&list)))
+}
+
+async fn test_provider(
+    State(api): State<Api>,
+    Json(p): Json<agentbench_core::Provider>,
+) -> Reply<agentbench_core::ProviderCheck> {
+    let p = saved_with_keys(&api, p);
+    Ok(Json(crate::providers::test(&p).await))
+}
+
+async fn provider_models(
+    State(api): State<Api>,
+    Json(p): Json<agentbench_core::Provider>,
+) -> Reply<Vec<String>> {
+    let p = saved_with_keys(&api, p);
+    Ok(Json(crate::providers::models(&p).await.map_err(bad)?))
+}
+
+async fn provider_health(State(api): State<Api>) -> Reply<Vec<agentbench_core::ProviderHealth>> {
+    let list = crate::providers::saved(api.runner.store());
+    let got = crate::providers::health(list).await;
+    Ok(Json(
+        got.into_iter()
+            .map(|(kind, c)| agentbench_core::ProviderHealth { kind, ok: c.ok, message: c.message })
+            .collect(),
+    ))
+}
+
+const LOGIN_TERMINAL: SessionId = SessionId(uuid::Uuid::from_u128(0x1844_0000_0000_4000_8000_0000_0000_0184));
+
+async fn start_login(
+    State(api): State<Api>,
+    Json(start): Json<agentbench_core::LoginStart>,
+) -> Result<StatusCode, Failure> {
+    let (program, args) = crate::providers::login_command(&start.cli).ok_or_else(|| {
+        bad(format!("{} is not installed on this machine", start.cli))
+    })?;
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    api.runner.terminals.close(LOGIN_TERMINAL);
+    api.runner
+        .terminals
+        .open_command(LOGIN_TERMINAL, &home, Some(&program.display().to_string()), &args)
+        .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn login_screen(State(api): State<Api>) -> Reply<agentbench_core::Screen> {
+    api.runner
+        .terminals
+        .screen(LOGIN_TERMINAL)
+        .map(Json)
+        .ok_or_else(|| Failure(StatusCode::NOT_FOUND, "no login is running".into()))
+}
+
+async fn login_input(
+    State(api): State<Api>,
+    Json(input): Json<agentbench_core::TerminalInput>,
+) -> Result<StatusCode, Failure> {
+    let t = &api.runner.terminals;
+    if input.rows > 0 && input.cols > 0 {
+        t.resize(LOGIN_TERMINAL, input.rows, input.cols).map_err(bad)?;
+    }
+    if !input.data.is_empty() {
+        t.write(LOGIN_TERMINAL, input.data.as_bytes()).map_err(bad)?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn login_close(State(api): State<Api>) -> Result<StatusCode, Failure> {
+    api.runner.terminals.close(LOGIN_TERMINAL);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_projects(State(api): State<Api>) -> Reply<Vec<agentbench_core::Project>> {
@@ -1430,6 +1555,59 @@ mod tests {
         assert!(store.title_is_auto(sid(&cut)).unwrap());
         assert!(!store.title_is_auto(sid(&named)).unwrap());
         assert!(store.title_is_auto(sid(&blank)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn onboarding_saves_providers_hides_keys_and_is_finished_once() {
+        let f = fixture();
+        let (s, o) = call(&f.app, "GET", "/api/onboarding", None, T).await;
+        assert_eq!(s, StatusCode::OK, "{o}");
+        assert_eq!(o["needed"], true);
+        assert_eq!(o["status"], "new");
+
+        let put = json!([
+            {"kind": "openai_key", "key": "sk-secret", "default": true, "medium": "gpt-x"},
+            {"kind": "claude_subscription"}
+        ]);
+        let (s, got) = call(&f.app, "PUT", "/api/onboarding/providers", Some(put), T).await;
+        assert_eq!(s, StatusCode::OK, "{got}");
+        assert_eq!(got[0]["key"], "");
+        assert_eq!(got[0]["has_key"], true);
+        let stored = crate::providers::saved(f.api.runner.store());
+        assert_eq!(stored[0].key, "sk-secret");
+
+        let again = json!([{"kind": "openai_key", "has_key": true, "default": true, "medium": "gpt-y"}]);
+        let (_, got) = call(&f.app, "PUT", "/api/onboarding/providers", Some(again), T).await;
+        assert_eq!(got[0]["has_key"], true);
+        assert_eq!(crate::providers::saved(f.api.runner.store())[0].key, "sk-secret");
+
+        call(&f.app, "PATCH", "/api/onboarding", Some(json!({"status": "done"})), T).await;
+        let (_, o) = call(&f.app, "GET", "/api/onboarding", None, T).await;
+        assert_eq!(o["needed"], false);
+        assert_eq!(o["status"], "done");
+        assert_eq!(o["providers"][0]["key"], "");
+        assert_eq!(o["default_agent"], "native");
+    }
+
+    #[tokio::test]
+    async fn the_test_endpoint_reports_pass_and_the_real_error() {
+        let f = fixture();
+        let up = crate::providers::tests::fake_server(vec![
+            ("/models", 200, r#"{"data":[{"id":"m1"}]}"#),
+            ("/chat/completions", 200, r#"{"choices":[]}"#),
+        ]);
+        let ok = json!({"kind": "endpoint", "url": up});
+        let (_, got) = call(&f.app, "POST", "/api/onboarding/test", Some(ok), T).await;
+        assert_eq!(got["ok"], true, "{got}");
+        let down = crate::providers::tests::fake_server(vec![
+            ("/models", 200, r#"{"data":[{"id":"m1"}]}"#),
+            ("/chat/completions", 500, r#"{"error":{"message":"model overloaded"}}"#),
+        ]);
+        let bad = json!({"kind": "endpoint", "url": down});
+        let (s, got) = call(&f.app, "POST", "/api/onboarding/test", Some(bad), T).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(got["ok"], false);
+        assert!(got["message"].as_str().unwrap().contains("model overloaded"), "{got}");
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ pub mod git;
 pub mod http;
 pub mod local;
 pub mod projects;
+pub mod providers;
 pub mod runner;
 pub mod speech;
 pub mod store;
@@ -109,6 +110,7 @@ impl Config {
         native.code =
             std::sync::Arc::new(agent::code::Code::new(agent::code::unconfined(self.code.clone())));
         let mut all: Vec<Box<dyn Agent>> = vec![Box::new(native)];
+        all.extend(providers::cli_agents().into_iter().map(|a| Box::new(a) as Box<dyn Agent>));
         for extra in &self.agents {
             all.retain(|a| a.name() != extra.name);
             all.push(Box::new(extra.clone()));
@@ -301,7 +303,7 @@ mod tests {
         assert_eq!(c.listen, Some("0.0.0.0:9000".parse().unwrap()));
         let agents = c.agents();
         let names: Vec<_> = agents.iter().map(|a| a.name()).collect();
-        assert_eq!(names, ["native", "aider", "codex"]);
+        assert_eq!(names, ["native", "claude", "aider", "codex"]);
     }
 
     #[test]

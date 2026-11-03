@@ -19,6 +19,7 @@ mod chat;
 mod composer;
 mod header;
 mod modals;
+mod onboarding;
 mod settings;
 mod side;
 mod transcript;
@@ -654,6 +655,10 @@ pub struct App {
     new_worktree: Option<(Id, String)>,
     confirm: Option<Confirm>,
     terminal: Option<TerminalView>,
+    onboard: Option<onboarding::Onboard>,
+    onboard_opening: bool,
+    onboard_checked: bool,
+    preferred_agent: String,
     settings: Option<Settings>,
     save_requested: bool,
     tray: crate::attach::Tray,
@@ -797,6 +802,10 @@ impl App {
             new_worktree: None,
             confirm: None,
             terminal: None,
+            onboard: None,
+            onboard_opening: false,
+            onboard_checked: false,
+            preferred_agent: String::new(),
             settings: None,
             save_requested: false,
             tray: crate::attach::Tray::default(),
@@ -918,6 +927,7 @@ impl App {
         self.cursor = None;
         self.watching = false;
         self.offline = None;
+        self.onboard_checked = false;
         self.transcripts.clear();
         self.comments.clear();
     }
@@ -1034,6 +1044,18 @@ impl App {
 
     pub fn settings_audio_device(&self) -> Option<String> {
         self.settings.as_ref()?.audio.clone()?.map(|a| a.device)
+    }
+
+    pub fn onboarding_open(&self) -> bool {
+        self.onboard.is_some()
+    }
+
+    pub fn onboarding_providers(&self) -> Vec<agentbench_core::ProviderKind> {
+        self.onboard.as_ref().map(|o| o.working_kinds()).unwrap_or_default()
+    }
+
+    pub fn onboarding_step(&self) -> String {
+        self.onboard.as_ref().map(|o| o.step_name()).unwrap_or_default()
     }
 
     pub fn settings_loaded(&self) -> Option<bool> {
@@ -1524,6 +1546,12 @@ impl App {
         match reply {
             Reply::Overview(o) => {
                 self.offline = None;
+                if !self.onboard_checked && !cfg!(target_os = "android") {
+                    self.onboard_checked = true;
+                    if let Some(c) = &mut self.client {
+                        c.onboarding();
+                    }
+                }
                 let cursor = o.cursor;
                 if self.project.is_none_or(|p| !o.projects.iter().any(|x| x.id == p)) {
                     self.project = o
@@ -1650,6 +1678,12 @@ impl App {
                     c.overview();
                 }
             }
+            Reply::Onboarding(o) => self.onboarding_reply(o),
+            Reply::Providers(list) => self.providers_reply(list),
+            Reply::ProviderTest(kind, check) => self.provider_test_reply(kind, check),
+            Reply::ProviderModels(kind, list) => self.provider_models_reply(kind, list),
+            Reply::ProviderHealth(list) => self.provider_health_reply(list),
+            Reply::LoginScreen(screen) => self.login_reply(screen),
             Reply::Models(list) => {
                 if let Some(st) = &mut self.settings {
                     st.asking = false;
@@ -1901,7 +1935,9 @@ impl App {
         let Some(o) = &self.overview else {
             return String::new();
         };
-        let last = o.sessions.iter().max_by_key(|s| s.updated_at).map(|s| s.agent.clone());
+        let last = (!self.preferred_agent.is_empty())
+            .then(|| self.preferred_agent.clone())
+            .or_else(|| o.sessions.iter().max_by_key(|s| s.updated_at).map(|s| s.agent.clone()));
         last.filter(|a| o.agents.iter().any(|x| &x.name == a && x.available))
             .or_else(|| o.agents.iter().find(|a| a.available).map(|a| a.name.clone()))
             .unwrap_or_default()
@@ -1939,7 +1975,8 @@ impl App {
         let agent = o
             .agents
             .iter()
-            .find(|a| a.available && a.name == "pi")
+            .find(|a| a.available && !self.preferred_agent.is_empty() && a.name == self.preferred_agent)
+            .or_else(|| o.agents.iter().find(|a| a.available && a.name == "pi"))
             .or_else(|| o.agents.iter().find(|a| a.available))
             .map(|a| a.name.clone())
             .unwrap_or_default();

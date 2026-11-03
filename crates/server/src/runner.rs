@@ -15,7 +15,6 @@ use tokio::sync::{Notify, oneshot};
 
 const TEXT_FLUSH: Duration = Duration::from_millis(250);
 const TITLE_MAX: usize = 40;
-const SUPERVISOR_MODEL: &str = "high";
 const ANSWER_PATIENCE: Duration = Duration::from_secs(24 * 3600);
 
 /// Questions put to the user, each waiting on the channel its answers arrive on.
@@ -207,9 +206,15 @@ impl Runner {
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty())
-            .or(project.supervisor.then_some(SUPERVISOR_MODEL));
+            .map(str::to_string)
+            .or_else(|| {
+                project
+                    .supervisor
+                    .then(|| crate::providers::supervisor_model(&store, agent.name()))
+                    .flatten()
+            });
         let session =
-            store.add_session(worktree.id, agent.name(), title.trim(), model, new.issue_id)?;
+            store.add_session(worktree.id, agent.name(), title.trim(), model.as_deref(), new.issue_id)?;
         if stand_in {
             store.set_title_auto(session.id, true)?;
         }
@@ -237,7 +242,8 @@ impl Runner {
     pub fn open_supervisor(&self, agent: &str) -> Result<Session, StoreError> {
         if let Some(s) = self.supervisor_session() {
             if s.model.is_none() {
-                self.store.set_model(s.id, Some(SUPERVISOR_MODEL))?;
+                let model = crate::providers::supervisor_model(&self.store, &s.agent);
+                self.store.set_model(s.id, model.as_deref())?;
                 return self.store.session(s.id);
             }
             return Ok(s);
@@ -646,6 +652,14 @@ impl Runner {
         self.turn(agent, &session, &prompt, stop, inbox, questions, Mode::Compact).await
     }
 
+    fn cli_model(&self, agent: &str, chosen: Option<&str>) -> Option<String> {
+        let chosen = chosen.map(str::trim).filter(|m| !m.is_empty())?;
+        if !matches!(agent, "claude" | "codex") || !agentbench_core::LEVELS.contains(&chosen) {
+            return Some(chosen.to_string());
+        }
+        crate::providers::level_model(&self.store, agent, chosen)
+    }
+
     fn context(&self, session: &Session) -> Context {
         let project = self.store.project(session.project_id).ok();
         let branch = self.store.worktree(session.worktree_id).ok().and_then(|w| w.branch);
@@ -717,11 +731,12 @@ impl Runner {
         let cwd = PathBuf::from(&session.cwd);
         let context = self.context(session);
         let resume = session.agent_session.as_deref().filter(|_| agent.resumable());
+        let cli_model = self.cli_model(&session.agent, session.model.as_deref());
         let turn = Turn {
             prompt,
             files: &files,
             cwd: &cwd,
-            model: session.model.as_deref(),
+            model: cli_model.as_deref(),
             effort: session.effort.as_deref(),
             resume,
             history: &history,

@@ -116,6 +116,8 @@ Beyond that it can:
 - tell the user with `notify_user`, a notice in the chat and a desktop
   notification where `notify-send` (Linux) or `osascript` (macOS) exists.
 
+On first launch the window opens a setup: sign in with a Claude Code or Codex subscription (it runs `claude auth login` / `codex login` in a pane and never stores the login itself), or add an Anthropic key, an OpenAI key, an OpenAI compatible endpoint or a local model, then pick the low, medium, high and supervisor models. Keys are kept in the server's database. Run it again from settings, under *set up providers*.
+
 Set its model in `agentbench.toml`:
 
 ```toml

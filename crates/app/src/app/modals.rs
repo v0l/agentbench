@@ -13,6 +13,7 @@ impl App {
         self.confirm_modal(ctx);
         self.terminal_modal(ctx);
         self.settings_modal(ctx);
+        self.onboarding_modal(ctx);
         self.scan_modal(ctx);
         self.help_modal(ctx);
         self.rename_chat_modal(ctx);

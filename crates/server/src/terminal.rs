@@ -44,6 +44,16 @@ impl Terminals {
         cwd: &Path,
         program: Option<&str>,
     ) -> Result<(), String> {
+        self.open_command(session, cwd, program, &[])
+    }
+
+    pub fn open_command(
+        &self,
+        session: SessionId,
+        cwd: &Path,
+        program: Option<&str>,
+        args: &[&str],
+    ) -> Result<(), String> {
         let mut all = lock(&self.0);
         if all.contains_key(&session) {
             return Ok(());
@@ -52,6 +62,7 @@ impl Terminals {
             .openpty(PtySize { rows: ROWS, cols: COLS, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| e.to_string())?;
         let mut cmd = CommandBuilder::new(program.map(str::to_string).unwrap_or_else(shell));
+        cmd.args(args);
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;

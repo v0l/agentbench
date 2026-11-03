@@ -85,6 +85,15 @@ fn model_server(n: usize) -> String {
 }
 
 fn rig_on(model_url: &str, extra: Vec<Box<dyn agentbench_server::agent::Agent>>) -> Rig {
+    rig_named(model_url, "test-model", extra)
+}
+
+fn rig_named(
+    model_url: &str,
+    model_name: &str,
+    extra: Vec<Box<dyn agentbench_server::agent::Agent>>,
+) -> Rig {
+    let model_name = model_name.to_string();
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("demo");
     repo(&main);
@@ -155,7 +164,7 @@ fn rig_on(model_url: &str, extra: Vec<Box<dyn agentbench_server::agent::Agent>>)
         let config = agentbench_server::Config {
             model: agentbench_server::agent::native::Model {
                 url: model_url.clone(),
-                model: "test-model".into(),
+                model: model_name,
                 ..Default::default()
             },
             ..Default::default()
@@ -2847,4 +2856,234 @@ fn a_waiting_session_on_the_issue_board_carries_the_marker() {
     h.run_steps(3);
     shot(&mut h, "board-needs-you");
     assert_eq!(marker_count(&h), 2, "one in the side list, one on the issue card");
+}
+
+
+fn chat_server(chat_status: u16, chat_body: &'static str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            let (code, body) = if head.starts_with("GET /v1/models") {
+                (200, r#"{"data":[{"id":"alpha-1"},{"id":"beta-2"}]}"#)
+            } else {
+                (chat_status, chat_body)
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://{addr}/v1")
+}
+
+fn onboarding_rig() -> Rig {
+    rig_named("http://127.0.0.1:9/v1", "", Vec::new())
+}
+
+fn click_label(h: &mut Harness<'_, App>, label: &str) {
+    h.get_by_label(label).click();
+    h.run_steps(3);
+}
+
+fn type_into_secret(h: &mut Harness<'_, App>, text: &str) {
+    let at = h
+        .query_all_by_role(egui::accesskit::Role::PasswordInput)
+        .next()
+        .map(|n| n.rect().center())
+        .expect("a secret field");
+    click(h, at.x, at.y);
+    h.run_steps(2);
+    h.event(egui::Event::Text(text.to_string()));
+    h.run_steps(3);
+}
+
+fn type_into_field(h: &mut Harness<'_, App>, nth_in_modal: usize, text: &str) {
+    let modal_fields = |h: &Harness<'_, App>| {
+        let mut all: Vec<_> = h
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .filter(|n| n.rect().min.x > 300.0)
+            .map(|n| n.rect().min.y)
+            .collect();
+        all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        all
+    };
+    let y = modal_fields(h)[nth_in_modal];
+    let pick = |h: &Harness<'_, App>| {
+        h.query_all_by_role(egui::accesskit::Role::TextInput)
+            .find(|n| n.rect().min.x > 300.0 && n.rect().min.y == y)
+            .map(|n| n.rect().center())
+    };
+    let at = pick(h).unwrap();
+    click(h, at.x, at.y);
+    h.run_steps(2);
+    h.event(egui::Event::Text(text.to_string()));
+    h.run_steps(3);
+}
+
+#[test]
+fn a_first_launch_with_nothing_set_up_shows_the_onboarding() {
+    let rig = onboarding_rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the onboarding", |h| h.state().onboarding_open());
+    shot(&mut h, "onboarding-welcome");
+    for label in [
+        "set up Claude subscription",
+        "set up ChatGPT subscription",
+        "set up Anthropic API key",
+        "set up OpenAI API key",
+        "set up OpenAI compatible endpoint",
+        "set up Local model",
+    ] {
+        h.get_by_label(label);
+    }
+    h.get_by_label_contains("Nothing is set up yet");
+}
+
+#[test]
+fn a_server_with_a_model_already_set_does_not_show_the_onboarding() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(20);
+    std::thread::sleep(Duration::from_millis(300));
+    h.run_steps(10);
+    assert!(!h.state().onboarding_open());
+}
+
+#[test]
+fn skipping_the_onboarding_closes_it_and_it_stays_closed() {
+    let rig = onboarding_rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the onboarding", |h| h.state().onboarding_open());
+    click_label(&mut h, "skip for now");
+    assert!(!h.state().onboarding_open());
+    until(&mut h, "it is saved", |_| rig.store.setting("onboarding").unwrap().as_deref() == Some("skipped"));
+    let mut again = harness(rig.url.clone());
+    until(&mut again, "the overview", |h| h.state().overview().is_some());
+    again.run_steps(20);
+    std::thread::sleep(Duration::from_millis(300));
+    again.run_steps(10);
+    assert!(!again.state().onboarding_open(), "a skipped setup is not shown again");
+}
+
+#[test]
+fn completing_the_onboarding_writes_a_working_default_and_does_not_show_again() {
+    let up = chat_server(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+    let rig = onboarding_rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the onboarding", |h| h.state().onboarding_open());
+
+    click_label(&mut h, "set up OpenAI compatible endpoint");
+    until(&mut h, "the address field", |h| {
+        h.query_all_by_role(egui::accesskit::Role::TextInput).count() >= 2
+    });
+    type_into_field(&mut h, 0, &up);
+    click_label(&mut h, "test connection");
+    until(&mut h, "the test to pass", |h| h.query_by_label_contains("answered").is_some());
+    shot(&mut h, "onboarding-endpoint");
+    click_label(&mut h, "save provider");
+    until(&mut h, "the provider to save", |_| {
+        agentbench_server::providers::saved(&rig.store).len() == 1
+    });
+    until(&mut h, "the welcome page", |h| h.state().onboarding_step() == "welcome");
+    until(&mut h, "the card to show it works", |h| h.query_by_label("make OpenAI compatible endpoint the default").is_none() && h.query_by_label("edit OpenAI compatible endpoint").is_some());
+
+    click_label(&mut h, "next");
+    until(&mut h, "the model page", |h| h.state().onboarding_step() == "models");
+    until(&mut h, "the model lists", |h| h.query_all_by_label("choose model").count() >= 1);
+    shot(&mut h, "onboarding-models");
+    click_label(&mut h, "next");
+    until(&mut h, "the last page", |h| h.state().onboarding_step() == "finish");
+    shot(&mut h, "onboarding-finish");
+    click_label(&mut h, "finish");
+    assert!(!h.state().onboarding_open());
+
+    until(&mut h, "the setup to be marked done", |_| {
+        rig.store.setting("onboarding").unwrap().as_deref() == Some("done")
+    });
+    let saved = agentbench_server::providers::saved(&rig.store);
+    assert_eq!(saved[0].url, up);
+    assert!(saved[0].default);
+    assert!(!saved[0].medium.is_empty(), "a default model was chosen");
+    let model: serde_json::Value =
+        serde_json::from_str(&rig.store.setting("model").unwrap().unwrap()).unwrap();
+    assert_eq!(model["url"], up, "the native agent now points at it");
+    assert_eq!(model["model"], saved[0].medium.as_str());
+
+    let mut again = harness(rig.url.clone());
+    until(&mut again, "the overview", |h| h.state().overview().is_some());
+    again.run_steps(20);
+    std::thread::sleep(Duration::from_millis(300));
+    again.run_steps(10);
+    assert!(!again.state().onboarding_open(), "a finished setup is not shown again");
+}
+
+#[test]
+fn running_the_setup_again_keeps_the_providers_already_set_up() {
+    let up = chat_server(200, r#"{"choices":[]}"#);
+    let rig = rig();
+    agentbench_server::providers::save(
+        &rig.store,
+        &[agentbench_core::Provider {
+            kind: agentbench_core::ProviderKind::Endpoint,
+            url: up.clone(),
+            key: "keep-me".into(),
+            default: true,
+            medium: "alpha-1".into(),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    assert!(!h.state().onboarding_open());
+    h.get_by_label("settings").click();
+    h.run_steps(2);
+    until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
+    h.run_steps(3);
+    click_label(&mut h, "set up providers");
+    until(&mut h, "the onboarding", |h| h.state().onboarding_open());
+    until(&mut h, "the saved provider", |h| {
+        h.state().onboarding_providers() == [agentbench_core::ProviderKind::Endpoint]
+    });
+    until(&mut h, "its health", |h| h.query_by_label("edit OpenAI compatible endpoint").is_some());
+
+    click_label(&mut h, "set up Anthropic API key");
+    until(&mut h, "the key field", |h| {
+        h.query_all_by_role(egui::accesskit::Role::TextInput).count() >= 1
+    });
+    type_into_secret(&mut h, "sk-ant-new");
+    click_label(&mut h, "save provider");
+    until(&mut h, "both providers", |_| {
+        agentbench_server::providers::saved(&rig.store).len() == 2
+    });
+    let saved = agentbench_server::providers::saved(&rig.store);
+    assert_eq!(saved[0].key, "keep-me", "the first provider is untouched");
+    assert!(saved[0].default, "and stays the default");
+    assert_eq!(saved[1].key, "sk-ant-new");
+    assert!(!saved[1].default);
+}
+
+#[test]
+fn a_failed_test_call_shows_the_servers_own_error() {
+    let down = chat_server(401, r#"{"error":{"message":"Incorrect API key provided"}}"#);
+    let rig = onboarding_rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the onboarding", |h| h.state().onboarding_open());
+    click_label(&mut h, "set up OpenAI compatible endpoint");
+    until(&mut h, "the address field", |h| {
+        h.query_all_by_role(egui::accesskit::Role::TextInput).count() >= 2
+    });
+    type_into_field(&mut h, 0, &down);
+    click_label(&mut h, "test connection");
+    until(&mut h, "the error", |h| h.query_by_label_contains("Incorrect API key provided").is_some());
+    shot(&mut h, "onboarding-error");
 }

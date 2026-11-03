@@ -92,6 +92,7 @@ impl App {
             return;
         };
         let (mut save, mut close, mut probe, mut probe_title) = (false, false, false, false);
+        let mut providers = false;
         let can_close = self.client.is_some() || self.starting.is_some();
         let has_local = self.local.is_some();
         let installed = self.installed.clone();
@@ -137,6 +138,17 @@ impl App {
                     .show(ui, |ui| {
                 ui.set_width(ui.available_width() - 12.0);
                 if st.page == Page::General {
+                    if !cfg!(target_os = "android") && can_close {
+                        section(ui, "providers", "how agentbench reaches a model", |ui| {
+                            note(ui, "Sign in with a Claude or ChatGPT subscription, add an API key or point at your own server, and pick the models chats start on.", LEGEND);
+                            let key = ui.add(Key::new("set up providers").solid(READOUT));
+                            key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "set up providers"));
+                            if key.clicked() {
+                                providers = true;
+                            }
+                        });
+                        ui.add_space(14.0);
+                    }
                     server_section(ui, &mut st, has_local);
                     ui.add_space(14.0);
                     // A phone is what scans the code, so it has no use for showing one.
@@ -382,6 +394,10 @@ impl App {
             close = true;
         }
         save |= std::mem::take(&mut self.save_requested);
+        if providers {
+            self.open_onboarding();
+            return;
+        }
         if std::mem::take(&mut st.scan) {
             let ctx = ctx.clone();
             self.scanner = Some(crate::scan::Scanner::start(move || ctx.request_repaint()));

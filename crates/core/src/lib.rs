@@ -933,6 +933,161 @@ fn default_compact_at() -> u64 {
     DEFAULT_COMPACT_AT
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    #[default]
+    ClaudeSubscription,
+    CodexSubscription,
+    AnthropicKey,
+    OpenaiKey,
+    Endpoint,
+    Local,
+}
+
+impl ProviderKind {
+    pub const ALL: [ProviderKind; 6] = [
+        ProviderKind::ClaudeSubscription,
+        ProviderKind::CodexSubscription,
+        ProviderKind::AnthropicKey,
+        ProviderKind::OpenaiKey,
+        ProviderKind::Endpoint,
+        ProviderKind::Local,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            ProviderKind::ClaudeSubscription => "claude_subscription",
+            ProviderKind::CodexSubscription => "codex_subscription",
+            ProviderKind::AnthropicKey => "anthropic_key",
+            ProviderKind::OpenaiKey => "openai_key",
+            ProviderKind::Endpoint => "endpoint",
+            ProviderKind::Local => "local",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<ProviderKind> {
+        ProviderKind::ALL.into_iter().find(|k| k.id() == id)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ProviderKind::ClaudeSubscription => "Claude subscription",
+            ProviderKind::CodexSubscription => "ChatGPT subscription",
+            ProviderKind::AnthropicKey => "Anthropic API key",
+            ProviderKind::OpenaiKey => "OpenAI API key",
+            ProviderKind::Endpoint => "OpenAI compatible endpoint",
+            ProviderKind::Local => "Local model",
+        }
+    }
+
+    pub fn subscription(self) -> bool {
+        matches!(self, ProviderKind::ClaudeSubscription | ProviderKind::CodexSubscription)
+    }
+
+    pub fn needs_key(self) -> bool {
+        matches!(self, ProviderKind::AnthropicKey | ProviderKind::OpenaiKey)
+    }
+
+    pub fn default_url(self) -> &'static str {
+        match self {
+            ProviderKind::AnthropicKey => "https://api.anthropic.com/v1",
+            ProviderKind::OpenaiKey => "https://api.openai.com/v1",
+            ProviderKind::Local => "http://127.0.0.1:11434/v1",
+            _ => "",
+        }
+    }
+
+    /// The agent a chat runs with when this provider is the default.
+    pub fn agent(self) -> &'static str {
+        match self {
+            ProviderKind::ClaudeSubscription => "claude",
+            ProviderKind::CodexSubscription => "codex",
+            _ => "native",
+        }
+    }
+}
+
+/// A way to reach a model. Subscriptions use the vendor's own CLI login and hold no secret
+/// here; the rest hold a server address and maybe a key, which is never read back.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Provider {
+    pub kind: ProviderKind,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub has_key: bool,
+    #[serde(default)]
+    pub default: bool,
+    #[serde(default)]
+    pub low: String,
+    #[serde(default)]
+    pub medium: String,
+    #[serde(default)]
+    pub high: String,
+    #[serde(default)]
+    pub supervisor: String,
+}
+
+/// What one health check found: the same call whether it runs from the setup or later.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProviderCheck {
+    pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderHealth {
+    pub kind: ProviderKind,
+    pub ok: bool,
+    pub message: String,
+}
+
+/// The login CLI the setup runs in a terminal pane.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LoginStart {
+    pub cli: String,
+}
+
+/// A vendor CLI on the server's machine and whether it holds a login.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CliLogin {
+    pub installed: bool,
+    #[serde(default)]
+    pub path: String,
+    pub logged_in: bool,
+    #[serde(default)]
+    pub detail: String,
+    pub install: String,
+    pub login: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Onboarding {
+    /// The window opens the setup by itself: nothing is set up and it was neither finished nor skipped.
+    pub needed: bool,
+    /// "new", "open", "skipped" or "done".
+    pub status: String,
+    #[serde(default)]
+    pub step: String,
+    pub providers: Vec<Provider>,
+    pub claude: CliLogin,
+    pub codex: CliLogin,
+    /// The agent a new chat starts with, from the default provider.
+    #[serde(default)]
+    pub default_agent: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OnboardingPatch {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub step: Option<String>,
+}
+
 /// The names a chat's model can take besides a plain model id.
 pub const LEVELS: [&str; 3] = ["low", "medium", "high"];
 

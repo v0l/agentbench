@@ -40,6 +40,12 @@ pub enum Reply {
     SpeechModels(Option<Vec<(String, String)>>),
     TitleModels(Result<Vec<String>, String>),
     Models(Result<Vec<String>, String>),
+    Onboarding(agentbench_core::Onboarding),
+    Providers(Vec<agentbench_core::Provider>),
+    ProviderTest(agentbench_core::ProviderKind, agentbench_core::ProviderCheck),
+    ProviderModels(agentbench_core::ProviderKind, Result<Vec<String>, String>),
+    ProviderHealth(Vec<agentbench_core::ProviderHealth>),
+    LoginScreen(Option<agentbench_core::Screen>),
     AgentModels(String, Result<Vec<String>, String>),
     Changed(Id),
     Messages(SessionId, Vec<Message>),
@@ -469,6 +475,81 @@ impl Client {
     pub fn models(&mut self, m: &agentbench_core::ModelSettings) {
         let req = self.request(Method::POST, "/api/settings/models", Self::json(m));
         self.fetch_models(req, Reply::Models);
+    }
+
+    pub fn onboarding(&mut self) {
+        let req = self.request(Method::GET, "/api/onboarding", None);
+        self.send(req, Reply::Onboarding);
+    }
+
+    pub fn set_onboarding(&mut self, status: &str, step: Option<&str>) {
+        let patch = agentbench_core::OnboardingPatch {
+            status: Some(status.to_string()),
+            step: step.map(str::to_string),
+        };
+        self.act(Method::PATCH, "/api/onboarding", Some(&patch), "");
+    }
+
+    pub fn put_providers(&mut self, list: &[agentbench_core::Provider]) {
+        let req = self.request(Method::PUT, "/api/onboarding/providers", Self::json(&list));
+        self.send(req, Reply::Providers);
+    }
+
+    pub fn test_provider(&mut self, p: &agentbench_core::Provider) {
+        let kind = p.kind;
+        let req = self
+            .request(Method::POST, "/api/onboarding/test", Self::json(p))
+            .timeout(Duration::from_secs(45));
+        self.dispatch(req, move |res| {
+            let check = match res {
+                Err(Reply::Failed(e) | Reply::Offline(e)) => {
+                    agentbench_core::ProviderCheck { ok: false, message: e }
+                }
+                Err(_) => agentbench_core::ProviderCheck { ok: false, message: "no reply".into() },
+                Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                    agentbench_core::ProviderCheck { ok: false, message: e.to_string() }
+                }),
+            };
+            Reply::ProviderTest(kind, check)
+        });
+    }
+
+    pub fn provider_models(&mut self, p: &agentbench_core::Provider) {
+        let kind = p.kind;
+        let req = self.request(Method::POST, "/api/onboarding/models", Self::json(p));
+        self.fetch_models(req, move |list| Reply::ProviderModels(kind, list));
+    }
+
+    pub fn provider_health(&mut self) {
+        let req = self
+            .request(Method::GET, "/api/onboarding/health", None)
+            .timeout(Duration::from_secs(45));
+        self.dispatch(req, |res| match res {
+            Ok(bytes) => Reply::ProviderHealth(serde_json::from_slice(&bytes).unwrap_or_default()),
+            Err(_) => Reply::ProviderHealth(Vec::new()),
+        });
+    }
+
+    pub fn login_start(&mut self, cli: &str) {
+        let start = agentbench_core::LoginStart { cli: cli.to_string() };
+        self.act(Method::POST, "/api/onboarding/login", Some(&start), "");
+    }
+
+    pub fn login_screen(&mut self) {
+        let req = self.request(Method::GET, "/api/onboarding/login/screen", None);
+        self.dispatch(req, |res| match res {
+            Ok(bytes) => Reply::LoginScreen(serde_json::from_slice(&bytes).ok()),
+            Err(_) => Reply::LoginScreen(None),
+        });
+    }
+
+    pub fn login_send(&mut self, data: &str, rows: u16, cols: u16) {
+        let input = agentbench_core::TerminalInput { data: data.to_string(), rows, cols };
+        self.act(Method::POST, "/api/onboarding/login/screen", Some(&input), "");
+    }
+
+    pub fn login_close(&mut self) {
+        self.act::<()>(Method::DELETE, "/api/onboarding/login/screen", None, "");
     }
 
     pub fn agent_models(&mut self, agent: &str) {
