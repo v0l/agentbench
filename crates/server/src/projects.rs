@@ -164,6 +164,10 @@ pub fn ensure_home(store: &Store, dir: &Path) -> Result<Project, StoreError> {
     if let Some(p) = store.home_project()? {
         return Ok(p);
     }
+    let resolved = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if store.project_by_path(&resolved.to_string_lossy())?.is_some() {
+        return Err(StoreError(format!("{} is already a project", resolved.display())));
+    }
     store.add_home("chats", &dir.to_string_lossy())
 }
 
@@ -375,6 +379,18 @@ mod tests {
         let s = Store::memory().unwrap();
         add(&s, dir.path(), None, false).unwrap();
         assert!(ensure_home(&s, dir.path()).is_err());
+    }
+
+    #[test]
+    fn a_symlinked_home_folder_that_is_a_project_gets_no_home_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        repo(&real);
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let s = Store::memory().unwrap();
+        add(&s, &real, None, false).unwrap();
+        assert!(ensure_home(&s, &link).is_err());
     }
 
     #[test]
