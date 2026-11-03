@@ -102,6 +102,42 @@ impl PointerDecoder {
     }
 }
 
+fn refusal(v: &Value) -> Option<String> {
+    let kind = v.get("type").and_then(Value::as_str);
+    let reason = v
+        .pointer("/message/stop_reason")
+        .or_else(|| v.get("stop_reason"))
+        .and_then(Value::as_str)
+        .filter(|r| matches!(*r, "refusal" | "content_filter"));
+    if let Some(reason) = reason.filter(|_| kind != Some("result")) {
+        let said = v.get("message").map(|m| content_text(m.get("content").unwrap_or(m)));
+        let said = said.filter(|t| !t.trim().is_empty()).unwrap_or_default();
+        return Some(format!("the model refused to answer ({reason}): {}", said.trim()));
+    }
+    if kind != Some("result") {
+        return None;
+    }
+    let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or_default();
+    let failed = v.get("is_error").and_then(Value::as_bool).unwrap_or(false)
+        || subtype.starts_with("error");
+    if !failed && reason.is_none() {
+        return None;
+    }
+    let mut said = v.get("result").map(content_text).unwrap_or_default();
+    if said.trim().is_empty() {
+        said = v
+            .get("errors")
+            .and_then(Value::as_array)
+            .map(|e| e.iter().map(content_text).collect::<Vec<_>>().join("; "))
+            .unwrap_or_default();
+    }
+    let why = reason.unwrap_or(subtype);
+    let said = if said.trim().is_empty() { "the agent gave no reason" } else { said.trim() };
+    Some(if why.is_empty() { format!("the agent stopped with an error: {said}") } else {
+        format!("the agent stopped ({why}): {said}")
+    })
+}
+
 impl Decoder for PointerDecoder {
     fn line(&mut self, line: &str) -> Vec<Event> {
         let Some(v) = parse(line) else {
@@ -116,6 +152,9 @@ impl Decoder for PointerDecoder {
         }
         if let Some(e) = at(&v, &self.spec.error) {
             out.push(Event::Error(content_text(e)));
+        }
+        if let Some(e) = refusal(&v) {
+            out.push(Event::Error(e));
         }
         let input = at(&v, &self.spec.input_tokens).and_then(Value::as_u64);
         let output = at(&v, &self.spec.output_tokens).and_then(Value::as_u64);
@@ -183,6 +222,22 @@ mod tests {
                 Event::Error("boom".into()),
             ]
         );
+    }
+
+    #[test]
+    fn a_claude_refusal_and_error_result_become_errors() {
+        let events = decode_all(
+            &spec(),
+            &[
+                r#"{"type":"assistant","message":{"stop_reason":"refusal","content":[{"type":"text","text":"I cannot assist with that."}]}}"#,
+                r#"{"type":"result","subtype":"success","is_error":false,"result":"fine"}"#,
+                r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Usage policy violation"}"#,
+            ],
+        );
+        let events: Vec<_> = events.into_iter().filter(|e| matches!(e, Event::Error(_))).collect();
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(matches!(&events[0], Event::Error(e) if e.contains("refusal") && e.contains("I cannot assist with that.")));
+        assert!(matches!(&events[1], Event::Error(e) if e.contains("error_during_execution") && e.contains("Usage policy violation")));
     }
 
     #[test]

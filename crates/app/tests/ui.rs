@@ -885,6 +885,28 @@ fn a_checklist_shows_its_items_in_the_transcript() {
 }
 
 #[test]
+fn a_model_refusal_shows_in_the_chat() {
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "native", "do it", None, None).unwrap();
+    rig.store.add_message(s.id, &Entry::user("do it")).unwrap();
+    rig.store
+        .add_message(
+            s.id,
+            &Entry::Error {
+                text: "the model refused to answer (refusal): I can't help with that.".into(),
+            },
+        )
+        .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 2);
+    h.run_steps(3);
+    h.get_by_label_contains("I can't help with that.");
+}
+
+#[test]
 fn diagnostics_after_an_edit_show_as_a_folded_row_with_the_first_finding() {
     let rig = rig();
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();

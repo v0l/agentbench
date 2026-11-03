@@ -1395,6 +1395,7 @@ struct Reply {
     calls: Vec<Call>,
     usage: Option<Usage>,
     finish: Option<String>,
+    refusal: String,
 }
 
 #[async_trait]
@@ -2614,7 +2615,17 @@ where
     check_complete(done, reply)
 }
 
+fn refused(reply: &Reply) -> Option<String> {
+    let reason = reply.finish.as_deref().filter(|r| matches!(*r, "refusal" | "content_filter"))?;
+    let said = if reply.refusal.trim().is_empty() { reply.text.trim() } else { reply.refusal.trim() };
+    let said = if said.is_empty() { "the model gave no reason" } else { said };
+    Some(format!("the model refused to answer ({reason}): {said}"))
+}
+
 fn check_complete(done: bool, reply: Reply) -> Result<Reply, Failure> {
+    if let Some(e) = refused(&reply) {
+        return Err(Failure::Fatal(e));
+    }
     if reply.finish.as_deref() == Some("length") {
         return Err(Failure::Truncated);
     }
@@ -2674,6 +2685,9 @@ fn take(v: &Value, reply: &mut Reply, io: &dyn Io) {
         reply.finish = Some(reason.to_string());
     }
     let Some(delta) = v.pointer("/choices/0/delta") else { return };
+    if let Some(t) = delta.get("refusal").and_then(Value::as_str) {
+        reply.refusal.push_str(t);
+    }
     for key in ["reasoning_content", "reasoning"] {
         if let Some(t) = delta.get(key).and_then(Value::as_str).filter(|t| !t.is_empty()) {
             io.emit(Event::Thinking { text: t.to_string() });
@@ -4452,6 +4466,32 @@ for line in sys.stdin:
         let io = TestIo::new(Arc::new(FakeApi));
         let e = run(&native, dir.path(), "listen to this", &io).await.unwrap_err();
         assert!(e.contains("does not accept audio input"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_finish_fails_the_turn_with_the_models_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _) = stub(vec![vec![
+            say("I can't help with that request."),
+            finished("refusal"),
+        ]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let e = run(&native, dir.path(), "do it", &io).await.unwrap_err();
+        assert!(e.contains("refus") && e.contains("I can't help with that request."), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_field_is_shown_when_there_is_no_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _) = stub(vec![vec![
+            json!({"choices":[{"delta":{"refusal":"Policy says no."}}]}),
+            finished("content_filter"),
+        ]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let e = run(&native, dir.path(), "do it", &io).await.unwrap_err();
+        assert!(e.contains("content_filter") && e.contains("Policy says no."), "{e}");
     }
 
     #[tokio::test]

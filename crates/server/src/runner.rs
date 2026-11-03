@@ -1220,6 +1220,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_claude_refusal_is_stored_and_fails_the_session() {
+        let script = r#"echo '{"type":"assistant","message":{"stop_reason":"refusal","content":[{"type":"text","text":"I cannot assist with that."}]}}'"#;
+        let (runner, s) = setup(script_agent("c", script));
+        runner.send(&s, "x").unwrap();
+        assert_eq!(wait_idle(&runner, s.id).await.status, SessionStatus::Failed);
+        let all = runner.store().messages(s.id, 0).unwrap();
+        assert!(all.iter().any(|m| matches!(&m.entry, Entry::Error { text } if text.contains("I cannot assist with that."))));
+    }
+
+    #[tokio::test]
     async fn an_agent_error_fails_the_session() {
         let (runner, s) = setup(script_agent("e", r#"echo '{"error":"quota"}'"#));
         runner.send(&s, "x").unwrap();
