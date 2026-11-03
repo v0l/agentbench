@@ -442,9 +442,32 @@ fn not_found(what: &str, id: impl std::fmt::Display) -> StoreError {
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
         if let Some(dir) = path.parent() {
+            let existed = dir.is_dir();
             std::fs::create_dir_all(dir).map_err(|e| StoreError(e.to_string()))?;
+            #[cfg(unix)]
+            if !existed {
+                // The store holds the bearer token and model API keys; keep the
+                // directory to the owner only instead of the umask default.
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
         }
-        Store::setup(Connection::open(path)?)
+        let conn = Connection::open(path)?;
+        #[cfg(unix)]
+        {
+            // Same for the database and its WAL/SHM siblings: 0600, independent
+            // of the process umask.
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o600);
+            for p in [path.to_path_buf(), path.with_extension("db-wal"), path.with_extension("db-shm")] {
+                if p.is_file() {
+                    let _ = std::fs::set_permissions(&p, mode.clone());
+                }
+            }
+            let _ = std::fs::set_permissions(path, mode);
+        }
+        Store::setup(conn)
     }
 
     pub fn memory() -> Result<Store> {
