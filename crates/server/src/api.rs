@@ -125,8 +125,42 @@ pub fn router(api: Api) -> Router {
     Router::new()
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
         .merge(protected)
+        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(host_allowlist))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(api)
+}
+
+/// DNS-rebinding guard: the API is driven with a bearer token header rather
+/// than ambient cookies, but a hostile page can still probe the port. Only
+/// loopback names (or hosts listed in AGENTBENCH_ALLOWED_HOSTS for remote
+/// setups) may name this server.
+async fn host_allowlist(req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let name = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    let mut allowed = ["localhost", "127.0.0.1", "[::1]", "::1", ""].iter();
+    let extra = std::env::var("AGENTBENCH_ALLOWED_HOSTS").unwrap_or_default();
+    let ok = allowed.any(|a| name.eq_ignore_ascii_case(a))
+        || (!extra.is_empty() && extra.split(',').any(|h| name.eq_ignore_ascii_case(h.trim())));
+    if ok {
+        next.run(req).await
+    } else {
+        Failure(StatusCode::FORBIDDEN, "host not allowed".into()).into_response()
+    }
+}
+
+/// Keep browsers from MIME-sniffing responses into executable content.
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    res
 }
 
 /// OpenAI's speech to text, answered with Whisper on this machine. Takes a multipart form with a
