@@ -1,6 +1,6 @@
 use agentbench_core::{
     Automation, Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue,
-    Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Worktree,
+    NoteVersion, Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Worktree,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::Path;
@@ -205,6 +205,19 @@ CREATE TABLE triage_proposals (
 );
 CREATE INDEX triage_fingerprint ON triage_proposals(fingerprint);
 "#,
+    r#"
+CREATE TABLE note_versions (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    topic TEXT NOT NULL,
+    body TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    author TEXT NOT NULL,
+    session TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX note_versions_topic ON note_versions(project_id, topic, id);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -261,6 +274,27 @@ pub struct SeenTree {
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
+}
+
+pub fn hash_note(body: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in body.trim().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+fn note_version_row(r: &Row) -> rusqlite::Result<NoteVersion> {
+    Ok(NoteVersion {
+        id: r.get(0)?,
+        topic: r.get(1)?,
+        body: r.get(2)?,
+        hash: r.get(3)?,
+        author: r.get(4)?,
+        session: r.get(5)?,
+        created_at: r.get(6)?,
+    })
 }
 
 pub fn now() -> i64 {
@@ -1102,8 +1136,6 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Keep a note under a topic, replacing what was there. An empty note forgets the topic.
-    /// Answers whether anything changed.
     pub fn add_watch(&self, watched: SessionId, watcher: SessionId) -> Result<()> {
         self.db().execute(
             "INSERT OR IGNORE INTO watches (watched, watcher) VALUES (?1, ?2)",
@@ -1213,21 +1245,70 @@ impl Store {
         Ok(found)
     }
 
-    pub fn set_note(&self, project_id: Id, topic: &str, body: &str) -> Result<bool> {
-        let db = self.db();
-        let n = if body.trim().is_empty() {
-            db.execute(
+    pub fn note_hash(&self, project_id: Id, topic: &str) -> Result<String> {
+        let body: Option<String> = self
+            .db()
+            .query_row(
+                "SELECT body FROM notes WHERE project_id = ?1 AND topic = ?2",
+                params![project_id, topic],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(body.map(|b| hash_note(&b)).unwrap_or_default())
+    }
+
+    pub fn set_note(
+        &self,
+        project_id: Id,
+        topic: &str,
+        body: &str,
+        author: &str,
+        session: Option<SessionId>,
+        based_on: Option<&str>,
+    ) -> Result<bool> {
+        let mut db = self.db();
+        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT body FROM notes WHERE project_id = ?1 AND topic = ?2",
+                params![project_id, topic],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let current_hash = current.as_deref().map(hash_note).unwrap_or_default();
+        if let Some(base) = based_on {
+            if base.trim() != current_hash {
+                return Err(StoreError(format!(
+                    "note `{topic}` changed since you read it (now {current_hash}); recall it again and retry with based_on set to the new hash"
+                )));
+            }
+        } else if current.is_some() {
+            return Err(StoreError(format!(
+                "note `{topic}` exists; pass based_on={current_hash} (from recall) to replace it"
+            )));
+        }
+        let body = body.trim();
+        let n = if body.is_empty() {
+            tx.execute(
                 "DELETE FROM notes WHERE project_id = ?1 AND topic = ?2",
                 params![project_id, topic],
             )?
         } else {
-            db.execute(
+            tx.execute(
                 "INSERT INTO notes (project_id, topic, body, updated_at) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(project_id, topic) DO UPDATE
                  SET body = excluded.body, updated_at = excluded.updated_at",
-                params![project_id, topic, body.trim(), now()],
+                params![project_id, topic, body, now()],
             )?
         };
+        if n > 0 {
+            tx.execute(
+                "INSERT INTO note_versions (project_id, topic, body, hash, author, session, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![project_id, topic, body, hash_note(body), author, session, now()],
+            )?;
+        }
+        tx.commit()?;
         Ok(n > 0)
     }
 
@@ -1299,6 +1380,46 @@ impl Store {
             Store::changed(&db, "triage", id)?;
         }
         self.proposal(id)
+    }
+
+    pub fn note_versions(&self, project_id: Id, topic: &str) -> Result<Vec<NoteVersion>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT id, topic, body, hash, author, session, created_at FROM note_versions
+             WHERE project_id = ?1 AND topic = ?2 ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map(params![project_id, topic], note_version_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn note_topics(&self, project_id: Id) -> Result<Vec<String>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT topic FROM note_versions WHERE project_id = ?1 GROUP BY topic ORDER BY MAX(id) DESC",
+        )?;
+        let rows = stmt.query_map([project_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn restore_note(
+        &self,
+        project_id: Id,
+        version: Id,
+        author: &str,
+        session: Option<SessionId>,
+    ) -> Result<()> {
+        let (topic, body): (String, String) = self
+            .db()
+            .query_row(
+                "SELECT topic, body FROM note_versions WHERE id = ?1 AND project_id = ?2",
+                params![version, project_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError(format!("no note version {version}")))?;
+        let current = self.note_hash(project_id, &topic)?;
+        self.set_note(project_id, &topic, &body, author, session, Some(&current))?;
+        Ok(())
     }
 
     pub fn reset_running(&self) -> Result<Vec<SessionId>> {

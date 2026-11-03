@@ -91,6 +91,8 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects", get(list_projects).post(add_project))
         .route("/api/projects/{id}", delete(delete_project).patch(update_project))
         .route("/api/projects/{id}/sync", post(sync_project))
+        .route("/api/projects/{id}/notes", get(list_notes))
+        .route("/api/projects/{id}/notes/restore", post(restore_note))
         .route("/api/projects/{id}/icon", get(project_icon))
         .route("/api/projects/{id}/worktrees", get(list_worktrees).post(add_worktree))
         .route("/api/worktrees/{id}", delete(remove_worktree))
@@ -589,6 +591,37 @@ async fn sync_project(
         changed(&api);
     }
     Ok(Json(api.runner.store().worktrees(Some(id))?))
+}
+
+async fn list_notes(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+) -> Reply<Vec<agentbench_core::NoteHistory>> {
+    let store = api.runner.store();
+    store.project(id)?;
+    let current = store.notes(id)?;
+    let mut out = Vec::new();
+    for topic in store.note_topics(id)? {
+        let body = current.iter().find(|(t, _)| *t == topic).map(|(_, b)| b.clone());
+        let versions = store.note_versions(id, &topic)?;
+        out.push(agentbench_core::NoteHistory { topic, current: body, versions });
+    }
+    Ok(Json(out))
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreNote {
+    version: Id,
+}
+
+async fn restore_note(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+    Json(req): Json<RestoreNote>,
+) -> Reply<()> {
+    api.runner.store().restore_note(id, req.version, "user", None)?;
+    changed(&api);
+    Ok(Json(()))
 }
 
 async fn list_worktrees(

@@ -48,6 +48,7 @@ pub enum Reply {
     Jobs(SessionId, Vec<agentbench_core::Job>),
     Screen(SessionId, agentbench_core::Screen),
     Comments(Id, Vec<Comment>),
+    Notes(Id, Vec<agentbench_core::NoteHistory>),
     Done(String),
     Failed(String),
     Offline(String),
@@ -265,6 +266,22 @@ impl Client {
 
     pub fn update_project(&mut self, id: Id, patch: &ProjectPatch) {
         self.act(Method::PATCH, &format!("/api/projects/{id}"), Some(patch), "");
+    }
+
+    pub fn notes(&mut self, project: Id) {
+        let req = self.request(Method::GET, &format!("/api/projects/{project}/notes"), None);
+        self.send(req, move |n| Reply::Notes(project, n));
+    }
+
+    pub fn restore_note(&mut self, project: Id, version: Id) {
+        let body = Self::json(&serde_json::json!({ "version": version }));
+        let req = self.request(
+            Method::POST,
+            &format!("/api/projects/{project}/notes/restore"),
+            body,
+        );
+        self.send(req, move |_: serde_json::Value| Reply::Done("note restored".into()));
+        self.notes(project);
     }
 
     pub fn sync_project(&mut self, id: Id) {
