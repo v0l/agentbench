@@ -194,6 +194,17 @@ CREATE TABLE autopilot_log (
     "ALTER TABLE projects ADD COLUMN automation TEXT;
      ALTER TABLE projects ADD COLUMN risky TEXT NOT NULL DEFAULT '[]';
      ALTER TABLE projects ADD COLUMN deploy TEXT;",
+    r#"
+CREATE TABLE triage_proposals (
+    id INTEGER PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    body TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL,
+    decided_at INTEGER
+);
+CREATE INDEX triage_fingerprint ON triage_proposals(fingerprint);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -254,6 +265,22 @@ pub struct Store {
 
 pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+fn proposal_row(row: &Row) -> rusqlite::Result<Option<agentbench_core::Proposal>> {
+    let body: String = row.get(1)?;
+    let state: String = row.get(2)?;
+    let Ok(mut p) = serde_json::from_str::<agentbench_core::Proposal>(&body) else {
+        return Ok(None);
+    };
+    p.id = row.get(0)?;
+    p.created_at = row.get(3)?;
+    p.state = match state.as_str() {
+        "accepted" => agentbench_core::ProposalState::Accepted,
+        "rejected" => agentbench_core::ProposalState::Rejected,
+        _ => agentbench_core::ProposalState::Pending,
+    };
+    Ok(Some(p))
 }
 
 fn issue_row(row: &Row) -> rusqlite::Result<Issue> {
@@ -1202,6 +1229,76 @@ impl Store {
             )?
         };
         Ok(n > 0)
+    }
+
+    pub fn proposals(&self, state: agentbench_core::ProposalState) -> Result<Vec<agentbench_core::Proposal>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT id, body, state, created_at FROM triage_proposals WHERE state = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([state.as_str()], proposal_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().flatten().collect())
+    }
+
+    pub fn proposal(&self, id: Id) -> Result<agentbench_core::Proposal> {
+        self.db()
+            .query_row(
+                "SELECT id, body, state, created_at FROM triage_proposals WHERE id = ?1",
+                [id],
+                proposal_row,
+            )
+            .optional()?
+            .flatten()
+            .ok_or_else(|| not_found("proposal", id))
+    }
+
+    pub fn proposal_known(&self, fingerprint: &str) -> Result<bool> {
+        Ok(self
+            .db()
+            .query_row(
+                "SELECT 1 FROM triage_proposals WHERE fingerprint = ?1
+                 AND state IN ('pending', 'rejected')",
+                [fingerprint],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub fn add_proposal(
+        &self,
+        fingerprint: &str,
+        proposal: &agentbench_core::Proposal,
+    ) -> Result<Id> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO triage_proposals (fingerprint, body, state, created_at)
+             VALUES (?1, ?2, 'pending', ?3)",
+            params![fingerprint, serde_json::to_string(proposal).unwrap_or_default(), now()],
+        )?;
+        let id = db.last_insert_rowid();
+        Store::changed(&db, "triage", id)?;
+        Ok(id)
+    }
+
+    pub fn decide_proposal(
+        &self,
+        id: Id,
+        state: agentbench_core::ProposalState,
+    ) -> Result<agentbench_core::Proposal> {
+        {
+            let db = self.db();
+            let n = db.execute(
+                "UPDATE triage_proposals SET state = ?1, decided_at = ?2
+                 WHERE id = ?3 AND state = 'pending'",
+                params![state.as_str(), now(), id],
+            )?;
+            if n == 0 {
+                return Err(StoreError("that proposal was already decided".into()));
+            }
+            Store::changed(&db, "triage", id)?;
+        }
+        self.proposal(id)
     }
 
     pub fn reset_running(&self) -> Result<Vec<SessionId>> {

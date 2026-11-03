@@ -1158,6 +1158,8 @@ pub struct Overview {
     pub supervisor: Option<SessionId>,
     #[serde(default)]
     pub autopilot: Option<AutopilotState>,
+    #[serde(default)]
+    pub triage: Option<TriageState>,
     pub cursor: Id,
 }
 
@@ -1201,6 +1203,101 @@ pub struct AutopilotPatch {
     pub max_nudges: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_level: Option<Automation>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalKind {
+    Duplicate,
+    Stale,
+    Labels,
+    CrossCutting,
+}
+
+impl ProposalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProposalKind::Duplicate => "duplicate",
+            ProposalKind::Stale => "stale",
+            ProposalKind::Labels => "labels",
+            ProposalKind::CrossCutting => "cross_cutting",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ProposalKind> {
+        match s.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+            "duplicate" | "duplicates" => Some(ProposalKind::Duplicate),
+            "stale" => Some(ProposalKind::Stale),
+            "labels" | "label" | "priority" | "labels_priority" => Some(ProposalKind::Labels),
+            "cross_cutting" | "crosscutting" => Some(ProposalKind::CrossCutting),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "do", rename_all = "snake_case")]
+pub enum Change {
+    Update { issue_id: Id, patch: IssuePatch },
+    Comment { issue_id: Id, body: String },
+    Create { issue: NewIssue },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalState {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+impl ProposalState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProposalState::Pending => "pending",
+            ProposalState::Accepted => "accepted",
+            ProposalState::Rejected => "rejected",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Proposal {
+    pub id: Id,
+    pub kind: ProposalKind,
+    pub summary: String,
+    pub issues: Vec<Id>,
+    pub sessions: Vec<String>,
+    pub projects: Vec<Id>,
+    pub changes: Vec<Change>,
+    pub state: ProposalState,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TriageState {
+    pub proposals: Vec<Proposal>,
+    pub running: bool,
+    pub budget_tokens: u64,
+    pub every_hours: u64,
+    #[serde(default)]
+    pub last_run: Option<i64>,
+    #[serde(default)]
+    pub last_status: String,
+    #[serde(default)]
+    pub notes: Vec<(Id, String)>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TriagePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_hours: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_project: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -326,6 +326,19 @@ impl Client {
         self.act(Method::PATCH, "/api/autopilot", Some(patch), "");
     }
 
+    pub fn triage_run(&mut self) {
+        self.act::<()>(Method::POST, "/api/triage/run", None, "triage started");
+    }
+
+    pub fn triage_decide(&mut self, id: Id, accept: bool) {
+        let verb = if accept { "accept" } else { "reject" };
+        self.act::<()>(Method::POST, &format!("/api/triage/{id}/{verb}"), None, "");
+    }
+
+    pub fn triage_patch(&mut self, patch: &agentbench_core::TriagePatch) {
+        self.act(Method::PATCH, "/api/triage", Some(patch), "");
+    }
+
     pub fn send_message(&mut self, session: SessionId, text: &str) {
         self.send_with(session, text, Vec::new());
     }
