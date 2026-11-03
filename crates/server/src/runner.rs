@@ -2455,7 +2455,8 @@ mod tests {
         }
         let first = store.messages(boss.id, 0).unwrap().remove(0).entry;
         assert!(first.text().contains(&format!("Watched session {child}")), "{first:?}");
-        assert!(first.text().contains("built it"));
+        assert!(!first.text().contains("built it"));
+        assert!(first.text().contains("changed state to"));
     }
 
     #[tokio::test]
