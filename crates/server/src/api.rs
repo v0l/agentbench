@@ -987,6 +987,7 @@ async fn delete_session(
     api.runner.interrupt(id);
     api.runner.end(id);
     api.runner.store().delete_session(id)?;
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("agentbench").join(id.to_string()));
     changed(&api);
     Ok(StatusCode::NO_CONTENT)
 }
