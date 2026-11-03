@@ -917,6 +917,9 @@ impl Api for StoreApi {
                 }
                 let note = text(args, "note").unwrap_or_default();
                 let based_on = text(args, "based_on");
+                if text(args, "scope").is_some_and(|s| s.trim().eq_ignore_ascii_case("global")) {
+                    return Err("global notes are read-only to agents: only the user, or a triage proposal the user accepted, can change them. Propose the note to the user in your reply instead.".into());
+                }
                 s.set_note(project, &topic, &note, "agent", Some(me.id), based_on.as_deref())
                     .map_err(|e| e.0)?;
                 if note.trim().is_empty() {
@@ -926,7 +929,8 @@ impl Api for StoreApi {
                 }
             }
             "recall" => {
-                let notes = s.notes(project).map_err(|e| e.0)?;
+                let global = text(args, "scope").is_some_and(|s| s.trim().eq_ignore_ascii_case("global"));
+                let notes = if global { s.global_notes() } else { s.notes(project) }.map_err(|e| e.0)?;
                 let want = text(args, "topic").map(|t| t.trim().to_lowercase());
                 let notes: Vec<Value> = notes
                     .into_iter()
@@ -1537,6 +1541,25 @@ mod tests {
         s.restore_note(p, versions[1].id, "user", None).unwrap();
         assert_eq!(s.notes(p).unwrap(), [("t".to_string(), "one".to_string())]);
         assert_eq!(s.note_versions(p, "t").unwrap().len(), 3);
+    }
+
+    #[test]
+    fn global_notes_are_read_only_to_agents() {
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/a");
+        let (_, other) = crate::store::testing::project(&s, "/b");
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let them = s.add_session(other.id, "native", "them", None, None).unwrap();
+        s.set_global_note("style", "no em dashes").unwrap();
+        let api = StoreApi::new(s.clone());
+        let refused = api.call("remember", &json!({"scope": "global", "topic": "style", "note": "x"}), me.id);
+        assert!(refused.unwrap_err().contains("read-only"));
+        assert_eq!(s.global_notes().unwrap(), [("style".to_string(), "no em dashes".to_string())]);
+        for id in [me.id, them.id] {
+            let seen = api.call("recall", &json!({"scope": "global"}), id).unwrap();
+            assert_eq!(seen[0]["note"], "no em dashes");
+        }
+        assert_eq!(api.call("recall", &json!({}), me.id).unwrap(), json!([]));
     }
 
     #[test]

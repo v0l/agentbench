@@ -507,9 +507,9 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "recall",
-            "Read the notes kept for this project with remember, optionally only those matching a word.",
+            "Read the notes kept for this project with remember, optionally only those matching a word. Pass scope `global` to read the global notes, which are read-only to you.",
             object(
-                json!({ "project": string("Supervisor chat only: the project by name or id"), "topic": string("Only notes whose topic or text has this word") }),
+                json!({ "project": string("Supervisor chat only: the project by name or id"), "scope": string("`global` for the notes shared by all projects"), "topic": string("Only notes whose topic or text has this word") }),
                 &[],
             ),
         ),
@@ -1037,6 +1037,13 @@ pub fn system(turn: &Turn, base: &Model, mcp: &Mcp) -> String {
     let mut out = format!("Working directory: {}\n\n", turn.cwd.display());
     out.push_str(&brief(turn.context));
     out.push_str("\n\nPrefer the tracker tools to the REST API. Write markdown, and put code in fenced blocks.\n\n");
+    if !turn.context.global_notes.is_empty() {
+        let mut notes = String::new();
+        for (topic, note) in &turn.context.global_notes {
+            notes.push_str(&format!("- {topic}: {}\n", note.trim().replace('\n', "\n  ")));
+        }
+        out.push_str(&section("global_notes", &notes));
+    }
     if !turn.context.notes.is_empty() {
         let mut notes = String::new();
         for (topic, note) in &turn.context.notes {
@@ -3565,6 +3572,30 @@ mod tests {
         confirm_project(&json!({"project": main2.project_id}), &c, &TestIo::new(api2))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn global_notes_open_every_session_before_the_project_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("hi")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let mut c = context();
+        c.global_notes = vec![("style".into(), "no em dashes".into())];
+        let turn = Turn {
+            prompt: "x",
+            files: &[],
+            cwd: dir.path(),
+            model: None,
+            effort: None,
+            resume: None,
+            history: &[],
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        let system = asked.recv().unwrap()["messages"][0]["content"].as_str().unwrap().to_string();
+        assert!(system.contains("<global_notes>"), "{system}");
+        assert!(system.contains("- style: no em dashes"), "{system}");
     }
 
     #[tokio::test]
