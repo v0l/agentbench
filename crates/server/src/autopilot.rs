@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const ENABLED: &str = "autopilot";
+const AUTO_CLOSE: &str = "autopilot_auto_close";
 const CAP: &str = "autopilot_cap";
 const PROJECT_CAP: &str = "autopilot_project_cap";
 const STUCK_MINUTES: &str = "autopilot_stuck_minutes";
@@ -561,7 +562,7 @@ impl Autopilot {
 
     fn sweep(&self, now: i64) {
         let store = self.store();
-        if !flag(store, ENABLED) {
+        if !flag(store, ENABLED) || !flag(store, AUTO_CLOSE) {
             return;
         }
         let supervisor = store.supervisor_project().ok().flatten().map(|p| p.id);
@@ -840,13 +841,20 @@ impl Autopilot {
                 self.notify(&format!("#{} merged but not pushed", w.issue));
             }
             Ok(shipped) => {
-                self.runner.interrupt(w.session);
-                self.runner.end(w.session);
-                let _ = store.delete_session(w.session);
+                let closed = flag(store, AUTO_CLOSE);
+                if closed {
+                    self.runner.interrupt(w.session);
+                    self.runner.end(w.session);
+                    let _ = store.delete_session(w.session);
+                }
                 self.set_state(w.issue, IssueState::Done);
                 self.comment(
                     w.issue,
-                    &format!("autopilot: {} and closed session {}.", shipped.describe(), w.session),
+                    &if closed {
+                        format!("autopilot: {} and closed session {}.", shipped.describe(), w.session)
+                    } else {
+                        format!("autopilot: {}.", shipped.describe())
+                    },
                 );
                 self.log(Some(w.project), Some(w.issue), &format!("{}, #{} done", shipped.describe(), w.issue));
                 if let Some(Err(e)) = &shipped.deployed {
@@ -1386,6 +1394,10 @@ mod tests {
             .id
     }
 
+    fn auto_close(r: &Rig) {
+        r.store.set_setting(AUTO_CLOSE, "1").unwrap();
+    }
+
     fn on(r: &Rig) {
         apply(
             &r.store,
@@ -1438,7 +1450,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_done_issue_with_a_merged_branch_loses_its_session_and_worktree() {
+    async fn a_done_issue_with_a_merged_branch_loses_its_session_and_worktree_only_when_auto_close_is_on() {
         let r = rig(DONE);
         let (a, sid) = worked_on(&r).await;
         r.ap.tick();
@@ -1447,6 +1459,10 @@ mod tests {
         set_level(&r.store, r.project, Some(Automation::Ship));
         crate::git::merge_branch(&r.repo, tree.branch.as_deref().unwrap()).unwrap();
         r.ap.set_state(a, IssueState::Done);
+        r.ap.tick();
+        assert!(r.store.session(sid).is_ok(), "session stays open by default");
+        assert!(std::path::Path::new(&tree.path).exists(), "worktree stays by default");
+        auto_close(&r);
         r.ap.tick();
         assert!(r.store.session(sid).is_err(), "session closed");
         assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
@@ -1520,6 +1536,9 @@ mod tests {
         r.ap.tick_at(at + 60_000);
         assert!(r.store.session(s.id).is_ok(), "within the grace period");
         r.ap.tick_at(at + 31 * 60_000);
+        assert!(r.store.session(s.id).is_ok(), "a concluded session stays open by default");
+        auto_close(&r);
+        r.ap.tick_at(at + 31 * 60_000);
         assert!(r.store.session(s.id).is_err(), "closed after it");
     }
 
@@ -1553,7 +1572,7 @@ mod tests {
         assert!(r.repo.join("feature.txt").exists(), "merged into the main checkout");
         assert!(remote_has(&bare, "feature.txt"), "pushed");
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
-        assert!(r.store.session(sid).is_err(), "session closed");
+        assert!(r.store.session(sid).is_ok(), "session stays open by default");
     }
 
     #[tokio::test]
