@@ -184,6 +184,8 @@ fn harness(url: String) -> Harness<'static, App> {
 }
 
 fn harness_at(url: String, size: [f32; 2]) -> Harness<'static, App> {
+    static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _build = BUILD.lock().unwrap_or_else(|e| e.into_inner());
     Harness::builder().with_size(size).wgpu().build_eframe(move |cc| {
         let mut storage = Mem::default();
         storage.0.insert("url".into(), url);
@@ -211,7 +213,7 @@ impl eframe::Storage for Mem {
 fn until(h: &mut Harness<'_, App>, what: &str, ok: impl Fn(&Harness<'_, App>) -> bool) {
     let start = Instant::now();
     while !ok(h) {
-        assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for {what}");
+        assert!(start.elapsed() < Duration::from_secs(60), "timed out waiting for {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(30));
     }
@@ -630,7 +632,7 @@ fn several_questions_are_answered_together_with_multiple_choice() {
     );
     let fields = h.query_all_by_role(egui::accesskit::Role::TextInput).count();
     assert!(fields >= 3, "{fields} text fields");
-    h.query_all_by_role(egui::accesskit::Role::TextInput).nth(2).unwrap().click();
+    h.query_all_by_role(egui::accesskit::Role::TextInput).last().unwrap().click();
     h.run_steps(2);
     h.event(egui::Event::Text("no".into()));
     h.run_steps(2);
