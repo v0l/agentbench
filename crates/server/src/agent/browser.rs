@@ -1976,3 +1976,43 @@ function later() { setTimeout(() => { document.body.insertAdjacentHTML('beforeen
         assert_eq!(browsers.open(), 0);
     }
 }
+
+/// The agent fetches whatever a page or a model asks for, so a prompt injection
+/// could otherwise reach loopback services, LAN hosts or cloud metadata
+/// endpoints (169.254.169.254) and hand the response to the model. Resolve the
+/// host and refuse anything that is not a public address.
+fn private_address(url: &url::Url) -> Option<String> {
+    use std::net::IpAddr;
+    let host = url.host_str()?;
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".internal") {
+        return Some(format!("{host} is a private host"));
+    }
+    let port = url.port_or_known_default().unwrap_or(80);
+    let addrs = std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+        .ok()?
+        .filter(|a| a.is_ipv4())
+        .collect::<Vec<_>>();
+    if addrs.is_empty() {
+        return None;
+    }
+    for addr in addrs {
+        let ip = addr.ip();
+        let private = match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64 // RFC 7333 range
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00
+            }
+        };
+        if private {
+            return Some(format!("{host} resolves to the private address {ip}"));
+        }
+    }
+    None
+}
