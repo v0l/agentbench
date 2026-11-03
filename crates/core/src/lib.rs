@@ -4,6 +4,24 @@ use serde_json::Value;
 
 pub type Id = i64;
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NoteVersion {
+    pub id: Id,
+    pub topic: String,
+    pub body: String,
+    pub hash: String,
+    pub author: String,
+    pub session: Option<SessionId>,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NoteHistory {
+    pub topic: String,
+    pub current: Option<String>,
+    pub versions: Vec<NoteVersion>,
+}
+
 /// A chat's id. Never reused, so nothing cached under one id can surface in another chat.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,

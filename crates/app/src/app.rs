@@ -610,6 +610,7 @@ pub struct App {
     project_sort: ProjectSort,
     tag_filter: String,
     edit_tags: Option<(Id, String)>,
+    notes_view: Option<(Id, Vec<agentbench_core::NoteHistory>)>,
     rename_chat: Option<(SessionId, String)>,
     only_busy: bool,
     project: Option<Id>,
@@ -746,6 +747,7 @@ impl App {
             project_sort: ProjectSort::Name,
             tag_filter: String::new(),
             edit_tags: None,
+            notes_view: None,
             rename_chat: None,
             only_busy: false,
             project: None,
@@ -1584,6 +1586,11 @@ impl App {
                 if changed || t.messages.is_empty() && !t.rows.is_empty() {
                     t.messages = agentbench_core::shown(&t.rows);
                     t.rebuilds += 1;
+                }
+            }
+            Reply::Notes(pid, n) => {
+                if self.notes_view.as_ref().is_some_and(|(p, _)| *p == pid) {
+                    self.notes_view = Some((pid, n));
                 }
             }
             Reply::Comments(iid, c) => {

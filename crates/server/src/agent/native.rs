@@ -499,9 +499,9 @@ fn agentbench_specs() -> Vec<Spec> {
         Spec::new(
             "remember",
             "Keep a note about this project that survives across sessions: how to run the tests, a convention, a gotcha. \
-             One note per topic; saving a topic again replaces it, and an empty note forgets it. Notes are shown to every session at its start, so keep them short and true.",
+             One note per topic; saving a topic again replaces it, and an empty note forgets it. Replacing needs `based_on`, the hash recall gave for the version you read; if the note changed since, the write is refused, so recall again and retry. Every version is kept. Notes are shown to every session at its start, so keep them short and true.",
             object(
-                json!({ "project": string("Supervisor chat only: the project by name or id"), "topic": string("A short name, like `tests` or `style`"), "note": string("The note; empty to forget the topic") }),
+                json!({ "project": string("Supervisor chat only: the project by name or id"), "topic": string("A short name, like `tests` or `style`"), "note": string("The note; empty to forget the topic"), "based_on": string("Hash of the note version you read, from recall; required when the topic already exists") }),
                 &["topic"],
             ),
         ),

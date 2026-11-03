@@ -9,6 +9,7 @@ impl App {
         self.start_modal(ctx);
         self.worktree_modal(ctx);
         self.tags_modal(ctx);
+        self.notes_modal(ctx);
         self.confirm_modal(ctx);
         self.terminal_modal(ctx);
         self.settings_modal(ctx);
@@ -611,6 +612,58 @@ impl App {
             });
         if close || m.should_close() {
             self.help = false;
+        }
+    }
+
+    pub(super) fn notes_modal(&mut self, ctx: &egui::Context) {
+        let Some((pid, notes)) = &self.notes_view else {
+            return;
+        };
+        let pid = *pid;
+        let (mut close, mut restore) = (false, None);
+        let m = egui::Modal::new(egui::Id::unique("notes"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(modal_width(ctx, 560.0));
+                modal_title(ui, "Project notes");
+                if notes.is_empty() {
+                    note(ui, "No notes yet.", LEGEND);
+                }
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for n in notes {
+                        section(ui, &n.topic, "every version, newest first", |ui| {
+                            for v in &n.versions {
+                                let live = n.current.as_deref() == Some(v.body.as_str());
+                                let who = match &v.session {
+                                    Some(s) => format!("{} ({s})", v.author),
+                                    None => v.author.clone(),
+                                };
+                                let tag = if live { " (current)" } else { "" };
+                                note(ui, &format!("{who}{tag}: {}", v.body), LEGEND);
+                                if !live
+                                    && ui
+                                        .add(Key::new(format!("restore {}", v.id)).outline(VALUE))
+                                        .clicked()
+                                {
+                                    restore = Some(v.id);
+                                }
+                            }
+                        });
+                    }
+                });
+                footer(ui, |ui| {
+                    if ui.add(Key::new("close").outline(VALUE).min_width(100.0)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if let Some(v) = restore {
+            if let Some(c) = &mut self.client {
+                c.restore_note(pid, v);
+            }
+        }
+        if close || m.should_close() {
+            self.notes_view = None;
         }
     }
 

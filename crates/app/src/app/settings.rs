@@ -398,6 +398,12 @@ impl App {
                     );
                 }
             }
+            Some(ProjectAction::Notes(id)) => {
+                self.notes_view = Some((id, Vec::new()));
+                if let Some(c) = &mut self.client {
+                    c.notes(id);
+                }
+            }
             Some(ProjectAction::Rescan(id)) => {
                 if let Some(c) = &mut self.client {
                     c.sync_project(id);
@@ -877,6 +883,7 @@ fn speech_devices(
 enum ProjectAction {
     Remove(Id, String),
     Rescan(Id),
+    Notes(Id),
     NewWorktree(Id),
     RemoveWorktree(Worktree),
     Rename(Id, String),
@@ -1063,6 +1070,9 @@ fn projects_section(
                 }
                 if ui.add(Key::new("new worktree").outline(VALUE)).clicked() {
                     action = Some(ProjectAction::NewWorktree(p.id));
+                }
+                if ui.add(Key::new("notes").outline(VALUE)).clicked() {
+                    action = Some(ProjectAction::Notes(p.id));
                 }
                 if ui.add(Key::new("rescan").outline(VALUE)).clicked() {
                     action = Some(ProjectAction::Rescan(p.id));

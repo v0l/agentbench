@@ -916,7 +916,9 @@ impl Api for StoreApi {
                     return Err("missing `topic`".into());
                 }
                 let note = text(args, "note").unwrap_or_default();
-                s.set_note(project, &topic, &note).map_err(|e| e.0)?;
+                let based_on = text(args, "based_on");
+                s.set_note(project, &topic, &note, "agent", Some(me.id), based_on.as_deref())
+                    .map_err(|e| e.0)?;
                 if note.trim().is_empty() {
                     json!({ "forgot": topic })
                 } else {
@@ -933,7 +935,9 @@ impl Api for StoreApi {
                             t.to_lowercase().contains(w) || b.to_lowercase().contains(w)
                         })
                     })
-                    .map(|(topic, note)| json!({ "topic": topic, "note": note }))
+                    .map(|(topic, note)| {
+                        json!({ "topic": topic, "hash": crate::store::hash_note(&note), "note": note })
+                    })
                     .collect();
                 json!(notes)
             }
@@ -1490,17 +1494,49 @@ mod tests {
         let them = s.add_session(other.id, "native", "them", None, None).unwrap();
         let api = StoreApi::new(s.clone());
         api.call("remember", &json!({"topic": "tests", "note": "cargo test"}), me.id).unwrap();
-        api.call("remember", &json!({"topic": "tests", "note": "cargo test --all"}), me.id)
-            .unwrap();
+        assert!(api
+            .call("remember", &json!({"topic": "tests", "note": "cargo test --all"}), me.id)
+            .is_err());
+        let hash = api.call("recall", &json!({"topic": "tests"}), me.id).unwrap()[0]["hash"].clone();
+        api.call(
+            "remember",
+            &json!({"topic": "tests", "note": "cargo test --all", "based_on": hash}),
+            me.id,
+        )
+        .unwrap();
+        let stale = api.call(
+            "remember",
+            &json!({"topic": "tests", "note": "lost", "based_on": hash}),
+            me.id,
+        );
+        assert!(stale.unwrap_err().contains("changed since"));
+        assert_eq!(s.note_versions(main.project_id, "tests").unwrap().len(), 2);
         api.call("remember", &json!({"topic": "style", "note": "rustfmt"}), me.id).unwrap();
         let all = api.call("recall", &json!({}), me.id).unwrap();
         assert_eq!(all.as_array().unwrap().len(), 2);
         let some = api.call("recall", &json!({"topic": "ALL"}), me.id).unwrap();
         assert_eq!(some[0]["note"], "cargo test --all");
         assert_eq!(api.call("recall", &json!({}), them.id).unwrap(), json!([]));
-        api.call("remember", &json!({"topic": "style", "note": ""}), me.id).unwrap();
+        let h = api.call("recall", &json!({"topic": "style"}), me.id).unwrap()[0]["hash"].clone();
+        api.call("remember", &json!({"topic": "style", "note": "", "based_on": h}), me.id).unwrap();
         assert_eq!(s.notes(main.project_id).unwrap().len(), 1);
         assert!(api.call("remember", &json!({"note": "x"}), me.id).is_err());
+    }
+
+    #[test]
+    fn a_prior_note_version_can_be_restored_and_keeps_its_author() {
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/a");
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let p = main.project_id;
+        s.set_note(p, "t", "one", "agent", Some(me.id), None).unwrap();
+        let h = s.note_hash(p, "t").unwrap();
+        s.set_note(p, "t", "two", "user", None, Some(&h)).unwrap();
+        let versions = s.note_versions(p, "t").unwrap();
+        assert_eq!((versions[0].author.as_str(), versions[1].session), ("user", Some(me.id)));
+        s.restore_note(p, versions[1].id, "user", None).unwrap();
+        assert_eq!(s.notes(p).unwrap(), [("t".to_string(), "one".to_string())]);
+        assert_eq!(s.note_versions(p, "t").unwrap().len(), 3);
     }
 
     #[test]
