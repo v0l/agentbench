@@ -3,7 +3,7 @@
 use super::transcript::{latest_plan, plan_panel};
 use super::*;
 
-const PANEL_MAX_H: f32 = 140.0;
+const PANEL_MAX_H: f32 = 120.0;
 
 impl App {
     pub(super) fn chat(&mut self, ui: &mut Ui) {
