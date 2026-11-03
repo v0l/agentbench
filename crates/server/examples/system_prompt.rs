@@ -41,6 +41,7 @@ fn main() -> Result<(), String> {
         ),
         token: "<token>".into(),
         notes,
+        global_notes: store.global_notes().map_err(|e| e.0)?,
         automation: String::new(),
     };
     let turn = Turn {

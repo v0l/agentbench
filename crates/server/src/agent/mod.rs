@@ -38,6 +38,7 @@ pub struct Context {
     pub token: String,
     /// What was remembered about the project with `remember`: topic and note.
     pub notes: Vec<(String, String)>,
+    pub global_notes: Vec<(String, String)>,
     pub automation: String,
 }
 
@@ -417,6 +418,7 @@ pub fn context() -> Context {
         api_url: "http://127.0.0.1:7420".into(),
         token: "t".into(),
         notes: Vec::new(),
+        global_notes: Vec::new(),
         automation: String::new(),
     }
 }

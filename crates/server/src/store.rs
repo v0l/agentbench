@@ -194,6 +194,13 @@ CREATE TABLE autopilot_log (
     "ALTER TABLE projects ADD COLUMN automation TEXT;
      ALTER TABLE projects ADD COLUMN risky TEXT NOT NULL DEFAULT '[]';
      ALTER TABLE projects ADD COLUMN deploy TEXT;",
+    r#"
+CREATE TABLE global_notes (
+    topic TEXT PRIMARY KEY,
+    body TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -1199,6 +1206,29 @@ impl Store {
                  ON CONFLICT(project_id, topic) DO UPDATE
                  SET body = excluded.body, updated_at = excluded.updated_at",
                 params![project_id, topic, body.trim(), now()],
+            )?
+        };
+        Ok(n > 0)
+    }
+
+    pub fn global_notes(&self) -> Result<Vec<(String, String)>> {
+        let db = self.db();
+        let mut stmt =
+            db.prepare("SELECT topic, body FROM global_notes ORDER BY updated_at, topic")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_global_note(&self, topic: &str, body: &str) -> Result<bool> {
+        let db = self.db();
+        let n = if body.trim().is_empty() {
+            db.execute("DELETE FROM global_notes WHERE topic = ?1", params![topic])?
+        } else {
+            db.execute(
+                "INSERT INTO global_notes (topic, body, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(topic) DO UPDATE
+                 SET body = excluded.body, updated_at = excluded.updated_at",
+                params![topic, body.trim(), now()],
             )?
         };
         Ok(n > 0)

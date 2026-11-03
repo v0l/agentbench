@@ -80,6 +80,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/settings/models", post(list_models))
         .route("/api/settings/cross-project", get(get_cross).delete(clear_cross))
         .route("/api/settings/autorun", get(get_autorun).put(put_autorun))
+        .route("/api/global-notes", get(get_global_notes).put(put_global_note))
         .route("/api/autopilot", get(get_autopilot).patch(patch_autopilot))
         .route("/api/settings/title", get(get_title).put(put_title))
         .route("/api/settings/title/models", post(list_title_models))
@@ -681,6 +682,24 @@ async fn patch_autopilot(
 }
 
 const AUTORUN_AGENT: &str = "native";
+
+async fn get_global_notes(State(api): State<Api>) -> Reply<serde_json::Value> {
+    let notes = api.runner.store().global_notes()?;
+    let notes: Vec<_> = notes.into_iter().map(|(t, n)| json!({ "topic": t, "note": n })).collect();
+    Ok(Json(json!(notes)))
+}
+
+async fn put_global_note(
+    State(api): State<Api>,
+    Json(body): Json<serde_json::Value>,
+) -> Reply<serde_json::Value> {
+    let topic = body["topic"].as_str().map(str::trim).filter(|t| !t.is_empty());
+    let topic = topic.ok_or_else(|| bad("missing `topic`"))?;
+    let note = body["note"].as_str().unwrap_or_default();
+    api.runner.store().set_global_note(topic, note)?;
+    changed(&api);
+    get_global_notes(State(api)).await
+}
 
 async fn get_autorun(State(api): State<Api>) -> Reply<serde_json::Value> {
     let store = api.runner.store();
