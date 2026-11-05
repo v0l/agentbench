@@ -1708,6 +1708,19 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_session_forgets_its_missing_plan_marker() {
+        let s = Store::memory().unwrap();
+        let (_, wt) = testing::project(&s, "/r");
+        let a = s.add_session(wt.id, "pi", "t", None, None).unwrap();
+        let b = s.add_session(wt.id, "pi", "t", None, None).unwrap();
+        s.set_setting(&format!("no_plan_{}", a.id), "15").unwrap();
+        s.set_setting(&format!("no_plan_{}", b.id), "15").unwrap();
+        s.delete_session(a.id).unwrap();
+        assert_eq!(s.setting(&format!("no_plan_{}", a.id)).unwrap(), None);
+        assert_eq!(s.setting(&format!("no_plan_{}", b.id)).unwrap().as_deref(), Some("15"));
+    }
+
+    #[test]
     fn issues_round_trip_and_patch() {
         let s = Store::memory().unwrap();
         let (p, _) = project(&s, "/r");

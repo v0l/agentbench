@@ -709,15 +709,18 @@ impl Autopilot {
             self.log(Some(w.project), Some(w.issue), &format!("#{} answered, working again", w.issue));
         }
         let stuck_ms = number(store, STUCK_MINUTES, DEFAULT_STUCK_MINUTES) as i64 * 60_000;
-        if now - session.updated_at < stuck_ms {
+        let unplanned = number::<u32>(store, &format!("no_plan_{}", w.session), 0) >= crate::agent::progress::ESCALATE_AT;
+        if !unplanned && now - session.updated_at < stuck_ms {
             return;
         }
         let minutes = stuck_ms / 60_000;
         if w.nudges < number(store, MAX_NUDGES, DEFAULT_MAX_NUDGES) {
             let _ = store.bump_worker(w.session, "nudges");
-            let text = format!(
-                "Autopilot: no output from you for {minutes} minutes. If something blocks you, say what; otherwise carry on and finish with a conclusion."
-            );
+            let text = if unplanned {
+                "Autopilot: you have read many files and written no plan. Write your implementation steps with todo_write now and start the first one.".to_string()
+            } else {
+                format!("Autopilot: no output from you for {minutes} minutes. If something blocks you, say what; otherwise carry on and finish with a conclusion.")
+            };
             let _ = self.runner.send(session, &text);
             self.log(
                 Some(w.project),
@@ -1735,6 +1738,22 @@ mod tests {
         assert!(sent.iter().any(|m| matches!(&m.entry, Entry::User { text, .. } if text.contains("Conclusion check") && text.contains("run the tests"))));
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_only_reads_is_stuck_even_though_it_is_not_silent() {
+        let r = rig(r#"read p; sleep 30"#);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        r.ap.tick();
+        let w = r.store.workers().unwrap().remove(0);
+        let now = r.store.session(w.session).unwrap().updated_at;
+        r.ap.tick_at(now);
+        assert_eq!(r.store.workers().unwrap()[0].nudges, 0, "recent output, no gap flagged");
+        r.store.set_setting(&format!("no_plan_{}", w.session), "45").unwrap();
+        r.ap.tick_at(now);
+        assert_eq!(r.store.workers().unwrap()[0].nudges, 1);
+        let _ = a;
     }
 
     #[tokio::test]
