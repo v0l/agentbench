@@ -249,6 +249,7 @@ impl App {
                 PlaceChoice::New => Place::New { branch: f.branch.trim().to_string() },
             };
             let new = NewSession {
+                parent: None,
                 project_id: f.project,
                 agent: f.agent.clone(),
                 place,
