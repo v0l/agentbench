@@ -9,6 +9,7 @@ pub mod replace;
 pub mod screenshot;
 pub mod search;
 pub mod secrets;
+pub mod steer;
 
 pub use async_trait::async_trait;
 pub use command::JsonCommand;
@@ -247,8 +248,14 @@ pub fn brief(c: &Context) -> String {
         pid = c.project_id,
     ));
     out.push_str(ORCHESTRATION);
+    out.push_str("\n\n");
+    out.push_str(FILE_TOOLS);
     out
 }
+
+pub const FILE_TOOLS: &str = "<file_tools>\n\
+Create files with write_file, change files with edit_file (several files and `then` for a test run in one call) or replace_in_files (a regex across files). Use bash only for programs: builds, tests, git. Do not write or edit files with sed -i, cat > or tee heredocs, or inline python or perl.\n\
+</file_tools>";
 
 const ORCHESTRATION: &str = "<orchestration>\n\
 When you start sub-sessions, you are the parent.\n\n\

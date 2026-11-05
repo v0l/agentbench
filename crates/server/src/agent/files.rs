@@ -130,7 +130,8 @@ fn apply(content: &str, change: &Change) -> Result<Applied, Option<String>> {
     let found = content.matches(&old).count();
     if found > 1 && !change.all {
         return Err(Some(format!(
-            "oldText is in the file {found} times; add surrounding lines to make it unique, or pass all=true"
+            "oldText is in the file {found} times; add surrounding lines to make it unique, or pass all=true. Matches:\n{}",
+            places(content, &old)
         )));
     }
     if found > 0 {
@@ -157,7 +158,8 @@ fn apply(content: &str, change: &Change) -> Result<Applied, Option<String>> {
     }
     if hits > 1 {
         return Err(Some(format!(
-            "oldText matches {hits} places once trailing spaces and quotes are ignored; add surrounding lines"
+            "oldText matches {hits} places once trailing spaces and quotes are ignored; add surrounding lines. Matches:\n{}",
+            places(&base, &target)
         )));
     }
     let at = base.find(&target).expect("found above");
@@ -182,16 +184,127 @@ fn apply(content: &str, change: &Change) -> Result<Applied, Option<String>> {
     })
 }
 
-fn nearest(content: &str, old: &str) -> Option<String> {
-    let first = loose(old).lines().map(str::trim).find(|l| l.len() > 3)?.to_string();
-    let hit = loose(content).lines().position(|l| l.trim() == first || l.contains(&first))?;
-    Some(format!(
-        " Its first line is at line {} but the lines after it differ; read_file around there and copy them exactly.",
-        hit + 1
-    ))
+const LISTED: usize = 10;
+const WINDOW_MAX: usize = 40;
+const NEAR: f64 = 0.5;
+
+fn places(text: &str, needle: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out = Vec::new();
+    for (n, (at, _)) in text.match_indices(needle).enumerate() {
+        if n == LISTED {
+            out.push(format!("  ... and {} more", text.matches(needle).count() - LISTED));
+            break;
+        }
+        let line = line_of(text, at);
+        let mut block = format!("  at line {}:", line + 1);
+        for i in line.saturating_sub(1)..=(line + 1).min(lines.len() - 1) {
+            block.push_str(&format!("\n    {}| {}", i + 1, lines[i]));
+        }
+        out.push(block);
+    }
+    out.join("\n")
 }
 
-pub fn edit(ws: &Workspace, args: &Value) -> Result<String, String> {
+fn bigrams(s: &str) -> Vec<(char, char)> {
+    let c: Vec<char> = s.chars().collect();
+    c.windows(2).map(|w| (w[0], w[1])).collect()
+}
+
+fn similarity(a: &str, b: &str) -> f64 {
+    let (a, b) = (a.trim(), b.trim());
+    if a == b {
+        return 1.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    if a.contains(b) || b.contains(a) {
+        return 0.9;
+    }
+    let (x, mut y) = (bigrams(a), bigrams(b));
+    if x.is_empty() || y.is_empty() {
+        return 0.0;
+    }
+    let total = (x.len() + y.len()) as f64;
+    let mut shared = 0usize;
+    for g in &x {
+        if let Some(i) = y.iter().position(|h| h == g) {
+            y.swap_remove(i);
+            shared += 1;
+        }
+    }
+    2.0 * shared as f64 / total
+}
+
+fn difference(want: &str, have: &str) -> Option<String> {
+    if want == have {
+        return None;
+    }
+    if want.trim_end() == have.trim_end() {
+        return Some("trailing spaces differ".into());
+    }
+    if want.trim() == have.trim() {
+        return Some("indentation differs".into());
+    }
+    if loose(want).trim() == loose(have).trim() {
+        return Some("quotes or dashes differ".into());
+    }
+    if want.split_whitespace().collect::<Vec<_>>() == have.split_whitespace().collect::<Vec<_>>() {
+        return Some("spacing inside the line differs".into());
+    }
+    Some("the line differs".into())
+}
+
+fn nearest(content: &str, old: &str) -> Option<String> {
+    let want: Vec<&str> = old.lines().take(WINDOW_MAX).collect();
+    let have: Vec<&str> = content.lines().collect();
+    if want.iter().all(|l| l.trim().is_empty()) || have.is_empty() {
+        return None;
+    }
+    let n = want.len().min(have.len());
+    let mut best: Option<(f64, usize)> = None;
+    for start in 0..=(have.len() - n) {
+        let score: f64 =
+            (0..n).map(|j| similarity(want[j], have[start + j])).sum::<f64>() / n as f64;
+        if best.is_none_or(|(b, _)| score > b) {
+            best = Some((score, start));
+        }
+    }
+    let (score, start) = best.filter(|(s, _)| *s >= NEAR)?;
+    let mut out = format!(
+        " The closest text starts at line {} (lines {}-{}):",
+        start + 1,
+        start + 1,
+        start + n
+    );
+    let mut notes = Vec::new();
+    for j in 0..n {
+        out.push_str(&format!("\n  {}| {}", start + j + 1, have[start + j]));
+        if let Some(d) = difference(want[j], have[start + j]) {
+            notes.push(format!("line {}: {d}, you sent `{}`", start + j + 1, want[j]));
+        }
+    }
+    if want.len() > n {
+        notes.push(format!("oldText has {} more lines than the file has there", want.len() - n));
+    }
+    if score >= 1.0 || notes.is_empty() {
+        return Some(out);
+    }
+    notes.truncate(5);
+    out.push_str(&format!("\nWhat differs: {}. Copy the lines exactly.", notes.join("; ")));
+    Some(out)
+}
+
+struct Plan {
+    file: std::path::PathBuf,
+    shown: String,
+    raw: String,
+    content: String,
+    report: Vec<Applied>,
+}
+
+fn plan(ws: &Workspace, args: &Value) -> Result<Plan, String> {
     let path = text(args, &PATH).ok_or("missing `path`")?;
     let file = ws.resolve_for(path, Access::Write)?;
     let shown = ws.shown(&file);
@@ -206,7 +319,7 @@ pub fn edit(ws: &Workspace, args: &Value) -> Result<String, String> {
                 Some(w) => format!("{which}{w} in {shown}"),
                 None => format!(
                     "{which}oldText is not in {shown}.{}",
-                    nearest(&original, &c.old)
+                    nearest(&original, &lf(&c.old))
                         .unwrap_or_else(|| " read_file it and copy the text exactly.".into())
                 ),
             });
@@ -228,15 +341,22 @@ pub fn edit(ws: &Workspace, args: &Value) -> Result<String, String> {
         }
     }
     let content = if crlf { content.replace('\n', "\r\n") } else { content };
-    fs::write(&file, &content).map_err(|e| format!("{shown}: {e}"))?;
+    Ok(Plan { file, shown, raw, content, report })
+}
+
+fn render(plan: &Plan) -> String {
+    let report = &plan.report;
     let total: usize = report.iter().map(|a| a.count).sum();
-    let mut out =
-        format!("edited {shown}: {total} replacement{}", if total == 1 { "" } else { "s" });
+    let mut out = format!(
+        "edited {}: {total} replacement{}",
+        plan.shown,
+        if total == 1 { "" } else { "s" }
+    );
     if report.iter().any(|a| a.loose) {
         out.push_str(" (matched ignoring trailing spaces and quote styles)");
     }
     let mut lines = 0;
-    for a in &report {
+    for a in report {
         out.push_str(&format!("\n@@ line {}\n", a.line + 1));
         for l in &a.removed {
             if lines < DIFF_LINES {
@@ -254,7 +374,68 @@ pub fn edit(ws: &Workspace, args: &Value) -> Result<String, String> {
     if lines > DIFF_LINES {
         out.push_str(&format!("... {} more diff lines\n", lines - DIFF_LINES));
     }
-    Ok(out.trim_end().to_string())
+    out.trim_end().to_string()
+}
+
+fn targets(args: &Value) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    let inherit = |mut spec: Value| {
+        for key in ["all", "replace_all"] {
+            if let (Some(v), Some(obj)) = (args.get(key), spec.as_object_mut()) {
+                obj.entry(key).or_insert(v.clone());
+            }
+        }
+        spec
+    };
+    if let Some(list) = args.get("files").and_then(Value::as_array) {
+        out.extend(list.iter().cloned().map(inherit));
+    }
+    if text(args, &PATH).is_some() {
+        out.insert(0, args.clone());
+    }
+    if out.is_empty() {
+        return Err("missing `path` (or `files`: [{\"path\", \"edits\"}, ...])".into());
+    }
+    Ok(out)
+}
+
+pub fn edit_paths(args: &Value) -> Vec<String> {
+    targets(args)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| text(t, &PATH).map(str::to_string))
+        .collect()
+}
+
+pub fn edit(ws: &Workspace, args: &Value) -> Result<String, String> {
+    let specs = targets(args)?;
+    let many = specs.len() > 1;
+    let mut plans: Vec<Plan> = Vec::new();
+    for (i, spec) in specs.iter().enumerate() {
+        let p = plan(ws, spec).map_err(|e| {
+            if many {
+                format!("{e}\nNothing was changed in any file (the call is all or nothing); the failing entry is files[{i}].")
+            } else {
+                e
+            }
+        })?;
+        if plans.iter().any(|q| q.file == p.file) {
+            return Err(format!(
+                "{} is listed twice; put all its edits in one entry. Nothing was changed.",
+                p.shown
+            ));
+        }
+        plans.push(p);
+    }
+    for (done, p) in plans.iter().enumerate() {
+        if let Err(e) = fs::write(&p.file, &p.content) {
+            for q in &plans[..done] {
+                let _ = fs::write(&q.file, &q.raw);
+            }
+            return Err(format!("{}: {e}; earlier files were put back", p.shown));
+        }
+    }
+    Ok(plans.iter().map(render).collect::<Vec<_>>().join("\n\n"))
 }
 
 #[cfg(test)]
@@ -375,5 +556,87 @@ mod tests {
         assert_eq!(number(&json!({"offset": 5}), &["offset"]), Some(5));
         assert_eq!(number(&json!({"offset": 5.0}), &["offset"]), Some(5));
         assert_eq!(number(&json!({"offset": "5"}), &["offset"]), Some(5));
+    }
+
+    #[test]
+    fn a_miss_shows_the_nearest_lines_and_what_differs() {
+        let (_dir, w) = ws("fn main() {\n    let total = 1;\n    run();\n}\n");
+        let e = edit(&w, &json!({"path": "a.rs", "old": "let total = 2;\nrun();", "new": "x"}))
+            .unwrap_err();
+        assert!(e.contains("closest text starts at line 2"), "{e}");
+        assert!(e.contains("2|     let total = 1;") && e.contains("3|     run();"), "{e}");
+        assert!(e.contains("line 2: the line differs"), "{e}");
+        assert!(e.contains("line 3: indentation differs"), "{e}");
+    }
+
+    #[test]
+    fn a_miss_names_trailing_space() {
+        let (_, w) = ws("a\nlet x = 1;  \nb\n");
+        let n = nearest("a\nlet x = 1;  \nb\n", "let x = 1;\nc").unwrap();
+        assert!(n.contains("1|") || n.contains("2| let x = 1;"), "{n}");
+        drop(w);
+    }
+
+    #[test]
+    fn a_duplicate_lists_every_match_with_context() {
+        let (dir, w) = ws("one\nx\ntwo\nx\nthree\n");
+        let e = edit(&w, &json!({"path": "a.rs", "old": "x", "new": "y"})).unwrap_err();
+        assert!(e.contains("2 times"), "{e}");
+        assert!(e.contains("at line 2") && e.contains("at line 4"), "{e}");
+        assert!(e.contains("1| one") && e.contains("5| three"), "{e}");
+        assert_eq!(read(&dir), "one\nx\ntwo\nx\nthree\n");
+        edit(&w, &json!({"path": "a.rs", "old": "x", "new": "y", "all": true})).unwrap();
+        assert_eq!(read(&dir), "one\ny\ntwo\ny\nthree\n");
+    }
+
+    fn two() -> (tempfile::TempDir, Workspace) {
+        let (dir, w) = ws("alpha\n");
+        fs::write(dir.path().join("b.rs"), "beta\n").unwrap();
+        (dir, w)
+    }
+
+    #[test]
+    fn several_files_change_together_with_one_combined_diff() {
+        let (dir, w) = two();
+        let out = edit(
+            &w,
+            &json!({"files": [
+                {"path": "a.rs", "edits": [{"oldText": "alpha", "newText": "ALPHA"}]},
+                {"path": "b.rs", "edits": [{"oldText": "beta", "newText": "BETA"}]}
+            ]}),
+        )
+        .unwrap();
+        assert_eq!(read(&dir), "ALPHA\n");
+        assert_eq!(fs::read_to_string(dir.path().join("b.rs")).unwrap(), "BETA\n");
+        assert!(out.contains("edited a.rs") && out.contains("edited b.rs"), "{out}");
+    }
+
+    #[test]
+    fn path_and_files_can_be_mixed() {
+        let (dir, w) = two();
+        edit(
+            &w,
+            &json!({"path": "a.rs", "old": "alpha", "new": "A",
+                "files": [{"path": "b.rs", "edits": [{"oldText": "beta", "newText": "B"}]}]}),
+        )
+        .unwrap();
+        assert_eq!(read(&dir), "A\n");
+        assert_eq!(fs::read_to_string(dir.path().join("b.rs")).unwrap(), "B\n");
+    }
+
+    #[test]
+    fn a_failing_edit_in_the_second_file_leaves_the_first_untouched() {
+        let (dir, w) = two();
+        let e = edit(
+            &w,
+            &json!({"files": [
+                {"path": "a.rs", "edits": [{"oldText": "alpha", "newText": "ALPHA"}]},
+                {"path": "b.rs", "edits": [{"oldText": "missing", "newText": "x"}]}
+            ]}),
+        )
+        .unwrap_err();
+        assert!(e.contains("files[1]") && e.contains("Nothing was changed"), "{e}");
+        assert_eq!(read(&dir), "alpha\n");
+        assert_eq!(fs::read_to_string(dir.path().join("b.rs")).unwrap(), "beta\n");
     }
 }

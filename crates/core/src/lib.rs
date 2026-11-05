@@ -386,6 +386,12 @@ pub struct Usage {
     /// this is a reading, not a total: a newer one replaces it.
     #[serde(default)]
     pub lsp: Vec<Lsp>,
+    /// Bash calls that wrote or edited a file, which the file tools do better. A total.
+    #[serde(default)]
+    pub bash_edits: u64,
+    /// Calls to write_file, edit_file and replace_in_files. A total.
+    #[serde(default)]
+    pub file_edits: u64,
 }
 
 /// How far a language server has got.
@@ -427,6 +433,8 @@ impl Usage {
         self.cache_read_tokens += other.cache_read_tokens;
         self.cost_usd += other.cost_usd;
         self.turns += other.turns;
+        self.bash_edits += other.bash_edits;
+        self.file_edits += other.file_edits;
         if other.context > 0 {
             self.context = other.context;
         }

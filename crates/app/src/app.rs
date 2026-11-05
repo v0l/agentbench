@@ -2382,6 +2382,12 @@ impl App {
                 .measured(format!("ctx {}%", s.usage.context * 100 / s.usage.window))
                 .size(10.5);
         }
+        if s.usage.bash_edits + s.usage.file_edits > 0 {
+            line = line
+                .gap(8.0)
+                .measured(format!("edits {} file / {} bash", s.usage.file_edits, s.usage.bash_edits))
+                .size(10.5);
+        }
         line.gap(8.0).note(ago(s.updated_at)).size(10.5).elided(ui);
     }
 
