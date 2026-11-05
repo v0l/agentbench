@@ -954,7 +954,7 @@ fn a_native_chat_shows_from_what_was_sent() {
         row(vec![(json!({"role": "system", "content": "You are a careful agent."}), Said::Plain)]),
         row(vec![(
             json!({"role": "user", "content": "list the files"}),
-            Said::Typed { attachments: vec![] },
+            Said::Typed { attachments: vec![], from: vec![] },
         )]),
         row(vec![(
             json!({"role": "assistant", "content": "Looking.", "tool_calls": [

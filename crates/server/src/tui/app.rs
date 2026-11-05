@@ -754,6 +754,8 @@ pub mod tests {
             created_at: 0,
             updated_at: 0,
             queued: Vec::new(),
+            deferred: 0,
+            queue_system: false,
             no_plan_reads: None,
             parent: None,
         }

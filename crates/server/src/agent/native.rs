@@ -1266,7 +1266,7 @@ fn history(entries: &[Entry]) -> Vec<Value> {
 pub fn wire_of(entry: &Entry, role: &str) -> Vec<Sent> {
     let plain = |message: Value| Sent { message, said: Said::Plain };
     match entry {
-        Entry::User { text, attachments } => {
+        Entry::User { text, attachments, from } => {
             let content = if attachments.is_empty() {
                 text.clone()
             } else {
@@ -1275,7 +1275,7 @@ pub fn wire_of(entry: &Entry, role: &str) -> Vec<Sent> {
             };
             vec![Sent {
                 message: json!({ "role": "user", "content": content }),
-                said: Said::Typed { attachments: attachments.clone() },
+                said: Said::Typed { attachments: attachments.clone(), from: from.clone() },
             }]
         }
         Entry::Assistant { text } => vec![plain(json!({ "role": "assistant", "content": text }))],
@@ -1376,7 +1376,7 @@ impl<'a> Log<'a> {
                 said: Said::Plain,
             })
             .collect();
-        sent.push(Sent { message: prompt, said: Said::Typed { attachments: Vec::new() } });
+        sent.push(Sent { message: prompt, said: Said::Typed { attachments: Vec::new(), from: Vec::new() } });
         self.messages.extend(sent.iter().map(|s| s.message.clone()));
         self.io.emit(Event::Sent(sent));
     }
@@ -1795,7 +1795,7 @@ impl Agent for Native {
                 io.emit(Event::Steered { text: steer.text.clone() });
                 messages.say(
                     user_message(&steer.text, &steer.files).await,
-                    Said::Typed { attachments: Vec::new() },
+                    Said::Typed { attachments: Vec::new(), from: Vec::new() },
                 );
                 steered = true;
             }

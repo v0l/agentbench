@@ -124,13 +124,16 @@ fn question_lines(
 
 fn entry_lines(m: &Message, expanded: bool, width: usize) -> Vec<Line<'static>> {
     match &m.entry {
-        Entry::User { text, attachments } => {
+        Entry::User { text, attachments, from } => {
             let lead = piece("› ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD));
             let mut body = piece(text, Style::default().add_modifier(Modifier::BOLD));
             if !attachments.is_empty() {
                 body.push((format!("  [{} files]", attachments.len()), dim()));
             }
             let mut rows = Vec::new();
+            if !from.is_empty() {
+                rows.push(line(piece(&format!("from {}", from.join(", ")), dim())));
+            }
             for para in text_paragraphs(&body) {
                 rows.extend(wrap(&para, width, &lead, &piece("  ", dim())));
             }

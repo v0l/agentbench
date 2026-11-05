@@ -263,6 +263,7 @@ async fn serve_inner(
         runner::Base { url: local_url(listen), token: token.clone() };
     let api = api::Api { runner, token, model, speech, voice };
     api.runner.resume(&stale);
+    api.runner.deliver_backlog();
     autopilot::spawn(api.runner.clone());
     triage::spawn(api.runner.clone());
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));

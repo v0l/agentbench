@@ -118,8 +118,8 @@ impl App {
 
     pub(super) fn entry(&mut self, ui: &mut Ui, m: &Message, session: SessionId) {
         match &m.entry {
-            Entry::User { text, attachments } => {
-                self.you(ui, m.id, m.created_at, text, attachments, session, false)
+            Entry::User { text, attachments, from } => {
+                self.you(ui, m.id, m.created_at, text, attachments, from, session, false)
             }
             Entry::Assistant { text } => {
                 let mut read = false;
@@ -221,9 +221,11 @@ impl App {
         created_at: i64,
         text: &str,
         attachments: &[agentbench_core::Attachment],
+        from: &[String],
         session: SessionId,
         queued: bool,
     ) {
+        let who = if from.is_empty() { "you".to_string() } else { format!("from {}", from.join(", ")) };
         ui.add_space(6.0);
         let (rail, fill) =
             if queued { (LEGEND, egui::Color32::TRANSPARENT) } else { (READOUT, PANEL) };
@@ -238,7 +240,7 @@ impl App {
                     .show(ui);
             } else {
                 Line::new()
-                    .legend("you")
+                    .legend(&who)
                     .size(10.0)
                     .gap(8.0)
                     .note(ago(created_at))

@@ -650,7 +650,7 @@ impl Client {
     }
 
     pub fn rename_session(&mut self, session: SessionId, title: &str) {
-        let patch = agentbench_core::SessionPatch { title: Some(title.to_string()) };
+        let patch = agentbench_core::SessionPatch { title: Some(title.to_string()), ..Default::default() };
         self.act(Method::PATCH, &format!("/api/sessions/{session}"), Some(&patch), "");
     }
 

@@ -243,6 +243,18 @@ CREATE TABLE verdicts (
 );
 CREATE INDEX verdicts_session ON verdicts(session, id);
 "#,
+    r#"
+CREATE TABLE deferred (
+    id INTEGER PRIMARY KEY,
+    session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    source TEXT NOT NULL,
+    worker TEXT,
+    urgent INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX deferred_session ON deferred(session, id);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -256,6 +268,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("projects", "automation", "TEXT"),
     ("projects", "risky", "TEXT NOT NULL DEFAULT '[]'"),
     ("projects", "deploy", "TEXT"),
+    ("sessions", "queue_system", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
@@ -318,6 +331,16 @@ fn judged_row(r: &Row) -> rusqlite::Result<Judged> {
         acted: r.get::<_, i64>("acted")? != 0,
         created_at: r.get("created_at")?,
     })
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Deferred {
+    pub id: Id,
+    pub source: String,
+    pub worker: Option<SessionId>,
+    pub urgent: bool,
+    pub text: String,
+    pub created_at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -414,6 +437,8 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         updated_at: row.get("updated_at")?,
         queued: Vec::new(),
         no_plan_reads: None,
+        deferred: 0,
+        queue_system: row.get::<_, i64>("queue_system")? != 0,
     })
 }
 
@@ -1357,6 +1382,74 @@ impl Store {
             .query_map([watched], |r| r.get::<_, SessionId>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(found)
+    }
+
+    pub fn defer(
+        &self,
+        session: SessionId,
+        source: &str,
+        worker: Option<SessionId>,
+        urgent: bool,
+        text: &str,
+    ) -> Result<Id> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO deferred (session, source, worker, urgent, text, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session, source, worker, urgent as i64, text, now()],
+        )?;
+        let id = db.last_insert_rowid();
+        Store::changed(&db, "session", session)?;
+        Ok(id)
+    }
+
+    pub fn deferred(&self, session: SessionId) -> Result<Vec<Deferred>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT id, source, worker, urgent, text, created_at FROM deferred
+             WHERE session = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([session], |r| {
+            Ok(Deferred {
+                id: r.get(0)?,
+                source: r.get(1)?,
+                worker: r.get(2)?,
+                urgent: r.get::<_, i64>(3)? != 0,
+                text: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn deferred_count(&self, session: SessionId) -> Result<usize> {
+        let n: i64 = self.db().query_row(
+            "SELECT COUNT(*) FROM deferred WHERE session = ?1",
+            [session],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    pub fn remove_deferred(&self, session: SessionId, ids: &[Id]) -> Result<()> {
+        let db = self.db();
+        for id in ids {
+            db.execute("DELETE FROM deferred WHERE session = ?1 AND id = ?2", params![session, id])?;
+        }
+        Store::changed(&db, "session", session)
+    }
+
+    pub fn sessions_with_deferred(&self) -> Result<Vec<SessionId>> {
+        let db = self.db();
+        let mut stmt = db.prepare("SELECT DISTINCT session FROM deferred ORDER BY session")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_queue_system(&self, id: SessionId, on: bool) -> Result<()> {
+        let db = self.db();
+        db.execute("UPDATE sessions SET queue_system = ?1 WHERE id = ?2", params![on as i64, id])?;
+        Store::changed(&db, "session", id)
     }
 
     pub fn take_watchers(&self, watched: SessionId) -> Result<Vec<SessionId>> {

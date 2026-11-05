@@ -1050,6 +1050,10 @@ async fn rename_session(
         api.runner.store().set_title(id, title, true)?;
         changed(&api);
     }
+    if let Some(on) = patch.queue_system {
+        api.runner.store().set_queue_system(id, on)?;
+        changed(&api);
+    }
     let session = api.runner.store().session(id)?;
     Ok(Json(api.runner.with_queued(vec![session]).remove(0)))
 }

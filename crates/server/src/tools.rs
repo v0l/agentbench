@@ -856,7 +856,9 @@ impl Api for StoreApi {
                 // The prefix also keeps a message that starts with a slash from running as a command.
                 let line =
                     format!("Message from session {session} ({}): {}", me.agent, body.trim());
-                runner.send(&other, &line).map_err(|e| e.0)?;
+                let urgent = body.trim_start().starts_with("BLOCKED");
+                let origin = crate::runner::Origin::new("session", Some(session)).urgent(urgent);
+                runner.tell(&other, &line, origin).map_err(|e| e.0)?;
                 json!({ "sent": other.id, "status": other.status })
             }
             "list_worktrees" => {

@@ -359,6 +359,14 @@ pub struct Session {
     pub queued: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_plan_reads: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub deferred: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue_system: bool,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -620,6 +628,8 @@ pub enum Entry {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<Attachment>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        from: Vec<String>,
     },
     Question {
         id: String,
@@ -690,6 +700,8 @@ pub enum Said {
     Typed {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<Attachment>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        from: Vec<String>,
     },
     Diagnostics {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -806,9 +818,11 @@ pub fn shown(rows: &[Message]) -> Vec<Message> {
                             }
                         }
                         ("tool", _) => {}
-                        (_, Said::Typed { attachments }) => {
-                            entries.push(Entry::User { text, attachments: attachments.clone() })
-                        }
+                        (_, Said::Typed { attachments, from }) => entries.push(Entry::User {
+                            text,
+                            attachments: attachments.clone(),
+                            from: from.clone(),
+                        }),
                         (_, Said::Diagnostics { broken }) => {
                             entries.push(Entry::Diagnostics { text, broken: broken.clone() })
                         }
@@ -827,7 +841,7 @@ pub fn shown(rows: &[Message]) -> Vec<Message> {
 
 impl Entry {
     pub fn user(text: impl Into<String>) -> Entry {
-        Entry::User { text: text.into(), attachments: Vec::new() }
+        Entry::User { text: text.into(), attachments: Vec::new(), from: Vec::new() }
     }
 
     pub fn text(&self) -> &str {
@@ -1220,6 +1234,8 @@ pub struct ProjectPatch {
 pub struct SessionPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_system: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

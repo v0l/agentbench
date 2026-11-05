@@ -704,7 +704,11 @@ impl App {
                 ui.add_space(6.0);
             }
             for (i, text) in s.queued.iter().enumerate() {
-                self.you(ui, -1 - i as Id, 0, text, &[], s.id, true);
+                self.you(ui, -1 - i as Id, 0, text, &[], &[], s.id, true);
+            }
+            if s.deferred > 0 {
+                ui.add_space(4.0);
+                Line::new().note(&waiting_label(s.deferred)).size(10.0).show(ui);
             }
             if jump {
                 ui.scroll_to_cursor(Some(Align::BOTTOM));
@@ -808,4 +812,11 @@ impl App {
 
 fn names_projects(app: &App) -> Vec<Project> {
     app.overview().iter().flat_map(|o| &o.projects).filter(|p| !p.builtin()).cloned().collect()
+}
+
+pub(super) fn waiting_label(n: usize) -> String {
+    match n {
+        1 => "1 message waiting until I am idle".into(),
+        n => format!("{n} messages waiting until I am idle"),
+    }
 }

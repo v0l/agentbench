@@ -1,7 +1,7 @@
 use crate::agent::{
     Agent, Api, Attached, CancellationToken, Context, Event, Io, Steer, Turn, async_trait,
 };
-use crate::store::{Store, StoreError};
+use crate::store::{Deferred, Store, StoreError};
 use crate::titles::Titles;
 use agentbench_core::{
     Attachment, Entry, Id, NewSession, Place, Question, Session, SessionId, SessionStatus, Upload,
@@ -27,18 +27,45 @@ struct Live {
     questions: Waiting,
 }
 
-/// What the user sent: the words, and the files kept with them.
+/// What the user sent: the words, and the files kept with them. `from` names the sources of a
+/// message the system sent instead.
 #[derive(Clone, Debug, Default)]
 struct Message {
     text: String,
     attachments: Vec<Attachment>,
+    from: Vec<String>,
 }
 
 impl Message {
     fn entry(&self) -> Entry {
-        Entry::User { text: self.text.clone(), attachments: self.attachments.clone() }
+        Entry::User {
+            text: self.text.clone(),
+            attachments: self.attachments.clone(),
+            from: self.from.clone(),
+        }
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct Origin {
+    pub source: &'static str,
+    pub worker: Option<SessionId>,
+    pub urgent: bool,
+}
+
+impl Origin {
+    pub fn new(source: &'static str, worker: Option<SessionId>) -> Origin {
+        Origin { source, worker, urgent: false }
+    }
+
+    pub fn urgent(self, urgent: bool) -> Origin {
+        Origin { urgent, ..self }
+    }
+}
+
+pub const URGENT_AFTER_SETTING: &str = "supervisor_urgent_secs";
+const URGENT_AFTER_DEFAULT: u64 = 600;
+const DIGEST_MAX: usize = 12;
 
 #[derive(Clone)]
 pub struct Runner {
@@ -340,8 +367,58 @@ impl Runner {
                 .ok()
                 .flatten()
                 .and_then(|n| n.parse().ok());
+            s.deferred = self.store.deferred_count(s.id).unwrap_or_default();
         }
         sessions
+    }
+
+    fn queues_system(&self, session: &Session) -> bool {
+        session.queue_system
+            || self.store.project(session.project_id).is_ok_and(|p| p.supervisor)
+    }
+
+    /// Send a message the system wrote rather than the user. A supervisor, or a session set to
+    /// queue them, gets these only when it is idle, gathered into one digest; anyone else is
+    /// steered with it as with any message.
+    pub fn tell(&self, session: &Session, text: &str, origin: Origin) -> Result<(), StoreError> {
+        if !self.queues_system(session) {
+            return self.send(session, text);
+        }
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(StoreError("nothing to send".into()));
+        }
+        self.store.defer(session.id, origin.source, origin.worker, origin.urgent, text)?;
+        self.changed.notify_waiters();
+        self.deliver_deferred(session.id)
+    }
+
+    fn deliver_deferred(&self, id: SessionId) -> Result<(), StoreError> {
+        let session = self.store.session(id)?;
+        self.dispatch(&session, Mode::Chat, |running| {
+            if running { None } else { self.digest(id, |_| true) }
+        })
+    }
+
+    /// Hand every idle session the messages that waited for it while the server was down.
+    pub fn deliver_backlog(&self) {
+        for id in self.store.sessions_with_deferred().unwrap_or_default() {
+            if let Err(e) = self.deliver_deferred(id) {
+                tracing::warn!("could not deliver the waiting messages to {id}: {}", e.0);
+            }
+        }
+    }
+
+    /// The deferred messages that `pick` chooses, taken out of the queue as one message.
+    fn digest(&self, id: SessionId, pick: impl Fn(&Deferred) -> bool) -> Option<Message> {
+        let all: Vec<Deferred> =
+            self.store.deferred(id).ok()?.into_iter().filter(|d| pick(d)).collect();
+        if all.is_empty() {
+            return None;
+        }
+        let ids: Vec<Id> = all.iter().map(|d| d.id).collect();
+        let _ = self.store.remove_deferred(id, &ids);
+        Some(digest_of(all))
     }
 
     fn not_sent(&self, session: SessionId, why: &str, dropped: Vec<Message>) {
@@ -476,7 +553,7 @@ impl Runner {
                 .unwrap_or("application/octet-stream");
             attachments.push(self.store.add_attachment(session.id, &name, mime, &data)?);
         }
-        self.send_text(session, Message { text: text.to_string(), attachments }, Mode::Chat)
+        self.send_text(session, Message { text: text.to_string(), attachments, from: Vec::new() }, Mode::Chat)
     }
 
     /// The files of a message, written to a folder of this session's so an agent can read them.
@@ -567,7 +644,7 @@ impl Runner {
                         "stop the agent or let it finish before compacting".into(),
                     ));
                 }
-                let prompt = Message { text: COMPACT_PROMPT.into(), attachments: Vec::new() };
+                let prompt = Message { text: COMPACT_PROMPT.into(), ..Default::default() };
                 self.send_text(session, prompt, Mode::Compact)
             }
             other => Err(StoreError(format!("/{other} is handled by the window"))),
@@ -584,34 +661,46 @@ impl Runner {
     }
 
     fn send_text(&self, session: &Session, msg: Message, mode: Mode) -> Result<(), StoreError> {
-        let agent = self
-            .agent(&session.agent)
-            .ok_or_else(|| StoreError(format!("no agent named {}", session.agent)))?;
         if msg.text.is_empty() && msg.attachments.is_empty() {
             return Err(StoreError("nothing to send".into()));
         }
-        {
-            let live = self.live();
-            if let Some(l) = live.get(&session.id) {
-                l.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
-                drop(live);
-                self.store.touch_session(session.id)?;
-                self.changed.notify_waiters();
-                return Ok(());
-            }
+        self.dispatch(session, mode, |_| Some(msg))
+    }
+
+    /// Start a turn with what `make` gives, or put it in the inbox of the turn already running.
+    /// `make` is told whether one is running, and is called under the lock that decides it.
+    fn dispatch(
+        &self,
+        session: &Session,
+        mode: Mode,
+        make: impl FnOnce(bool) -> Option<Message>,
+    ) -> Result<(), StoreError> {
+        let agent = self
+            .agent(&session.agent)
+            .ok_or_else(|| StoreError(format!("no agent named {}", session.agent)))?;
+        let mut all = self.live();
+        if let Some(l) = all.get(&session.id) {
+            let Some(msg) = make(true) else { return Ok(()) };
+            l.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+            drop(all);
+            self.store.touch_session(session.id)?;
+            self.changed.notify_waiters();
+            return Ok(());
         }
+        let Some(first) = make(false) else { return Ok(()) };
         let live = Live {
             stop: CancellationToken::new(),
             inbox: Arc::new(Mutex::new(Vec::new())),
             questions: Arc::new(Mutex::new(HashMap::new())),
         };
-        self.live().insert(session.id, live.clone());
+        all.insert(session.id, live.clone());
+        drop(all);
         let runner = self.clone();
         let session_id = session.id;
-        let first = msg;
         tokio::spawn(async move {
             let Live { stop, inbox, questions } = live;
             let mut next = Some(first);
+            let mut gone = false;
             while let Some(prompt) = next.take() {
                 if stop.is_cancelled() {
                     break;
@@ -641,24 +730,41 @@ impl Runner {
                         break;
                     }
                 }
-                let mut queued = inbox.lock().unwrap_or_else(|e| e.into_inner());
-                if !queued.is_empty() {
-                    let all: Vec<Message> = queued.drain(..).collect();
-                    next = Some(Message {
-                        text: all.iter().map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n\n"),
-                        attachments: all.into_iter().flat_map(|m| m.attachments).collect(),
-                    });
+                let mut all = runner.live();
+                let queued: Vec<Message> =
+                    inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+                next = if queued.is_empty() {
+                    runner.digest(session_id, |_| true)
+                } else {
+                    Some(Message {
+                        text: queued
+                            .iter()
+                            .map(|m| m.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                        attachments: queued.into_iter().flat_map(|m| m.attachments).collect(),
+                        from: Vec::new(),
+                    })
+                };
+                if next.is_none() {
+                    all.remove(&session_id);
+                    gone = true;
                 }
             }
             // A turn that failed or was stopped never reads what was waiting.
             let left: Vec<Message> =
                 inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
-            runner.live().remove(&session_id);
+            if !gone {
+                runner.live().remove(&session_id);
+            }
             if !left.is_empty() {
                 runner.not_sent(session_id, "the turn ended first", left);
             }
             runner.changed.notify_waiters();
             runner.tell_watchers(session_id);
+            if runner.store.session(session_id).is_ok_and(|s| s.status == SessionStatus::Idle) {
+                let _ = runner.deliver_deferred(session_id);
+            }
         });
         Ok(())
     }
@@ -680,8 +786,12 @@ impl Runner {
                 let judges = done.parent == Some(id)
                     && done.status == SessionStatus::Idle
                     && self.store.project(watcher.project_id).is_ok_and(|p| p.supervisor);
-                let text = if judges { crate::autopilot::judge_request(&self.store, &done) } else { plain.clone() };
-                let _ = self.send(&watcher, &text);
+                let (text, source) = if judges {
+                    (crate::autopilot::judge_request(&self.store, &done), "judge")
+                } else {
+                    (plain.clone(), "watch")
+                };
+                let _ = self.tell(&watcher, &text, Origin::new(source, Some(finished)));
             }
         }
     }
@@ -708,7 +818,7 @@ impl Runner {
                 text: format!("the context is {:.0}% full, so it is being compacted", used * 100.0),
             },
         );
-        let prompt = Message { text: COMPACT_PROMPT.into(), attachments: Vec::new() };
+        let prompt = Message { text: COMPACT_PROMPT.into(), ..Default::default() };
         self.turn(agent, &session, &prompt, stop, inbox, questions, Mode::Compact).await
     }
 
@@ -810,6 +920,7 @@ impl Runner {
                 capture: mode == Mode::Compact,
                 raw: agent.writes_log(),
                 prompt: msg.attachments.clone(),
+                from: msg.from.clone(),
                 typed: (mode == Mode::Chat).then_some(prompt_row.id),
                 ..SinkState::default()
             }),
@@ -855,6 +966,52 @@ impl Runner {
     }
 }
 
+fn clock(ms: i64) -> String {
+    let secs = ms.div_euclid(1000).rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+fn label(d: &Deferred) -> String {
+    match d.worker {
+        Some(w) => format!("{} {w}", d.source),
+        None => d.source.clone(),
+    }
+}
+
+/// Messages that waited for an idle session, as one: oldest first, repeats dropped, and only the
+/// newest `DIGEST_MAX` written out.
+fn digest_of(all: Vec<Deferred>) -> Message {
+    let mut kept: Vec<Deferred> = Vec::new();
+    for d in all {
+        if !kept.iter().any(|k| k.worker == d.worker && k.source == d.source && k.text == d.text) {
+            kept.push(d);
+        }
+    }
+    let folded = kept.len().saturating_sub(DIGEST_MAX);
+    let mut from: Vec<String> = Vec::new();
+    for d in &kept {
+        let l = label(d);
+        if !from.contains(&l) {
+            from.push(l);
+        }
+    }
+    let mut lines = match kept.len() {
+        1 => Vec::new(),
+        n => vec![format!("{n} messages for you, sent while you were busy, oldest first:")],
+    };
+    if folded > 0 {
+        let older: Vec<String> = kept[..folded].iter().map(label).collect();
+        lines.push(format!(
+            "({folded} older ones are folded in and not repeated here, from: {})",
+            older.join(", ")
+        ));
+    }
+    for d in &kept[folded..] {
+        lines.push(format!("[{} UTC] {}: {}", clock(d.created_at), label(d), d.text));
+    }
+    Message { text: lines.join("\n\n"), attachments: Vec::new(), from }
+}
+
 /// A name safe to write to disk and show: the last part of what was sent, never empty.
 fn file_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default().trim();
@@ -881,6 +1038,7 @@ struct SinkState {
     capture: bool,
     raw: bool,
     prompt: Vec<Attachment>,
+    from: Vec<String>,
     typed: Option<Id>,
     captured: String,
     text: Option<(Id, String)>,
@@ -925,7 +1083,7 @@ impl Sink {
                 self.inbox
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push(Message { text, attachments: Vec::new() });
+                    .push(Message { text, ..Default::default() });
             }
             Some(crate::agent::progress::Nudge::Escalate(n)) => {
                 let _ = self.store.set_setting(&key, &n.to_string());
@@ -935,7 +1093,8 @@ impl Sink {
                 );
                 for id in self.store.watchers(self.session).unwrap_or_default() {
                     if let Ok(watcher) = self.store.session(id) {
-                        let _ = self.runner.send(&watcher, &text);
+                        let origin = Origin::new("watchdog", Some(self.session)).urgent(true);
+                        let _ = self.runner.tell(&watcher, &text, origin);
                     }
                 }
             }
@@ -1020,6 +1179,20 @@ impl Sink {
 }
 
 impl Sink {
+    fn urgent(&self) -> Option<Message> {
+        let after = self
+            .store
+            .setting(URGENT_AFTER_SETTING)
+            .ok()
+            .flatten()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(URGENT_AFTER_DEFAULT);
+        if self.began.elapsed() < Duration::from_secs(after) {
+            return None;
+        }
+        self.runner.digest(self.session, |d| d.urgent)
+    }
+
     fn pictures_removed(&self) {
         if self.lock().capture || !self.lock().raw {
             return;
@@ -1042,8 +1215,9 @@ impl Sink {
         let mut st = self.lock();
         let mut typed = None;
         for s in &mut messages {
-            if let agentbench_core::Said::Typed { attachments } = &mut s.said {
+            if let agentbench_core::Said::Typed { attachments, from } = &mut s.said {
                 *attachments = std::mem::take(&mut st.prompt);
+                *from = std::mem::take(&mut st.from);
                 typed = st.typed.take();
             }
         }
@@ -1083,7 +1257,8 @@ impl Sink {
             "This goes to the user; you are only told.".to_string()
         };
         let text = format!("Worker {} (\"{title}\"{issue}) asks:\n{asked}\n{how}", self.session);
-        let _ = self.runner.send(supervisor, &text);
+        let origin = Origin::new("question", Some(self.session)).urgent(!answerable);
+        let _ = self.runner.tell(supervisor, &text, origin);
     }
 
     async fn wait(
@@ -1264,11 +1439,13 @@ impl Io for Sink {
             return None;
         }
         let mut inbox = self.inbox.lock().unwrap_or_else(|e| e.into_inner());
-        let msg = (!inbox.is_empty()).then(|| inbox.remove(0))?;
+        let waiting = (!inbox.is_empty()).then(|| inbox.remove(0));
         drop(inbox);
+        let msg = waiting.or_else(|| self.urgent())?;
         let id = self.entry(msg.entry());
         let mut st = self.lock();
         st.prompt = msg.attachments.clone();
+        st.from = msg.from.clone();
         st.typed = id;
         drop(st);
         let files = self.runner.materialise(self.session, &msg.attachments);
@@ -2802,6 +2979,17 @@ mod tests {
         let told = boss_was_told(&r).remove(0);
         assert!(told.contains("red or blue?") && told.contains("red | blue"), "{told}");
         assert!(told.contains(&r.worker.id.to_string()) && told.contains("worker"), "{told}");
+        let from: Vec<Vec<String>> = r
+            .store
+            .messages(r.boss.id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::User { from, .. } => Some(from),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(from[0], [format!("question {}", r.worker.id)], "a routed question is a system message");
         assert_eq!(r.store.session(r.worker.id).unwrap().status, SessionStatus::Running);
         let args = serde_json::json!({"id": r.worker.id.to_string(), "answer": "blue"});
         r.runner.api.call("answer_session", &args, r.boss.id).unwrap();
@@ -3070,5 +3258,323 @@ mod tests {
         assert!(
             api.call("start_session", &json!({"project": 999, "prompt": "x"}), lead.id).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    use super::*;
+
+    struct Recorder {
+        name: &'static str,
+        log: Arc<Mutex<Vec<String>>>,
+        ms: u64,
+    }
+
+    #[async_trait]
+    impl Agent for Recorder {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn label(&self) -> &str {
+            self.name
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn steerable(&self) -> bool {
+            true
+        }
+        async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            self.log.lock().unwrap().push(format!("turn: {}", turn.prompt));
+            let end = Instant::now() + Duration::from_millis(self.ms);
+            while Instant::now() < end {
+                if let Some(s) = io.steer() {
+                    self.log.lock().unwrap().push(format!("steer: {}", s.text));
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            io.emit(Event::Text { delta: "ok".into() });
+            Ok(())
+        }
+    }
+
+    struct Rig {
+        runner: Runner,
+        store: Store,
+        boss: Session,
+        worker: Session,
+        boss_log: Arc<Mutex<Vec<String>>>,
+        worker_log: Arc<Mutex<Vec<String>>>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn rig_in(dir: tempfile::TempDir, store: Store) -> Rig {
+        let boss_log = Arc::new(Mutex::new(Vec::new()));
+        let worker_log = Arc::new(Mutex::new(Vec::new()));
+        let sup = match store.supervisor_project().unwrap() {
+            Some(p) => p,
+            None => crate::projects::ensure_supervisor(&store, &dir.path().join("sup")).unwrap(),
+        };
+        let existing = store.sessions().unwrap();
+        let (boss, worker) = match existing.iter().find(|s| s.project_id == sup.id) {
+            Some(b) => (b.clone(), existing.iter().find(|s| s.project_id != sup.id).unwrap().clone()),
+            None => {
+                let main = dir.path().join("r");
+                crate::git::testing::repo(&main);
+                let p = crate::projects::add(&store, &main, None, false).unwrap();
+                let tree = store.main_worktree(p.id).unwrap();
+                let sup_tree = store.main_worktree(sup.id).unwrap();
+                let boss = store.add_session(sup_tree.id, "boss", "boss", None, None).unwrap();
+                let worker = store.add_session(tree.id, "worker", "worker", None, None).unwrap();
+                store.set_parent(worker.id, Some(boss.id)).unwrap();
+                (boss, worker)
+            }
+        };
+        let runner = Runner::new(
+            store.clone(),
+            vec![
+                Box::new(Recorder { name: "boss", log: boss_log.clone(), ms: 800 }),
+                Box::new(Recorder { name: "worker", log: worker_log.clone(), ms: 300 }),
+            ],
+        );
+        Rig { runner, store, boss, worker, boss_log, worker_log, _dir: dir }
+    }
+
+    fn rig() -> Rig {
+        rig_in(tempfile::tempdir().unwrap(), Store::memory().unwrap())
+    }
+
+    async fn idle(runner: &Runner, id: SessionId) {
+        for _ in 0..400 {
+            if !runner.is_running(id) {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                if !runner.is_running(id) {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("session {id} never finished");
+    }
+
+    async fn started(r: &Rig, log: &Arc<Mutex<Vec<String>>>) {
+        for _ in 0..200 {
+            if !log.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("never started: {:?}", r.boss_log);
+    }
+
+    fn log(l: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        l.lock().unwrap().clone()
+    }
+
+    fn said_to(r: &Rig, id: SessionId) -> Vec<(String, Vec<String>)> {
+        agentbench_core::shown(&r.store.messages(id, 0).unwrap())
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::User { text, from, .. } => Some((text, from)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_system_message_waits_for_the_supervisor_to_finish_its_turn() {
+        let r = rig();
+        r.runner.send(&r.boss, "review the queue").unwrap();
+        started(&r, &r.boss_log).await;
+        let origin = Origin::new("watch", Some(r.worker.id));
+        r.runner.tell(&r.boss, "worker finished", origin).unwrap();
+        assert_eq!(r.store.deferred_count(r.boss.id).unwrap(), 1);
+        let shown = r.runner.with_queued(vec![r.store.session(r.boss.id).unwrap()]);
+        assert_eq!(shown[0].deferred, 1);
+        assert!(shown[0].queued.is_empty(), "not in the steer inbox");
+        idle(&r.runner, r.boss.id).await;
+        let seen = log(&r.boss_log);
+        assert!(!seen.iter().any(|l| l.starts_with("steer")), "{seen:?}");
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[1].starts_with("turn: [") && seen[1].contains("worker finished"), "{seen:?}");
+        assert!(seen[1].contains(&format!("watch {}", r.worker.id)), "{seen:?}");
+        let told = said_to(&r, r.boss.id);
+        assert_eq!(told.last().unwrap().1, [format!("watch {}", r.worker.id)]);
+        assert_eq!(r.store.deferred_count(r.boss.id).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_user_still_steers_a_busy_supervisor() {
+        let r = rig();
+        r.runner.send(&r.boss, "review the queue").unwrap();
+        started(&r, &r.boss_log).await;
+        r.runner.send(&r.boss, "stop that, look at the login bug").unwrap();
+        idle(&r.runner, r.boss.id).await;
+        assert_eq!(
+            log(&r.boss_log),
+            ["turn: review the queue", "steer: stop that, look at the login bug"]
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_queued_during_a_turn_arrive_as_one_digest_in_order_without_repeats() {
+        let r = rig();
+        r.runner.send(&r.boss, "go").unwrap();
+        started(&r, &r.boss_log).await;
+        let w = Some(r.worker.id);
+        r.runner.tell(&r.boss, "first", Origin::new("watch", w)).unwrap();
+        r.runner.tell(&r.boss, "second", Origin::new("autopilot", w)).unwrap();
+        r.runner.tell(&r.boss, "first", Origin::new("watch", w)).unwrap();
+        r.runner.tell(&r.boss, "third", Origin::new("session", None)).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let seen = log(&r.boss_log);
+        assert_eq!(seen.len(), 2, "one digest turn: {seen:?}");
+        let digest = &seen[1];
+        assert!(digest.contains("3 messages"), "{digest}");
+        assert_eq!(digest.matches(": first").count(), 1, "{digest}");
+        let at = |s: &str| digest.find(s).unwrap();
+        assert!(at(": first") < at(": second") && at(": second") < at(": third"), "{digest}");
+        let from = said_to(&r, r.boss.id).pop().unwrap().1;
+        assert_eq!(
+            &from,
+            &[
+                format!("watch {}", r.worker.id),
+                format!("autopilot {}", r.worker.id),
+                "session".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_burst_is_capped_to_the_newest_and_says_how_many_were_folded() {
+        let all: Vec<Deferred> = (0..20)
+            .map(|i| Deferred {
+                id: i,
+                source: "watch".into(),
+                worker: None,
+                urgent: false,
+                text: format!("finish number {i:02}"),
+                created_at: 0,
+            })
+            .collect();
+        let m = digest_of(all);
+        assert!(m.text.starts_with("20 messages"), "{}", m.text);
+        assert!(m.text.contains(&format!("{} older ones are folded in", 20 - DIGEST_MAX)), "{}", m.text);
+        assert!(!m.text.contains("finish number 07"), "{}", m.text);
+        assert!(m.text.contains("finish number 08") && m.text.contains("finish number 19"));
+        assert_eq!(m.text.matches("finish number").count(), DIGEST_MAX);
+    }
+
+    #[tokio::test]
+    async fn an_urgent_message_waits_until_the_turn_is_long_then_interrupts() {
+        let r = rig();
+        r.runner.send(&r.boss, "go").unwrap();
+        started(&r, &r.boss_log).await;
+        let urgent = Origin::new("session", Some(r.worker.id)).urgent(true);
+        r.runner.tell(&r.boss, "BLOCKED early", urgent).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let seen = log(&r.boss_log);
+        assert!(!seen.iter().any(|l| l.starts_with("steer")), "under the threshold it waits: {seen:?}");
+        assert!(seen.last().unwrap().contains("BLOCKED early"));
+
+        r.boss_log.lock().unwrap().clear();
+        r.store.set_setting(URGENT_AFTER_SETTING, "0").unwrap();
+        r.runner.send(&r.store.session(r.boss.id).unwrap(), "go again").unwrap();
+        started(&r, &r.boss_log).await;
+        r.runner.tell(&r.boss, "a plain finish", Origin::new("watch", None)).unwrap();
+        r.runner.tell(&r.boss, "BLOCKED late", urgent).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let seen = log(&r.boss_log);
+        assert!(seen.iter().any(|l| l.starts_with("steer: ") && l.contains("BLOCKED late")), "{seen:?}");
+        assert!(!seen.iter().any(|l| l.starts_with("steer: ") && l.contains("a plain finish")), "{seen:?}");
+        assert!(seen.last().unwrap().starts_with("turn: ") && seen.last().unwrap().contains("a plain finish"));
+    }
+
+    #[tokio::test]
+    async fn a_worker_is_still_steered_by_the_supervisor_and_the_autopilot() {
+        let r = rig();
+        r.runner.send(&r.worker, "build it").unwrap();
+        started(&r, &r.worker_log).await;
+        let args = serde_json::json!({"id": r.worker.id.to_string(), "text": "use the new api"});
+        r.runner.api.call("send_message", &args, r.boss.id).unwrap();
+        r.runner.tell(&r.worker, "Autopilot: no output", Origin::new("autopilot", None)).unwrap();
+        idle(&r.runner, r.worker.id).await;
+        let seen = log(&r.worker_log);
+        assert!(seen.iter().any(|l| l.starts_with("steer: ") && l.contains("use the new api")), "{seen:?}");
+        assert!(seen.iter().any(|l| l == "steer: Autopilot: no output"), "{seen:?}");
+        assert_eq!(r.store.deferred_count(r.worker.id).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_session_set_to_queue_system_messages_waits_too() {
+        let r = rig();
+        r.store.set_queue_system(r.worker.id, true).unwrap();
+        let worker = r.store.session(r.worker.id).unwrap();
+        r.runner.send(&worker, "build it").unwrap();
+        started(&r, &r.worker_log).await;
+        r.runner.tell(&worker, "Autopilot: no output", Origin::new("autopilot", None)).unwrap();
+        idle(&r.runner, r.worker.id).await;
+        let seen = log(&r.worker_log);
+        assert!(!seen.iter().any(|l| l.starts_with("steer")), "{seen:?}");
+        assert_eq!(seen.len(), 2, "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_restart_keeps_the_waiting_messages_and_an_idle_supervisor_gets_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let (boss, worker) = {
+            let r = rig_in(tempfile::tempdir_in(dir.path()).unwrap(), Store::open(&path).unwrap());
+            let keep = r._dir.path().to_path_buf();
+            r.runner.send(&r.boss, "go").unwrap();
+            started(&r, &r.boss_log).await;
+            r.runner.tell(&r.boss, "finished while you worked", Origin::new("watch", Some(r.worker.id))).unwrap();
+            r.runner.interrupt(r.boss.id);
+            idle(&r.runner, r.boss.id).await;
+            let _ = keep;
+            (r.boss.id, r.worker.id)
+        };
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.deferred_count(boss).unwrap(), 1, "kept across the restart");
+        let r = rig_in(tempfile::tempdir().unwrap(), store);
+        assert_eq!((r.boss.id, r.worker.id), (boss, worker));
+        r.runner.deliver_backlog();
+        started(&r, &r.boss_log).await;
+        idle(&r.runner, boss).await;
+        let seen = log(&r.boss_log);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].contains("finished while you worked"), "{seen:?}");
+        assert_eq!(r.store.deferred_count(boss).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn watch_notices_and_judge_requests_reach_the_supervisor_as_system_messages() {
+        let r = rig();
+        r.store.add_watch(r.worker.id, r.boss.id).unwrap();
+        r.runner.send(&r.boss, "go").unwrap();
+        started(&r, &r.boss_log).await;
+        r.runner.send(&r.worker, "build").unwrap();
+        idle(&r.runner, r.worker.id).await;
+        assert_eq!(r.store.deferred_count(r.boss.id).unwrap(), 1, "the judge request waits");
+        idle(&r.runner, r.boss.id).await;
+        let from = said_to(&r, r.boss.id).pop().unwrap().1;
+        assert_eq!(from, [format!("judge {}", r.worker.id)], "its own idle child is judged");
+
+        r.store.set_parent(r.worker.id, None).unwrap();
+        r.store.add_watch(r.worker.id, r.boss.id).unwrap();
+        r.runner.send(&r.store.session(r.boss.id).unwrap(), "again").unwrap();
+        r.runner.send(&r.store.session(r.worker.id).unwrap(), "build").unwrap();
+        idle(&r.runner, r.worker.id).await;
+        assert_eq!(r.store.deferred_count(r.boss.id).unwrap(), 1, "the watch notice waits");
+        idle(&r.runner, r.boss.id).await;
+        let from = said_to(&r, r.boss.id).pop().unwrap().1;
+        assert_eq!(from, [format!("watch {}", r.worker.id)]);
     }
 }

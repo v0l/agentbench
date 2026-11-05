@@ -1,4 +1,4 @@
-use crate::runner::Runner;
+use crate::runner::{Origin, Runner};
 use crate::store::{Judged, Store, StoreError, Worker};
 use agentbench_core::{
     Automation, AutopilotPatch, AutopilotState, Entry, Id, Issue, IssuePatch, IssueState,
@@ -745,7 +745,7 @@ impl Autopilot {
             } else {
                 format!("Autopilot: no output from you for {minutes} minutes. If something blocks you, say what; otherwise carry on and finish with a conclusion.")
             };
-            let _ = self.runner.send(session, &text);
+            let _ = self.runner.tell(session, &text, Origin::new("autopilot", Some(w.session)));
             self.log(
                 Some(w.project),
                 Some(w.issue),
@@ -806,7 +806,8 @@ impl Autopilot {
             self.notify(&format!("#{} finished but no supervisor is running to judge it", w.issue));
             return;
         };
-        match self.runner.send(&sup, &judge_request(store, session)) {
+        let origin = Origin::new("judge", Some(w.session));
+        match self.runner.tell(&sup, &judge_request(store, session), origin) {
             Ok(()) => {
                 let _ = store.set_worker_asked(w.session, now.max(1));
                 self.log(Some(w.project), Some(w.issue), &format!("#{} finished, asked the supervisor for a verdict", w.issue));
@@ -869,7 +870,7 @@ impl Autopilot {
             followup.trim(),
             w.issue
         );
-        match self.runner.send(session, &text) {
+        match self.runner.tell(session, &text, Origin::new("autopilot", Some(w.session))) {
             Ok(()) => self.log(
                 Some(w.project),
                 Some(w.issue),
@@ -1763,6 +1764,20 @@ mod tests {
         assert!(ask.contains(&sid.to_string()) && ask.contains("judge_session"), "{ask}");
         assert!(ask.contains("Let me know if you want X"), "the full reply: {ask}");
         assert!(ask.contains("Diff stat") && ask.contains("Test runs"), "{ask}");
+        let froms: Vec<Vec<String>> = r
+            .store
+            .messages(r.boss.unwrap(), 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::User { text, from, .. } if text.contains("Judge worker ") => Some(from),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            froms.iter().all(|f| f.iter().any(|s| s.starts_with("judge "))),
+            "a judge request is a system message: {froms:?}"
+        );
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "not review");
         assert!(r.store.session(sid).is_ok(), "not closed");
         assert!(r.store.comments(a).unwrap().iter().all(|c| !c.body.contains("merged")));
