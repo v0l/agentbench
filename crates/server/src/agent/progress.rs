@@ -4,29 +4,19 @@ pub const REMIND_AT: [u32; 2] = [15, 30];
 pub const ESCALATE_AT: u32 = 45;
 pub const THINKING_LIMIT: Duration = Duration::from_secs(600);
 
-const READ_ONLY: [&str; 17] = [
-    "read_file",
-    "search_files",
-    "list_files",
-    "load_skill",
-    "recall",
-    "list_issues",
-    "get_issue",
-    "list_sessions",
-    "read_session",
-    "code_outline",
-    "code_find",
-    "code_diagnostics",
-    "web_search",
-    "web_fetch",
-    "user_asks",
-    "list_worktrees",
-    "session_status",
+const PLANNING_OR_EDITING: [&str; 8] = [
+    "todo_write",
+    "todowrite",
+    "edit_file",
+    "write_file",
+    "replace_in_files",
+    "file_issue",
+    "edit",
+    "write",
 ];
 
 pub fn reads_only(tool: &str) -> bool {
-    let lower = tool.to_ascii_lowercase();
-    READ_ONLY.contains(&lower.as_str()) || matches!(lower.as_str(), "read" | "grep" | "glob" | "ls")
+    !PLANNING_OR_EDITING.contains(&tool.to_ascii_lowercase().as_str())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -106,12 +96,18 @@ mod tests {
 
     #[test]
     fn a_plan_or_an_edit_silences_it() {
-        for tool in ["todo_write", "edit_file", "write_file", "file_issue", "bash"] {
+        for tool in ["todo_write", "edit_file", "write_file", "replace_in_files", "file_issue", "TodoWrite", "Edit"] {
             let mut w = Watchdog::default();
             feed(&mut w, "read_file", 10);
             assert!(feed(&mut w, tool, 1).is_empty());
             assert!(feed(&mut w, "read_file", 60).is_empty(), "{tool}");
         }
+    }
+
+    #[test]
+    fn bash_and_other_exploring_calls_count_as_reading() {
+        let mut w = Watchdog::default();
+        assert_eq!(feed(&mut w, "bash", 15), [Nudge::Remind(15)]);
     }
 
     #[test]

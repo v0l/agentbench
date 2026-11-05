@@ -330,6 +330,12 @@ impl Runner {
     pub fn with_queued(&self, mut sessions: Vec<Session>) -> Vec<Session> {
         for s in &mut sessions {
             s.queued = self.queued(s.id);
+            s.no_plan_reads = self
+                .store
+                .setting(&format!("no_plan_{}", s.id))
+                .ok()
+                .flatten()
+                .and_then(|n| n.parse().ok());
         }
         sessions
     }
@@ -806,7 +812,7 @@ impl Runner {
             api: self.api.clone(),
             runner: self.clone(),
             began: Instant::now(),
-            watched: mode == Mode::Chat && session.issue_id.is_some(),
+            watched: mode == Mode::Chat && (session.issue_id.is_some() || session.parent.is_some()),
         };
         let result = agent.run(&turn, &sink).await;
         sink.flush();
@@ -1568,9 +1574,94 @@ mod tests {
         }
     }
 
-    async fn reminders_for(tools: Vec<&'static str>) -> Vec<String> {
+    async fn run_scripted(
+        tools: Vec<&'static str>,
+        with_issue: bool,
+        with_parent: bool,
+    ) -> (Vec<String>, Runner, Session) {
         let script = Arc::new(Scripted(tools, Mutex::new(Vec::new())));
         let agent = SharedScripted(script.clone());
+        let store = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&store, "/tmp");
+        let issue = with_issue.then(|| {
+            store
+                .add_issue(&agentbench_core::NewIssue {
+                    project_id: main.project_id,
+                    title: "t".into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .id
+        });
+        let s = store.add_session(main.id, "scripted", "t", None, issue).unwrap();
+        if with_parent {
+            let lead = store.add_session(main.id, "scripted", "lead", None, None).unwrap();
+            store.set_parent(s.id, Some(lead.id)).unwrap();
+        }
+        let s = store.session(s.id).unwrap();
+        let runner = Runner::new(store, vec![Box::new(agent)]);
+        runner.send(&s, "go").unwrap();
+        wait_idle(&runner, s.id).await;
+        let got = script.1.lock().unwrap().clone();
+        (got, runner, s)
+    }
+
+    async fn reminders_for(tools: Vec<&'static str>) -> Vec<String> {
+        run_scripted(tools, true, false).await.0
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_only_reads_is_told_to_write_its_steps_then_a_planner_is_left_alone() {
+        let mut reads = vec!["read_file"; 16];
+        reads.push("todo_write");
+        reads.extend(vec!["read_file"; 40]);
+        let (got, runner, s) = run_scripted(reads, true, false).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("read 15 files") && got[0].contains("todo_write"));
+        let lines: Vec<String> = runner
+            .store()
+            .messages(s.id, 0)
+            .unwrap()
+            .into_iter()
+            .map(|m| match m.entry {
+                Entry::Tool { name, .. } => format!("tool {name}"),
+                Entry::User { text, .. } => format!("user {text}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        let at = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap();
+        println!("{}", lines.join("\n"));
+        assert!(at("read 15 files") > 14 && at("read 15 files") < at("tool todo_write"));
+        assert_eq!(runner.store().setting(&format!("no_plan_{}", s.id)).unwrap(), None);
+        let mut planned = vec!["todo_write"];
+        planned.extend(vec!["read_file"; 40]);
+        assert!(reminders_for(planned).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bash_exploring_does_not_silence_the_watchdog() {
+        let got = reminders_for(vec!["bash"; 15]).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn a_chat_with_neither_issue_nor_parent_is_not_watched_but_a_parented_one_is() {
+        assert!(run_scripted(vec!["read_file"; 16], false, false).await.0.is_empty());
+        assert_eq!(run_scripted(vec!["read_file"; 16], false, true).await.0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_plan_gap_shows_on_the_session_and_goes_with_it() {
+        let (_, runner, s) = run_scripted(vec!["read_file"; 20], true, false).await;
+        let shown = runner.with_queued(vec![runner.store().session(s.id).unwrap()]);
+        assert_eq!(shown[0].no_plan_reads, Some(15));
+        runner.store().delete_session(s.id).unwrap();
+        assert_eq!(runner.store().setting(&format!("no_plan_{}", s.id)).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn forty_five_reads_tell_the_watcher() {
+        let script = Arc::new(Scripted(vec!["read_file"; 46], Mutex::new(Vec::new())));
         let store = Store::memory().unwrap();
         let (_, main) = crate::store::testing::project(&store, "/tmp");
         let issue = store
@@ -1580,24 +1671,18 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let s = store.add_session(main.id, "scripted", "t", None, Some(issue.id)).unwrap();
-        let runner = Runner::new(store, vec![Box::new(agent)]);
-        runner.send(&s, "go").unwrap();
-        wait_idle(&runner, s.id).await;
-        let got = script.1.lock().unwrap().clone();
-        got
-    }
-
-    #[tokio::test]
-    async fn a_worker_that_only_reads_is_told_to_write_its_steps_then_a_planner_is_left_alone() {
-        let mut reads = vec!["read_file"; 16];
-        reads.push("todo_write");
-        let got = reminders_for(reads).await;
-        assert_eq!(got.len(), 1, "{got:?}");
-        assert!(got[0].contains("read 15 files") && got[0].contains("todo_write"));
-        let mut planned = vec!["todo_write"];
-        planned.extend(vec!["read_file"; 40]);
-        assert!(reminders_for(planned).await.is_empty());
+        let worker = store.add_session(main.id, "scripted", "w", None, Some(issue.id)).unwrap();
+        let lead = store.add_session(main.id, "scripted", "lead", None, None).unwrap();
+        store.add_watch(worker.id, lead.id).unwrap();
+        let runner = Runner::new(store, vec![Box::new(SharedScripted(script))]);
+        runner.send(&worker, "go").unwrap();
+        wait_idle(&runner, worker.id).await;
+        wait_idle(&runner, lead.id).await;
+        let said = runner.store().messages(lead.id, 0).unwrap();
+        assert!(
+            said.iter().any(|m| matches!(&m.entry, Entry::User { text, .. } if text.contains("46 read-only calls") || text.contains("45 read-only calls"))),
+            "{said:?}"
+        );
     }
 
     fn fresh_session(runner: &Runner, id: SessionId) -> Session {

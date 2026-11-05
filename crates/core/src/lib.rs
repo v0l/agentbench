@@ -357,6 +357,8 @@ pub struct Session {
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_plan_reads: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

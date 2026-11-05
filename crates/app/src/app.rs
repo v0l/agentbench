@@ -2389,6 +2389,15 @@ impl App {
                 .size(10.5);
         }
         line.gap(8.0).note(ago(s.updated_at)).size(10.5).elided(ui);
+        if let Some(n) = s.no_plan_reads {
+            let text = format!("no plan after {n} reads");
+            let r = Line::new()
+                .value(&text)
+                .tint(egui::Color32::from_rgb(220, 160, 60))
+                .size(10.5)
+                .elided(ui);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
+        }
     }
 
     fn issue_card(
@@ -3000,6 +3009,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             queued: Vec::new(),
+            no_plan_reads: None,
             parent: None,
         };
         let all = [

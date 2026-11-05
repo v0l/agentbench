@@ -3087,3 +3087,26 @@ fn a_failed_test_call_shows_the_servers_own_error() {
     until(&mut h, "the error", |h| h.query_by_label_contains("Incorrect API key provided").is_some());
     shot(&mut h, "onboarding-error");
 }
+
+#[test]
+fn a_session_with_no_plan_says_so_in_its_details() {
+    let rig = rig();
+    let issue = rig.store.issues().unwrap()[0].id;
+    let side = rig
+        .store
+        .worktrees(None)
+        .unwrap()
+        .into_iter()
+        .find(|w| w.branch.as_deref() == Some("fix-login"))
+        .unwrap();
+    let linked = rig.store.add_session(side.id, "echo", "work on readme", None, Some(issue)).unwrap();
+    rig.store.add_message(linked.id, &Entry::user("write it")).unwrap();
+    rig.store.set_setting(&format!("no_plan_{}", linked.id), "15").unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_issues_first(true);
+    h.state_mut().open_session(linked.id, linked.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(linked.id) == 1);
+    h.run_steps(3);
+    h.get_by_label_contains("no plan after 15");
+}

@@ -364,6 +364,7 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         queued: Vec::new(),
+        no_plan_reads: None,
     })
 }
 
@@ -1126,6 +1127,7 @@ impl Store {
         if db.execute("DELETE FROM sessions WHERE id = ?1", [id])? == 0 {
             return Err(not_found("session", id));
         }
+        db.execute("DELETE FROM settings WHERE key = ?1", [format!("no_plan_{id}")])?;
         Store::changed(&db, "session", id)?;
         // A vanished worktree only stays listed so its sessions can be read; once the
         // last one is deleted there is nothing left to show.
