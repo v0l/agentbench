@@ -805,6 +805,8 @@ impl Runner {
             steerable: agent.steerable(),
             api: self.api.clone(),
             runner: self.clone(),
+            began: Instant::now(),
+            watched: mode == Mode::Chat && session.issue_id.is_some(),
         };
         let result = agent.run(&turn, &sink).await;
         sink.flush();
@@ -872,6 +874,7 @@ struct SinkState {
     thinking: Option<(Id, String)>,
     tools: HashMap<String, (Id, serde_json::Value)>,
     errored: bool,
+    progress: crate::agent::progress::Watchdog,
 }
 
 struct Sink {
@@ -885,9 +888,46 @@ struct Sink {
     steerable: bool,
     runner: Runner,
     api: Arc<dyn Api>,
+    began: Instant,
+    watched: bool,
 }
 
 impl Sink {
+    fn watch_progress(&self, tool: &str) {
+        if !self.watched || !self.steerable {
+            return;
+        }
+        let nudge = self.lock().progress.observe(tool, self.began.elapsed());
+        let key = format!("no_plan_{}", self.session);
+        match nudge {
+            None => {
+                if !crate::agent::progress::reads_only(tool) && self.store.setting(&key).ok().flatten().is_some() {
+                    let _ = self.store.delete_setting(&key);
+                }
+            }
+            Some(crate::agent::progress::Nudge::Remind(n)) => {
+                let _ = self.store.set_setting(&key, &n.to_string());
+                let text = crate::agent::progress::reminder(n);
+                self.inbox
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(Message { text, attachments: Vec::new() });
+            }
+            Some(crate::agent::progress::Nudge::Escalate(n)) => {
+                let _ = self.store.set_setting(&key, &n.to_string());
+                let text = format!(
+                    "Session {} has made {n} read-only calls with no plan and no edit. Tell it to write its steps with todo_write, or stop it.",
+                    self.session
+                );
+                for id in self.store.watchers(self.session).unwrap_or_default() {
+                    if let Ok(watcher) = self.store.session(id) {
+                        let _ = self.runner.send(&watcher, &text);
+                    }
+                }
+            }
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, SinkState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -1141,6 +1181,7 @@ impl Io for Sink {
             Event::ToolStart { .. } | Event::ToolEnd { .. } | Event::Diagnostics { .. }
                 if self.lock().raw => {}
             Event::ToolStart { call_id, name, input } => {
+                self.watch_progress(&name);
                 let entry = Entry::Tool {
                     call_id: call_id.clone(),
                     name,
@@ -1480,6 +1521,83 @@ mod tests {
         wait_idle(&runner, s.id).await;
         assert_eq!(users(&runner), ["go", "left instead"]);
         assert!(runner.queued(s.id).is_empty());
+    }
+
+    struct Scripted(Vec<&'static str>, Mutex<Vec<String>>);
+
+    struct SharedScripted(Arc<Scripted>);
+
+    #[async_trait]
+    impl Agent for SharedScripted {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn label(&self) -> &str {
+            "Scripted"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn steerable(&self) -> bool {
+            true
+        }
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            for (i, tool) in self.0.0.iter().enumerate() {
+                io.emit(Event::ToolStart {
+                    call_id: i.to_string(),
+                    name: (*tool).into(),
+                    input: serde_json::Value::Null,
+                });
+                io.emit(Event::ToolEnd {
+                    call_id: i.to_string(),
+                    name: (*tool).into(),
+                    output: String::new(),
+                    error: false,
+                });
+                while let Some(steer) = io.steer() {
+                    self.0.1.lock().unwrap().push(steer.text);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    async fn reminders_for(tools: Vec<&'static str>) -> Vec<String> {
+        let script = Arc::new(Scripted(tools, Mutex::new(Vec::new())));
+        let agent = SharedScripted(script.clone());
+        let store = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&store, "/tmp");
+        let issue = store
+            .add_issue(&agentbench_core::NewIssue {
+                project_id: main.project_id,
+                title: "t".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let s = store.add_session(main.id, "scripted", "t", None, Some(issue.id)).unwrap();
+        let runner = Runner::new(store, vec![Box::new(agent)]);
+        runner.send(&s, "go").unwrap();
+        wait_idle(&runner, s.id).await;
+        let got = script.1.lock().unwrap().clone();
+        got
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_only_reads_is_told_to_write_its_steps_then_a_planner_is_left_alone() {
+        let mut reads = vec!["read_file"; 16];
+        reads.push("todo_write");
+        let got = reminders_for(reads).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("read 15 files") && got[0].contains("todo_write"));
+        let mut planned = vec!["todo_write"];
+        planned.extend(vec!["read_file"; 40]);
+        assert!(reminders_for(planned).await.is_empty());
     }
 
     fn fresh_session(runner: &Runner, id: SessionId) -> Session {

@@ -5,6 +5,7 @@ pub mod files;
 pub mod media;
 pub mod native;
 mod process;
+pub mod progress;
 pub mod replace;
 pub mod screenshot;
 pub mod search;
@@ -250,12 +251,23 @@ pub fn brief(c: &Context) -> String {
     out.push_str(ORCHESTRATION);
     out.push_str("\n\n");
     out.push_str(FILE_TOOLS);
+    out.push_str("\n\n");
+    out.push_str(PLANNING);
     out
 }
 
 pub const FILE_TOOLS: &str = "<file_tools>\n\
 Create files with write_file, change files with edit_file (several files and `then` for a test run in one call) or replace_in_files (a regex across files). Use bash only for programs: builds, tests, git. Do not write or edit files with sed -i, cat > or tee heredocs, or inline python or perl.\n\
 </file_tools>";
+
+const PLANNING: &str = "<planning>\n\
+Before any edit, read context, then plan the steps.\n\n\
+1. Read context first, time boxed: read the issue and its comments, `recall` the project notes, read the named files, and use code_outline and search for call sites. About 10 read-only calls. Do not design before this is done.\n\
+2. Plan the implementation steps with `todo_write` before the first edit. Each step is one coherent change that can be committed and checked on its own, with the files it touches named. A one line fix is a one item list.\n\
+3. Work the list one step at a time: failing test first, make the change, run the narrow test, commit, tick the item. If a step turns out to need more steps, add them to the list; do not fold them into the step in hand.\n\
+4. Decide once, then write. The plan is the steps, not a design document. Pick the simplest approach that satisfies the tests and record open questions as later items, not blockers. The first non-read-only call must come within 10 calls after the plan.\n\
+5. Run the full suite once at the end, narrow tests while working.\n\
+</planning>";
 
 const ORCHESTRATION: &str = "<orchestration>\n\
 When you start sub-sessions, you are the parent.\n\n\
@@ -284,7 +296,7 @@ fn supervisor_brief(c: &Context) -> String {
          <role>\n\
          - Track: `user_asks` is what the user typed to every session. `list_sessions` and `list_issues` cover every project (pass `project` to narrow). `read_session` shows what a session actually did. Compare asks, replies and issues to find what is unfinished, never answered, failed, stopped, or has no issue.\n\
          - Record: every ask that deserves an issue gets one (`file_issue` with `project`). Search the issue list first and never duplicate. Keep states honest with `update_issue` and `comment_on_issue`: doing while a session works on it, review when it reports done, done only when verified.\n\
-         - Delegate: when work must be done, `start_session` (with `project`, and `issue` when one exists) with a self-contained prompt. Sessions you start are watched for you.\n\
+         - Delegate: when work must be done, `start_session` (with `project`, and `issue` when one exists) with a self-contained prompt. Hand the worker an issue whose body lists the implementation steps, or tell it to read the context and write its steps with `todo_write` before the first edit. Sessions you start are watched for you.\n\
          - Follow: use `watch_session` on any running session you care about. Do not poll and do not block on `wait_for_session`. When a watched session finishes, a message with its session id and new state (no reply text) arrives here. Then read the full reply with `read_session`, check it against the issue, update the tracker, and start the next step or tell the user.\n\
          - Conclusion check: when a watched session finishes, read its last reply and assert it has a conclusion: either rigid (verified, tests pass, nothing left) or needs more work, listing only items the session genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). If the reply contains a todo or leftover list of things the agent could do itself (run tests, write the test, deploy to a test env, merge locally, verify X, add a test for Y), `send_message` the session to do them, do not move the issue to `review` or `done`, and do not relay the list to the user. Never relay a worker's leftover list as the user's todo.\n\
          - Autopilot: the `autopilot` tool reads the server's own worker loop (pause switch, caps, activity feed). It starts workers on todo issues in projects at autowork or above, applies the conclusion check to their replies, labels issues `needs-user` or `blocked`, nudges stuck sessions, and in projects at ship or above merges and pushes green branches. Do not duplicate its work on the same issues; when the user asks to pause, resume or change it, call the tool and confirm the new state.\n\
@@ -492,6 +504,21 @@ mod tests {
         assert!(b.contains("branch main"));
         assert!(b.contains("\"project_id\": 4"));
         assert!(b.contains("<orchestration>") && b.contains("PARENT=<id>"));
+    }
+
+    #[test]
+    fn the_worker_brief_requires_reading_then_a_step_list_and_no_size_classes() {
+        let b = brief(&context());
+        assert!(b.contains("<planning>") && b.contains("`todo_write`"), "{b}");
+        assert!(b.contains("About 10 read-only calls") && b.contains("A one line fix is a one item list"));
+        for word in ["SMALL", "MEDIUM", "LARGE"] {
+            assert!(!b.contains(word), "{word}");
+        }
+        let sup = brief(&Context { supervisor: true, ..context() });
+        assert!(sup.contains("implementation steps") && sup.contains("todo_write"));
+        for word in ["SMALL", "MEDIUM", "LARGE"] {
+            assert!(!sup.contains(word), "{word}");
+        }
     }
 
     #[test]

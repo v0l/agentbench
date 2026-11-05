@@ -1250,6 +1250,15 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn watchers(&self, watched: SessionId) -> Result<Vec<SessionId>> {
+        let db = self.db();
+        let mut stmt = db.prepare("SELECT watcher FROM watches WHERE watched = ?1")?;
+        let found = stmt
+            .query_map([watched], |r| r.get::<_, SessionId>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(found)
+    }
+
     pub fn take_watchers(&self, watched: SessionId) -> Result<Vec<SessionId>> {
         let db = self.db();
         let mut stmt = db.prepare("SELECT watcher FROM watches WHERE watched = ?1")?;
