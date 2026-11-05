@@ -348,6 +348,8 @@ pub struct Session {
     #[serde(default)]
     pub effort: Option<String>,
     pub issue_id: Option<Id>,
+    #[serde(default)]
+    pub parent: Option<SessionId>,
     pub status: SessionStatus,
     pub agent_session: Option<String>,
     pub usage: Usage,
@@ -1260,6 +1262,8 @@ pub enum Place {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NewSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionId>,
     pub project_id: Id,
     pub agent: String,
     #[serde(default)]

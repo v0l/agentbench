@@ -272,7 +272,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 27] = [
+pub const AGENTBENCH_TOOLS: [&str; 29] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -300,6 +300,8 @@ pub const AGENTBENCH_TOOLS: [&str; 27] = [
     "set_automation",
     "merge_branch",
     "risky_action",
+    "answer_session",
+    "escalate_question",
 ];
 
 /// How long `wait_for_session` waits when not told, and the longest it may.
@@ -383,6 +385,16 @@ fn agentbench_specs() -> Vec<Spec> {
             "watch_session",
             "Be told when a running session finishes. When it does, a message with the session id and its new state (not the reply; read that with read_session) arrives in this chat as a new turn, so you do not have to poll or block. Sessions you start from the supervisor chat are watched automatically. Does nothing for a session that is not running.",
             object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
+        ),
+        Spec::new(
+            "answer_session",
+            "Supervisor chat only. Answer the question a worker you started asked you, returning the answer to it. Decide yourself when you can.",
+            object(json!({ "id": string("The worker session id"), "answer": string("The answer") }), &["id", "answer"]),
+        ),
+        Spec::new(
+            "escalate_question",
+            "Supervisor chat only. Put a worker's question to the user instead, with your recommendation shown beside it. Use only for real user decisions.",
+            object(json!({ "id": string("The worker session id"), "recommendation": string("What you would answer, and why") }), &["id"]),
         ),
         Spec::new(
             "stop_session",

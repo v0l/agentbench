@@ -264,6 +264,7 @@ When your prompt contains `PARENT=<id>`, you are a worker.\n\n\
 - When finished, `update_issue state=review`, then as your last action `send_message id=<PARENT>` with one line: `DONE #<issue> <branch> tests:<pass|fail> <one-line result>`.\n\
 - If blocked, send `BLOCKED #<issue> <reason>` instead and stop.\n\
 - Always send exactly one final message, including when you fail.\n\
+ - When your prompt names a PARENT, questions go to that supervisor, not the user. Decide yourself when you can, and ask only when you cannot. Secrets still go to the user.\n\
 - Finish the work. Do the tests, the verification and every follow-up you can do yourself before reporting. End with a conclusion in one of two states: rigid (verified, tests pass, nothing left) or needs more work, listing only what you genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). Never end with a todo list of things you could have done.\n\
 </orchestration>";
 

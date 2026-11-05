@@ -225,6 +225,7 @@ CREATE TABLE global_notes (
     updated_at INTEGER NOT NULL
 );
 "#,
+    "ALTER TABLE sessions ADD COLUMN parent TEXT;",
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -356,6 +357,7 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         model: row.get("model")?,
         effort: row.get("effort")?,
         issue_id: row.get("issue_id")?,
+        parent: row.get("parent")?,
         status: SessionStatus::parse(&status).unwrap_or(SessionStatus::Idle),
         agent_session: row.get("agent_session")?,
         usage: serde_json::from_str(&usage).unwrap_or_default(),
@@ -935,6 +937,13 @@ impl Store {
             .query_row(&format!("{SESSION_SELECT} WHERE s.id = ?1"), [id], session_row)
             .optional()?
             .ok_or_else(|| not_found("session", id))
+    }
+
+    pub fn set_parent(&self, id: SessionId, parent: Option<SessionId>) -> Result<()> {
+        let db = self.db();
+        db.execute("UPDATE sessions SET parent = ?1 WHERE id = ?2", params![parent, id])?;
+        Store::changed(&db, "session", id)?;
+        Ok(())
     }
 
     pub fn add_session(

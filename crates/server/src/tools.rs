@@ -805,6 +805,7 @@ impl Api for StoreApi {
                     return Err("give a `prompt`, or an `issue` to work from".into());
                 }
                 let new = NewSession {
+                    parent: sup.then_some(session),
                     project_id: project,
                     agent,
                     place,
@@ -888,6 +889,26 @@ impl Api for StoreApi {
             }
             "cleanup_worktree" => {
                 self.cleanup_worktree(args, &me, (!everywhere).then_some(project))?
+            }
+            "answer_session" | "escalate_question" => {
+                if !sup {
+                    return Err(format!("only the supervisor chat can use {tool}"));
+                }
+                let worker = s.session(session_id(args)?).map_err(|e| e.0)?;
+                if worker.parent != Some(session) {
+                    return Err("that session is not one of yours".into());
+                }
+                let runner = self.runner.get()?;
+                if tool == "answer_session" {
+                    let answer = text(args, "answer").filter(|a| !a.trim().is_empty());
+                    let answer = answer.ok_or("missing `answer`")?;
+                    runner.answer_routed(worker.id, vec![answer]).map_err(|e| e.0)?;
+                    json!({ "answered": worker.id })
+                } else {
+                    let rec = text(args, "recommendation").unwrap_or_default();
+                    runner.escalate_routed(worker.id, &rec).map_err(|e| e.0)?;
+                    json!({ "escalated": worker.id })
+                }
             }
             "stop_session" => {
                 let other = self.managed(&me, args)?;

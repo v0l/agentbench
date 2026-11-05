@@ -45,6 +45,7 @@ pub struct Runner {
     store: Store,
     agents: Arc<HashMap<String, Arc<dyn Agent>>>,
     live: Arc<Mutex<HashMap<SessionId, Live>>>,
+    routed: Arc<Mutex<HashMap<SessionId, Routed>>>,
     api: Arc<dyn Api>,
     titles: Option<Titles>,
     pub base: Arc<Mutex<Base>>,
@@ -52,6 +53,16 @@ pub struct Runner {
     pub terminals: crate::terminal::Terminals,
     /// This runner, as the tracker tools see it, for starting and messaging sessions.
     me: crate::tools::Handle,
+}
+
+const SUPERVISOR_PATIENCE_SETTING: &str = "supervisor_answer_secs";
+const SUPERVISOR_PATIENCE_DEFAULT: u64 = 600;
+
+#[derive(Clone)]
+struct Routed {
+    question: String,
+    escalate: Arc<Notify>,
+    recommendation: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -71,6 +82,7 @@ impl Runner {
             store,
             agents: Arc::new(agents),
             live: Arc::new(Mutex::new(HashMap::new())),
+            routed: Arc::new(Mutex::new(HashMap::new())),
             api,
             titles: None,
             base: Arc::new(Mutex::new(Base::default())),
@@ -215,6 +227,9 @@ impl Runner {
             });
         let session =
             store.add_session(worktree.id, agent.name(), title.trim(), model.as_deref(), new.issue_id)?;
+        if let Some(parent) = new.parent {
+            store.set_parent(session.id, Some(parent))?;
+        }
         if stand_in {
             store.set_title_auto(session.id, true)?;
         }
@@ -366,6 +381,37 @@ impl Runner {
             .and_then(|l| l.questions.lock().unwrap_or_else(|e| e.into_inner()).remove(question))
             .ok_or_else(|| StoreError("that question is no longer waiting".into()))?;
         tx.send(answers).map_err(|_| StoreError("the agent stopped waiting".into()))
+    }
+
+    fn routed(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, Routed>> {
+        self.routed.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn answer_routed(&self, worker: SessionId, answers: Vec<String>) -> Result<(), StoreError> {
+        let question = self
+            .routed()
+            .get(&worker)
+            .map(|r| r.question.clone())
+            .ok_or_else(|| StoreError("that session has no question waiting on you".into()))?;
+        self.answer(worker, &question, answers)
+    }
+
+    pub fn escalate_routed(&self, worker: SessionId, recommendation: &str) -> Result<(), StoreError> {
+        let routed = self
+            .routed()
+            .get(&worker)
+            .cloned()
+            .ok_or_else(|| StoreError("that session has no question waiting on you".into()))?;
+        *routed.recommendation.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(recommendation.trim().to_string());
+        routed.escalate.notify_one();
+        Ok(())
+    }
+
+    fn supervisor_of(&self, session: SessionId) -> Option<Session> {
+        let parent = self.store.session(session).ok()?.parent?;
+        let parent = self.store.session(parent).ok()?;
+        self.store.project(parent.project_id).ok()?.supervisor.then_some(parent)
     }
 
     pub fn send(&self, session: &Session, text: &str) -> Result<(), StoreError> {
@@ -967,6 +1013,25 @@ impl Sink {
         self.changed.notify_waiters();
     }
 
+    fn tell_supervisor(&self, supervisor: &Session, asked: &str, answerable: bool) {
+        let me = self.store.session(self.session).ok();
+        let title = me.as_ref().map(|m| m.title.clone()).unwrap_or_default();
+        let issue = me
+            .and_then(|m| m.issue_id)
+            .map(|i| format!(", issue #{i}"))
+            .unwrap_or_default();
+        let how = if answerable {
+            format!(
+                "Reply with answer_session id={} answer=..., or escalate_question id={} recommendation=... to put it to the user. Decide yourself when you can.",
+                self.session, self.session
+            )
+        } else {
+            "This goes to the user; you are only told.".to_string()
+        };
+        let text = format!("Worker {} (\"{title}\"{issue}) asks:\n{asked}\n{how}", self.session);
+        let _ = self.runner.send(supervisor, &text);
+    }
+
     async fn wait(
         &self,
         id: &str,
@@ -975,14 +1040,64 @@ impl Sink {
     ) -> Result<Vec<String>, String> {
         let (tx, rx) = oneshot::channel();
         self.questions.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), tx);
+        let secret = match &open {
+            Entry::Question { question, .. } => question.secret,
+            Entry::Questions { questions, .. } => questions.iter().any(|q| q.secret),
+            _ => false,
+        };
+        let supervisor = self.runner.supervisor_of(self.session);
+        let asked = describe_question(&open);
         let msg = self.entry(open);
-        let _ = self.store.set_status(self.session, SessionStatus::Waiting);
-        crate::tools::desktop_notice("needs you", "a chat is waiting for your answer");
-        self.changed.notify_waiters();
-        let answer = tokio::select! {
-            _ = self.stop.cancelled() => Err("stopped".to_string()),
-            _ = tokio::time::sleep(ANSWER_PATIENCE) => Err("nobody answered in a day".to_string()),
-            a = rx => a.map_err(|_| "the question was withdrawn".to_string()),
+        let mut rx = rx;
+        let mut early = None;
+        if let Some(sup) = supervisor.as_ref().filter(|_| !secret) {
+            let routed = Routed {
+                question: id.to_string(),
+                escalate: Arc::new(Notify::new()),
+                recommendation: Arc::new(Mutex::new(None)),
+            };
+            self.runner.routed().insert(self.session, routed.clone());
+            self.tell_supervisor(sup, &asked, true);
+            let patience = Duration::from_secs(
+                self.store
+                    .setting(SUPERVISOR_PATIENCE_SETTING)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(SUPERVISOR_PATIENCE_DEFAULT),
+            );
+            tokio::select! {
+                _ = self.stop.cancelled() => early = Some(Err("stopped".to_string())),
+                _ = tokio::time::sleep(patience) => {}
+                _ = routed.escalate.notified() => {}
+                a = &mut rx => early = Some(a.map_err(|_| "the question was withdrawn".to_string())),
+            }
+            self.runner.routed().remove(&self.session);
+            if early.is_none() {
+                let note = routed
+                    .recommendation
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                    .map(|r| format!("the supervisor recommends: {r}"))
+                    .unwrap_or_else(|| "the supervisor did not answer, so it is yours".into());
+                self.entry(Entry::Notice { text: note });
+            }
+        } else if let Some(sup) = supervisor.as_ref() {
+            self.tell_supervisor(sup, &asked, false);
+        }
+        let answer = match early {
+            Some(a) => a,
+            None => {
+                let _ = self.store.set_status(self.session, SessionStatus::Waiting);
+                crate::tools::desktop_notice("needs you", "a chat is waiting for your answer");
+                self.changed.notify_waiters();
+                tokio::select! {
+                    _ = self.stop.cancelled() => Err("stopped".to_string()),
+                    _ = tokio::time::sleep(ANSWER_PATIENCE) => Err("nobody answered in a day".to_string()),
+                    a = rx => a.map_err(|_| "the question was withdrawn".to_string()),
+                }
+            }
         };
         self.questions.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         if let (Some(m), Ok(a)) = (msg, &answer) {
@@ -991,6 +1106,26 @@ impl Sink {
         let _ = self.store.set_status(self.session, SessionStatus::Running);
         self.changed.notify_waiters();
         answer
+    }
+}
+
+fn describe_question(open: &Entry) -> String {
+    let one = |q: &Question| {
+        if q.options.is_empty() {
+            q.text.clone()
+        } else {
+            format!("{} (options: {})", q.text, q.options.join(" | "))
+        }
+    };
+    match open {
+        Entry::Question { question, .. } => one(question),
+        Entry::Questions { questions, .. } => questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| format!("{}. {}", i + 1, one(q)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -2385,6 +2520,128 @@ mod tests {
         assert!(!told[0].contains("all done"), "{told:?}");
         assert!(told[0].contains("changed state to idle"), "{told:?}");
         assert!(runner.store().take_watchers(watched.id).unwrap().is_empty(), "fires once");
+    }
+
+    struct Rig {
+        runner: Runner,
+        store: Store,
+        boss: Session,
+        worker: Session,
+        _dir: tempfile::TempDir,
+    }
+
+    fn rig(agent: Box<dyn Agent>, parented: bool) -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let store = Store::memory().unwrap();
+        let p = crate::projects::add(&store, &main, None, false).unwrap();
+        let tree = store.main_worktree(p.id).unwrap();
+        let sup = crate::projects::ensure_supervisor(&store, &dir.path().join("sup")).unwrap();
+        let sup_tree = store.main_worktree(sup.id).unwrap();
+        let name = agent.name().to_string();
+        let boss = store.add_session(sup_tree.id, "idle", "boss", None, None).unwrap();
+        let worker = store.add_session(tree.id, &name, "worker", None, None).unwrap();
+        if parented {
+            store.set_parent(worker.id, Some(boss.id)).unwrap();
+        }
+        let runner = Runner::new(store.clone(), vec![agent, script_agent("idle", "read p; sleep 30")]);
+        Rig { runner, store, boss, worker, _dir: dir }
+    }
+
+    async fn until(mut f: impl FnMut() -> bool) -> bool {
+        for _ in 0..200 {
+            if f() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    fn boss_was_told(r: &Rig) -> Vec<String> {
+        r.store
+            .messages(r.boss.id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::User { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_workers_question_goes_to_the_supervisor_and_its_answer_returns() {
+        use crate::agent::Api;
+        let r = rig(Box::new(Asker), true);
+        r.runner.send(&r.worker, "pick").unwrap();
+        assert!(until(|| !boss_was_told(&r).is_empty()).await, "the supervisor is told");
+        let told = boss_was_told(&r).remove(0);
+        assert!(told.contains("red or blue?") && told.contains("red | blue"), "{told}");
+        assert!(told.contains(&r.worker.id.to_string()) && told.contains("worker"), "{told}");
+        assert_eq!(r.store.session(r.worker.id).unwrap().status, SessionStatus::Running);
+        let args = serde_json::json!({"id": r.worker.id.to_string(), "answer": "blue"});
+        r.runner.api.call("answer_session", &args, r.boss.id).unwrap();
+        wait_idle(&r.runner, r.worker.id).await;
+        let msgs: Vec<Entry> =
+            r.store.messages(r.worker.id, 0).unwrap().into_iter().map(|m| m.entry).collect();
+        assert_eq!(msgs.last().unwrap().text(), "you picked blue");
+    }
+
+    #[tokio::test]
+    async fn escalating_puts_the_question_to_the_user_with_a_recommendation() {
+        use crate::agent::Api;
+        let r = rig(Box::new(Asker), true);
+        r.runner.send(&r.worker, "pick").unwrap();
+        assert!(until(|| !boss_was_told(&r).is_empty()).await);
+        let args = serde_json::json!({"id": r.worker.id.to_string(), "recommendation": "blue"});
+        r.runner.api.call("escalate_question", &args, r.boss.id).unwrap();
+        assert!(
+            until(|| r.store.session(r.worker.id).unwrap().status == SessionStatus::Waiting).await
+        );
+        let notes: Vec<String> = r
+            .store
+            .messages(r.worker.id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::Notice { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(notes.iter().any(|n| n.contains("recommends: blue")), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_routed_question_falls_to_the_user_after_the_timeout() {
+        let r = rig(Box::new(Asker), true);
+        r.store.set_setting(SUPERVISOR_PATIENCE_SETTING, "0").unwrap();
+        r.runner.send(&r.worker, "pick").unwrap();
+        assert!(
+            until(|| r.store.session(r.worker.id).unwrap().status == SessionStatus::Waiting).await
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_always_goes_to_the_user_and_the_supervisor_is_only_told() {
+        let r = rig(Box::new(SecretAsker), true);
+        r.runner.send(&r.worker, "key").unwrap();
+        assert!(
+            until(|| r.store.session(r.worker.id).unwrap().status == SessionStatus::Waiting).await
+        );
+        let told = boss_was_told(&r).join("\n");
+        assert!(told.contains("only told"), "{told}");
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_supervisor_still_asks_the_user() {
+        let r = rig(Box::new(Asker), false);
+        r.runner.send(&r.worker, "pick").unwrap();
+        assert!(
+            until(|| r.store.session(r.worker.id).unwrap().status == SessionStatus::Waiting).await
+        );
+        assert!(boss_was_told(&r).is_empty());
     }
 
     #[tokio::test]

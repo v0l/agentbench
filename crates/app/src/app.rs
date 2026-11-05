@@ -2994,6 +2994,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             queued: Vec::new(),
+            parent: None,
         };
         let all = [
             s(SessionStatus::Idle),

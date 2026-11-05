@@ -927,6 +927,7 @@ impl Autopilot {
         for issue in &picked.issues {
             let comments = store.comments(issue.id).unwrap_or_default();
             let new = NewSession {
+                parent: self.runner.supervisor_session().map(|s| s.id),
                 project_id: issue.project_id,
                 agent: agent.clone(),
                 place: Place::New { branch: String::new() },
