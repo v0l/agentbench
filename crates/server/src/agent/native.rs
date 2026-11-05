@@ -669,11 +669,11 @@ fn question_of(v: &Value) -> Option<Question> {
 fn bash_spec() -> Spec {
     Spec::new(
         "bash",
-        "Run a shell command in the worktree and read what it prints: git, cargo, tests, scripts, anything installed. \
-         It runs as the user with their environment, in the worktree. Bash is for builds, tests, git and other programs. \
-         Do not use it to read, search, list, create or edit files (cat, head, sed, grep, find, ls, tee, heredocs, python or perl \
-         one-liners): read_file, search_files, list_files, write_file, edit_file, replace_in_files and the code_* tools do that, \
-         and bash is meant to be restricted to what they cannot do.",
+        "Use write_file to create files, edit_file to change them (it also takes `then` to run a test after) and replace_in_files for a regex change across files; \
+         bash is only for programs. Runs a shell command in the worktree and reads what it prints: git, cargo, tests, scripts, anything installed. \
+         It runs as the user with their environment, in the worktree. Do not use it to read, search, list, create or edit files \
+         (cat, head, sed, grep, find, ls, tee, heredocs, python or perl one-liners): read_file, search_files, list_files, write_file, \
+         edit_file, replace_in_files and the code_* tools do that, and a bash command that edits a file gets a note telling you so.",
         object(
             json!({
                 "command": string("The command line, run by bash -c"),
@@ -853,7 +853,9 @@ fn file_specs() -> Vec<Spec> {
         "edit_file",
         "Replace exact text in a file, in the worktree or anywhere else on this machine. Each edits[].oldText must match the file and appear once; \
          every edit is matched against the file as it was before this call, so do not overlap them. Put several \
-         changes to one file in one call. Read the file first. The answer shows the diff.",
+         changes to one file in one call. To change several files at once pass `files`: [{path, edits}, ...] (the call is all or nothing, \
+         one combined diff). Pass `then` to run a command after a successful edit, such as `cargo test -p x`; it runs like bash and \
+         its output follows the diff. Read the file first. A miss shows the nearest lines, a duplicate lists every match.",
         object(
             json!({
                 "path": string("A path, relative to the worktree or absolute"),
@@ -868,8 +870,31 @@ fn file_specs() -> Vec<Spec> {
                     ),
                 },
                 "all": { "type": "boolean", "description": "Replace every occurrence of each oldText" },
+                "files": {
+                    "type": "array",
+                    "description": "More files to edit in the same call, each {path, edits, all?}; applied together or not at all",
+                    "items": object(
+                        json!({
+                            "path": string("A path, relative to the worktree or absolute"),
+                            "edits": {
+                                "type": "array",
+                                "items": object(
+                                    json!({
+                                        "oldText": string("The exact text to replace"),
+                                        "newText": string("What to put there"),
+                                    }),
+                                    &["oldText", "newText"],
+                                ),
+                            },
+                            "all": { "type": "boolean" },
+                        }),
+                        &["path", "edits"],
+                    ),
+                },
+                "then": string("A command to run after the edit succeeds, for example `cargo test -p x`. Same limits as bash; not run if the edit fails"),
+                "timeout_s": { "type": "integer", "description": "Seconds `then` may run, default 120, at most 600" },
             }),
-            &["path", "edits"],
+            &[],
         ),
     ));
     specs.push(Spec::new(
@@ -1036,6 +1061,10 @@ pub fn system(turn: &Turn, base: &Model, mcp: &Mcp) -> String {
     let skills = skillset::discover(&skillset::roots(turn.cwd), &[]);
     let mut out = format!("Working directory: {}\n\n", turn.cwd.display());
     out.push_str(&brief(turn.context));
+    if turn.context.home {
+        out.push_str("\n\n");
+        out.push_str(super::FILE_TOOLS);
+    }
     out.push_str("\n\nPrefer the tracker tools to the REST API. Write markdown, and put code in fenced blocks.\n\n");
     if !turn.context.global_notes.is_empty() {
         let mut notes = String::new();
@@ -1679,10 +1708,12 @@ impl Agent for Native {
                 };
                 if result.is_ok()
                     && matches!(name, "write_file" | "edit_file")
-                    && let Some(p) = files::text(&input, &files::PATH)
-                    && let Ok(p) = workspace.resolve(p)
                 {
-                    edited.push(p);
+                    for p in files::edit_paths(&input) {
+                        if let Ok(p) = workspace.resolve(&p) {
+                            edited.push(p);
+                        }
+                    }
                 }
                 let (output, error) = match &result {
                     Ok(o) => (o.clone(), false),
@@ -2281,10 +2312,33 @@ impl Native {
         match name {
             "list_files" | "read_file" | "write_file" | "edit_file" | "search_files"
             | "replace_in_files" | "load_skill" => {
-                let (name, args, ws) = (name.to_string(), args.clone(), ws.clone());
-                tokio::task::spawn_blocking(move || file_tool(&name, &args, &ws))
+                let (tool, call, space) = (name.to_string(), args.clone(), ws.clone());
+                let done = tokio::task::spawn_blocking(move || file_tool(&tool, &call, &space))
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                if matches!(name, "write_file" | "edit_file" | "replace_in_files") {
+                    io.emit(Event::Usage(Usage { file_edits: 1, ..Usage::default() }));
+                }
+                let diff = done?;
+                match files::text(args, &["then"]).filter(|_| name == "edit_file") {
+                    Some(then) if !then.trim().is_empty() => {
+                        let ran = bash(
+                            ws.root(),
+                            then,
+                            number(&["then_timeout_s", "timeout_s", "timeout"]).map(|n| n as u64),
+                            cx,
+                            io,
+                        )
+                        .await;
+                        let (ran, failed) = match ran {
+                            Ok(o) => (o, false),
+                            Err(e) => (e, true),
+                        };
+                        let out = format!("{diff}\n\n$ {then}\n{ran}");
+                        if failed { Err(out) } else { Ok(out) }
+                    }
+                    _ => Ok(diff),
+                }
             }
             "bash" if args.get("background").and_then(Value::as_bool).unwrap_or(false) => {
                 let command = files::text(args, &["command", "cmd"]).ok_or("missing `command`")?;
@@ -2292,7 +2346,8 @@ impl Native {
                 let handle =
                     self.jobs.start(&cx.session.to_string(), ws.root(), command, &confine)?;
                 Ok(format!(
-                    "started in the background as {handle}. bash_output {handle} reads what it prints; bash_kill {handle} stops it."
+                    "started in the background as {handle}. bash_output {handle} reads what it prints; bash_kill {handle} stops it.{}",
+                    steer_note(command, io)
                 ))
             }
             "bash_output" => match files::text(args, &["handle", "id"]) {
@@ -2313,14 +2368,20 @@ impl Native {
             }
             "todo_write" => egui_bench::agent::todo::write(args),
             "bash" => {
-                bash(
+                let command = files::text(args, &["command", "cmd"]).ok_or("missing `command`")?;
+                let note = steer_note(command, io);
+                let ran = bash(
                     ws.root(),
-                    files::text(args, &["command", "cmd"]).ok_or("missing `command`")?,
+                    command,
                     number(&["timeout_s", "timeout"]).map(|n| n as u64),
                     cx,
                     io,
                 )
-                .await
+                .await;
+                match ran {
+                    Ok(o) => Ok(format!("{o}{note}")),
+                    Err(e) => Err(format!("{e}{note}")),
+                }
             }
             n if super::code::TOOLS.contains(&n) => {
                 self.watched(self.code.run(n, args, ws, io.stop()), ws.root(), io).await
@@ -2409,6 +2470,16 @@ impl Native {
                 ))
             }
         }
+    }
+}
+
+fn steer_note(command: &str, io: &dyn Io) -> String {
+    match super::steer::edit_shaped(command) {
+        Some(shape) => {
+            io.emit(Event::Usage(Usage { bash_edits: 1, ..Usage::default() }));
+            format!("\n\n{}", super::steer::note(shape))
+        }
+        None => String::new(),
     }
 }
 
@@ -4245,6 +4316,64 @@ for line in sys.stdin:
         let mut all = entries.clone();
         all.extend(rows_from(&io));
         assert_eq!(history(&all)[..sent.len()], sent[..], "the system row comes first on replay");
+    }
+
+    #[tokio::test]
+    async fn an_edit_shaped_bash_command_still_runs_and_gets_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "old\n").unwrap();
+        let io = TestIo::new(Arc::new(FakeApi));
+        let native = Native::default();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let c = context();
+        let out = native
+            .tool("bash", &json!({"command": "sed -i 's/old/new/' a.rs && echo ran"}), &ws, &c, &io)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.rs")).unwrap(), "new\n");
+        assert!(out.contains("ran") && out.contains("[exit 0"), "{out}");
+        assert!(out.contains("edit_file") && out.contains("It ran as usual"), "{out}");
+        assert!(io.events().iter().any(|e| matches!(e, Event::Usage(u) if u.bash_edits == 1)));
+        let plain = native
+            .tool("bash", &json!({"command": "echo hi > /tmp/agentbench-steer-test.txt"}), &ws, &c, &io)
+            .await
+            .unwrap();
+        assert!(!plain.contains("[note"), "{plain}");
+    }
+
+    #[tokio::test]
+    async fn edit_file_runs_then_only_after_a_good_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello world\n").unwrap();
+        let io = TestIo::new(Arc::new(FakeApi));
+        let native = Native::default();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let c = context();
+        let ok = native
+            .tool(
+                "edit_file",
+                &json!({"path": "a.txt", "edits": [{"oldText": "world", "newText": "there"}], "then": "cat a.txt"}),
+                &ws,
+                &c,
+                &io,
+            )
+            .await
+            .unwrap();
+        assert!(ok.contains("+there") && ok.contains("$ cat a.txt"), "{ok}");
+        assert!(ok.contains("hello there\n\n[exit 0"), "{ok}");
+        let bad = native
+            .tool(
+                "edit_file",
+                &json!({"path": "a.txt", "edits": [{"oldText": "nope", "newText": "x"}], "then": "touch ran"}),
+                &ws,
+                &c,
+                &io,
+            )
+            .await
+            .unwrap_err();
+        assert!(bad.contains("not in a.txt"), "{bad}");
+        assert!(!dir.path().join("ran").exists());
+        assert!(io.events().iter().any(|e| matches!(e, Event::Usage(u) if u.file_edits == 1)));
     }
 
     #[tokio::test]
