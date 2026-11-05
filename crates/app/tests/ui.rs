@@ -196,13 +196,17 @@ fn gpu_setup() -> eframe::egui_wgpu::WgpuSetup {
     setup
 }
 
+fn build_lock() -> std::sync::MutexGuard<'static, ()> {
+    static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    BUILD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn harness(url: String) -> Harness<'static, App> {
     harness_at(url, [1280.0, 800.0])
 }
 
 fn harness_at(url: String, size: [f32; 2]) -> Harness<'static, App> {
-    static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _build = BUILD.lock().unwrap_or_else(|e| e.into_inner());
+    let _build = build_lock();
     Harness::builder().with_size(size).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
         let mut storage = Mem::default();
         storage.0.insert("url".into(), url);
@@ -429,9 +433,11 @@ fn a_server_that_never_answers_is_offline_not_a_hang() {
 #[test]
 fn without_a_local_server_the_window_asks_where_to_connect() {
     let rig = rig();
+    let build = build_lock();
     let mut h = Harness::builder()
         .with_size([900.0, 600.0])
         .build_eframe(|cc| App::new(&cc.egui_ctx, None, None));
+    drop(build);
     assert!(!h.state().is_local());
     h.run_steps(2);
     assert_eq!(h.state().settings_loaded(), Some(false), "the settings open by themselves");
@@ -448,7 +454,8 @@ fn without_a_local_server_the_window_asks_where_to_connect() {
 fn the_window_starts_its_own_server_by_default() {
     let rig = rig();
     let url = format!("http://{}", rig.url);
-    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(move |cc| {
+    let _build = build_lock();
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
         let url = url.clone();
         let local = agentbench::LocalServer {
             start: Box::new(move || {
@@ -457,6 +464,7 @@ fn the_window_starts_its_own_server_by_default() {
         };
         App::with_local(&cc.egui_ctx, None, None, Some(local))
     });
+    drop(_build);
     assert!(h.state().is_local());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
 }
@@ -465,10 +473,12 @@ fn the_window_starts_its_own_server_by_default() {
 fn a_saved_remote_choice_is_kept() {
     let mut storage = Mem::default();
     storage.0.insert("remote".into(), "true".into());
+    let build = build_lock();
     let h = Harness::builder().with_size([900.0, 600.0]).build_eframe(move |cc| {
         let local = agentbench::LocalServer { start: Box::new(|| Err("must not start".into())) };
         App::with_local(&cc.egui_ctx, Some(&storage), None, Some(local))
     });
+    drop(build);
     assert!(!h.state().is_local());
 }
 
@@ -1778,13 +1788,15 @@ fn the_speak_key_sits_in_the_composer_and_says_what_is_missing() {
     let rig = rig();
     // A speech server with no address, so pressing the key never opens a real microphone.
     let url = rig.url.clone();
-    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(move |cc| {
+    let _build = build_lock();
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
         let mut storage = Mem::default();
         storage.0.insert("url".into(), url);
         storage.0.insert("token".into(), TOKEN.into());
         storage.0.insert("voice_mode".into(), "server".into());
         App::new(&cc.egui_ctx, Some(&storage), None)
     });
+    drop(_build);
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     open_home_row(&mut h);
     h.run_steps(3);
@@ -1931,11 +1943,13 @@ fn the_grid_and_its_chats_are_remembered() {
     let mut saved = Mem::default();
     h.state().store(&mut saved);
     assert_eq!(saved.get_string("grid").as_deref(), Some("2x2"));
-    let again = Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(|cc| {
+    let _build = build_lock();
+    let again = Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(|cc| {
         saved.0.insert("url".into(), rig.url.clone());
         saved.0.insert("token".into(), TOKEN.into());
         App::new(&cc.egui_ctx, Some(&saved), None)
     });
+    drop(_build);
     assert_eq!(again.state().grid(), Grid::Quad);
     assert_eq!(again.state().tile_chat(0), Some(all[0].id));
     assert_eq!(again.state().tile_chat(1), Some(all[1].id));
