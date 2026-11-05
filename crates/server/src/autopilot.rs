@@ -1,5 +1,5 @@
 use crate::runner::Runner;
-use crate::store::{Store, StoreError, Worker};
+use crate::store::{Judged, Store, StoreError, Worker};
 use agentbench_core::{
     Automation, AutopilotPatch, AutopilotState, Entry, Id, Issue, IssuePatch, IssueState,
     NewComment, NewSession, Place, Project, ProjectPatch, Risky, Session, SessionStatus,
@@ -256,149 +256,129 @@ pub fn pick(issues: &[Issue], room: &Room) -> Picked {
     out
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    Concluded { green: bool },
-    Leftover(Vec<String>),
-    Blocked { reason: String, user: bool },
-    Asked(String),
-    Empty,
+    ConcludedPass,
+    ConcludedFail,
+    NeedsFollowup,
+    WaitingOnUser,
+    Blocked,
 }
 
-const USER_ONLY: [&str; 24] = [
-    "secret",
-    "credential",
-    "api key",
-    "password",
-    "token",
-    "decision",
-    "decide",
-    "hardware",
-    "device",
-    "deploy",
-    "install on",
-    "send email",
-    "send an email",
-    "send a message",
-    "external message",
-    "spend",
-    "money",
-    "purchase",
-    "permission",
-    "approval",
-    "the user",
-    "user's",
-    "out of scope",
-    "access to",
-];
+impl Verdict {
+    pub const ALL: [Verdict; 5] = [
+        Verdict::ConcludedPass,
+        Verdict::ConcludedFail,
+        Verdict::NeedsFollowup,
+        Verdict::WaitingOnUser,
+        Verdict::Blocked,
+    ];
 
-pub fn needs_user(text: &str) -> bool {
-    let t = text.to_lowercase();
-    USER_ONLY.iter().any(|k| t.contains(k))
-}
-
-const LEFTOVER_HEADS: [&str; 13] = [
-    "needs more work",
-    "not done",
-    "what is left",
-    "todo",
-    "to do",
-    "to-do",
-    "next steps",
-    "remaining",
-    "left to do",
-    "follow-up",
-    "follow-ups",
-    "follow ups",
-    "still to do",
-];
-
-fn bullet(line: &str) -> Option<&str> {
-    let t = line.trim_start();
-    if t.starts_with("- [x]") || t.starts_with("* [x]") {
-        return None;
-    }
-    for p in ["- [ ]", "* [ ]", "- ", "* ", "• "] {
-        if let Some(rest) = t.strip_prefix(p) {
-            return Some(rest.trim());
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::ConcludedPass => "concluded_pass",
+            Verdict::ConcludedFail => "concluded_fail",
+            Verdict::NeedsFollowup => "needs_followup",
+            Verdict::WaitingOnUser => "waiting_on_user",
+            Verdict::Blocked => "blocked",
         }
     }
-    let digits = t.chars().take_while(char::is_ascii_digit).count();
-    if digits > 0 && t[digits..].starts_with(". ") {
-        return Some(t[digits + 2..].trim());
+
+    pub fn parse(s: &str) -> Option<Verdict> {
+        Verdict::ALL.into_iter().find(|v| v.as_str() == s.trim())
     }
-    None
 }
 
-fn head_of(line: &str) -> bool {
-    let t = line.trim().trim_start_matches(['#', '*', '`', ' ']).trim_end_matches([':', '*', '`', ' ']);
-    let t = t.to_lowercase();
-    LEFTOVER_HEADS.iter().any(|h| t == *h || t.starts_with(&format!("{h} ")) || t.starts_with(&format!("{h}:")))
+const JUDGE_MINUTES: &str = "autopilot_judge_minutes";
+pub const DEFAULT_JUDGE_MINUTES: u64 = 15;
+
+pub const JUDGING_RULES: &str = "Decide from what the worker actually did, not its tone. \
+     Idle after \"let me know if you want X\" is needs_followup unless X is a real user decision. \
+     A claim of passing tests without test output in the transcript is not a pass. \
+     Leftover items the worker could do itself mean needs_followup. \
+     Check the diff against the issue's acceptance criteria.";
+
+pub fn head_of(store: &Store, session: &Session) -> Option<String> {
+    let tree = store.worktree(session.worktree_id).ok()?;
+    crate::git::head(Path::new(&tree.path))
 }
 
-pub fn judge(reply: &str) -> Verdict {
-    let reply = reply.trim();
-    if reply.is_empty() {
-        return Verdict::Empty;
+pub fn current_verdict(store: &Store, session: &Session) -> Option<Judged> {
+    let v = store.latest_verdict(session.id).ok().flatten()?;
+    (v.head == head_of(store, session)).then_some(v)
+}
+
+fn verdict_line(v: &Judged) -> String {
+    format!("supervisor {} judged {}: {}", v.judge, v.verdict, clip(&v.reason, 300))
+}
+
+fn diff_summary(store: &Store, session: &Session) -> String {
+    let (Ok(project), Ok(tree)) = (store.project(session.project_id), store.worktree(session.worktree_id)) else {
+        return "the worktree is gone".into();
+    };
+    if tree.main {
+        return "it works in the main checkout, so there is no branch diff".into();
     }
-    let lines: Vec<&str> = reply.lines().collect();
-    for line in &lines {
-        let t = line.trim().trim_start_matches(['*', '`', '#', ' ']);
-        if let Some(rest) = t.strip_prefix("BLOCKED") {
-            let reason = rest.trim_start_matches(|c: char| c == '#' || c.is_ascii_digit() || c == ' ');
-            let reason = reason.trim().to_string();
-            return Verdict::Blocked { user: needs_user(&reason), reason };
-        }
+    let base = project.branch.clone().or_else(|| crate::git::current_branch(Path::new(&project.path)));
+    let Some(base) = base else { return "the default branch is unknown".into() };
+    match crate::git::diff_stat(Path::new(&tree.path), &base) {
+        Ok(s) if s.trim().is_empty() => format!("no changes against {base}"),
+        Ok(s) => s,
+        Err(e) => format!("git diff failed: {}", clip(&e, 200)),
     }
-    let mut items = Vec::new();
-    let mut under_head = false;
-    for line in &lines {
-        if head_of(line) {
-            under_head = true;
+}
+
+fn test_runs(store: &Store, session: agentbench_core::SessionId) -> Vec<String> {
+    let mut runs = Vec::new();
+    for m in agentbench_core::shown(&store.messages(session, 0).unwrap_or_default()) {
+        let Entry::Tool { input, output, error, .. } = m.entry else { continue };
+        let Some(command) = input.get("command").and_then(|c| c.as_str()) else { continue };
+        if !command.contains("test") {
             continue;
         }
-        match bullet(line) {
-            Some(item) if under_head || line.trim_start().contains("[ ]") => {
-                items.push(item.to_string())
-            }
-            Some(_) => {}
-            None if line.trim().is_empty() => {}
-            None => under_head = false,
-        }
+        let out = output.unwrap_or_default();
+        let tail: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).rev().take(4).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        runs.push(format!(
+            "$ {}{}\n{}",
+            clip(command, 200),
+            if error { " (tool error)" } else { "" },
+            tail.iter().map(|l| format!("  {}", clip(l, 200))).collect::<Vec<_>>().join("\n")
+        ));
     }
-    if !items.is_empty() {
-        let doable: Vec<String> = items.iter().filter(|i| !needs_user(i)).cloned().collect();
-        return if doable.is_empty() {
-            Verdict::Blocked { reason: items.join("; "), user: true }
-        } else {
-            Verdict::Leftover(doable)
-        };
-    }
-    let last = lines.iter().rev().find(|l| !l.trim().is_empty()).copied().unwrap_or("");
-    if last.trim_end().ends_with('?') && !reply.contains("DONE #") {
-        return Verdict::Asked(last.trim().to_string());
-    }
-    let lower = reply.to_lowercase();
-    let done_line = lower.lines().rev().find(|l| l.contains("done #") && l.contains("tests:"));
-    if let Some(l) = done_line {
-        if l.contains("tests:pass") {
-            return Verdict::Concluded { green: true };
-        }
-        if l.contains("tests:fail") {
-            return Verdict::Concluded { green: false };
-        }
-    }
-    let failed = lower.contains("tests:fail")
-        || lower.contains("tests fail")
-        || lower.contains("test failed")
-        || lower.contains("tests failed")
-        || lower.contains("failing");
-    let passed = lower.contains("tests:pass")
-        || lower.contains("tests pass")
-        || lower.contains("all tests")
-        || lower.contains("passed")
-        || lower.contains("passing");
-    Verdict::Concluded { green: passed && !failed }
+    let skip = runs.len().saturating_sub(6);
+    runs.into_iter().skip(skip).collect()
+}
+
+pub fn judge_request(store: &Store, session: &Session) -> String {
+    let issue = session.issue_id.and_then(|i| store.issue(i).ok());
+    let about = match &issue {
+        Some(i) => format!(
+            "Issue #{}: {}\n\nAcceptance criteria (the issue body):\n{}",
+            i.id,
+            i.title,
+            if i.body.trim().is_empty() { "(empty)" } else { i.body.trim() }
+        ),
+        None => "No issue.".into(),
+    };
+    let reply = last_reply(store, session.id);
+    let tests = test_runs(store, session.id);
+    let tests = if tests.is_empty() {
+        "No test command appears in the transcript.".to_string()
+    } else {
+        tests.join("\n")
+    };
+    format!(
+        "Judge worker {id} (\"{title}\"), its turn ended.\n\n{about}\n\nIts last reply:\n{reply}\n\nDiff stat of its branch (head {head}):\n{diff}\n\nTest runs in its transcript:\n{tests}\n\n\
+         Call judge_session id={id} with verdict concluded_pass, concluded_fail, needs_followup (give `followup`, the message the worker gets), waiting_on_user or blocked, and a reason. \
+         Nothing is reviewed, merged or closed until you do. {rules}",
+        id = session.id,
+        title = session.title,
+        reply = if reply.trim().is_empty() { "(empty)" } else { reply.trim() },
+        head = head_of(store, session).map(|h| h.chars().take(10).collect::<String>()).unwrap_or_else(|| "unknown".into()),
+        diff = diff_summary(store, session),
+        rules = JUDGING_RULES,
+    )
 }
 
 fn worker_prompt(issue: &Issue, comments: &[agentbench_core::Comment]) -> String {
@@ -415,7 +395,7 @@ fn worker_prompt(issue: &Issue, comments: &[agentbench_core::Comment]) -> String
     )
 }
 
-fn last_reply(store: &Store, session: agentbench_core::SessionId) -> String {
+pub fn last_reply(store: &Store, session: agentbench_core::SessionId) -> String {
     agentbench_core::shown(&store.messages(session, 0).unwrap_or_default())
         .into_iter()
         .rev()
@@ -570,14 +550,18 @@ impl Autopilot {
         let sessions = store.sessions().unwrap_or_default();
         for s in &sessions {
             if Some(s.project_id) == supervisor
+                || s.parent.is_none()
                 || tracked.contains(&s.id)
                 || self.runner.is_running(s.id)
-                || s.status == SessionStatus::Waiting
+                || s.status != SessionStatus::Idle
                 || level(store, s.project_id) < Automation::Ship
             {
                 continue;
             }
-            let reason = match s.issue_id {
+            let Some(v) = current_verdict(store, s).filter(|v| v.verdict == Verdict::ConcludedPass.as_str()) else {
+                continue;
+            };
+            let why = match s.issue_id {
                 Some(i) => match store.issue(i) {
                     Ok(issue) if issue.state == IssueState::Done && self.branch_is_merged(s) => {
                         format!("#{i} is done and its branch is merged")
@@ -586,19 +570,15 @@ impl Autopilot {
                 },
                 None => {
                     let grace = number(store, GRACE_MINUTES, DEFAULT_GRACE_MINUTES) as i64 * 60_000;
-                    let finished = matches!(s.status, SessionStatus::Idle)
-                        && now - s.updated_at >= grace
-                        && matches!(judge(&last_reply(store, s.id)), Verdict::Concluded { .. });
-                    if !finished || !self.branch_is_merged_or_none(s) {
+                    if now - s.updated_at < grace || !self.branch_is_merged_or_none(s) {
                         continue;
                     }
-                    "it finished with a conclusion and nothing is pending".to_string()
+                    "it is idle past the grace period and nothing is pending".to_string()
                 }
             };
-            self.close_finished(s, &reason);
+            self.close_finished(s, &format!("{why}; {}", verdict_line(&v)));
         }
     }
-
     fn branch_is_merged(&self, s: &Session) -> bool {
         let store = self.store();
         let (Ok(project), Ok(tree)) = (store.project(s.project_id), store.worktree(s.worktree_id)) else {
@@ -670,19 +650,63 @@ impl Autopilot {
             let _ = store.remove_worker(w.session);
             return;
         };
+        let running = self.runner.is_running(w.session);
         match w.state.as_str() {
             "working" | "asking" => {
-                if self.runner.is_running(w.session) {
+                if running {
                     self.watch(w, &session, now);
                 } else {
-                    self.finished(w, &session);
+                    self.finished(w, &session, now);
+                }
+            }
+            "judging" | "held" | "parked" | "ready" if running => {
+                let _ = store.set_worker(w.session, "working", false);
+                if w.state == "parked" {
+                    self.drop_labels(w.issue, &[BLOCKED, NEEDS_USER]);
+                }
+                self.log(Some(w.project), Some(w.issue), &format!("#{} is working again", w.issue));
+            }
+            "judging" | "held" => {
+                if let Some(v) = store.latest_verdict(w.session).ok().flatten().filter(|v| !v.acted) {
+                    if v.head == head_of(store, &session) {
+                        self.act(w, &session, &v);
+                    } else {
+                        self.log(
+                            Some(w.project),
+                            Some(w.issue),
+                            &format!("#{}: its branch changed after the verdict, so it is judged again", w.issue),
+                        );
+                        self.ask(w, &session, now);
+                    }
+                } else if w.state == "held" {
+                    if w.asked_at == 0 && self.runner.supervisor_session().is_some() {
+                        self.ask(w, &session, now);
+                    }
+                } else if now - w.asked_at >= number(store, JUDGE_MINUTES, DEFAULT_JUDGE_MINUTES) as i64 * 60_000 {
+                    let _ = store.set_worker(w.session, "held", false);
+                    self.log(
+                        Some(w.project),
+                        Some(w.issue),
+                        &format!("#{}: the supervisor gave no verdict in time; nothing is reviewed, merged or closed", w.issue),
+                    );
+                    self.notify(&format!("#{} finished but the supervisor has not judged it; nothing merges until it does", w.issue));
                 }
             }
             "ready" => {
                 if issue.state == IssueState::Done {
                     let _ = store.remove_worker(w.session);
                 } else if w.green && flag(store, ENABLED) && level(store, w.project) >= Automation::Ship {
-                    self.merge(w, &session);
+                    match current_verdict(store, &session) {
+                        Some(v) if v.verdict == Verdict::ConcludedPass.as_str() => self.merge(w, &session, &v),
+                        _ => {
+                            self.log(
+                                Some(w.project),
+                                Some(w.issue),
+                                &format!("#{}: its branch changed after the verdict, so it is judged again", w.issue),
+                            );
+                            self.ask(w, &session, now);
+                        }
+                    }
                 }
             }
             "merge_failed" => {
@@ -753,78 +777,103 @@ impl Autopilot {
         );
     }
 
-    fn finished(&self, w: &Worker, session: &Session) {
+    fn finished(&self, w: &Worker, session: &Session, now: i64) {
         let store = self.store();
         match session.status {
             SessionStatus::Failed => {
                 self.block(w, &last_error(store, w.session), false);
                 let _ = store.remove_worker(w.session);
-                return;
             }
             SessionStatus::Stopped => {
                 self.block(w, "the session was stopped before it finished", false);
                 let _ = store.remove_worker(w.session);
-                return;
             }
-            _ => {}
+            _ => self.ask(w, session, now),
         }
-        let reply = last_reply(store, w.session);
-        match judge(&reply) {
-            Verdict::Concluded { green } => {
+    }
+
+    fn ask(&self, w: &Worker, session: &Session, now: i64) {
+        let store = self.store();
+        let _ = store.settle_verdicts(w.session);
+        let Some(sup) = self.runner.supervisor_session() else {
+            let _ = store.set_worker_asked(w.session, 0);
+            let _ = store.set_worker(w.session, "held", false);
+            self.log(
+                Some(w.project),
+                Some(w.issue),
+                &format!("#{} finished but no supervisor is running to judge it; nothing is reviewed, merged or closed", w.issue),
+            );
+            self.notify(&format!("#{} finished but no supervisor is running to judge it", w.issue));
+            return;
+        };
+        match self.runner.send(&sup, &judge_request(store, session)) {
+            Ok(()) => {
+                let _ = store.set_worker_asked(w.session, now.max(1));
+                self.log(Some(w.project), Some(w.issue), &format!("#{} finished, asked the supervisor for a verdict", w.issue));
+            }
+            Err(e) => {
+                let _ = store.set_worker_asked(w.session, 0);
+                let _ = store.set_worker(w.session, "held", false);
+                self.log(Some(w.project), Some(w.issue), &format!("#{}: could not ask the supervisor: {}", w.issue, clip(&e.0, 160)));
+                self.notify(&format!("#{} finished but the supervisor could not be asked to judge it", w.issue));
+            }
+        }
+    }
+
+    fn act(&self, w: &Worker, session: &Session, v: &Judged) {
+        let store = self.store();
+        let _ = store.settle_verdicts(w.session);
+        let Some(verdict) = Verdict::parse(&v.verdict) else { return };
+        let line = verdict_line(v);
+        match verdict {
+            Verdict::ConcludedPass | Verdict::ConcludedFail => {
+                let green = verdict == Verdict::ConcludedPass;
                 self.set_state(w.issue, IssueState::Review);
                 let _ = store.set_worker(w.session, "ready", green);
-                self.comment(
-                    w.issue,
-                    &format!("autopilot: session {} concluded{}.\n\n{}", w.session, if green { " with tests passing" } else { " without a green result" }, clip(&reply, 1200)),
-                );
                 self.log(
                     Some(w.project),
                     Some(w.issue),
-                    &format!(
-                        "#{} finished, moved to review{}",
-                        w.issue,
-                        if green { "" } else { " (no green result, will not merge)" }
-                    ),
+                    &format!("#{} moved to review{}; {line}", w.issue, if green { "" } else { ", will not merge" }),
                 );
                 if !green || level(store, w.project) < Automation::Ship {
                     self.notify(&format!("#{} is ready for review", w.issue));
                 }
             }
-            Verdict::Leftover(items) => self.rework(
-                w,
-                session,
-                &format!("your last reply lists work you can do yourself: {}", items.join("; ")),
-            ),
-            Verdict::Empty => self.rework(w, session, "your last reply was empty"),
-            Verdict::Asked(q) => {
-                self.block(w, &format!("the session asked: {q}"), true);
-                let _ = store.set_worker(w.session, "asking", false);
+            Verdict::NeedsFollowup => {
+                let followup = v.followup.clone().filter(|f| !f.trim().is_empty()).unwrap_or_else(|| v.reason.clone());
+                self.rework(w, session, &followup, &line);
             }
-            Verdict::Blocked { reason, user } => {
-                self.block(w, &reason, user);
+            Verdict::WaitingOnUser => {
+                let _ = store.set_worker(w.session, "parked", false);
+                self.block(w, &format!("{}; {line}", v.reason), true);
+            }
+            Verdict::Blocked => {
+                self.block(w, &format!("{}; {line}", v.reason), false);
                 let _ = store.remove_worker(w.session);
             }
         }
     }
 
-    fn rework(&self, w: &Worker, session: &Session, why: &str) {
+    fn rework(&self, w: &Worker, session: &Session, followup: &str, line: &str) {
         let store = self.store();
         if w.reworks >= MAX_REWORKS {
-            self.block(w, &format!("no conclusion after {MAX_REWORKS} reminders: {why}"), false);
+            self.block(w, &format!("still not finished after {MAX_REWORKS} follow-ups; {line}"), false);
+            self.notify(&format!("#{} is blocked: not finished after {MAX_REWORKS} follow-ups", w.issue));
             let _ = store.remove_worker(w.session);
             return;
         }
         let _ = store.bump_worker(w.session, "reworks");
+        let _ = store.set_worker(w.session, "working", false);
         let text = format!(
-            "Conclusion check: {why}. Do it now: run the tests, write the missing test, verify, and finish what you can do yourself. \
-             Then end with a conclusion: rigid, or needs more work listing only what you genuinely cannot do, and a final `DONE #{} tests:<pass|fail> <result>` line.",
+            "Conclusion check from the supervisor: {}\n\nDo it now and finish what you can do yourself, then end with a conclusion and a final `DONE #{} tests:<pass|fail> <result>` line.",
+            followup.trim(),
             w.issue
         );
         match self.runner.send(session, &text) {
             Ok(()) => self.log(
                 Some(w.project),
                 Some(w.issue),
-                &format!("sent #{} back to finish: {}", w.issue, clip(why, 160)),
+                &format!("sent #{} back to finish ({} of {MAX_REWORKS}); {line}", w.issue, w.reworks + 1),
             ),
             Err(e) => {
                 self.block(w, &format!("could not send it back: {}", e.0), false);
@@ -833,7 +882,7 @@ impl Autopilot {
         }
     }
 
-    fn merge(&self, w: &Worker, session: &Session) {
+    fn merge(&self, w: &Worker, session: &Session, v: &Judged) {
         let store = self.store();
         match ship(store, session) {
             Ok(shipped) if matches!(shipped.pushed, Some(Err(_))) => {
@@ -850,16 +899,17 @@ impl Autopilot {
                     self.runner.end(w.session);
                     let _ = store.delete_session(w.session);
                 }
+                let line = verdict_line(v);
                 self.set_state(w.issue, IssueState::Done);
                 self.comment(
                     w.issue,
                     &if closed {
-                        format!("autopilot: {} and closed session {}.", shipped.describe(), w.session)
+                        format!("autopilot: {} and closed session {}; {line}.", shipped.describe(), w.session)
                     } else {
-                        format!("autopilot: {}.", shipped.describe())
+                        format!("autopilot: {}; {line}.", shipped.describe())
                     },
                 );
-                self.log(Some(w.project), Some(w.issue), &format!("{}, #{} done", shipped.describe(), w.issue));
+                self.log(Some(w.project), Some(w.issue), &format!("{}, #{} done; {line}", shipped.describe(), w.issue));
                 if let Some(Err(e)) = &shipped.deployed {
                     self.notify(&format!("#{} merged but the deploy failed: {}", w.issue, clip(e, 160)));
                 }
@@ -1319,37 +1369,13 @@ mod tests {
         assert_eq!(s.project(b.id).unwrap().automation, Some(Automation::Delegate), "its own off is kept");
     }
 
-    #[test]
-    fn a_reply_with_a_list_of_self_doable_work_is_not_a_conclusion() {
-        let v = judge("Implemented it.\n\nTodo:\n- run the full test suite\n- add a test for Y\n");
-        assert_eq!(v, Verdict::Leftover(vec!["run the full test suite".into(), "add a test for Y".into()]));
-        let v = judge("Next steps:\n1. verify the merge locally\n2. need the API key from the user\n");
-        assert_eq!(v, Verdict::Leftover(vec!["verify the merge locally".into()]));
-    }
-
-    #[test]
-    fn a_list_of_user_only_items_is_blocked_on_the_user() {
-        let v = judge("Needs more work:\n- needs the user's decision on the schema\n- credentials for the staging db\n");
-        assert!(matches!(v, Verdict::Blocked { user: true, .. }), "{v:?}");
-        let v = judge("BLOCKED #7 need an api key to continue");
-        assert_eq!(v, Verdict::Blocked { reason: "need an api key to continue".into(), user: true });
-        let v = judge("BLOCKED #7 the build is broken upstream");
-        assert!(matches!(v, Verdict::Blocked { user: false, .. }));
-    }
-
-    #[test]
-    fn a_rigid_reply_concludes_and_a_question_does_not() {
-        assert_eq!(judge("All done.\nDONE #3 branch tests:pass fixed it"), Verdict::Concluded { green: true });
-        assert_eq!(judge("DONE #3 tests:fail one case left"), Verdict::Concluded { green: false });
-        assert_eq!(judge("Finished, nothing else."), Verdict::Concluded { green: false });
-        assert!(matches!(judge("Which database should I use?"), Verdict::Asked(_)));
-        assert_eq!(judge("  "), Verdict::Empty);
-        assert_eq!(judge("- [x] done\n- [x] tested\nDONE #1 tests:pass ok"), Verdict::Concluded { green: true });
-    }
-
     fn script_agent(script: &str) -> Box<dyn crate::agent::Agent> {
+        named_agent("echo", script)
+    }
+
+    fn named_agent(name: &str, script: &str) -> Box<dyn crate::agent::Agent> {
         Box::new(JsonCommand {
-            name: "echo".into(),
+            name: name.into(),
             label: None,
             program: "sh".into(),
             args: vec!["-c".into(), script.into(), "sh".into()],
@@ -1370,18 +1396,77 @@ mod tests {
         store: Store,
         project: Id,
         repo: std::path::PathBuf,
+        boss: Option<agentbench_core::SessionId>,
         _dir: tempfile::TempDir,
     }
 
     fn rig(script: &str) -> Rig {
+        let r = rig_alone(script);
+        let sup = crate::projects::ensure_supervisor(&r.store, &r._dir.path().join("sup")).unwrap();
+        let tree = r.store.main_worktree(sup.id).unwrap();
+        let boss = r.store.add_session(tree.id, "boss", "boss", None, None).unwrap();
+        Rig { boss: Some(boss.id), ..r }
+    }
+
+    fn rig_alone(script: &str) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("demo");
         crate::git::testing::repo(&repo);
         let store = Store::memory().unwrap();
         let project = crate::projects::add(&store, &repo, None, false).unwrap();
-        let runner = Runner::new(store.clone(), vec![script_agent(script)]);
+        let boss = named_agent("boss", r#"cat >/dev/null; echo '{"text":"noted"}'"#);
+        let runner = Runner::new(store.clone(), vec![script_agent(script), boss]);
         store.set_setting("autorun_agent", "echo").unwrap();
-        Rig { ap: Autopilot::new(runner), store, project: project.id, repo, _dir: dir }
+        Rig { ap: Autopilot::new(runner), store, project: project.id, repo, boss: None, _dir: dir }
+    }
+
+    fn judge(
+        r: &Rig,
+        sid: agentbench_core::SessionId,
+        verdict: &str,
+        followup: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut args = serde_json::json!({"id": sid.to_string(), "verdict": verdict, "reason": format!("because {verdict}")});
+        if let Some(f) = followup {
+            args["followup"] = serde_json::json!(f);
+        }
+        r.ap.runner.tools().call("judge_session", &args, r.boss.unwrap())
+    }
+
+    async fn boss_told(r: &Rig) -> Vec<String> {
+        idle(r, r.boss.unwrap()).await;
+        r.store
+            .messages(r.boss.unwrap(), 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::User { text, .. } => Some(text),
+                _ => None,
+            })
+            .flat_map(|t| t.split("Judge worker ").skip(1).map(str::to_string).collect::<Vec<_>>())
+            .collect()
+    }
+
+    fn feed(r: &Rig) -> Vec<String> {
+        r.store.autopilot_log(200).unwrap().into_iter().map(|a| a.text).collect()
+    }
+
+    async fn idle(r: &Rig, sid: agentbench_core::SessionId) {
+        for _ in 0..400 {
+            if !r.ap.runner.is_running(sid) {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("session never finished");
+    }
+
+    async fn passed(r: &Rig, sid: agentbench_core::SessionId) {
+        r.ap.tick();
+        idle(r, r.boss.unwrap()).await;
+        judge(r, sid, "concluded_pass", None).unwrap();
+        r.ap.tick();
     }
 
     fn todo(r: &Rig, title: &str, priority: i64, labels: &[&str]) -> Id {
@@ -1446,18 +1531,11 @@ mod tests {
         (a, w.session)
     }
 
-    #[test]
-    fn a_done_line_with_passing_tests_is_green_even_when_the_prose_mentions_failing() {
-        let reply = "Wrote a failing test first, then fixed it.\n\nDONE #168 tests:pass all suites green";
-        assert_eq!(judge(reply), Verdict::Concluded { green: true });
-        assert_eq!(judge("tests passed before\nDONE #9 tests:fail one left"), Verdict::Concluded { green: false });
-    }
-
     #[tokio::test]
     async fn a_done_issue_with_a_merged_branch_loses_its_session_and_worktree_only_when_auto_close_is_on() {
         let r = rig(DONE);
         let (a, sid) = worked_on(&r).await;
-        r.ap.tick();
+        passed(&r, sid).await;
         let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
         assert!(std::path::Path::new(&tree.path).exists());
         set_level(&r.store, r.project, Some(Automation::Ship));
@@ -1470,16 +1548,18 @@ mod tests {
         r.ap.tick();
         assert!(r.store.session(sid).is_err(), "session closed");
         assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
-        assert!(r.store.autopilot_log(50).unwrap().iter().any(|l| l.text.contains("closed session")));
+        let closed = feed(&r).into_iter().find(|l| l.contains("closed session")).unwrap();
+        assert!(closed.contains("judged concluded_pass: because concluded_pass"), "{closed}");
     }
 
     #[tokio::test]
     async fn a_session_waiting_on_the_user_is_never_closed() {
         let r = rig(DONE);
         let (a, sid) = worked_on(&r).await;
-        r.ap.tick();
+        passed(&r, sid).await;
         let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
         set_level(&r.store, r.project, Some(Automation::Ship));
+        auto_close(&r);
         crate::git::merge_branch(&r.repo, tree.branch.as_deref().unwrap()).unwrap();
         r.ap.set_state(a, IssueState::Done);
         r.store.set_status(sid, SessionStatus::Waiting).unwrap();
@@ -1492,8 +1572,8 @@ mod tests {
     async fn an_unmerged_branch_keeps_its_session_even_when_the_issue_is_done() {
         let r = rig(DONE);
         let (a, sid) = worked_on(&r).await;
-        r.ap.tick();
-        set_level(&r.store, r.project, Some(Automation::Autowork));
+        passed(&r, sid).await;
+        auto_close(&r);
         r.ap.set_state(a, IssueState::Done);
         set_level(&r.store, r.project, Some(Automation::Ship));
         r.ap.tick();
@@ -1504,7 +1584,8 @@ mod tests {
     async fn below_ship_nothing_is_closed() {
         let r = rig(DONE);
         let (a, sid) = worked_on(&r).await;
-        r.ap.tick();
+        passed(&r, sid).await;
+        auto_close(&r);
         let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
         crate::git::merge_branch(&r.repo, tree.branch.as_deref().unwrap()).unwrap();
         r.ap.set_state(a, IssueState::Done);
@@ -1512,16 +1593,15 @@ mod tests {
         assert!(r.store.session(sid).is_ok());
     }
 
-    #[tokio::test]
-    async fn a_finished_session_with_no_issue_is_closed_after_the_grace_period() {
-        let r = rig(DONE);
-        on(&r);
+    async fn loose_session(r: &Rig, parent: Option<agentbench_core::SessionId>) -> Session {
+        on(r);
         set_level(&r.store, r.project, Some(Automation::Ship));
         let tree = r.store.main_worktree(r.project).unwrap();
         let s = r
             .ap
             .runner
             .start_session(NewSession {
+                parent,
                 project_id: r.project,
                 agent: "echo".into(),
                 place: Place::Existing { worktree_id: tree.id },
@@ -1529,21 +1609,46 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        for _ in 0..200 {
-            if !r.ap.runner.is_running(s.id) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let at = r.store.session(s.id).unwrap().updated_at;
+        idle(r, s.id).await;
+        r.store.session(s.id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_judged_session_with_no_issue_is_closed_only_after_the_grace_period() {
+        let r = rig(DONE);
+        let s = loose_session(&r, r.boss).await;
+        let at = s.updated_at;
+        auto_close(&r);
+        r.ap.tick_at(at + 31 * 60_000);
+        assert!(r.store.session(s.id).is_ok(), "a DONE line alone closes nothing");
+        judge(&r, s.id, "concluded_pass", None).unwrap();
         r.ap.tick_at(at + 60_000);
         assert!(r.store.session(s.id).is_ok(), "within the grace period");
         r.ap.tick_at(at + 31 * 60_000);
-        assert!(r.store.session(s.id).is_ok(), "a concluded session stays open by default");
-        auto_close(&r);
-        r.ap.tick_at(at + 31 * 60_000);
         assert!(r.store.session(s.id).is_err(), "closed after it");
+        assert!(feed(&r).iter().any(|l| l.contains("closed session") && l.contains("judged concluded_pass")));
+    }
+
+    #[tokio::test]
+    async fn the_sweep_never_closes_a_user_started_session() {
+        let r = rig(DONE);
+        let s = loose_session(&r, None).await;
+        auto_close(&r);
+        r.store.add_verdict(s.id, None, head_of(&r.store, &s).as_deref(), "concluded_pass", "x", None, "", r.boss.unwrap()).unwrap();
+        r.ap.tick_at(s.updated_at + 120 * 60_000);
+        assert!(r.store.session(s.id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_sweep_leaves_an_idle_session_judged_anything_but_pass_open() {
+        let r = rig(r#"read p; echo '{"text":"Pushed. Let me know if you want X."}'"#);
+        let s = loose_session(&r, r.boss).await;
+        auto_close(&r);
+        r.ap.tick_at(s.updated_at + 120 * 60_000);
+        assert!(r.store.session(s.id).is_ok(), "no verdict");
+        judge(&r, s.id, "waiting_on_user", None).unwrap();
+        r.ap.tick_at(s.updated_at + 120 * 60_000);
+        assert!(r.store.session(s.id).is_ok(), "waiting on the user");
     }
 
     #[tokio::test]
@@ -1554,7 +1659,7 @@ mod tests {
         for l in [Automation::Manual, Automation::Assist, Automation::Delegate] {
             set_level(&r.store, r.project, Some(l));
             r.ap.tick();
-            assert!(r.store.sessions().unwrap().is_empty(), "nothing started at {l:?}");
+            assert!(r.store.sessions().unwrap().iter().all(|s| s.issue_id.is_none()), "nothing started at {l:?}");
         }
         set_level(&r.store, r.project, None);
         apply(&r.store, &AutopilotPatch { default_level: Some(Automation::Autowork), ..Default::default() }).unwrap();
@@ -1563,11 +1668,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn autowork_leaves_a_green_branch_in_review_and_ship_merges_and_pushes_it() {
+    async fn autowork_leaves_a_passed_branch_in_review_and_ship_merges_and_pushes_it() {
         let r = rig(DONE);
         let bare = bare_remote(&r);
         let (a, sid) = worked_on(&r).await;
-        r.ap.tick();
+        passed(&r, sid).await;
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review, "autowork does not merge");
         assert!(!r.repo.join("feature.txt").exists());
@@ -1577,6 +1682,7 @@ mod tests {
         assert!(remote_has(&bare, "feature.txt"), "pushed");
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
         assert!(r.store.session(sid).is_ok(), "session stays open by default");
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("merged") && c.body.contains("judged concluded_pass")));
     }
 
     #[tokio::test]
@@ -1584,9 +1690,9 @@ mod tests {
         let r = rig(DONE);
         let missing = r._dir.path().join("gone.git");
         assert!(std::process::Command::new("git").arg("-C").arg(&r.repo).args(["remote", "add", "origin"]).arg(&missing).status().unwrap().success());
-        let (a, _) = worked_on(&r).await;
+        let (a, sid) = worked_on(&r).await;
         set_level(&r.store, r.project, Some(Automation::Ship));
-        r.ap.tick();
+        passed(&r, sid).await;
         r.ap.tick();
         assert!(r.repo.join("feature.txt").exists());
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
@@ -1610,9 +1716,9 @@ mod tests {
                 &ProjectPatch { deploy: Some(format!("touch {}", mark.display())), risky: Some(toggles.clone()), ..Default::default() },
             )
             .unwrap();
-            let (a, _) = worked_on(&r).await;
+            let (a, sid) = worked_on(&r).await;
             set_level(&r.store, r.project, Some(level));
-            r.ap.tick();
+            passed(&r, sid).await;
             r.ap.tick();
             assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
             assert_eq!(mark.exists(), want, "{level:?} with {toggles:?}");
@@ -1631,6 +1737,177 @@ mod tests {
     }
 
     const DONE: &str = r#"read p; sleep 1; echo "{\"text\":\"Done. DONE #1 tests:pass ok\"}""#;
+    const LOOSE: &str = r#"read p; case "$p" in *"Conclusion check"*) echo '{"text":"Added X too. DONE #1 tests:pass ok"}';; *) echo '{"text":"Pushed. Let me know if you want X. All tests passed."}';; esac"#;
+
+    async fn finished_worker(script: &str) -> (Rig, Id, agentbench_core::SessionId) {
+        let r = rig(script);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        auto_close(&r);
+        r.ap.tick();
+        settle(&r).await;
+        let sid = r.store.workers().unwrap()[0].session;
+        (r, a, sid)
+    }
+
+    #[tokio::test]
+    async fn a_loose_reply_only_asks_the_supervisor_until_it_judges() {
+        let (r, a, sid) = finished_worker(LOOSE).await;
+        for _ in 0..3 {
+            r.ap.tick();
+        }
+        let told = boss_told(&r).await;
+        assert_eq!(told.len(), 1, "asked once: {told:?}");
+        let ask = &told[0];
+        assert!(ask.contains(&sid.to_string()) && ask.contains("judge_session"), "{ask}");
+        assert!(ask.contains("Let me know if you want X"), "the full reply: {ask}");
+        assert!(ask.contains("Diff stat") && ask.contains("Test runs"), "{ask}");
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "not review");
+        assert!(r.store.session(sid).is_ok(), "not closed");
+        assert!(r.store.comments(a).unwrap().iter().all(|c| !c.body.contains("merged")));
+        assert_eq!(r.store.workers().unwrap()[0].state, "judging");
+    }
+
+    #[tokio::test]
+    async fn concluded_pass_moves_to_review_and_ship_merges() {
+        let (r, a, sid) = finished_worker(DONE).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        r.ap.tick();
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        r.ap.tick();
+        assert!(r.repo.join("feature.txt").exists());
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(feed(&r).iter().any(|l| l.contains("done") && l.contains("judged concluded_pass: because concluded_pass")));
+        let c = r.store.comments(a).unwrap();
+        assert!(c.iter().any(|c| c.body.contains("concluded_pass") && c.body.contains("> Done. DONE #1")), "the judged reply is posted");
+    }
+
+    #[tokio::test]
+    async fn concluded_fail_goes_to_review_and_never_merges() {
+        let (r, a, sid) = finished_worker(DONE).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        r.ap.tick();
+        judge(&r, sid, "concluded_fail", None).unwrap();
+        for _ in 0..3 {
+            r.ap.tick();
+        }
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        assert!(!r.repo.join("feature.txt").exists());
+        assert!(r.store.session(sid).is_ok());
+    }
+
+    #[tokio::test]
+    async fn needs_followup_sends_the_message_and_the_worker_carries_on() {
+        let (r, a, sid) = finished_worker(LOOSE).await;
+        r.ap.tick();
+        judge(&r, sid, "needs_followup", Some("Add X yourself, it is in scope.")).unwrap();
+        r.ap.tick();
+        let w = r.store.workers().unwrap().remove(0);
+        assert_eq!(w.reworks, 1);
+        settle(&r).await;
+        let sent = agentbench_core::shown(&r.store.messages(sid, 0).unwrap());
+        assert!(sent.iter().any(|m| matches!(&m.entry, Entry::User { text, .. } if text.contains("Add X yourself"))));
+        assert!(last_reply(&r.store, sid).contains("Added X too"));
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "judged again, not reviewed");
+        assert_eq!(boss_told(&r).await.len(), 2, "asked again after the follow-up");
+    }
+
+    #[tokio::test]
+    async fn followups_past_the_cap_block_the_issue_without_closing_or_merging() {
+        let (r, a, sid) = finished_worker(r#"read p; echo '{"text":"Next I can add Y."}'"#).await;
+        for _ in 0..=MAX_REWORKS {
+            r.ap.tick();
+            judge(&r, sid, "needs_followup", Some("do Y")).unwrap();
+            r.ap.tick();
+            settle(&r).await;
+        }
+        let i = r.store.issue(a).unwrap();
+        assert!(i.labels.contains(&"blocked".to_string()), "{:?}", i.labels);
+        assert_ne!(i.state, IssueState::Review);
+        assert!(r.store.session(sid).is_ok());
+        assert!(r.store.workers().unwrap().is_empty());
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("follow-ups")));
+    }
+
+    #[tokio::test]
+    async fn waiting_on_user_labels_and_notifies_once() {
+        let (r, a, sid) = finished_worker(r#"read p; echo '{"text":"Which vendor key should I use?"}'"#).await;
+        r.ap.tick();
+        judge(&r, sid, "waiting_on_user", None).unwrap();
+        r.ap.tick();
+        r.ap.tick();
+        let i = r.store.issue(a).unwrap();
+        assert!(i.labels.contains(&"needs-user".to_string()) && i.labels.contains(&"blocked".to_string()));
+        let notices = r.store.messages(r.boss.unwrap(), 0).unwrap().into_iter().filter(|m| matches!(&m.entry, Entry::Notice { text } if text.contains("needs you"))).count();
+        assert_eq!(notices, 1);
+        assert!(r.store.session(sid).is_ok());
+        assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.issue_id == Some(a)).count(), 1, "not restarted");
+    }
+
+    #[tokio::test]
+    async fn blocked_labels_the_issue() {
+        let (r, a, sid) = finished_worker(DONE).await;
+        r.ap.tick();
+        judge(&r, sid, "blocked", None).unwrap();
+        r.ap.tick();
+        let i = r.store.issue(a).unwrap();
+        assert!(i.labels.contains(&"blocked".to_string()) && !i.labels.contains(&"needs-user".to_string()));
+        assert!(r.store.workers().unwrap().is_empty());
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("because blocked")));
+    }
+
+    #[tokio::test]
+    async fn with_no_supervisor_nothing_moves_and_the_user_is_told_once() {
+        let r = rig_alone(DONE);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        auto_close(&r);
+        r.ap.tick();
+        settle(&r).await;
+        let sid = r.store.workers().unwrap()[0].session;
+        for _ in 0..3 {
+            r.ap.tick();
+        }
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing);
+        assert!(r.store.session(sid).is_ok());
+        assert_eq!(r.store.workers().unwrap()[0].state, "held");
+        assert_eq!(feed(&r).iter().filter(|l| l.contains("no supervisor is running")).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_that_does_not_answer_in_time_holds_the_worker_and_tells_the_user_once() {
+        let (r, a, _) = finished_worker(DONE).await;
+        let now = crate::store::now();
+        r.ap.tick_at(now);
+        r.ap.tick_at(now + 16 * 60_000);
+        r.ap.tick_at(now + 40 * 60_000);
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing);
+        assert_eq!(r.store.workers().unwrap()[0].state, "held");
+        assert_eq!(feed(&r).iter().filter(|l| l.contains("no verdict in time")).count(), 1);
+        assert_eq!(boss_told(&r).await.len(), 1, "not asked again on every tick");
+    }
+
+    #[tokio::test]
+    async fn a_new_commit_voids_the_verdict() {
+        let (r, a, sid) = finished_worker(DONE).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        r.ap.tick();
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        commit_in(&tree.path, "late.txt");
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "stale verdict not acted on");
+        assert_eq!(boss_told(&r).await.len(), 2, "judged again");
+        assert!(!r.repo.join("late.txt").exists());
+        let s = r.store.session(sid).unwrap();
+        assert!(current_verdict(&r.store, &s).is_none());
+    }
 
     #[tokio::test]
     async fn with_three_todo_issues_and_a_cap_of_two_the_third_starts_when_one_finishes() {
@@ -1639,14 +1916,14 @@ mod tests {
         let b = todo(&r, "b", 2, &[]);
         let c = todo(&r, "c", 1, &[]);
         r.ap.tick();
-        assert!(r.store.sessions().unwrap().is_empty(), "off by default");
-        on(&r);
-        r.ap.tick();
         let started = |r: &Rig| {
             let mut v: Vec<_> = r.store.sessions().unwrap().iter().filter_map(|s| s.issue_id).collect();
             v.sort();
             v
         };
+        assert!(started(&r).is_empty(), "off by default");
+        on(&r);
+        r.ap.tick();
         assert_eq!(started(&r), [a, b]);
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing);
         assert_eq!(r.store.issue(c).unwrap().state, IssueState::Todo);
@@ -1655,7 +1932,6 @@ mod tests {
         settle(&r).await;
         r.ap.tick();
         assert_eq!(started(&r), [a, b, c], "the third starts with no user input");
-        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
     }
 
     #[tokio::test]
@@ -1677,20 +1953,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_finished_worker_moves_its_issue_to_review() {
-        let r = rig(DONE);
-        let a = todo(&r, "a", 0, &[]);
-        on(&r);
-        r.ap.tick();
-        settle(&r).await;
-        r.ap.tick();
-        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
-        let w = &r.store.workers().unwrap()[0];
-        assert_eq!((w.state.as_str(), w.green), ("ready", true));
-        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("concluded with tests passing")));
-    }
-
-    #[tokio::test]
     async fn a_worker_that_failed_blocks_its_issue_with_a_comment() {
         let r = rig(r#"read p; echo '{"error":"quota exceeded"}'"#);
         let a = todo(&r, "a", 0, &[]);
@@ -1704,40 +1966,7 @@ mod tests {
         assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("blocked") && c.body.contains("quota exceeded")));
         assert!(r.store.workers().unwrap().is_empty());
         r.ap.tick();
-        assert_eq!(r.store.sessions().unwrap().len(), 1, "not started again");
-    }
-
-    #[tokio::test]
-    async fn a_worker_that_asks_for_a_credential_gets_needs_user_and_is_not_restarted() {
-        let r = rig(r#"read p; echo '{"text":"BLOCKED #1 I need an api key for the vendor"}'"#);
-        let a = todo(&r, "a", 0, &[]);
-        on(&r);
-        r.ap.tick();
-        settle(&r).await;
-        r.ap.tick();
-        r.ap.tick();
-        let i = r.store.issue(a).unwrap();
-        assert!(i.labels.contains(&"needs-user".to_string()) && i.labels.contains(&"blocked".to_string()));
-        assert_eq!(r.store.sessions().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_reply_with_a_leftover_list_is_sent_back_not_moved_to_review() {
-        let script = r#"read p; case "$p" in *"Conclusion check"*) echo '{"text":"Ran everything. DONE #1 tests:pass ok"}';; *) printf '%s\n' '{"text":"Built it.\n\nTodo:\n- run the tests\n- add a test for Z"}';; esac"#;
-        let r = rig(script);
-        let a = todo(&r, "a", 0, &[]);
-        on(&r);
-        r.ap.tick();
-        settle(&r).await;
-        r.ap.tick();
-        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "not review");
-        let w = r.store.workers().unwrap().remove(0);
-        assert_eq!((w.state.as_str(), w.reworks), ("working", 1));
-        settle(&r).await;
-        let sent = agentbench_core::shown(&r.store.messages(w.session, 0).unwrap());
-        assert!(sent.iter().any(|m| matches!(&m.entry, Entry::User { text, .. } if text.contains("Conclusion check") && text.contains("run the tests"))));
-        r.ap.tick();
-        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.issue_id == Some(a)).count(), 1, "not started again");
     }
 
     #[tokio::test]
@@ -1787,14 +2016,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_dirty_main_checkout_stops_the_merge_instead_of_forcing_it() {
-        let r = rig(DONE);
-        let a = todo(&r, "a", 0, &[]);
-        on(&r);
-        set_level(&r.store, r.project, Some(Automation::Ship));
-        r.ap.tick();
-        settle(&r).await;
+        let (r, a, sid) = finished_worker(DONE).await;
         std::fs::write(r.repo.join("scratch.txt"), "x").unwrap();
-        r.ap.tick();
+        passed(&r, sid).await;
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
         assert_eq!(r.store.workers().unwrap()[0].state, "merge_failed");

@@ -226,6 +226,23 @@ CREATE TABLE global_notes (
 );
 "#,
     "ALTER TABLE sessions ADD COLUMN parent TEXT;",
+    r#"
+ALTER TABLE autopilot_workers ADD COLUMN asked_at INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE verdicts (
+    id INTEGER PRIMARY KEY,
+    session TEXT NOT NULL,
+    issue INTEGER,
+    head TEXT,
+    verdict TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    followup TEXT,
+    reply TEXT NOT NULL,
+    judge TEXT NOT NULL,
+    acted INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX verdicts_session ON verdicts(session, id);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -269,6 +286,38 @@ pub struct Worker {
     pub nudges: u32,
     pub reworks: u32,
     pub green: bool,
+    pub asked_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Judged {
+    pub id: Id,
+    pub session: SessionId,
+    pub issue: Option<Id>,
+    pub head: Option<String>,
+    pub verdict: String,
+    pub reason: String,
+    pub followup: Option<String>,
+    pub reply: String,
+    pub judge: SessionId,
+    pub acted: bool,
+    pub created_at: i64,
+}
+
+fn judged_row(r: &Row) -> rusqlite::Result<Judged> {
+    Ok(Judged {
+        id: r.get("id")?,
+        session: r.get("session")?,
+        issue: r.get("issue")?,
+        head: r.get("head")?,
+        verdict: r.get("verdict")?,
+        reason: r.get("reason")?,
+        followup: r.get("followup")?,
+        reply: r.get("reply")?,
+        judge: r.get("judge")?,
+        acted: r.get::<_, i64>("acted")? != 0,
+        created_at: r.get("created_at")?,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1175,7 +1224,7 @@ impl Store {
     pub fn workers(&self) -> Result<Vec<Worker>> {
         let db = self.db();
         let mut stmt = db.prepare(
-            "SELECT session, issue, project, state, nudges, reworks, green
+            "SELECT session, issue, project, state, nudges, reworks, green, asked_at
              FROM autopilot_workers ORDER BY created_at, rowid",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1187,6 +1236,7 @@ impl Store {
                 nudges: r.get(4)?,
                 reworks: r.get(5)?,
                 green: r.get::<_, i64>(6)? != 0,
+                asked_at: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1205,6 +1255,54 @@ impl Store {
             params![state, green as i64, session],
         )?;
         Store::changed(&db, "autopilot", 0)
+    }
+
+    pub fn set_worker_asked(&self, session: SessionId, at: i64) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "UPDATE autopilot_workers SET state = 'judging', asked_at = ?1 WHERE session = ?2",
+            params![at, session],
+        )?;
+        Store::changed(&db, "autopilot", 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_verdict(
+        &self,
+        session: SessionId,
+        issue: Option<Id>,
+        head: Option<&str>,
+        verdict: &str,
+        reason: &str,
+        followup: Option<&str>,
+        reply: &str,
+        judge: SessionId,
+    ) -> Result<Judged> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO verdicts (session, issue, head, verdict, reason, followup, reply, judge, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![session, issue, head, verdict, reason, followup, reply, judge, now()],
+        )?;
+        let id = db.last_insert_rowid();
+        Store::changed(&db, "autopilot", 0)?;
+        Ok(db.query_row("SELECT * FROM verdicts WHERE id = ?1", [id], judged_row)?)
+    }
+
+    pub fn latest_verdict(&self, session: SessionId) -> Result<Option<Judged>> {
+        Ok(self
+            .db()
+            .query_row(
+                "SELECT * FROM verdicts WHERE session = ?1 ORDER BY id DESC LIMIT 1",
+                [session],
+                judged_row,
+            )
+            .optional()?)
+    }
+
+    pub fn settle_verdicts(&self, session: SessionId) -> Result<()> {
+        self.db().execute("UPDATE verdicts SET acted = 1 WHERE session = ?1", [session])?;
+        Ok(())
     }
 
     pub fn bump_worker(&self, session: SessionId, column: &str) -> Result<()> {

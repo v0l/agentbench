@@ -177,6 +177,14 @@ pub fn is_merged(main: &Path, branch: &str) -> bool {
     git(main, &["merge-base", "--is-ancestor", branch, "HEAD"]).is_ok()
 }
 
+pub fn head(dir: &Path) -> Option<String> {
+    git(dir, &["rev-parse", "HEAD"]).ok()
+}
+
+pub fn diff_stat(dir: &Path, base: &str) -> Result<String, String> {
+    git(dir, &["diff", "--stat", &format!("{base}...HEAD")])
+}
+
 pub fn push_remote(main: &Path) -> Option<String> {
     let remotes = git(main, &["remote"]).ok()?;
     let names: Vec<&str> = remotes.lines().map(str::trim).filter(|r| !r.is_empty()).collect();

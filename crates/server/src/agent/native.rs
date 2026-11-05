@@ -272,7 +272,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 29] = [
+pub const AGENTBENCH_TOOLS: [&str; 30] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -302,6 +302,7 @@ pub const AGENTBENCH_TOOLS: [&str; 29] = [
     "risky_action",
     "answer_session",
     "escalate_question",
+    "judge_session",
 ];
 
 /// How long `wait_for_session` waits when not told, and the longest it may.
@@ -383,7 +384,7 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "watch_session",
-            "Be told when a running session finishes. When it does, a message with the session id and its new state (not the reply; read that with read_session) arrives in this chat as a new turn, so you do not have to poll or block. Sessions you start from the supervisor chat are watched automatically. Does nothing for a session that is not running.",
+            "Be told when a running session finishes. When it does, a message with the session id and its new state (not the reply; read that with read_session) arrives in this chat as a new turn, so you do not have to poll or block. For a worker you started that went idle, the message is a judging request with its reply, diff stat and test runs; answer it with judge_session. Sessions you start from the supervisor chat are watched automatically. Does nothing for a session that is not running.",
             object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
         ),
         Spec::new(
@@ -395,6 +396,21 @@ fn agentbench_specs() -> Vec<Spec> {
             "escalate_question",
             "Supervisor chat only. Put a worker's question to the user instead, with your recommendation shown beside it. Use only for real user decisions.",
             object(json!({ "id": string("The worker session id"), "recommendation": string("What you would answer, and why") }), &["id"]),
+        ),
+        Spec::new(
+            "judge_session",
+            "Supervisor chat only. Record your verdict on a finished worker you started. The autopilot acts only on this: nothing is moved to review, merged or closed without it, and a new commit on the branch voids it. \
+             concluded_pass: finished, verified, nothing left. concluded_fail: finished but red or incomplete, not mergeable. needs_followup: it can do more itself; `followup` is sent to it and it carries on. waiting_on_user: a real user decision or secret. blocked: stuck. \
+             Decide from what it actually did, not its tone: idle after \"let me know if you want X\" is needs_followup unless X is a real user decision, and a claim of passing tests with no test output in its transcript is not a pass.",
+            object(
+                json!({
+                    "id": string("The worker session id"),
+                    "verdict": json!({ "type": "string", "enum": ["concluded_pass", "concluded_fail", "needs_followup", "waiting_on_user", "blocked"] }),
+                    "reason": string("Why, in a sentence; shown on the issue and in the autopilot feed"),
+                    "followup": string("For needs_followup: the message the worker gets"),
+                }),
+                &["id", "verdict", "reason"],
+            ),
         ),
         Spec::new(
             "stop_session",
@@ -527,7 +543,7 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "autopilot",
-            "Supervisor chat only. Read the autopilot loop (its pause switch, caps, workers and recent activity feed) or change it. The loop starts workers on todo issues by priority up to the caps in projects at autowork or above, sends back replies without a conclusion, blocks issues that need the user, nudges stuck sessions and, in projects at ship or above, merges and pushes green branches. Levels are set with set_automation. Call with no arguments to read it.",
+            "Supervisor chat only. Read the autopilot loop (its pause switch, caps, workers and recent activity feed) or change it. The loop starts workers on todo issues by priority up to the caps in projects at autowork or above, hands each finished worker to you to judge with judge_session and acts only on your verdict, nudges stuck sessions and, in projects at ship or above, merges and pushes branches you judged concluded_pass. Levels are set with set_automation. Call with no arguments to read it.",
             object(
                 json!({
                     "enabled": json!({ "type": "boolean", "description": "Run or pause the loop everywhere" }),
@@ -555,7 +571,7 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "merge_branch",
-            "Supervisor chat only, at ship or above. Merge a session's branch into its project's default branch in the main checkout, verify it, and push. Refuses a dirty checkout. Below ship it becomes a proposal the user can approve.",
+            "Supervisor chat only, at ship or above. Merge a session's branch into its project's default branch in the main checkout, verify it, and push. Needs your concluded_pass verdict (judge_session) for the branch's current head. Refuses a dirty checkout. Below ship it becomes a proposal the user can approve.",
             object(json!({ "id": string("The session whose branch to merge, as list_sessions gives it") }), &["id"]),
         ),
         Spec::new(

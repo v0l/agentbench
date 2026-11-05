@@ -910,6 +910,76 @@ impl Api for StoreApi {
                     json!({ "escalated": worker.id })
                 }
             }
+            "judge_session" => {
+                if !sup {
+                    return Err("only the supervisor chat can use judge_session".into());
+                }
+                let worker = s.session(session_id(args)?).map_err(|e| e.0)?;
+                if worker.parent != Some(session) {
+                    return Err("that session is not one of yours".into());
+                }
+                let raw = text(args, "verdict").unwrap_or_default();
+                let verdict = crate::autopilot::Verdict::parse(&raw).ok_or(
+                    "`verdict` is one of concluded_pass, concluded_fail, needs_followup, waiting_on_user, blocked",
+                )?;
+                let reason = text(args, "reason").filter(|r| !r.trim().is_empty()).ok_or("missing `reason`")?;
+                let followup = text(args, "followup").filter(|f| !f.trim().is_empty());
+                if verdict == crate::autopilot::Verdict::NeedsFollowup && followup.is_none() {
+                    return Err("needs_followup needs `followup`, the message the worker gets".into());
+                }
+                let runner = self.runner.get().ok();
+                if runner.as_ref().is_some_and(|r| r.is_running(worker.id)) {
+                    return Err("that session is still working; judge it when its turn ends".into());
+                }
+                let reply = crate::autopilot::last_reply(s, worker.id);
+                let head = crate::autopilot::head_of(s, &worker);
+                let judged = s
+                    .add_verdict(
+                        worker.id,
+                        worker.issue_id,
+                        head.as_deref(),
+                        verdict.as_str(),
+                        reason.trim(),
+                        followup.as_deref().map(str::trim),
+                        &reply,
+                        session,
+                    )
+                    .map_err(|e| e.0)?;
+                let short = head.as_deref().map(|h| &h[..h.len().min(10)]).unwrap_or("no commit");
+                let line = format!("supervisor {session} judged {} at {short}: {}", verdict.as_str(), reason.trim());
+                if let Some(i) = worker.issue_id {
+                    let quoted: String = reply.trim().lines().map(|l| format!("> {l}\n")).collect();
+                    let body = format!("verdict on session {}: {line}\n\nReply judged:\n{quoted}", worker.id);
+                    let _ = s.add_comment(i, &NewComment { author: Some("supervisor".into()), body });
+                }
+                let _ = s.log_autopilot(Some(worker.project_id), worker.issue_id, &format!("session {}: {line}", worker.id));
+                let tracked = s.workers().map_err(|e| e.0)?.iter().any(|w| w.session == worker.id);
+                if !tracked
+                    && verdict == crate::autopilot::Verdict::NeedsFollowup
+                    && let (Some(r), Some(f)) = (&runner, &followup)
+                {
+                    r.send(&worker, f.trim()).map_err(|e| e.0)?;
+                    let _ = s.settle_verdicts(worker.id);
+                }
+                if !tracked && let Some(i) = worker.issue_id {
+                    let add: &[&str] = match verdict {
+                        crate::autopilot::Verdict::WaitingOnUser => &["blocked", "needs-user"],
+                        crate::autopilot::Verdict::Blocked => &["blocked"],
+                        _ => &[],
+                    };
+                    let issue = s.issue(i).map_err(|e| e.0)?;
+                    let mut labels = issue.labels.clone();
+                    labels.extend(add.iter().filter(|a| !issue.labels.iter().any(|l| l == *a)).map(|a| a.to_string()));
+                    if labels != issue.labels {
+                        let patch = IssuePatch { labels: Some(labels), ..Default::default() };
+                        s.update_issue(i, &patch).map_err(|e| e.0)?;
+                        if verdict == crate::autopilot::Verdict::WaitingOnUser {
+                            desktop_notice("needs you", &format!("#{i}: {}", reason.trim()));
+                        }
+                    }
+                }
+                json!({ "judged": worker.id, "verdict": judged.verdict, "head": judged.head })
+            }
             "stop_session" => {
                 let other = self.managed(&me, args)?;
                 let runner = self.runner.get()?;
@@ -1029,6 +1099,11 @@ impl Api for StoreApi {
             }
             "merge_branch" => {
                 let other = s.session(session_id(args)?).map_err(|e| e.0)?;
+                if !crate::autopilot::current_verdict(s, &other)
+                    .is_some_and(|v| v.verdict == crate::autopilot::Verdict::ConcludedPass.as_str())
+                {
+                    return Err("that branch has no concluded_pass verdict for its current head; judge it with judge_session first".into());
+                }
                 match crate::autopilot::ship(s, &other) {
                     Ok(done) => json!({
                         "branch": done.branch,
@@ -1058,6 +1133,7 @@ impl Api for StoreApi {
             "file_issue"
                 | "autopilot"
                 | "merge_branch"
+                | "judge_session"
                 | "set_automation"
                 | "approve_action"
                 | "update_issue"
@@ -1296,6 +1372,27 @@ mod tests {
     }
 
     #[test]
+    fn judge_session_records_a_verdict_only_from_the_workers_own_supervisor() {
+        let b = boss();
+        let issue = b.s.issue(b.issue).unwrap();
+        let w = b.s.session(b.worker).unwrap();
+        b.s.set_parent(w.id, Some(b.boss)).unwrap();
+        let tree = b.s.worktree(w.worktree_id).unwrap();
+        let other = b.s.add_session(tree.id, "native", "stranger", None, Some(issue.id)).unwrap();
+        let go = |id: SessionId, verdict: &str| json!({"id": id.to_string(), "verdict": verdict, "reason": "read the diff"});
+        let err = b.api.call("judge_session", &go(other.id, "concluded_pass"), b.boss).unwrap_err();
+        assert!(err.contains("not one of yours"), "{err}");
+        assert!(b.api.call("judge_session", &go(w.id, "concluded_pass"), b.worker).is_err(), "only the supervisor");
+        assert!(b.api.call("judge_session", &go(w.id, "looks fine"), b.boss).is_err(), "a known verdict");
+        assert!(b.api.call("judge_session", &go(w.id, "needs_followup"), b.boss).is_err(), "follow-up text needed");
+        b.api.call("judge_session", &go(w.id, "concluded_fail"), b.boss).unwrap();
+        let v = b.s.latest_verdict(w.id).unwrap().unwrap();
+        assert_eq!((v.verdict.as_str(), v.reason.as_str(), v.judge), ("concluded_fail", "read the diff", b.boss));
+        assert!(b.s.latest_verdict(other.id).unwrap().is_none());
+        assert!(b.s.autopilot_log(10).unwrap().iter().any(|l| l.text.contains("judged concluded_fail")));
+    }
+
+    #[test]
     fn merge_branch_ships_a_worker_branch_at_ship() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("r");
@@ -1311,11 +1408,17 @@ mod tests {
             assert!(std::process::Command::new("git").arg("-C").arg(&tree.path).args(&args).status().unwrap().success());
         }
         let w = s.add_session(tree.id, "native", "w", None, None).unwrap();
+        s.set_parent(w.id, Some(boss.id)).unwrap();
         let api = StoreApi::new(s.clone());
         let go = json!({"id": w.id.to_string()});
         assert!(proposed(&api.call("merge_branch", &go, boss.id)));
         assert!(!main.join("f.txt").exists());
         s.update_project(p.id, &ProjectPatch { automation: Some(Some(Automation::Ship)), ..Default::default() }).unwrap();
+        let refused = api.call("merge_branch", &go, boss.id).unwrap_err();
+        assert!(refused.contains("judge_session"), "{refused}");
+        assert!(!main.join("f.txt").exists());
+        let pass = json!({"id": w.id.to_string(), "verdict": "concluded_pass", "reason": "verified"});
+        api.call("judge_session", &pass, boss.id).unwrap();
         let out = api.call("merge_branch", &go, boss.id).unwrap();
         assert!(main.join("f.txt").exists(), "{out}");
         assert_eq!(out["branch"], "feat");

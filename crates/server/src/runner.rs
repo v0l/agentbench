@@ -152,6 +152,10 @@ impl Runner {
         &self.store
     }
 
+    pub fn tools(&self) -> &dyn Api {
+        self.api.as_ref()
+    }
+
     /// Make a session, and a worktree for it when asked, and send it its first prompt. A prompt
     /// is taken from the issue when none is given. Must run inside the tokio runtime, because the
     /// first turn is spawned.
@@ -665,7 +669,7 @@ impl Runner {
             return;
         }
         let Ok(done) = self.store.session(finished) else { return };
-        let text = format!(
+        let plain = format!(
             "Watched session {finished} (\"{}\", project {}) changed state to {}. Read its reply with read_session.",
             done.title,
             done.project_id,
@@ -673,6 +677,10 @@ impl Runner {
         );
         for id in watchers {
             if let Ok(watcher) = self.store.session(id) {
+                let judges = done.parent == Some(id)
+                    && done.status == SessionStatus::Idle
+                    && self.store.project(watcher.project_id).is_ok_and(|p| p.supervisor);
+                let text = if judges { crate::autopilot::judge_request(&self.store, &done) } else { plain.clone() };
                 let _ = self.send(&watcher, &text);
             }
         }
@@ -2775,6 +2783,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_supervisor_watching_its_worker_is_asked_for_a_verdict_when_its_turn_ends() {
+        let r = rig(script_agent("echo", r#"read p; echo '{"text":"Pushed. Let me know if you want X."}'"#), true);
+        r.store.add_watch(r.worker.id, r.boss.id).unwrap();
+        r.runner.send(&r.worker, "go").unwrap();
+        wait_idle(&r.runner, r.worker.id).await;
+        assert!(until(|| !boss_was_told(&r).is_empty()).await);
+        let told = boss_was_told(&r).remove(0);
+        assert!(told.contains("judge_session") && told.contains("Let me know if you want X"), "{told}");
+    }
+
+    #[tokio::test]
     async fn a_workers_question_goes_to_the_supervisor_and_its_answer_returns() {
         use crate::agent::Api;
         let r = rig(Box::new(Asker), true);
@@ -2929,9 +2948,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let first = store.messages(boss.id, 0).unwrap().remove(0).entry;
-        assert!(first.text().contains(&format!("Watched session {child}")), "{first:?}");
-        assert!(!first.text().contains("built it"));
-        assert!(first.text().contains("changed state to"));
+        assert!(first.text().contains(&format!("Judge worker {child}")), "{first:?}");
+        assert!(first.text().contains("built it") && first.text().contains("judge_session"));
     }
 
     #[tokio::test]
