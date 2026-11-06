@@ -6,6 +6,11 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-06
+
+### Fixed
+- Android paste works: the long-press menu Paste, Copy and Cut use the system clipboard, and the keyboard clipboard chip and IME text input go through a real input view.
+
 ### Changed
 - `packaging/android/build.sh` is the only Android build (debug, release, `ABI=x86_64` for the emulator) and fails if the APK lacks the Kotlin classes or the ABI library. `cargo apk` is no longer used.
 
