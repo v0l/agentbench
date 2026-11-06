@@ -101,6 +101,7 @@ pub enum Event {
     Notice(String),
     Warning(String),
     PicturesRemoved,
+    Trimmed(Vec<agentbench_core::Trim>),
     Diagnostics { text: String, broken: Vec<String> },
     Sent(Vec<agentbench_core::Sent>),
     Summary(String),
