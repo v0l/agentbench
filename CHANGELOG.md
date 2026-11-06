@@ -6,6 +6,9 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- `packaging/android/build.sh` is the only Android build (debug, release, `ABI=x86_64` for the emulator) and fails if the APK lacks the Kotlin classes or the ABI library. `cargo apk` is no longer used.
+
 ## [0.8.0] - 2026-11-01
 
 ### Added

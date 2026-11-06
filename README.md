@@ -305,8 +305,12 @@ agentbench-server --web web
 The server then serves the app at `/`, and the page fills in its own address.
 
 ```sh
-cargo apk build -p agentbench --lib --release --no-default-features --features local-speech
+packaging/android/build.sh                 # debug APK, target/android/agentbench.apk
+RELEASE=1 KEYSTORE=... KEYSTORE_PASS=... packaging/android/build.sh   # signed release
+ABI=x86_64 packaging/android/build.sh      # emulator
 ```
+
+That script is the only Android build (needs `cargo-ndk`, the SDK and NDK). `cargo apk` does not ship the Kotlin activity, so paste and notifications break.
 
 ## API
 

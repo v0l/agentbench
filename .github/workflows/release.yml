@@ -251,15 +251,15 @@ jobs:
           "$sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;28.2.13676358"
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
-      - name: Install cargo-apk
-        run: cargo install cargo-apk --locked
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
 
       - name: Decode signing keystore
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
         run: echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
 
-      # The Rust app through cargo-apk, then the Kotlin notification service, the manifest and the
+      # The Rust library through cargo-ndk, then the Kotlin notification service, the manifest and the
       # signature on top. packaging/android/build.sh is the same script used on a developer machine.
       - name: Build and sign
         env:

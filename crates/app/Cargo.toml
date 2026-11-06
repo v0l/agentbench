@@ -91,54 +91,6 @@ log = "0.4"
 jni = "0.22"
 ndk-context = "0.1"
 
-[package.metadata.android]
-package = "io.v0l.agentbench"
-apk_name = "agentbench"
-# The launcher icon: an adaptive icon, with plain PNGs for older Android.
-resources = "android/res"
-build_targets = ["aarch64-linux-android"]
-
-[package.metadata.android.sdk]
-min_sdk_version = 26
-target_sdk_version = 34
-
-[[package.metadata.android.uses_permission]]
-name = "android.permission.INTERNET"
-
-[[package.metadata.android.uses_permission]]
-name = "android.permission.RECORD_AUDIO"
-
-[[package.metadata.android.uses_permission]]
-name = "android.permission.CAMERA"
-
-[[package.metadata.android.uses_permission]]
-name = "android.permission.POST_NOTIFICATIONS"
-
-# Scanning the pairing code needs a camera, but a tablet without one can still type the address.
-[[package.metadata.android.feature]]
-name = "android.hardware.camera"
-required = false
-
-[package.metadata.android.application]
-label = "Agentbench"
-icon = "@mipmap/ic_launcher"
-# An agentbench server on the LAN is plain http, which Android refuses unless the app says it may.
-uses_cleartext_traffic = true
-
-[package.metadata.android.application.activity]
-# One instance, so a scanned code opens the app that is already running instead of a second copy.
-launch_mode = "singleTask"
-
-[[package.metadata.android.application.activity.intent_filter]]
-actions = ["android.intent.action.MAIN"]
-categories = ["android.intent.category.LAUNCHER"]
-
-# `agentbench://pair?url=…&token=…`, which the pairing code holds.
-[[package.metadata.android.application.activity.intent_filter]]
-actions = ["android.intent.action.VIEW"]
-categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
-data = [{ scheme = "agentbench", host = "pair" }]
-
 [dev-dependencies]
 qrcode = { version = "0.14", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
