@@ -729,6 +729,43 @@ pub fn remove_pictures_from(entry: &mut Entry) -> bool {
     messages.iter_mut().fold(false, |any, s| remove_pictures(&mut s.message) | any)
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "cut", rename_all = "snake_case")]
+pub enum Trim {
+    Picture { url: String, text: String },
+    ToolResult { call_id: String, length: usize, content: String },
+}
+
+pub fn apply_trims(message: &mut Value, trims: &[Trim]) -> bool {
+    let mut changed = false;
+    for trim in trims {
+        match trim {
+            Trim::Picture { url, text } => {
+                let Some(parts) = message["content"].as_array_mut() else { continue };
+                for part in parts.iter_mut().filter(|p| p["image_url"]["url"] == url.as_str()) {
+                    *part = serde_json::json!({ "type": "text", "text": text });
+                    changed = true;
+                }
+            }
+            Trim::ToolResult { call_id, length, content } => {
+                if message["role"] == "tool"
+                    && message["tool_call_id"] == call_id.as_str()
+                    && message["content"].as_str().is_some_and(|c| c.len() == *length)
+                {
+                    message["content"] = Value::String(content.clone());
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+pub fn apply_trims_to(entry: &mut Entry, trims: &[Trim]) -> bool {
+    let Entry::Wire { messages } = entry else { return false };
+    messages.iter_mut().fold(false, |any, s| apply_trims(&mut s.message, trims) | any)
+}
+
 pub const SUMMARY_PREAMBLE: &str =
     "Here is a summary of our conversation so far. Carry on from it.";
 
@@ -1564,6 +1601,45 @@ pub fn branch_slug(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_trim_rewrites_only_the_picture_and_tool_result_it_names() {
+        let mut entry = Entry::Wire {
+            messages: vec![
+                Sent {
+                    message: serde_json::json!({"role": "user", "content": [
+                        {"type": "text", "text": "a.png:"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,OLD"}},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,NEW"}},
+                    ]}),
+                    said: Said::Plain,
+                },
+                Sent {
+                    message: serde_json::json!({"role": "tool", "tool_call_id": "c1", "content": "long"}),
+                    said: Said::Plain,
+                },
+                Sent {
+                    message: serde_json::json!({"role": "tool", "tool_call_id": "c2", "content": "kept"}),
+                    said: Said::Plain,
+                },
+                Sent {
+                    message: serde_json::json!({"role": "tool", "tool_call_id": "c1", "content": "other answer"}),
+                    said: Said::Plain,
+                },
+            ],
+        };
+        let trims = [
+            Trim::Picture { url: "data:image/png;base64,OLD".into(), text: "(gone)".into() },
+            Trim::ToolResult { call_id: "c1".into(), length: 4, content: "short".into() },
+        ];
+        assert!(apply_trims_to(&mut entry, &trims));
+        assert!(!apply_trims_to(&mut entry, &trims), "a second pass changes nothing");
+        let Entry::Wire { messages } = entry else { unreachable!() };
+        assert_eq!(messages[0].message["content"][1], serde_json::json!({"type": "text", "text": "(gone)"}));
+        assert_eq!(messages[0].message["content"][2]["type"], "image_url");
+        assert_eq!(messages[1].message["content"], "short");
+        assert_eq!(messages[2].message["content"], "kept");
+        assert_eq!(messages[3].message["content"], "other answer");
+    }
     #[test]
     fn queued_messages_return_to_the_draft_one_per_line() {
         let q = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();

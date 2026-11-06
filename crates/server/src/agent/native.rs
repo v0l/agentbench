@@ -54,6 +54,10 @@ pub struct Model {
     /// How hard the model thinks, sent as `reasoning_effort`. Empty leaves it to the server.
     #[serde(default)]
     pub effort: String,
+    #[serde(default = "default_request_budget")]
+    pub request_budget: usize,
+    #[serde(default = "default_keep_pictures")]
+    pub keep_pictures: usize,
 }
 
 /// One rung of the ladder. A level with no model is not set up. One with no
@@ -74,6 +78,14 @@ pub struct Level {
 
 fn default_compact_at() -> u64 {
     agentbench_core::DEFAULT_COMPACT_AT
+}
+
+fn default_request_budget() -> usize {
+    24 << 20
+}
+
+fn default_keep_pictures() -> usize {
+    4
 }
 
 fn default_url() -> String {
@@ -99,6 +111,8 @@ impl Default for Model {
             medium: Level::default(),
             high: Level::default(),
             effort: String::new(),
+            request_budget: default_request_budget(),
+            keep_pictures: default_keep_pictures(),
         }
     }
 }
@@ -1411,6 +1425,105 @@ impl<'a> Log<'a> {
         self.io.emit(Event::Sent(sent));
         self.messages.splice(0..0, opening);
     }
+
+    fn fit(&mut self, budget: usize, keep_pictures: usize, tools: &Value) -> Fitted {
+        let mut size = request_size(&self.messages, tools);
+        let mut fitted = Fitted { size, pictures: 0, results: 0 };
+        if size <= budget {
+            return fitted;
+        }
+        let mut trims = Vec::new();
+        let pictures: Vec<(usize, usize)> = self
+            .messages
+            .iter()
+            .enumerate()
+            .flat_map(|(m, message)| {
+                let parts = message["content"].as_array().cloned().unwrap_or_default();
+                parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p["type"] == "image_url")
+                    .map(|(p, _)| (m, p))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let old = pictures.len().saturating_sub(keep_pictures);
+        for &(m, p) in &pictures[..old] {
+            if size <= budget {
+                break;
+            }
+            let parts = self.messages[m]["content"].as_array().cloned().unwrap_or_default();
+            let url = parts[p]["image_url"]["url"].as_str().unwrap_or_default().to_string();
+            let named = p
+                .checked_sub(1)
+                .and_then(|l| parts[l]["text"].as_str())
+                .map(|t| t.trim().trim_end_matches(':').trim())
+                .filter(|t| !t.is_empty() && t.len() <= 200);
+            let text = match named {
+                Some(name) => format!("(picture removed to fit the request: {name})"),
+                None => "(picture removed to fit the request; read the file again to see it)".into(),
+            };
+            let trim = agentbench_core::Trim::Picture { url, text };
+            let before = self.messages[m].to_string().len();
+            agentbench_core::apply_trims(&mut self.messages[m], std::slice::from_ref(&trim));
+            size = size + self.messages[m].to_string().len() - before;
+            fitted.pictures += 1;
+            trims.push(trim);
+        }
+        let unseen = self.messages.iter().rposition(|m| m["role"] == "assistant").unwrap_or(0);
+        let results: Vec<usize> = (0..unseen)
+            .filter(|&i| {
+                self.messages[i]["role"] == "tool"
+                    && self.messages[i]["content"].as_str().is_some_and(|c| c.len() > RESULT_KEPT * 2)
+            })
+            .collect();
+        for i in results {
+            if size <= budget {
+                break;
+            }
+            let content = self.messages[i]["content"].as_str().unwrap_or_default().to_string();
+            let trim = agentbench_core::Trim::ToolResult {
+                call_id: self.messages[i]["tool_call_id"].as_str().unwrap_or_default().to_string(),
+                length: content.len(),
+                content: format!("(result shortened to fit the request)\n{}", clip(&content, RESULT_KEPT)),
+            };
+            let before = self.messages[i].to_string().len();
+            agentbench_core::apply_trims(&mut self.messages[i], std::slice::from_ref(&trim));
+            size = size + self.messages[i].to_string().len() - before;
+            fitted.results += 1;
+            trims.push(trim);
+        }
+        if !trims.is_empty() {
+            self.io.emit(Event::Trimmed(trims));
+        }
+        fitted.size = size;
+        fitted
+    }
+}
+
+const RESULT_KEPT: usize = 2000;
+
+struct Fitted {
+    size: usize,
+    pictures: usize,
+    results: usize,
+}
+
+impl Fitted {
+    fn dropped(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.pictures > 0 {
+            parts.push(format!("{} old pictures", self.pictures));
+        }
+        if self.results > 0 {
+            parts.push(format!("{} long old tool results", self.results));
+        }
+        (!parts.is_empty()).then(|| parts.join(" and "))
+    }
+}
+
+fn request_size(messages: &[Value], tools: &Value) -> usize {
+    messages.iter().map(size).sum::<usize>() + tools.to_string().len() + 512
 }
 
 impl std::ops::Deref for Log<'_> {
@@ -1588,6 +1701,22 @@ impl Agent for Native {
                     }
                 }
             }
+            let budget = base.request_budget.max(1 << 20);
+            let fitted = messages.fit(budget, base.keep_pictures, &tools);
+            if let Some(dropped) = fitted.dropped() {
+                io.emit(Event::Warning(format!(
+                    "the conversation was over the {} MB request budget; replaced {dropped} with a short note",
+                    budget >> 20
+                )));
+            }
+            if fitted.size > budget && messages.len() > ROLLING_MIN {
+                match roll(&model, &mut messages, window, self.patience, io).await {
+                    Ok(()) => crowded.context = 0,
+                    Err(e) if io.stopped() => return Err(e),
+                    Err(e) => io.emit(Event::Warning(format!("could not compact the conversation: {e}"))),
+                }
+            }
+            let mut shrunk = false;
             let reply = loop {
                 match complete(&model, &messages, &tools, self.patience, io).await {
                     Ok(reply) => break reply,
@@ -1596,6 +1725,17 @@ impl Agent for Native {
                             "the model server refused a picture; removed it and sending the request again"
                                 .into(),
                         ));
+                    }
+                    Err(e) if too_large(&e) && !shrunk => {
+                        shrunk = true;
+                        let target = request_size(&messages, &tools).min(budget) / 4;
+                        let Some(dropped) = messages.fit(target, base.keep_pictures, &tools).dropped()
+                        else {
+                            return Err(e);
+                        };
+                        io.emit(Event::Warning(format!(
+                            "the model server refused the request as too large; replaced {dropped} with a short note and sending it again"
+                        )));
                     }
                     Err(e) => return Err(e),
                 }
@@ -1886,6 +2026,9 @@ async fn roll(
 ) -> Result<(), String> {
     let cut = tail_start(messages, window).unwrap_or(messages.len());
     let mut ask: Vec<Value> = messages[..cut].to_vec();
+    ask.iter_mut().for_each(|m| {
+        agentbench_core::remove_pictures(m);
+    });
     ask.push(json!({ "role": "user", "content": ROLLING_PROMPT }));
     let reply = complete(model, &ask, &json!([]), patience, &Silent(io)).await?;
     let text = reply.text.trim().to_string();
@@ -2198,13 +2341,13 @@ async fn complete(
             return Err("stopped".into());
         }
         if attempt >= RETRIES {
-            return Err(format!("{}: {failure}", model.url));
+            return Err(format!("{}: {failure}", agentbench_core::host_of(&model.url)));
         }
         attempt += 1;
         let wait = backoff(attempt);
         io.emit(Event::Warning(format!(
-            "{}: {failure}; retrying in {}s ({attempt}/{RETRIES})",
-            model.url,
+            "{}: {failure}, retrying in {}s ({attempt}/{RETRIES})",
+            agentbench_core::host_of(&model.url),
             wait.as_secs_f32().ceil()
         )));
         tokio::select! {
@@ -2212,6 +2355,21 @@ async fn complete(
             _ = tokio::time::sleep(wait) => {}
         }
     }
+}
+
+fn too_large(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.starts_with("413")
+        || [
+            "payload too large",
+            "request entity too large",
+            "length limit exceeded",
+            "request_too_large",
+            "body too large",
+            "request too large",
+        ]
+        .iter()
+        .any(|s| error.contains(s))
 }
 
 fn refused_picture(error: &str) -> bool {
@@ -2264,7 +2422,7 @@ async fn attempt_once(
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        let e = format!("{status}: {}", text.trim());
+        let e = error_text(status, &text);
         return Err(if status.is_server_error() && status.as_u16() != 500 {
             Failure::Transient(e)
         } else {
@@ -2272,6 +2430,24 @@ async fn attempt_once(
         });
     }
     read_stream(resp.bytes_stream(), patience.stall, io).await
+}
+
+fn error_text(status: reqwest::StatusCode, body: &str) -> String {
+    let body = body.trim();
+    if !body.get(..body.len().min(200)).unwrap_or(body).to_ascii_lowercase().contains("<html") {
+        return format!("{status}: {body}");
+    }
+    let shown = status.to_string();
+    let signature = body
+        .split('<')
+        .filter_map(|chunk| chunk.split_once('>').map(|(_, text)| text.trim()))
+        .filter(|text| !text.is_empty() && *text != shown)
+        .last()
+        .filter(|text| text.len() <= 60);
+    match signature {
+        Some(server) => format!("{shown} ({server})"),
+        None => shown,
+    }
 }
 
 /// The cause chain of a request error, which reqwest keeps out of its own message.
@@ -4078,10 +4254,192 @@ for line in sys.stdin:
                         agentbench_core::remove_pictures_from(r);
                     });
                 }
+                Event::Trimmed(trims) => {
+                    rows.iter_mut().for_each(|r| {
+                        agentbench_core::apply_trims_to(r, &trims);
+                    });
+                }
                 _ => {}
             }
         }
         rows
+    }
+
+    const TOO_LARGE: &str = "Failed to buffer the request body: length limit exceeded";
+
+    fn limited(limit: usize, replies: Vec<Vec<Value>>) -> (String, std::sync::mpsc::Receiver<(u16, Value)>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (seen, asked) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut replies = replies.into_iter();
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if s.read(&mut byte).unwrap_or(0) != 1 {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let text = String::from_utf8_lossy(&head).to_lowercase();
+                let len = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()))
+                    .unwrap_or(0);
+                let mut body = vec![0u8; len];
+                let _ = s.read_exact(&mut body);
+                let parsed = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                if len > limit {
+                    let _ = seen.send((413, parsed));
+                    let _ = s.write_all(
+                        format!(
+                            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{TOO_LARGE}",
+                            TOO_LARGE.len()
+                        )
+                        .as_bytes(),
+                    );
+                    continue;
+                }
+                let _ = seen.send((200, parsed));
+                let Some(events) = replies.next() else { return };
+                let mut sse: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
+                sse.push_str("data: [DONE]\n\n");
+                let _ = s.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
+                        sse.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        (url, asked)
+    }
+
+    fn picture_url(i: usize) -> String {
+        format!("data:image/png;base64,{i:04}{}", "A".repeat(100_000))
+    }
+
+    fn screenshots(count: usize) -> Vec<Entry> {
+        let plain = |message: Value| Sent { message, said: Said::Plain };
+        (0..count)
+            .map(|i| Entry::Wire {
+                messages: vec![
+                    plain(json!({"role": "user", "content": [
+                        {"type": "text", "text": format!("/tmp/kgshots/shot{i}.png:")},
+                        {"type": "image_url", "image_url": {"url": picture_url(i)}},
+                    ]})),
+                    plain(json!({"role": "assistant", "content": format!("looked at shot {i}")})),
+                ],
+            })
+            .collect()
+    }
+
+    fn pictures_in(body: &Value) -> Vec<String> {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+            .filter_map(|p| p["image_url"]["url"].as_str().map(String::from))
+            .collect()
+    }
+
+    fn history_turn<'a>(dir: &'a Path, c: &'a crate::agent::Context, prompt: &'a str, history: &'a [Entry]) -> Turn<'a> {
+        Turn { prompt, files: &[], cwd: dir, model: None, effort: None, resume: None, history, context: c }
+    }
+
+    #[tokio::test]
+    async fn a_history_of_screenshots_past_the_limit_is_trimmed_to_the_budget_on_the_next_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = limited(2_000_000, vec![vec![say("back")], vec![say("again")]]);
+        let native = Native::new(Model { url, model: "m".into(), request_budget: 1 << 20, ..Model::default() });
+        let c = context();
+        let history = screenshots(40);
+        let first = TestIo::new(Arc::new(FakeApi));
+        native.run(&history_turn(dir.path(), &c, "stopped", &history), &first).await.unwrap();
+        let (status, sent) = asked.recv().unwrap();
+        assert_eq!(status, 200);
+        assert!(sent.to_string().len() <= 1 << 20, "{} bytes", sent.to_string().len());
+        let kept = pictures_in(&sent);
+        assert_eq!(kept[kept.len() - 4..], (36..40).map(picture_url).collect::<Vec<_>>()[..]);
+        assert!(!kept.contains(&picture_url(0)), "the oldest picture was kept");
+        assert!(sent.to_string().contains("(picture removed to fit the request: /tmp/kgshots/shot0.png)"));
+        assert!(first.events().iter().any(|e| matches!(e, Event::Warning(w) if w.contains("old pictures"))));
+
+        let mut rows = history.clone();
+        rows.iter_mut().for_each(|r| {
+            for e in first.events() {
+                if let Event::Trimmed(t) = e {
+                    agentbench_core::apply_trims_to(r, &t);
+                }
+            }
+        });
+        rows.extend(stored(&first));
+        let second = TestIo::new(Arc::new(FakeApi));
+        native.run(&history_turn(dir.path(), &c, "more", &rows), &second).await.unwrap();
+        let (status, next) = asked.recv().unwrap();
+        assert_eq!(status, 200);
+        let before = sent["messages"].as_array().unwrap();
+        let now = next["messages"].as_array().unwrap();
+        assert_eq!(now[..before.len()], before[..], "the prefix changed");
+        assert!(!second.events().iter().any(|e| matches!(e, Event::Trimmed(_))));
+    }
+
+    #[tokio::test]
+    async fn a_request_refused_as_too_large_is_trimmed_and_sent_once_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = limited(2_000_000, vec![vec![say("back")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let c = context();
+        let history = screenshots(40);
+        let io = TestIo::new(Arc::new(FakeApi));
+        native.run(&history_turn(dir.path(), &c, "stopped", &history), &io).await.unwrap();
+        let statuses: Vec<u16> = asked.try_iter().map(|(s, _)| s).collect();
+        assert_eq!(statuses, vec![413, 200]);
+        let warning = io
+            .events()
+            .into_iter()
+            .find_map(|e| match e {
+                Event::Warning(w) if w.contains("too large") => Some(w),
+                _ => None,
+            })
+            .expect("a warning about the refusal");
+        assert!(warning.contains("old pictures"), "{warning}");
+        assert!(io.events().iter().any(|e| matches!(e, Event::Trimmed(_))));
+    }
+
+    #[tokio::test]
+    async fn a_second_too_large_refusal_fails_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = limited(1000, vec![]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let c = context();
+        let history = screenshots(40);
+        let io = TestIo::new(Arc::new(FakeApi));
+        let e = native.run(&history_turn(dir.path(), &c, "stopped", &history), &io).await.unwrap_err();
+        assert!(e.contains("413"), "{e}");
+        assert!(asked.try_iter().count() <= 3);
+    }
+
+    #[test]
+    fn old_tool_results_are_shortened_when_pictures_are_not_enough() {
+        let io = TestIo::new(Arc::new(FakeApi));
+        let mut messages = vec![json!({"role": "system", "content": "s"})];
+        for i in 0..30 {
+            let id = format!("c{i}");
+            messages.push(json!({"role": "assistant", "content": "", "tool_calls": [{"id": id, "type": "function", "function": {"name": "bash", "arguments": "{}"}}]}));
+            messages.push(json!({"role": "tool", "tool_call_id": id, "content": "x".repeat(50_000)}));
+        }
+        let mut log = Log::new(&io, messages);
+        let fitted = log.fit(600_000, 4, &json!([]));
+        assert!(fitted.size <= 600_000, "{}", fitted.size);
+        assert_eq!(fitted.pictures, 0);
+        assert!(fitted.results > 0);
+        assert!(log[2]["content"].as_str().unwrap().len() < 5000);
+        assert_eq!(log[log.len() - 1]["content"].as_str().unwrap().len(), 50_000);
     }
 
     #[tokio::test]
@@ -4923,6 +5281,38 @@ for line in sys.stdin:
         let p = Patience::default();
         assert!(p.stall <= Duration::from_secs(60), "{p:?}");
         assert!(p.headers <= Duration::from_secs(120), "{p:?}");
+    }
+
+    #[test]
+    fn an_html_error_page_reads_as_one_line() {
+        let page = "<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n";
+        let line = error_text(reqwest::StatusCode::BAD_GATEWAY, page);
+        assert_eq!(line, "502 Bad Gateway (nginx)");
+        let json = r#"{"error":{"message":"bad key"}}"#;
+        assert_eq!(error_text(reqwest::StatusCode::UNAUTHORIZED, json), format!("401 Unauthorized: {json}"));
+    }
+
+    #[tokio::test]
+    async fn a_bad_gateway_page_is_a_short_retry_warning() {
+        let page = "<html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center><hr><center>nginx</center></body></html>";
+        let (url, _) = crate::titles::fake::server(vec![
+            (502, page.into()),
+            (200, format!("data: {}\n\ndata: [DONE]\n\n", say("ok"))),
+        ]);
+        let host = agentbench_core::host_of(&url);
+        let dir = tempfile::tempdir().unwrap();
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        let warnings: Vec<String> = io
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Warning(w) => Some(w),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warnings, vec![format!("{host}: 502 Bad Gateway (nginx), retrying in 1s (1/{RETRIES})")]);
     }
 
     #[tokio::test]

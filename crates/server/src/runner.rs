@@ -1194,13 +1194,21 @@ impl Sink {
     }
 
     fn pictures_removed(&self) {
+        self.rewrite(agentbench_core::remove_pictures_from);
+    }
+
+    fn trimmed(&self, trims: &[agentbench_core::Trim]) {
+        self.rewrite(|entry| agentbench_core::apply_trims_to(entry, trims));
+    }
+
+    fn rewrite(&self, mut change: impl FnMut(&mut Entry) -> bool) {
         if self.lock().capture || !self.lock().raw {
             return;
         }
         self.flush();
         let Ok(rows) = self.store.messages(self.session, 0) else { return };
         for mut row in rows {
-            if agentbench_core::remove_pictures_from(&mut row.entry) {
+            if change(&mut row.entry) {
                 let _ = self.store.update_message(row.id, &row.entry);
             }
         }
@@ -1413,6 +1421,7 @@ impl Io for Sink {
                 self.entry(Entry::Warning { text });
             }
             Event::PicturesRemoved => self.pictures_removed(),
+            Event::Trimmed(trims) => self.trimmed(&trims),
             Event::Diagnostics { text, broken } => {
                 self.entry(Entry::Diagnostics { text, broken });
             }
@@ -2561,6 +2570,56 @@ mod tests {
             io.emit(Event::Done);
             Ok(())
         }
+    }
+
+    struct Trimmer;
+
+    #[async_trait::async_trait]
+    impl Agent for Trimmer {
+        fn name(&self) -> &str {
+            "trimmer"
+        }
+        fn label(&self) -> &str {
+            "Trimmer"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn writes_log(&self) -> bool {
+            true
+        }
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            io.emit(Event::Sent(vec![agentbench_core::Sent {
+                message: serde_json::json!({"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,OLD"}},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,NEW"}},
+                ]}),
+                said: agentbench_core::Said::Plain,
+            }]));
+            io.emit(Event::Trimmed(vec![agentbench_core::Trim::Picture {
+                url: "data:image/png;base64,OLD".into(),
+                text: "(picture removed to fit the request)".into(),
+            }]));
+            io.emit(Event::Done);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_trim_is_kept_in_the_stored_rows() {
+        let (runner, s) = setup(Box::new(Trimmer));
+        runner.send(&s, "look").unwrap();
+        wait_idle(&runner, s.id).await;
+        let rows = serde_json::to_string(&runner.store().messages(s.id, 0).unwrap()).unwrap();
+        assert!(!rows.contains("base64,OLD"), "{rows}");
+        assert!(rows.contains("base64,NEW"), "{rows}");
+        assert!(rows.contains("to fit the request"), "{rows}");
     }
 
     struct Refused;

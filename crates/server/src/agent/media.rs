@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Largest picture sent as it is; a bigger one is shrunk first.
-const IMAGE_MAX: u64 = 5 << 20;
+const IMAGE_MAX: u64 = 512 << 10;
 /// Longest edge of a picture or video frame after shrinking.
-const EDGE: u32 = 2048;
+const EDGE: u32 = 1568;
 /// Largest sound file sent as it is.
 const AUDIO_MAX: u64 = 15 << 20;
 /// Seconds of sound kept when a file has to be converted.
@@ -148,24 +148,39 @@ fn image(file: &Path, shown: &str, bytes: u64) -> Result<Media, String> {
         "webp" => Some("image/webp"),
         _ => None,
     };
+    let fits = dimensions(file).is_none_or(|(w, h)| w.max(h) <= EDGE);
     let (data, mime, converted) = match mime {
-        Some(mime) if bytes <= IMAGE_MAX && !too_wide(file) => {
+        Some(mime) if bytes <= IMAGE_MAX && fits => {
             (fs::read(file).map_err(|e| format!("{shown}: {e}"))?, mime, false)
         }
         _ => {
             let scratch = Scratch::new()?;
-            let out = scratch.file("image.jpg");
-            ffmpeg(
-                &["-i".as_ref(), file.as_os_str()],
-                &["-frames:v", "1", "-vf", &shrink(), "-q:v", "3"],
-                &out,
-                shown,
-            )?;
-            (fs::read(&out).map_err(|e| format!("{shown}: {e}"))?, "image/jpeg", true)
+            let filter = shrink();
+            let (out, made) = if transparent(file) {
+                (scratch.file("image.png"), "image/png")
+            } else {
+                (scratch.file("image.jpg"), "image/jpeg")
+            };
+            let mut options = vec!["-frames:v", "1", "-vf", filter.as_str()];
+            if made == "image/jpeg" {
+                options.extend(["-q:v", "3"]);
+            }
+            ffmpeg(&["-i".as_ref(), file.as_os_str()], &options, &out, shown)?;
+            let shrunk = fs::read(&out).map_err(|e| format!("{shown}: {e}"))?;
+            match mime {
+                Some(mime) if fits && shrunk.len() as u64 >= bytes => {
+                    (fs::read(file).map_err(|e| format!("{shown}: {e}"))?, mime, false)
+                }
+                _ => (shrunk, made, true),
+            }
         }
     };
     let how = if converted {
-        format!("shrunk to a JPEG of {}", size(data.len() as u64))
+        let kind = if mime == "image/png" { "PNG" } else { "JPEG" };
+        format!(
+            "shrunk to a {kind} of {} at most {EDGE} px a side; the full-size file stays at {shown}",
+            size(data.len() as u64)
+        )
     } else {
         "attached as it is".to_string()
     };
@@ -266,18 +281,49 @@ fn video(file: &Path, shown: &str, bytes: u64, frames: usize) -> Result<Media, S
     Ok(Media { note, parts })
 }
 
-fn too_wide(file: &Path) -> bool {
+fn dimensions(file: &Path) -> Option<(u32, u32)> {
     let out = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height"])
         .args(["-of", "csv=p=0"])
         .arg(file)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (w, h) = text.trim().split_once(',')?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+fn transparent(file: &Path) -> bool {
+    let probe = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt"])
+        .args(["-of", "csv=p=0"])
+        .arg(file)
         .output();
-    let Ok(out) = out else { return false };
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .split(',')
-        .filter_map(|n| n.trim().parse::<u32>().ok())
-        .any(|edge| edge > EDGE)
+    let Ok(probe) = probe else { return false };
+    let format = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+    let alpha = format == "pal8"
+        || ["yuva", "gbrap", "ya", "argb", "abgr"].iter().any(|p| format.starts_with(p))
+        || ["rgba", "bgra"].iter().any(|p| format.contains(p));
+    if !alpha {
+        return false;
+    }
+    let lowest = Command::new("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(file)
+        .args([
+            "-frames:v",
+            "1",
+            "-vf",
+            "format=rgba,alphaextract,signalstats,metadata=print:key=lavfi.signalstats.YMIN:file=-",
+        ])
+        .args(["-f", "null", "-"])
+        .output();
+    let Ok(lowest) = lowest else { return true };
+    String::from_utf8_lossy(&lowest.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("lavfi.signalstats.YMIN="))
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .is_none_or(|min| min < 255)
 }
 
 fn shrink() -> String {
@@ -466,6 +512,49 @@ mod tests {
         ));
         let m = open(&dir, json!({"path": "a.png"})).unwrap().unwrap();
         assert!(m.note.contains("shrunk to a JPEG"), "{}", m.note);
+    }
+
+    #[test]
+    fn a_big_photo_png_is_shrunk_to_the_edge_and_gets_smaller() {
+        if !have_ffmpeg() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(make(
+            dir.path(),
+            "big.png",
+            &["-f", "lavfi", "-i", "testsrc2=s=4000x3000", "-frames:v", "1"]
+        ));
+        let before = fs::metadata(dir.path().join("big.png")).unwrap().len();
+        let m = open(&dir, json!({"path": "big.png"})).unwrap().unwrap();
+        let url = m.parts[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/jpeg;base64,"), "{}", m.note);
+        let data = STANDARD.decode(url.split_once(',').unwrap().1).unwrap();
+        assert!((data.len() as u64) < before);
+        assert!(data.len() < 600 << 10, "{} bytes", data.len());
+        let out = dir.path().join("out.jpg");
+        fs::write(&out, &data).unwrap();
+        assert_eq!(dimensions(&out), Some((1568, 1176)));
+        assert!(m.note.contains("big.png"), "{}", m.note);
+    }
+
+    #[test]
+    fn a_picture_with_transparency_stays_a_png_when_shrunk() {
+        if !have_ffmpeg() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(make(
+            dir.path(),
+            "sprite.png",
+            &["-f", "lavfi", "-i", "testsrc2=s=3000x2000", "-frames:v", "1", "-vf", "format=rgba,colorchannelmixer=aa=0.5"]
+        ));
+        let m = open(&dir, json!({"path": "sprite.png"})).unwrap().unwrap();
+        let url = m.parts[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "{}", m.note);
+        let out = dir.path().join("out.png");
+        fs::write(&out, STANDARD.decode(url.split_once(',').unwrap().1).unwrap()).unwrap();
+        assert_eq!(dimensions(&out).map(|(w, _)| w), Some(1568));
     }
 
     #[test]
