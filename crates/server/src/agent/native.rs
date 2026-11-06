@@ -2198,13 +2198,13 @@ async fn complete(
             return Err("stopped".into());
         }
         if attempt >= RETRIES {
-            return Err(format!("{}: {failure}", model.url));
+            return Err(format!("{}: {failure}", agentbench_core::host_of(&model.url)));
         }
         attempt += 1;
         let wait = backoff(attempt);
         io.emit(Event::Warning(format!(
-            "{}: {failure}; retrying in {}s ({attempt}/{RETRIES})",
-            model.url,
+            "{}: {failure}, retrying in {}s ({attempt}/{RETRIES})",
+            agentbench_core::host_of(&model.url),
             wait.as_secs_f32().ceil()
         )));
         tokio::select! {
@@ -2264,7 +2264,7 @@ async fn attempt_once(
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        let e = format!("{status}: {}", text.trim());
+        let e = error_text(status, &text);
         return Err(if status.is_server_error() && status.as_u16() != 500 {
             Failure::Transient(e)
         } else {
@@ -2272,6 +2272,24 @@ async fn attempt_once(
         });
     }
     read_stream(resp.bytes_stream(), patience.stall, io).await
+}
+
+fn error_text(status: reqwest::StatusCode, body: &str) -> String {
+    let body = body.trim();
+    if !body.get(..body.len().min(200)).unwrap_or(body).to_ascii_lowercase().contains("<html") {
+        return format!("{status}: {body}");
+    }
+    let shown = status.to_string();
+    let signature = body
+        .split('<')
+        .filter_map(|chunk| chunk.split_once('>').map(|(_, text)| text.trim()))
+        .filter(|text| !text.is_empty() && *text != shown)
+        .last()
+        .filter(|text| text.len() <= 60);
+    match signature {
+        Some(server) => format!("{shown} ({server})"),
+        None => shown,
+    }
 }
 
 /// The cause chain of a request error, which reqwest keeps out of its own message.
@@ -4923,6 +4941,38 @@ for line in sys.stdin:
         let p = Patience::default();
         assert!(p.stall <= Duration::from_secs(60), "{p:?}");
         assert!(p.headers <= Duration::from_secs(120), "{p:?}");
+    }
+
+    #[test]
+    fn an_html_error_page_reads_as_one_line() {
+        let page = "<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>\r\n<center><h1>502 Bad Gateway</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n";
+        let line = error_text(reqwest::StatusCode::BAD_GATEWAY, page);
+        assert_eq!(line, "502 Bad Gateway (nginx)");
+        let json = r#"{"error":{"message":"bad key"}}"#;
+        assert_eq!(error_text(reqwest::StatusCode::UNAUTHORIZED, json), format!("401 Unauthorized: {json}"));
+    }
+
+    #[tokio::test]
+    async fn a_bad_gateway_page_is_a_short_retry_warning() {
+        let page = "<html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center><hr><center>nginx</center></body></html>";
+        let (url, _) = crate::titles::fake::server(vec![
+            (502, page.into()),
+            (200, format!("data: {}\n\ndata: [DONE]\n\n", say("ok"))),
+        ]);
+        let host = agentbench_core::host_of(&url);
+        let dir = tempfile::tempdir().unwrap();
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        let warnings: Vec<String> = io
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Warning(w) => Some(w),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warnings, vec![format!("{host}: 502 Bad Gateway (nginx), retrying in 1s (1/{RETRIES})")]);
     }
 
     #[tokio::test]
