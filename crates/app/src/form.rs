@@ -112,6 +112,9 @@ fn own_clipboard_menu(response: Response) -> Response {
         ] {
             if ui.button(legend(label)).clicked() {
                 response.request_focus();
+                if nothing_selected(ui.ctx(), response.id) {
+                    select_all(ui.ctx(), response.id);
+                }
                 ui.ctx().send_viewport_cmd(command);
                 ui.close();
             }
@@ -139,4 +142,10 @@ fn select_all(ctx: &egui::Context, id: egui::Id) {
     let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
     state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(usize::MAX))));
     state.store(ctx, id);
+}
+
+fn nothing_selected(ctx: &egui::Context, id: egui::Id) -> bool {
+    egui::text_edit::TextEditState::load(ctx, id)
+        .and_then(|s| s.cursor.char_range())
+        .is_none_or(|r| r.is_empty())
 }
