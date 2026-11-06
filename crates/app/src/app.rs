@@ -23,6 +23,7 @@ mod onboarding;
 mod settings;
 mod side;
 mod transcript;
+mod viewer;
 mod widgets;
 
 use self::settings::{model_input, pairing_of};
@@ -614,6 +615,7 @@ pub struct App {
     edit_tags: Option<(Id, String)>,
     notes_view: Option<(Id, Vec<agentbench_core::NoteHistory>)>,
     rename_chat: Option<(SessionId, String)>,
+    viewer: Option<viewer::Viewer>,
     only_busy: bool,
     project: Option<Id>,
     session: Option<SessionId>,
@@ -756,6 +758,7 @@ impl App {
             edit_tags: None,
             notes_view: None,
             rename_chat: None,
+            viewer: None,
             only_busy: false,
             project: None,
             session: None,

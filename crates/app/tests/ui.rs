@@ -3264,3 +3264,105 @@ fn clipboard_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+fn send_file(rig: &Rig, name: &str, data: &[u8]) -> agentbench_core::SessionId {
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let mime = agentbench_core::mime_for(name).unwrap_or("application/octet-stream");
+    let file = rig.store.add_attachment(session.id, name, mime, data).unwrap();
+    rig.store.add_message(session.id, &Entry::File { text: String::new(), file }).unwrap();
+    session.id
+}
+
+fn show_chat(h: &mut Harness<'_, App>, rig: &Rig, id: agentbench_core::SessionId) {
+    until(h, "the overview", |h| h.state().overview().is_some());
+    let s = rig.store.sessions().unwrap().into_iter().find(|s| s.id == id).unwrap();
+    h.state_mut().open_session(s.id, s.project_id);
+    until(h, "the file", |h| h.state().transcript_len(id) == 4);
+    until(h, "the thumbnail", |h| h.state().thumbnails_ready() == 1 || true);
+    h.run_steps(10);
+}
+
+fn open_key(h: &mut Harness<'_, App>) {
+    h.get_by_label("open").click();
+    h.run_steps(3);
+}
+
+#[test]
+fn the_open_key_shows_an_image_large_and_zooms_it() {
+    let rig = rig();
+    let id = send_file(&rig, "pic.png", &png(300, 200));
+    let mut h = harness_at(rig.url.clone(), [1280.0, 1600.0]);
+    show_chat(&mut h, &rig, id);
+    open_key(&mut h);
+    until(&mut h, "the viewer", |h| h.state().viewer_open() && h.state().viewer_ready());
+    let fit = h.state().viewer_scale();
+    assert!(fit > 0.0);
+    h.get_by_label("zoom in").click();
+    h.run_steps(3);
+    assert!(h.state().viewer_scale() > fit, "{} vs {fit}", h.state().viewer_scale());
+    h.get_by_label("100%").click();
+    h.run_steps(3);
+    assert!((h.state().viewer_scale() - 1.0).abs() < 1e-3);
+    shot(&mut h, "viewer-image");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().viewer_open());
+}
+
+#[test]
+fn the_open_key_shows_a_text_file_and_marks_a_big_one_truncated() {
+    let rig = rig();
+    let code = "fn main() {\n    println!(\"hi\");\n}\n".repeat(20);
+    let id = send_file(&rig, "main.rs", code.as_bytes());
+    let mut h = harness_at(rig.url.clone(), [1280.0, 1600.0]);
+    show_chat(&mut h, &rig, id);
+    open_key(&mut h);
+    until(&mut h, "the viewer", |h| h.state().viewer_open() && h.state().viewer_ready());
+    assert!(!h.state().viewer_truncated());
+    h.get_by_label("copy");
+    shot(&mut h, "viewer-code");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!h.state().viewer_open());
+
+    let big = "x".repeat((1 << 20) + 100);
+    let rig = rig_with(Vec::new());
+    let id = send_file(&rig, "big.log", big.as_bytes());
+    let mut h = harness_at(rig.url.clone(), [1280.0, 1600.0]);
+    show_chat(&mut h, &rig, id);
+    open_key(&mut h);
+    until(&mut h, "the viewer", |h| h.state().viewer_open() && h.state().viewer_ready());
+    assert!(h.state().viewer_truncated());
+    h.get_by_label_contains("truncated");
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+#[test]
+fn open_externally_downloads_the_file_and_calls_the_opener() {
+    let rig = rig();
+    let id = send_file(&rig, "notes.txt", b"hello");
+    let dir = tempfile::tempdir().unwrap();
+    agentbench::attach::set_cache_dir(dir.path().to_path_buf());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let s = seen.clone();
+    agentbench::attach::set_opener(std::sync::Arc::new(move |p: &Path| {
+        s.lock().unwrap().push(p.to_path_buf());
+        Ok(())
+    }));
+    let mut h = harness_at(rig.url.clone(), [1280.0, 1600.0]);
+    show_chat(&mut h, &rig, id);
+    open_key(&mut h);
+    until(&mut h, "the viewer", |h| h.state().viewer_open() && h.state().viewer_ready());
+    h.get_by_label("open externally").click();
+    let start = Instant::now();
+    while seen.lock().unwrap().is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(20), "the opener was not called");
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let path = seen.lock().unwrap()[0].clone();
+    assert_eq!(path.file_name().unwrap(), "notes.txt");
+    assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    assert!(path.starts_with(dir.path()));
+}

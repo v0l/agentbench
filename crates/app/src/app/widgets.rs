@@ -417,3 +417,9 @@ pub(super) fn read_link(ui: &mut Ui, reading: bool) -> egui::Response {
     }
     r.on_hover_text("read this reply aloud with the server's voice")
 }
+
+pub(super) fn press(ui: &mut Ui, label: &str, enabled: bool, key: Key) -> bool {
+    let r = ui.add(key.enabled(enabled));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    r.clicked()
+}

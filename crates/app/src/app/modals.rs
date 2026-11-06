@@ -17,6 +17,7 @@ impl App {
         self.scan_modal(ctx);
         self.help_modal(ctx);
         self.rename_chat_modal(ctx);
+        self.viewer_modal(ctx);
     }
 
     /// The camera, looking for a pairing code. Pairs and closes itself when it reads one.

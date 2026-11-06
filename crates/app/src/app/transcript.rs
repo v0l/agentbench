@@ -291,22 +291,21 @@ impl App {
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                let mut act = None;
+                let mut save = false;
+                let mut view = false;
                 if cfg!(not(target_arch = "wasm32")) {
-                    if ui.add(Key::new("save").outline(VALUE)).clicked() {
-                        act = Some(false);
-                    }
-                    if cfg!(target_os = "android")
-                        && ui.add(Key::new("open").outline(VALUE)).clicked()
-                    {
-                        act = Some(true);
-                    }
+                    save = press(ui, "save", true, Key::new("save").outline(VALUE));
+                    view = press(ui, "open", true, Key::new("open").outline(VALUE));
                 }
-                if let (Some(view), Some(c)) = (act, &self.client) {
+                if view {
+                    self.open_viewer(ui.ctx(), session, file);
+                }
+                if let (true, Some(c)) = (save, &self.client) {
                     let (tx, ctx) = (self.tray.sender(), ui.ctx().clone());
                     let (name, mime) = (file.name.clone(), file.mime.clone());
+                    let key = (session, file.id);
                     c.attachment(session, file.id, move |bytes| match bytes {
-                        Some(data) => crate::attach::save(tx, ctx, name, mime, data, view),
+                        Some(data) => crate::attach::save_keyed(tx, ctx, key, name, mime, data),
                         None => {
                             let _ = tx.send(crate::attach::Arrived::Failed(format!(
                                 "could not download {name}"
