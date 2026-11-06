@@ -3142,6 +3142,7 @@ fn right_click(h: &mut Harness<'_, App>, x: f32, y: f32) {
 
 #[test]
 fn the_paste_menu_puts_the_system_clipboard_into_the_composer() {
+    let _one = clipboard_lock();
     let rig = rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
@@ -3160,4 +3161,106 @@ fn the_paste_menu_puts_the_system_clipboard_into_the_composer() {
     h.run_steps(4);
     agentbench::system::stand_in_clipboard(None);
     assert_eq!(h.state().draft_of(session.id), "see from the phone");
+}
+
+#[test]
+fn text_from_the_keyboard_and_a_paste_event_both_land_in_the_composer() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(2);
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Ime(egui::ImeEvent::Enabled));
+    h.event(egui::Event::Ime(egui::ImeEvent::Commit("committed ".into())));
+    h.run_steps(2);
+    h.event(egui::Event::Text("typed ".into()));
+    h.run_steps(2);
+    h.event(egui::Event::Paste("pasted".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().draft_of(session.id), "committed typed pasted");
+}
+
+#[test]
+fn the_paste_menu_fills_a_settings_field() {
+    let _one = clipboard_lock();
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("settings").click();
+    h.run_steps(3);
+    agentbench::system::stand_in_clipboard(Some("https://pasted.example.com"));
+    h.get_all_by_label("https://agentbench.example.com").last().unwrap().click_secondary();
+    h.run_steps(2);
+    h.get_by_label("PASTE").click();
+    h.run_steps(4);
+    agentbench::system::stand_in_clipboard(None);
+    assert_eq!(
+        h.state().settings_external(),
+        Some("https://pasted.example.com".to_string())
+    );
+}
+
+#[test]
+fn the_paste_menu_fills_a_question_answer_field() {
+    let _one = clipboard_lock();
+    let rig = rig_with(vec![Box::new(Planner)]);
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    c.add_session(&agentbench_core::NewSession {
+        project_id: project,
+        agent: "planner".into(),
+        prompt: Some("plan".into()),
+        ..Default::default()
+    });
+    until(&mut h, "the waiting session", |h| {
+        h.state().overview().is_some_and(|o| {
+            o.sessions.iter().any(|s| {
+                s.agent == "planner" && s.status == agentbench_core::SessionStatus::Waiting
+            })
+        })
+    });
+    let s = h
+        .state()
+        .overview()
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|s| s.agent == "planner")
+        .unwrap()
+        .clone();
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the questions", |h| h.state().transcript_len(s.id) == 2);
+    h.get_by_label("Apache-2.0").click();
+    h.get_by_label("linux").click();
+    agentbench::system::stand_in_clipboard(Some("pasted answer"));
+    h.query_all_by_role(egui::accesskit::Role::TextInput).last().unwrap().click_secondary();
+    h.run_steps(2);
+    h.get_by_label("PASTE").click();
+    h.run_steps(4);
+    agentbench::system::stand_in_clipboard(None);
+    h.get_by_label("send answers").click();
+    h.run_steps(5);
+    until(&mut h, "the reply", |h| h.state().transcript_len(s.id) >= 3);
+    let msgs = rig.store.messages(s.id, 0).unwrap();
+    assert!(
+        msgs.iter().any(|m| matches!(
+            &m.entry,
+            Entry::Questions { answers: Some(a), .. } if a.last().map(String::as_str) == Some("pasted answer")
+        )),
+        "{msgs:?}"
+    );
+}
+
+fn clipboard_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

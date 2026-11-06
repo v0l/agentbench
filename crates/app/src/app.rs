@@ -1134,6 +1134,10 @@ impl App {
         }
     }
 
+    pub fn settings_external(&self) -> Option<String> {
+        self.settings.as_ref().map(|st| st.external.clone())
+    }
+
     pub fn settings_set_external(&mut self, external: &str) {
         if let Some(st) = &mut self.settings {
             st.external = external.into();
