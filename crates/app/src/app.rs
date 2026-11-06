@@ -1012,6 +1012,8 @@ impl App {
         if !cfg!(target_os = "android") {
             return;
         }
+        crate::system::want_text_input(ctx.egui_wants_keyboard_input());
+        crate::system::feed_ime(raw);
         self.keyboard = crate::system::keyboard_height(ctx);
         let bottom = self.keyboard.max(crate::system::bottom_inset(ctx));
         raw.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {

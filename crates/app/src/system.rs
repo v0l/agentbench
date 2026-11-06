@@ -312,3 +312,112 @@ fn set_system_clipboard_text(text: &str) {
 
 #[cfg(not(target_os = "android"))]
 fn set_system_clipboard_text(_text: &str) {}
+
+#[cfg(target_os = "android")]
+pub fn want_text_input(on: bool) {
+    use jni::{jni_sig, jni_str};
+    static LAST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if LAST.swap(on, std::sync::atomic::Ordering::Relaxed) == on {
+        return;
+    }
+    let result = crate::voice::android::with_activity(|env, activity| {
+        env.call_method(activity, jni_str!("wantTextInput"), jni_sig!("(Z)V"), &[on.into()])?;
+        Ok(())
+    });
+    if let Err(e) = result {
+        log::warn!("text input: {e}");
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn want_text_input(_on: bool) {}
+
+#[cfg(target_os = "android")]
+fn take_ime_lines() -> Vec<String> {
+    use jni::{jni_sig, jni_str};
+    let mut lines = Vec::new();
+    loop {
+        let line = crate::voice::android::with_activity(|env, activity| {
+            let got = env
+                .call_method(
+                    activity,
+                    jni_str!("takeImeLine"),
+                    jni_sig!("()Ljava/lang/String;"),
+                    &[],
+                )?
+                .l()?;
+            if got.is_null() {
+                return Ok(None);
+            }
+            let got = env.cast_local::<jni::objects::JString>(got)?;
+            Ok(Some(got.try_to_string(env)?))
+        })
+        .ok()
+        .flatten();
+        match line {
+            Some(line) => lines.push(line),
+            None => return lines,
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn take_ime_lines() -> Vec<String> {
+    Vec::new()
+}
+
+pub fn feed_ime(raw: &mut egui::RawInput) {
+    for line in take_ime_lines() {
+        raw.events.extend(ime_events(&line));
+    }
+}
+
+pub fn ime_events(line: &str) -> Vec<egui::Event> {
+    let Some((kind, rest)) = line.split_once(':') else {
+        return Vec::new();
+    };
+    match kind {
+        "preedit" => vec![egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: rest.to_string(),
+            active_range_chars: None,
+        })],
+        "commit" => vec![egui::Event::Ime(egui::ImeEvent::Commit(rest.to_string()))],
+        "delete" => {
+            let count = rest.parse::<usize>().unwrap_or(0).min(64);
+            (0..count)
+                .flat_map(|_| {
+                    [true, false].map(|pressed| egui::Event::Key {
+                        key: egui::Key::Backspace,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    })
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_clipboard_chip_commit_from_the_keyboard_becomes_a_commit_event() {
+        assert_eq!(
+            ime_events("commit:chip text 42"),
+            vec![egui::Event::Ime(egui::ImeEvent::Commit("chip text 42".into()))]
+        );
+    }
+
+    #[test]
+    fn text_with_a_colon_keeps_it_and_a_delete_is_that_many_backspaces() {
+        assert_eq!(
+            ime_events("commit:a:b"),
+            vec![egui::Event::Ime(egui::ImeEvent::Commit("a:b".into()))]
+        );
+        assert_eq!(ime_events("delete:2").len(), 4);
+    }
+}

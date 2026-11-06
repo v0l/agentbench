@@ -8,11 +8,69 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.content.Context
+import android.text.InputType
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /** One file the user picked. `data` is null when it could not be read or is too big. */
 class Picked(val name: String, val data: ByteArray?)
+
+/** What the keyboard types into: NativeActivity gives it no editor, so Gboard would show no
+ *  clipboard chip and send only key presses. Its commits and deletes are queued as lines for
+ *  the Rust side: `commit:text`, `preedit:text`, `delete:count`. */
+class ImeView(context: Context, private val lines: ConcurrentLinkedQueue<String>) : View(context) {
+    init {
+        isFocusable = true
+        isFocusableInTouchMode = true
+    }
+
+    override fun onCheckIsTextEditor() = true
+
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+            InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        return object : BaseInputConnection(this, false) {
+            private var composing = ""
+
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                composing = ""
+                if (!text.isNullOrEmpty()) lines.add("commit:$text")
+                return true
+            }
+
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                composing = text?.toString() ?: ""
+                lines.add("preedit:$composing")
+                return true
+            }
+
+            override fun finishComposingText(): Boolean {
+                if (composing.isNotEmpty()) lines.add("commit:$composing")
+                composing = ""
+                return true
+            }
+
+            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                if (beforeLength > 0) lines.add("delete:$beforeLength")
+                return true
+            }
+
+            override fun sendKeyEvent(event: KeyEvent): Boolean {
+                this@ImeView.rootView.dispatchKeyEvent(event)
+                return true
+            }
+        }
+    }
+}
 
 /** The app's window. It keeps the newest intent, so tapping a notification while the app is open
  *  tells the Rust side which chat to show. Plain NativeActivity ignores new intents. It also
@@ -20,6 +78,32 @@ class Picked(val name: String, val data: ByteArray?)
 class MainActivity : NativeActivity() {
     private val picked = ConcurrentLinkedQueue<Picked>()
     @Volatile private var reading = 0
+    private val imeLines = ConcurrentLinkedQueue<String>()
+    private var imeView: ImeView? = null
+
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        val view = ImeView(this, imeLines)
+        addContentView(view, ViewGroup.LayoutParams(1, 1))
+        imeView = view
+    }
+
+    fun takeImeLine(): String? = imeLines.poll()
+
+    fun wantTextInput(on: Boolean) {
+        runOnUiThread {
+            val view = imeView ?: return@runOnUiThread
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            if (on) {
+                view.requestFocus()
+                imm.restartInput(view)
+                imm.showSoftInput(view, 0)
+            } else {
+                imm.hideSoftInputFromWindow(view.windowToken, 0)
+                view.clearFocus()
+            }
+        }
+    }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
