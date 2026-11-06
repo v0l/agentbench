@@ -3124,3 +3124,40 @@ fn a_session_with_no_plan_says_so_in_its_details() {
     h.run_steps(3);
     h.get_by_label_contains("no plan after 15");
 }
+
+fn right_click(h: &mut Harness<'_, App>, x: f32, y: f32) {
+    let pos = egui::pos2(x, y);
+    h.event(egui::Event::PointerMoved(pos));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+}
+
+#[test]
+fn the_paste_menu_puts_the_system_clipboard_into_the_composer() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(2);
+    agentbench::system::stand_in_clipboard(Some("from the phone"));
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Text("see ".into()));
+    h.run_steps(2);
+    right_click(&mut h, 800.0, 735.0);
+    h.run_steps(2);
+    h.get_by_label("PASTE").click();
+    h.run_steps(4);
+    agentbench::system::stand_in_clipboard(None);
+    assert_eq!(h.state().draft_of(session.id), "see from the phone");
+}

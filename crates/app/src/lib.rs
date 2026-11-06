@@ -6,7 +6,7 @@ mod form;
 mod notify;
 mod picker;
 pub mod scan;
-mod system;
+pub mod system;
 pub mod voice;
 
 pub use app::{App, LocalServer, status_counts, waiting_on_you, window_title};

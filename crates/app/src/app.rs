@@ -2654,6 +2654,7 @@ impl App {
 
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        crate::system::deliver_paste(&ctx);
         self.tick(&ctx);
         let narrow = ctx.content_rect().width() < 720.0;
         self.narrow = narrow;
@@ -2728,6 +2729,7 @@ impl App {
         {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
+        crate::system::copy_what_egui_copied(&ctx);
     }
 }
 

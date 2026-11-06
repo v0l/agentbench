@@ -53,7 +53,7 @@ fn named(ui: &mut Ui, edit: egui::TextEdit<'_>, name: &str) -> Response {
     if !name.is_empty() {
         ui.ctx().accesskit_node_builder(response.id, |node| node.set_label(name));
     }
-    clipboard_menu(response)
+    own_clipboard_menu(response)
 }
 
 fn field_of(
@@ -102,4 +102,41 @@ fn field_of(
             }
         })
         .inner
+}
+
+fn own_clipboard_menu(response: Response) -> Response {
+    response.context_menu(|ui| {
+        for (label, command) in [
+            ("CUT", egui::ViewportCommand::RequestCut),
+            ("COPY", egui::ViewportCommand::RequestCopy),
+        ] {
+            if ui.button(legend(label)).clicked() {
+                response.request_focus();
+                ui.ctx().send_viewport_cmd(command);
+                ui.close();
+            }
+        }
+        if ui.button(legend("PASTE")).clicked() {
+            response.request_focus();
+            if crate::system::owns_clipboard() {
+                crate::system::queue_paste(ui.ctx());
+            } else {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            }
+            ui.close();
+        }
+        if ui.button(legend("SELECT ALL")).clicked() {
+            response.request_focus();
+            select_all(ui.ctx(), response.id);
+            ui.close();
+        }
+    });
+    response
+}
+
+fn select_all(ctx: &egui::Context, id: egui::Id) {
+    use egui::text::{CCursor, CCursorRange};
+    let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+    state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(usize::MAX))));
+    state.store(ctx, id);
 }
