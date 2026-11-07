@@ -360,10 +360,10 @@ pub struct ImeEdit {
     pub insert: String,
 }
 
-pub fn ime_edit(old: &ImeText, new: &str) -> Option<ImeEdit> {
+pub fn ime_edit(old: &ImeText, new: &ImeText) -> Option<ImeEdit> {
     let a: Vec<char> = old.text.chars().collect();
-    let b: Vec<char> = new.chars().collect();
-    let cap = old.start.min(old.end).min(a.len()).min(b.len());
+    let b: Vec<char> = new.text.chars().collect();
+    let cap = old.start.min(old.end).min(new.start).min(new.end).min(a.len()).min(b.len());
     let mut prefix = 0;
     while prefix < cap && a[prefix] == b[prefix] {
         prefix += 1;
@@ -513,7 +513,7 @@ fn ime_apply(ctx: &egui::Context, ime: &mut Ime) {
         None => ime.keyboard.clone().unwrap_or_default(),
     };
     ime.keyboard = Some(new.clone());
-    let edit = ime_edit(&base, &new.text);
+    let edit = ime_edit(&base, &new);
     let Some((id, _)) = ime.field else {
         if let Some(edit) = edit {
             ctx.input_mut(|i| i.events.extend(ime_blind_events(&edit)));
@@ -538,22 +538,22 @@ fn ime_apply(ctx: &egui::Context, ime: &mut Ime) {
 /// Tell the keyboard what the focused field holds when that is not what it typed: a field just
 /// focused, a draft sent or recalled, a tap that moved the cursor.
 pub fn ime_after_frame(ctx: &egui::Context) {
-    let now = with_ime(ctx, |ime| {
-        let Some((id, text)) = ime.drawn.take() else {
-            ime.field = None;
-            return None;
-        };
-        let len = text.chars().count();
-        let (start, end) = selection(ctx, id, len);
-        let now = ImeText { text, start, end };
+    let Some((id, text)) = with_ime(ctx, |ime| ime.drawn.take()) else {
+        with_ime(ctx, |ime| ime.field = None);
+        return;
+    };
+    let len = text.chars().count();
+    let (start, end) = selection(ctx, id, len);
+    let now = ImeText { text, start, end };
+    let changed = with_ime(ctx, |ime| {
         ime.field = Some((id, now.clone()));
         if ime.select.is_some() || ime.keyboard.as_ref() == Some(&now) {
-            return None;
+            return false;
         }
         ime.keyboard = Some(now.clone());
-        Some(now)
+        true
     });
-    if let Some(now) = now {
+    if changed {
         sync_keyboard(&now);
     }
 }
@@ -652,39 +652,39 @@ mod tests {
 
     #[test]
     fn a_clipboard_chip_commit_inserts_its_text_at_the_cursor() {
-        let e = ime_edit(&at("see ", 4), "see chip text 42");
+        let e = ime_edit(&at("see ", 4), &at("see chip text 42", 16));
         assert_eq!(e, edit(4, 4, "chip text 42"));
         assert_eq!(ime_events(&e.unwrap()), vec![egui::Event::Text("chip text 42".into())]);
     }
 
     #[test]
     fn delete_surrounding_text_before_the_cursor_is_one_backspace_over_that_range() {
-        let e = ime_edit(&at("hello", 5), "hel").unwrap();
+        let e = ime_edit(&at("hello", 5), &at("hel", 3)).unwrap();
         assert_eq!(e, ImeEdit { start: 3, end: 5, insert: String::new() });
         assert_eq!(ime_events(&e), key(egui::Key::Backspace).to_vec());
     }
 
     #[test]
     fn delete_in_code_points_removes_a_whole_emoji() {
-        assert_eq!(ime_edit(&at("ok 👍", 4), "ok "), edit(3, 4, ""));
+        assert_eq!(ime_edit(&at("ok 👍", 4), &at("ok ", 3)), edit(3, 4, ""));
     }
 
     #[test]
     fn the_del_key_in_the_middle_deletes_the_character_before_the_cursor() {
-        assert_eq!(ime_edit(&at("hello", 3), "helo"), edit(2, 3, ""));
-        assert_eq!(ime_edit(&at("hello", 3), "hllo"), edit(1, 2, ""));
+        assert_eq!(ime_edit(&at("hello", 3), &at("helo", 2)), edit(2, 3, ""));
+        assert_eq!(ime_edit(&at("hello", 2), &at("hllo", 1)), edit(1, 2, ""));
     }
 
     #[test]
     fn forward_delete_removes_the_character_after_the_cursor() {
-        assert_eq!(ime_edit(&at("abcc", 2), "abc"), edit(2, 3, ""));
+        assert_eq!(ime_edit(&at("abcc", 2), &at("abc", 2)), edit(2, 3, ""));
     }
 
     #[test]
     fn backspace_while_composing_shrinks_the_word_one_letter_at_a_time() {
         let mut field = at("say hel", 7);
         for (next, cursor) in [("say he", 6), ("say h", 5), ("say ", 4)] {
-            let e = ime_edit(&field, next).unwrap();
+            let e = ime_edit(&field, &at(next, cursor)).unwrap();
             assert_eq!(e, ImeEdit { start: cursor, end: cursor + 1, insert: String::new() });
             field = at(next, cursor);
         }
@@ -695,7 +695,7 @@ mod tests {
         let mut field = at("abcdef", 6);
         while !field.text.is_empty() {
             let shorter: String = field.text.chars().take(field.end - 1).collect();
-            let e = ime_edit(&field, &shorter).unwrap();
+            let e = ime_edit(&field, &at(&shorter, field.end - 1)).unwrap();
             assert_eq!((e.start, e.end), (field.end - 1, field.end));
             field = at(&shorter, field.end - 1);
         }
@@ -704,18 +704,18 @@ mod tests {
     #[test]
     fn deleting_a_selection_replaces_exactly_the_selected_range() {
         let selected = ImeText { text: "one two three".into(), start: 4, end: 7 };
-        assert_eq!(ime_edit(&selected, "one  three"), edit(4, 7, ""));
-        assert_eq!(ime_edit(&selected, "one 2 three"), edit(4, 7, "2"));
+        assert_eq!(ime_edit(&selected, &at("one  three", 4)), edit(4, 7, ""));
+        assert_eq!(ime_edit(&selected, &at("one 2 three", 5)), edit(4, 7, "2"));
     }
 
     #[test]
     fn typing_a_letter_that_repeats_the_next_one_inserts_at_the_cursor() {
-        assert_eq!(ime_edit(&at("hell", 3), "helll"), edit(3, 3, "l"));
+        assert_eq!(ime_edit(&at("hell", 3), &at("helll", 4)), edit(3, 3, "l"));
     }
 
     #[test]
     fn an_autocorrect_swaps_only_the_letters_that_changed() {
-        assert_eq!(ime_edit(&at("teh ", 4), "the "), edit(1, 3, "he"));
+        assert_eq!(ime_edit(&at("teh ", 4), &at("the ", 4)), edit(1, 3, "he"));
     }
 
     #[test]
@@ -729,7 +729,8 @@ mod tests {
 
     #[test]
     fn no_change_and_a_cursor_move_are_not_edits() {
-        assert_eq!(ime_edit(&at("same", 2), "same"), None);
+        assert_eq!(ime_edit(&at("same", 2), &at("same", 2)), None);
+        assert_eq!(ime_edit(&at("same", 2), &at("same", 4)), None);
     }
 
     #[test]
