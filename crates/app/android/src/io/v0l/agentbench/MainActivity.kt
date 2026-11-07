@@ -9,24 +9,35 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.content.Context
+import android.text.Editable
 import android.text.InputType
+import android.text.Selection
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedText
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicReference
 
 /** One file the user picked. `data` is null when it could not be read or is too big. */
 class Picked(val name: String, val data: ByteArray?)
 
 /** What the keyboard types into: NativeActivity gives it no editor, so Gboard would show no
- *  clipboard chip and send only key presses. Its commits and deletes are queued as lines for
- *  the Rust side: `commit:text`, `preedit:text`, `delete:count`. */
-class ImeView(context: Context, private val lines: ConcurrentLinkedQueue<String>) : View(context) {
+ *  clipboard chip and send only key presses. It holds a copy of the focused field's text, which
+ *  every keyboard edit changes; after each one the whole text and selection, `start end\ntext`
+ *  in UTF-16 units converted to characters, is left for the Rust side to take, and `wake` is
+ *  called so it draws a frame. The Rust side puts the field's own text back with `sync`. */
+class ImeView(context: Context, private val wake: () -> Unit) : View(context) {
+    private val text: Editable = Editable.Factory.getInstance().newEditable("")
+    private val pending = AtomicReference<String?>(null)
+    private var batch = 0
+
     init {
         isFocusable = true
         isFocusableInTouchMode = true
@@ -34,38 +45,159 @@ class ImeView(context: Context, private val lines: ConcurrentLinkedQueue<String>
 
     override fun onCheckIsTextEditor() = true
 
+    fun take(): String? = pending.getAndSet(null)
+
+    private fun imm() = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+
+    private fun chars(at: Int): Int = Character.codePointCount(text, 0, at.coerceIn(0, text.length))
+
+    private fun units(chars: Int): Int {
+        val count = Character.codePointCount(text, 0, text.length)
+        return Character.offsetByCodePoints(text, 0, chars.coerceIn(0, count))
+    }
+
+    private fun report() {
+        val start = Selection.getSelectionStart(text).coerceAtLeast(0)
+        val end = Selection.getSelectionEnd(text).coerceAtLeast(0)
+        val a = minOf(start, end)
+        val b = maxOf(start, end)
+        imm().updateSelection(this, a, b, BaseInputConnection.getComposingSpanStart(text),
+            BaseInputConnection.getComposingSpanEnd(text))
+        pending.set("${chars(a)} ${chars(b)}\n$text")
+        wake()
+    }
+
+    private fun changed() {
+        if (batch == 0) report()
+    }
+
+    fun sync(line: String) {
+        if (pending.get() != null) return
+        val head = line.substringBefore('\n')
+        val body = line.substringAfter('\n', "")
+        val start = head.substringBefore(' ').toIntOrNull() ?: return
+        val end = head.substringAfter(' ').toIntOrNull() ?: return
+        val same = text.toString() == body
+        if (!same) {
+            BaseInputConnection.removeComposingSpans(text)
+            text.replace(0, text.length, body)
+        }
+        Selection.setSelection(text, units(start), units(end))
+        if (same) {
+            imm().updateSelection(this, units(start), units(end), -1, -1)
+        } else {
+            imm().restartInput(this)
+        }
+    }
+
+    private fun deleteSelectionOr(before: Int, after: Int) {
+        val start = Selection.getSelectionStart(text).coerceAtLeast(0)
+        val end = Selection.getSelectionEnd(text).coerceAtLeast(0)
+        val a = minOf(start, end)
+        val b = maxOf(start, end)
+        if (a != b) {
+            text.delete(a, b)
+        } else if (before > 0 && a > 0) {
+            text.delete(Character.offsetByCodePoints(text, a, -1), a)
+        } else if (after > 0 && b < text.length) {
+            text.delete(b, Character.offsetByCodePoints(text, b, 1))
+        }
+    }
+
+    private fun insert(s: String) {
+        val start = Selection.getSelectionStart(text).coerceAtLeast(0)
+        val end = Selection.getSelectionEnd(text).coerceAtLeast(0)
+        text.replace(minOf(start, end), maxOf(start, end), s)
+    }
+
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI
-        return object : BaseInputConnection(this, false) {
-            private var composing = ""
+        outAttrs.initialSelStart = Selection.getSelectionStart(text)
+        outAttrs.initialSelEnd = Selection.getSelectionEnd(text)
+        if (Build.VERSION.SDK_INT >= 30) outAttrs.setInitialSurroundingText(text)
+        return object : BaseInputConnection(this, true) {
+            override fun getEditable(): Editable = text
+
+            override fun beginBatchEdit(): Boolean {
+                batch += 1
+                return true
+            }
+
+            override fun endBatchEdit(): Boolean {
+                if (batch > 0) batch -= 1
+                if (batch == 0) report()
+                return batch > 0
+            }
 
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                composing = ""
-                if (!text.isNullOrEmpty()) lines.add("commit:$text")
+                super.commitText(text, newCursorPosition)
+                changed()
                 return true
             }
 
             override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                composing = text?.toString() ?: ""
-                lines.add("preedit:$composing")
+                super.setComposingText(text, newCursorPosition)
+                changed()
+                return true
+            }
+
+            override fun setComposingRegion(start: Int, end: Int): Boolean {
+                super.setComposingRegion(start, end)
+                changed()
                 return true
             }
 
             override fun finishComposingText(): Boolean {
-                if (composing.isNotEmpty()) lines.add("commit:$composing")
-                composing = ""
+                super.finishComposingText()
+                changed()
                 return true
             }
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-                if (beforeLength > 0) lines.add("delete:$beforeLength")
+                super.deleteSurroundingText(beforeLength, afterLength)
+                changed()
                 return true
             }
 
+            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+                super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+                changed()
+                return true
+            }
+
+            override fun setSelection(start: Int, end: Int): Boolean {
+                super.setSelection(start, end)
+                changed()
+                return true
+            }
+
+            override fun getExtractedText(request: ExtractedTextRequest?, flags: Int): ExtractedText {
+                return ExtractedText().also {
+                    it.text = text.toString()
+                    it.startOffset = 0
+                    it.partialStartOffset = -1
+                    it.partialEndOffset = -1
+                    it.selectionStart = Selection.getSelectionStart(text)
+                    it.selectionEnd = Selection.getSelectionEnd(text)
+                }
+            }
+
             override fun sendKeyEvent(event: KeyEvent): Boolean {
-                this@ImeView.rootView.dispatchKeyEvent(event)
+                if (event.action != KeyEvent.ACTION_DOWN) return true
+                removeComposingSpans(text)
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_DEL -> deleteSelectionOr(1, 0)
+                    KeyEvent.KEYCODE_FORWARD_DEL -> deleteSelectionOr(0, 1)
+                    KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> insert("\n")
+                    else -> {
+                        val c = event.unicodeChar
+                        if (c == 0) return this@ImeView.rootView.dispatchKeyEvent(event)
+                        insert(String(Character.toChars(c)))
+                    }
+                }
+                changed()
                 return true
             }
         }
@@ -78,17 +210,28 @@ class ImeView(context: Context, private val lines: ConcurrentLinkedQueue<String>
 class MainActivity : NativeActivity() {
     private val picked = ConcurrentLinkedQueue<Picked>()
     @Volatile private var reading = 0
-    private val imeLines = ConcurrentLinkedQueue<String>()
-    private var imeView: ImeView? = null
+    @Volatile private var imeView: ImeView? = null
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
-        val view = ImeView(this, imeLines)
+        val view = ImeView(this) {
+            try {
+                imeWake()
+            } catch (e: UnsatisfiedLinkError) {
+            }
+        }
         addContentView(view, ViewGroup.LayoutParams(1, 1))
         imeView = view
     }
 
-    fun takeImeLine(): String? = imeLines.poll()
+    /** Registered from the Rust side once its frame loop runs. */
+    external fun imeWake()
+
+    fun takeIme(): String? = imeView?.take()
+
+    fun syncIme(line: String) {
+        runOnUiThread { imeView?.sync(line) }
+    }
 
     fun wantTextInput(on: Boolean) {
         runOnUiThread {

@@ -537,6 +537,7 @@ impl App {
                     ui.spacing_mut().item_spacing.x = 8.0;
                     ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().value(&p.name).size(11.0).elided(ui); });
                     let edit = ui.add(egui::TextEdit::singleline(&mut text).hint_text("what matters here").desired_width(220.0));
+                    crate::system::ime_field(&edit, &text);
                     if edit.changed() {
                         ui.ctx().data_mut(|d| d.insert_temp(id, text.clone()));
                     }

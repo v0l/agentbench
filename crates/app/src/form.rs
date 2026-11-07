@@ -69,7 +69,7 @@ fn field_of(
     let font = egui::FontId::proportional(SIZE);
     let name = if hint.is_empty() && secret { "secret".to_string() } else { hint.to_string() };
     let hint = egui::RichText::new(hint).font(font.clone()).color(LEGEND.gamma_multiply(0.6));
-    egui::Frame::NONE
+    let response = egui::Frame::NONE
         .fill(WELL)
         .stroke(Stroke::new(1.0, ETCH))
         .corner_radius(theme::RADIUS)
@@ -101,7 +101,9 @@ fn field_of(
                 named(ui, edit, &name)
             }
         })
-        .inner
+        .inner;
+    crate::system::ime_field(&response, text);
+    response
 }
 
 fn own_clipboard_menu(response: Response) -> Response {
