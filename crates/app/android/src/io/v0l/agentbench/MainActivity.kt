@@ -37,6 +37,7 @@ class ImeView(context: Context, private val wake: () -> Unit) : View(context) {
     private val text: Editable = Editable.Factory.getInstance().newEditable("")
     private val pending = AtomicReference<String?>(null)
     private var batch = 0
+    private var last = ""
 
     init {
         isFocusable = true
@@ -63,7 +64,10 @@ class ImeView(context: Context, private val wake: () -> Unit) : View(context) {
         val b = maxOf(start, end)
         imm().updateSelection(this, a, b, BaseInputConnection.getComposingSpanStart(text),
             BaseInputConnection.getComposingSpanEnd(text))
-        pending.set("${chars(a)} ${chars(b)}\n$text")
+        val line = "${chars(a)} ${chars(b)}\n$text"
+        if (line == last) return
+        last = line
+        pending.set(line)
         wake()
     }
 
@@ -83,6 +87,7 @@ class ImeView(context: Context, private val wake: () -> Unit) : View(context) {
             text.replace(0, text.length, body)
         }
         Selection.setSelection(text, units(start), units(end))
+        last = "$start $end\n$body"
         if (same) {
             imm().updateSelection(this, units(start), units(end), -1, -1)
         } else {
