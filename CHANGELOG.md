@@ -6,6 +6,15 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-07
+
+### Fixed
+- Android typing is no longer laggy and backspace works: the keyboard keeps a real copy of the field's text, wakes the app on every change and sends one edit per change, so delete, held delete, delete while composing, autocorrect and the clipboard chip all behave.
+- A request that outgrows the router's body limit is fitted to a size budget and recovered after a 413, pictures are shrunk to 1568 px (PNG only with alpha), and HTML error pages show as one line.
+
+### Added
+- A large file preview modal for sent files, with an open-externally button on desktop.
+
 ## [0.8.1] - 2026-11-06
 
 ### Fixed
