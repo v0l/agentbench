@@ -1811,7 +1811,7 @@ mod tests {
         let made = api.call("create_worktree", &json!({"branch": "wip"}), me.id).unwrap();
         let path = made["path"].as_str().unwrap();
         let commit = std::process::Command::new("git")
-            .args(["-C", path, "-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-C", path, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
             .args(["commit", "-q", "--allow-empty", "-m", "wip"])
             .status()
             .unwrap();
