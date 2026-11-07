@@ -1650,6 +1650,53 @@ fn ctrl_c_in_the_composer_clears_the_draft_unless_text_is_selected() {
     assert_eq!(h.state().draft_of(session.id), "", "ctrl+c with nothing selected clears the box");
 }
 
+#[test]
+fn keyboard_edits_compose_shrink_commit_and_delete_in_the_composer() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(2);
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Text("say ".into()));
+    h.run_steps(2);
+    let ctx = h.ctx.clone();
+    assert_eq!(
+        agentbench::system::ime_keyboard(&ctx).map(|k| k.text),
+        Some("say ".into()),
+        "the keyboard is told what the field holds"
+    );
+    for (line, want) in [
+        ("6 6\nsay he", "say he"),
+        ("7 7\nsay hel", "say hel"),
+        ("6 6\nsay he", "say he"),
+        ("5 5\nsay h", "say h"),
+        ("9 9\nsay hello", "say hello"),
+        ("10 10\nsay hello ", "say hello "),
+        ("9 9\nsay hello", "say hello"),
+        ("8 8\nsay hell", "say hell"),
+        ("7 7\nsay hel", "say hel"),
+        ("1 1\nXsay hel", "Xsay hel"),
+        ("0 0\nsay hel", "say hel"),
+    ] {
+        agentbench::system::ime_from_keyboard(&ctx, line);
+        h.run_steps(2);
+        assert_eq!(h.state().draft_of(session.id), want, "after the keyboard sent {line:?}");
+    }
+    agentbench::system::ime_from_keyboard(&ctx, "7 7\nsay hel");
+    h.run_steps(2);
+    h.event(egui::Event::Text("p".into()));
+    h.run_steps(2);
+    assert_eq!(h.state().draft_of(session.id), "say help", "typing lands where the keyboard put the cursor");
+    assert_eq!(
+        agentbench::system::ime_keyboard(&ctx),
+        Some(agentbench::system::ImeText { text: "say help".into(), start: 8, end: 8 }),
+    );
+}
+
 fn arrow(h: &mut Harness<'_, App>, key: egui::Key) {
     h.event(egui::Event::Key {
         key,

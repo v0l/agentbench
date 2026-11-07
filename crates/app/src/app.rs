@@ -1016,7 +1016,6 @@ impl App {
             return;
         }
         crate::system::want_text_input(ctx.egui_wants_keyboard_input());
-        crate::system::feed_ime(raw);
         self.keyboard = crate::system::keyboard_height(ctx);
         let bottom = self.keyboard.max(crate::system::bottom_inset(ctx));
         raw.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {
@@ -1025,8 +1024,10 @@ impl App {
             top: crate::system::top_inset(ctx),
             bottom,
         }));
-        if self.keyboard > 0.0 || ctx.egui_wants_keyboard_input() {
-            // The keyboard slides in over several frames, and nothing else asks for them.
+    }
+
+    fn keep_drawing_while_the_keyboard_moves(&self, ctx: &egui::Context) {
+        if cfg!(target_os = "android") && (self.keyboard > 0.0 || ctx.egui_wants_keyboard_input()) {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
@@ -2663,6 +2664,7 @@ impl App {
 
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        crate::system::ime_before_frame(&ctx);
         crate::system::deliver_paste(&ctx);
         self.tick(&ctx);
         let narrow = ctx.content_rect().width() < 720.0;
@@ -2739,6 +2741,8 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
         crate::system::copy_what_egui_copied(&ctx);
+        crate::system::ime_after_frame(&ctx);
+        self.keep_drawing_while_the_keyboard_moves(&ctx);
     }
 }
 
