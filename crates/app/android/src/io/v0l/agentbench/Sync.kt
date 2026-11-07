@@ -15,21 +15,30 @@ import java.net.URL
 
 /** What the app tells the background work: which server, with what token, and whether to watch. */
 class Config(ctx: Context) {
-    private val prefs = ctx.applicationContext.getSharedPreferences("agentbench-sync", Context.MODE_PRIVATE)
+    @Suppress("DEPRECATION")
+    private val prefs = ctx.applicationContext.getSharedPreferences("agentbench-sync", Context.MODE_MULTI_PROCESS)
+    private val seen = ctx.applicationContext.getSharedPreferences("agentbench-watch", Context.MODE_PRIVATE)
     val on get() = prefs.getBoolean("on", false)
     val url get() = prefs.getString("url", "").orEmpty().trim().trimEnd('/')
     val token get() = prefs.getString("token", "").orEmpty().trim()
     val ready get() = on && url.isNotEmpty() && token.isNotEmpty()
 
+    init {
+        val server = url
+        if (seen.getString("server", null) != server) {
+            seen.edit().clear().putString("server", server).commit()
+        }
+    }
+
     /** The last change the server told us about, so a restart carries on from there. */
     var cursor: Long
-        get() = prefs.getLong("cursor", 0)
-        set(v) = prefs.edit().putLong("cursor", v).apply()
+        get() = seen.getLong("cursor", 0)
+        set(v) = seen.edit().putLong("cursor", v).apply()
 
     /** Each chat's status when we last looked, as JSON, to see what changed. */
     var known: String
-        get() = prefs.getString("known", "").orEmpty()
-        set(v) = prefs.edit().putString("known", v).apply()
+        get() = seen.getString("known", "").orEmpty()
+        set(v) = seen.edit().putString("known", v).apply()
 }
 
 object Net {
@@ -77,9 +86,9 @@ object Watcher {
     /** Whether the app's window is on screen, when there is no need to notify. */
     private fun visible(ctx: Context): Boolean {
         val am = ctx.getSystemService(ActivityManager::class.java)
-        val me = android.os.Process.myPid()
         return am.runningAppProcesses.orEmpty().any {
-            it.pid == me && it.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+            it.processName == ctx.packageName &&
+                it.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
         }
     }
 

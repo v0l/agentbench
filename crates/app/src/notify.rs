@@ -47,17 +47,6 @@ mod android {
         }
         let result = with_activity(|env, ctx| {
             let p = prefs(env, ctx)?;
-            let old_url = env.new_string("url")?;
-            let none = env.new_string("")?;
-            let before = env
-                .call_method(
-                    &p,
-                    jni_str!("getString"),
-                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
-                    &[(&old_url).into(), (&none).into()],
-                )?
-                .l()?;
-            let before = env.cast_local::<jni::objects::JString>(before)?.try_to_string(env)?;
             let edit = env
                 .call_method(
                     &p,
@@ -78,17 +67,6 @@ mod android {
             };
             put(env, "url", url.trim())?;
             put(env, "token", token.trim())?;
-            if before != url.trim() {
-                // A different server: its change numbers and chats are not the old one's.
-                put(env, "known", "")?;
-                let k = env.new_string("cursor")?;
-                env.call_method(
-                    &edit,
-                    jni_str!("putLong"),
-                    jni_sig!("(Ljava/lang/String;J)Landroid/content/SharedPreferences$Editor;"),
-                    &[(&k).into(), 0i64.into()],
-                )?;
-            }
             let k = env.new_string("on")?;
             env.call_method(
                 &edit,
@@ -96,7 +74,7 @@ mod android {
                 jni_sig!("(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;"),
                 &[(&k).into(), on.into()],
             )?;
-            env.call_method(&edit, jni_str!("apply"), jni_sig!("()V"), &[])?;
+            env.call_method(&edit, jni_str!("commit"), jni_sig!("()Z"), &[])?;
 
             let i = intent(env, ctx)?;
             if on {

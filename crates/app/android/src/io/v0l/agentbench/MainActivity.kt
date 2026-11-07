@@ -258,6 +258,12 @@ class MainActivity : NativeActivity() {
         setIntent(intent)
     }
 
+    override fun onDestroy() {
+        android.util.Log.i("agentbench", "activity destroyed, ending the window process")
+        android.os.Process.killProcess(android.os.Process.myPid())
+        super.onDestroy()
+    }
+
     fun pickFiles() {
         runOnUiThread {
             val open = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {

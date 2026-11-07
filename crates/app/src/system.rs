@@ -429,7 +429,14 @@ struct Ime {
 }
 
 static IME_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static IME_CTX: std::sync::OnceLock<egui::Context> = std::sync::OnceLock::new();
+static IME_CTX: std::sync::Mutex<Option<egui::Context>> = std::sync::Mutex::new(None);
+
+fn remember_ime_ctx(ctx: &egui::Context) {
+    let mut slot = IME_CTX.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.as_ref() != Some(ctx) {
+        *slot = Some(ctx.clone());
+    }
+}
 
 fn ime_id() -> egui::Id {
     egui::Id::new("system-ime")
@@ -454,7 +461,8 @@ pub fn ime_keyboard(ctx: &egui::Context) -> Option<ImeText> {
 
 fn ime_wake() {
     IME_PENDING.store(true, std::sync::atomic::Ordering::Release);
-    if let Some(ctx) = IME_CTX.get() {
+    let ctx = IME_CTX.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(ctx) = ctx {
         ctx.request_repaint();
     }
 }
@@ -496,7 +504,7 @@ fn take_keyboard(ime: &mut Ime) -> Option<ImeText> {
 /// the start of a frame, before any field is drawn.
 pub fn ime_before_frame(ctx: &egui::Context) {
     if cfg!(target_os = "android") {
-        IME_CTX.get_or_init(|| ctx.clone());
+        remember_ime_ctx(ctx);
     }
     let mut ime = with_ime(ctx, std::mem::take);
     ime_apply(ctx, &mut ime);
@@ -636,6 +644,28 @@ mod tests {
 
     fn edit(start: usize, end: usize, insert: &str) -> Option<ImeEdit> {
         Some(ImeEdit { start, end, insert: insert.into() })
+    }
+
+    #[test]
+    fn the_keyboard_wakes_the_newest_window_after_a_relaunch() {
+        let woken = |ctx: &egui::Context| {
+            let hit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = hit.clone();
+            ctx.set_request_repaint_callback(move |_| {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed)
+            });
+            hit
+        };
+        let first = egui::Context::default();
+        let first_woken = woken(&first);
+        remember_ime_ctx(&first);
+        let second = egui::Context::default();
+        let second_woken = woken(&second);
+        remember_ime_ctx(&second);
+        ime_wake();
+        assert!(second_woken.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!first_woken.load(std::sync::atomic::Ordering::Relaxed));
+        IME_PENDING.store(false, std::sync::atomic::Ordering::Release);
     }
 
     #[test]

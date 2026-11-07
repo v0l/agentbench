@@ -88,11 +88,17 @@ fn android_main(app: android_activity::AndroidApp) {
     let persistence_path = app.internal_data_path().map(|d| d.join("app.ron"));
     let opts =
         eframe::NativeOptions { android_app: Some(app), persistence_path, ..Default::default() };
-    let _ = eframe::run_native(
+    let result = eframe::run_native(
         "agentbench",
         opts,
-        Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx, cc.storage, None)))),
+        Box::new(|cc| {
+            log::info!("agentbench frame loop started");
+            Ok(Box::new(App::new(&cc.egui_ctx, cc.storage, None)))
+        }),
     );
+    if let Err(e) = result {
+        log::error!("agentbench frame loop failed: {e}");
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -41,13 +41,15 @@
 
         <service
             android:name="io.v0l.agentbench.WatchService"
+            android:process=":watch"
             android:exported="false"
             android:foregroundServiceType="dataSync"/>
         <service
             android:name="io.v0l.agentbench.SyncJob"
+            android:process=":watch"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE"/>
-        <receiver android:name="io.v0l.agentbench.BootReceiver" android:exported="true">
+        <receiver android:name="io.v0l.agentbench.BootReceiver" android:process=":watch" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED"/>
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
