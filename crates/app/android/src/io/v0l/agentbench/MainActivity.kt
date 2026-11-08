@@ -75,7 +75,7 @@ class ImeView(context: Context, private val wake: () -> Unit) : View(context) {
         if (batch == 0) report()
     }
 
-    fun sync(line: String) {
+    fun sync(line: String, mode: Int) {
         if (pending.get() != null) return
         val head = line.substringBefore('\n')
         val body = line.substringAfter('\n', "")
@@ -88,10 +88,10 @@ class ImeView(context: Context, private val wake: () -> Unit) : View(context) {
         }
         Selection.setSelection(text, units(start), units(end))
         last = "$start $end\n$body"
-        if (same) {
-            imm().updateSelection(this, units(start), units(end), -1, -1)
-        } else {
+        if (mode == RESTART && !same) {
             imm().restartInput(this)
+        } else if (mode != QUIET) {
+            imm().updateSelection(this, units(start), units(end), -1, -1)
         }
     }
 
@@ -207,6 +207,11 @@ class ImeView(context: Context, private val wake: () -> Unit) : View(context) {
             }
         }
     }
+
+    companion object {
+        const val QUIET = 0
+        const val RESTART = 2
+    }
 }
 
 /** The app's window. It keeps the newest intent, so tapping a notification while the app is open
@@ -234,8 +239,8 @@ class MainActivity : NativeActivity() {
 
     fun takeIme(): String? = imeView?.take()
 
-    fun syncIme(line: String) {
-        runOnUiThread { imeView?.sync(line) }
+    fun syncIme(line: String, mode: Int) {
+        runOnUiThread { imeView?.sync(line, mode) }
     }
 
     fun wantTextInput(on: Boolean) {

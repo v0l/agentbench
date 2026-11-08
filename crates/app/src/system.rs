@@ -313,13 +313,66 @@ fn set_system_clipboard_text(text: &str) {
 #[cfg(not(target_os = "android"))]
 fn set_system_clipboard_text(_text: &str) {}
 
-#[cfg(target_os = "android")]
-pub fn want_text_input(on: bool) {
-    use jni::{jni_sig, jni_str};
-    static LAST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if LAST.swap(on, std::sync::atomic::Ordering::Relaxed) == on {
-        return;
+/// What the app asked of the on screen keyboard, kept for tests.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum KeyboardCall {
+    Show,
+    Hide,
+    Quiet,
+    Selection,
+    Restart,
+}
+
+/// How the keyboard learns that the focused field now holds `now`: nothing when it already
+/// holds it, its copy of the text alone while it is away, the selection when only that moved,
+/// and a restart only while it is up and the text itself changed.
+pub fn keyboard_sync(shown: bool, held: Option<&ImeText>, now: &ImeText) -> Option<KeyboardCall> {
+    if held == Some(now) {
+        return None;
     }
+    if !shown {
+        return Some(KeyboardCall::Quiet);
+    }
+    if held.is_some_and(|k| k.text == now.text) {
+        Some(KeyboardCall::Selection)
+    } else {
+        Some(KeyboardCall::Restart)
+    }
+}
+
+fn record(ctx: &egui::Context, call: KeyboardCall) {
+    with_ime(ctx, |ime| {
+        if ime.calls.len() >= 256 {
+            ime.calls.remove(0);
+        }
+        ime.calls.push(call);
+    });
+}
+
+/// What the app asked of the keyboard since the last call.
+#[doc(hidden)]
+pub fn keyboard_calls(ctx: &egui::Context) -> Vec<KeyboardCall> {
+    with_ime(ctx, |ime| std::mem::take(&mut ime.calls))
+}
+
+/// Whether the on screen keyboard is up, as the system says when that changes.
+#[doc(hidden)]
+pub fn keyboard_visible(ctx: &egui::Context, visible: bool) {
+    with_ime(ctx, |ime| ime.visible = visible);
+}
+
+fn want_text_input(ctx: &egui::Context, on: bool) {
+    with_ime(ctx, |ime| {
+        ime.asked = on;
+        ime.visible = on;
+    });
+    record(ctx, if on { KeyboardCall::Show } else { KeyboardCall::Hide });
+    ask_for_text_input(on);
+}
+
+#[cfg(target_os = "android")]
+fn ask_for_text_input(on: bool) {
+    use jni::{jni_sig, jni_str};
     let result = crate::voice::android::with_activity(|env, activity| {
         env.call_method(activity, jni_str!("wantTextInput"), jni_sig!("(Z)V"), &[on.into()])?;
         Ok(())
@@ -330,7 +383,7 @@ pub fn want_text_input(on: bool) {
 }
 
 #[cfg(not(target_os = "android"))]
-pub fn want_text_input(_on: bool) {}
+fn ask_for_text_input(_on: bool) {}
 
 /// The text the keyboard holds or should hold, with its selection in characters.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -426,6 +479,10 @@ struct Ime {
     select: Option<(usize, usize)>,
     drawn: Option<(egui::Id, String)>,
     inbox: Option<String>,
+    asked: bool,
+    visible: bool,
+    tapped: bool,
+    calls: Vec<KeyboardCall>,
 }
 
 static IME_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -467,13 +524,19 @@ fn ime_wake() {
     }
 }
 
-/// A text field calls this each frame with what it shows.
+/// A text field calls this each frame with what it shows. Only a tap on it brings up the
+/// keyboard; focus it gets from the app, as when speech lands in it, leaves the keyboard be.
 pub fn ime_field(response: &egui::Response, text: &str) {
     if !response.has_focus() {
         return;
     }
     let drawn = Some((response.id, text.to_string()));
-    with_ime(&response.ctx, |ime| ime.drawn = drawn);
+    let tapped = response.clicked()
+        || (response.contains_pointer() && response.ctx.input(|i| i.pointer.primary_released()));
+    with_ime(&response.ctx, |ime| {
+        ime.drawn = drawn;
+        ime.tapped |= tapped;
+    });
 }
 
 fn set_selection(ctx: &egui::Context, id: egui::Id, start: usize, end: usize) {
@@ -546,23 +609,39 @@ fn ime_apply(ctx: &egui::Context, ime: &mut Ime) {
 /// Tell the keyboard what the focused field holds when that is not what it typed: a field just
 /// focused, a draft sent or recalled, a tap that moved the cursor.
 pub fn ime_after_frame(ctx: &egui::Context) {
+    if cfg!(target_os = "android") {
+        ctx.output_mut(|o| o.ime = None);
+    }
     let Some((id, text)) = with_ime(ctx, |ime| ime.drawn.take()) else {
-        with_ime(ctx, |ime| ime.field = None);
+        let asked = with_ime(ctx, |ime| {
+            ime.field = None;
+            ime.tapped = false;
+            ime.asked
+        });
+        if asked {
+            want_text_input(ctx, false);
+        }
         return;
     };
     let len = text.chars().count();
     let (start, end) = selection(ctx, id, len);
     let now = ImeText { text, start, end };
-    let changed = with_ime(ctx, |ime| {
+    let (call, tapped) = with_ime(ctx, |ime| {
         ime.field = Some((id, now.clone()));
-        if ime.select.is_some() || ime.keyboard.as_ref() == Some(&now) {
-            return false;
+        let tapped = std::mem::take(&mut ime.tapped) && !(ime.asked && ime.visible);
+        if ime.select.is_some() {
+            return (None, tapped);
         }
+        let call = keyboard_sync(ime.asked && ime.visible, ime.keyboard.as_ref(), &now);
         ime.keyboard = Some(now.clone());
-        true
+        (call, tapped)
     });
-    if changed {
-        sync_keyboard(&now);
+    if let Some(call) = call {
+        record(ctx, call);
+        sync_keyboard(&now, call);
+    }
+    if tapped {
+        want_text_input(ctx, true);
     }
 }
 
@@ -589,15 +668,20 @@ fn take_ime() -> Option<String> {
 }
 
 #[cfg(target_os = "android")]
-fn sync_keyboard(now: &ImeText) {
+fn sync_keyboard(now: &ImeText, call: KeyboardCall) {
     use jni::{jni_sig, jni_str};
+    let mode = match call {
+        KeyboardCall::Selection => 1,
+        KeyboardCall::Restart => 2,
+        _ => 0,
+    };
     let result = crate::voice::android::with_activity(|env, activity| {
         let line = env.new_string(now.line())?;
         env.call_method(
             activity,
             jni_str!("syncIme"),
-            jni_sig!("(Ljava/lang/String;)V"),
-            &[(&line).into()],
+            jni_sig!("(Ljava/lang/String;I)V"),
+            &[(&line).into(), mode.into()],
         )?;
         Ok(())
     });
@@ -607,7 +691,7 @@ fn sync_keyboard(now: &ImeText) {
 }
 
 #[cfg(not(target_os = "android"))]
-fn sync_keyboard(_now: &ImeText) {}
+fn sync_keyboard(_now: &ImeText, _call: KeyboardCall) {}
 
 #[cfg(target_os = "android")]
 extern "system" fn ime_wake_from_java(_env: *mut jni::sys::JNIEnv, _this: jni::sys::jobject) {
@@ -666,6 +750,49 @@ mod tests {
         assert!(second_woken.load(std::sync::atomic::Ordering::Relaxed));
         assert!(!first_woken.load(std::sync::atomic::Ordering::Relaxed));
         IME_PENDING.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    #[test]
+    fn text_from_outside_the_keyboard_restarts_it_only_while_it_is_up() {
+        let held = at("fix", 3);
+        let spoken = at("fix the bug", 11);
+        let moved = at("fix", 1);
+        assert_eq!(keyboard_sync(false, Some(&held), &spoken), Some(KeyboardCall::Quiet));
+        assert_eq!(keyboard_sync(false, Some(&held), &moved), Some(KeyboardCall::Quiet));
+        assert_eq!(keyboard_sync(false, None, &spoken), Some(KeyboardCall::Quiet));
+        assert_eq!(keyboard_sync(true, Some(&held), &moved), Some(KeyboardCall::Selection));
+        assert_eq!(keyboard_sync(true, Some(&held), &spoken), Some(KeyboardCall::Restart));
+        assert_eq!(keyboard_sync(true, Some(&spoken), &spoken), None);
+        assert_eq!(keyboard_sync(false, Some(&spoken), &spoken), None);
+    }
+
+    #[test]
+    fn an_echo_of_what_the_keyboard_typed_asks_nothing_of_it() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        for n in 0..3 {
+            if n == 1 {
+                ime_from_keyboard(&ctx, "3 3\nhey");
+            }
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                ime_before_frame(ui.ctx());
+                let r = ui.add(egui::TextEdit::singleline(&mut text).id_salt("field"));
+                if n == 0 {
+                    r.request_focus();
+                }
+                ime_field(&r, &text);
+                ime_after_frame(ui.ctx());
+            })
+            .textures_delta
+            .clear();
+        }
+        assert_eq!(text, "hey");
+        let calls = keyboard_calls(&ctx);
+        assert!(
+            !calls.contains(&KeyboardCall::Show),
+            "focus from the app shows nothing: {calls:?}"
+        );
+        assert!(!calls.contains(&KeyboardCall::Restart), "{calls:?}");
     }
 
     #[test]

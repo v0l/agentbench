@@ -218,8 +218,9 @@ impl App {
         let narrow = self.narrow;
         // While this tile's speech is being listened to or read, the words are written into the
         // draft for it, so typing or sending now would be overwritten or cut the take short.
-        let speaking =
-            self.voice.busy() && self.speaking_in.is_some() && self.speaking_in == self.drawing;
+        let speaking = (self.voice.busy() || self.hearing)
+            && self.speaking_in.is_some()
+            && self.speaking_in == self.drawing;
         if !speaking && let Some(s) = session {
             self.recall_sent(ui, s.id);
         }

@@ -699,6 +699,8 @@ pub struct App {
     /// The words the voice has put at the end of that draft so far, so the next reading can
     /// replace them rather than add to them.
     spoken: String,
+    /// A take given through `hear` is under way, as one from the microphone would be.
+    hearing: bool,
 }
 
 impl App {
@@ -831,6 +833,7 @@ impl App {
             drawing: None,
             speaking_in: None,
             spoken: String::new(),
+            hearing: false,
             fonts_loaded: 0,
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
             alerts: storage.and_then(|s| s.get_string("alerts")).as_deref() != Some("false"),
@@ -990,6 +993,10 @@ impl App {
         } else if let Some(id) = chat_in_link(&text) {
             // A tapped notification: show that chat once the overview has it.
             self.open_pending = Some(id);
+        } else if cfg!(debug_assertions)
+            && let Some((said, last)) = speech_in_link(&text)
+        {
+            self.hear(&said, last);
         }
     }
 
@@ -1015,8 +1022,11 @@ impl App {
         if !cfg!(target_os = "android") {
             return;
         }
-        crate::system::want_text_input(ctx.egui_wants_keyboard_input());
-        self.keyboard = crate::system::keyboard_height(ctx);
+        let height = crate::system::keyboard_height(ctx);
+        if (height > 0.0) != (self.keyboard > 0.0) {
+            crate::system::keyboard_visible(ctx, height > 0.0);
+        }
+        self.keyboard = height;
         let bottom = self.keyboard.max(crate::system::bottom_inset(ctx));
         raw.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {
             left: 0.0,
@@ -1189,6 +1199,19 @@ impl App {
         } else {
             self.spoken = added;
         }
+    }
+
+    /// Take `said` as speech heard for the chat in use, as the microphone would give it.
+    #[doc(hidden)]
+    pub fn hear(&mut self, said: &str, last: bool) {
+        if self.speaking_in.is_none() {
+            self.speaking_in = match self.session {
+                Some(s) => Some(Tile::Chat(s)),
+                None => Some(Tile::New),
+            };
+        }
+        self.hearing = !last;
+        self.add_speech(said, last);
     }
 
     /// Take back what a take wrote into the draft, because it came to nothing.

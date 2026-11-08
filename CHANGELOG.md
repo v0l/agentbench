@@ -6,6 +6,9 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Android: the keyboard no longer pops up while speech is written into the draft. Only a tap on a text field brings it up, and a keyboard you put away stays away while dictation text arrives.
+
 ## [0.8.2] - 2026-11-07
 
 ### Fixed

@@ -400,6 +400,21 @@ pub(super) fn chat_in_link(link: &str) -> Option<SessionId> {
     query.split('&').find_map(|kv| kv.strip_prefix("session=")).and_then(|v| v.parse().ok())
 }
 
+/// Words a debug build takes as heard speech, from `agentbench://speak?partial=a+b&n=1`, so a
+/// script can dictate on an emulator with no microphone. `final=` ends the take.
+pub(super) fn speech_in_link(link: &str) -> Option<(String, bool)> {
+    let query = link.trim().strip_prefix("agentbench://speak?")?;
+    query.split('&').find_map(|kv| {
+        let (key, value) = kv.split_once('=')?;
+        let last = match key {
+            "partial" => false,
+            "final" => true,
+            _ => return None,
+        };
+        Some((value.replace('+', " "), last))
+    })
+}
+
 /// The small "read aloud" link under a reply, which becomes "stop" while that reply is read.
 pub(super) fn read_link(ui: &mut Ui, reading: bool) -> egui::Response {
     let (label, tint) =

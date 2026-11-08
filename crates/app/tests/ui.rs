@@ -1699,6 +1699,55 @@ fn keyboard_edits_compose_shrink_commit_and_delete_in_the_composer() {
     );
 }
 
+#[test]
+fn dictation_into_a_composer_whose_keyboard_was_dismissed_never_brings_it_back() {
+    use agentbench::system::{KeyboardCall, keyboard_calls};
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    h.run_steps(2);
+    let ctx = h.ctx.clone();
+    click(&mut h, 800.0, 735.0);
+    h.run_steps(2);
+    let shown = keyboard_calls(&ctx);
+    assert!(shown.contains(&KeyboardCall::Show), "a tap on the composer shows it, got {shown:?}");
+    agentbench::system::keyboard_visible(&ctx, false);
+    let mut said = String::new();
+    for n in 0..20 {
+        said.push_str(&format!(" word{n}"));
+        h.state_mut().hear(&said, n == 19);
+        h.run_steps(2);
+        let calls = keyboard_calls(&ctx);
+        assert!(
+            !calls.contains(&KeyboardCall::Show) && !calls.contains(&KeyboardCall::Restart),
+            "partial {n} asked the keyboard for {calls:?}"
+        );
+    }
+    assert!(
+        h.state().draft_of(session.id).ends_with("word18 word19"),
+        "the words land in the draft"
+    );
+    click(&mut h, 600.0, 400.0);
+    h.run_steps(2);
+    keyboard_calls(&ctx);
+    for n in 0..5 {
+        h.state_mut().hear(&format!("more {n}"), n == 4);
+        h.run_steps(2);
+        let calls = keyboard_calls(&ctx);
+        assert!(
+            !calls.contains(&KeyboardCall::Show) && !calls.contains(&KeyboardCall::Restart),
+            "speech into an unfocused composer asked for {calls:?}"
+        );
+    }
+    click(&mut h, 800.0, 735.0);
+    h.run_steps(2);
+    assert!(keyboard_calls(&ctx).contains(&KeyboardCall::Show), "tapping it again shows it");
+}
+
 fn arrow(h: &mut Harness<'_, App>, key: egui::Key) {
     h.event(egui::Event::Key {
         key,
