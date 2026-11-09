@@ -597,6 +597,16 @@ impl Runner {
             }
             "model" => {
                 let model = Some(arg).filter(|m| !m.is_empty());
+                if let Some(pinned) = self.pinned_model(session) {
+                    let pinned = pinned.unwrap_or_default();
+                    if model.is_some_and(|m| m != pinned) {
+                        return Err(StoreError(format!(
+                            "the supervisor is pinned to the supervisor model ({pinned}); change which model that is in settings"
+                        )));
+                    }
+                    self.store.set_model(session.id, Some(pinned.as_str()).filter(|m| !m.is_empty()))?;
+                    return note(format!("the supervisor stays on {pinned}"));
+                }
                 self.store.set_model(session.id, model)?;
                 note(match model {
                     Some(m) => format!("this chat now uses {m}"),
@@ -830,6 +840,11 @@ impl Runner {
         crate::providers::level_model(&self.store, agent, chosen)
     }
 
+    fn pinned_model(&self, session: &Session) -> Option<Option<String>> {
+        let project = self.store.project(session.project_id).ok()?;
+        project.supervisor.then(|| crate::providers::supervisor_model(&self.store, &session.agent))
+    }
+
     fn context(&self, session: &Session) -> Context {
         let project = self.store.project(session.project_id).ok();
         let branch = self.store.worktree(session.worktree_id).ok().and_then(|w| w.branch);
@@ -901,7 +916,16 @@ impl Runner {
         let cwd = PathBuf::from(&session.cwd);
         let context = self.context(session);
         let resume = session.agent_session.as_deref().filter(|_| agent.resumable());
-        let cli_model = self.cli_model(&session.agent, session.model.as_deref());
+        let chosen = match self.pinned_model(session) {
+            Some(pinned) => {
+                if pinned != session.model {
+                    let _ = self.store.set_model(session.id, pinned.as_deref());
+                }
+                pinned
+            }
+            None => session.model.clone(),
+        };
+        let cli_model = self.cli_model(&session.agent, chosen.as_deref());
         let turn = Turn {
             prompt,
             files: &files,
@@ -3166,6 +3190,62 @@ mod tests {
             })
             .unwrap();
         assert_eq!(worker.model, None);
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_runs_every_turn_on_the_supervisor_model_and_refuses_model_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let store = Store::memory().unwrap();
+        let p = crate::projects::add(&store, &main, None, false).unwrap();
+        crate::projects::ensure_supervisor(&store, &dir.path().join("sup")).unwrap();
+        let seen = Arc::new(Echo(Mutex::new(Vec::new())));
+        struct Shared(Arc<Echo>);
+        #[async_trait]
+        impl Agent for Shared {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            fn label(&self) -> &str {
+                self.0.label()
+            }
+            fn available(&self) -> bool {
+                true
+            }
+            fn about(&self) -> String {
+                self.0.about()
+            }
+            fn resumable(&self) -> bool {
+                true
+            }
+            async fn run(&self, t: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+                self.0.run(t, io).await
+            }
+        }
+        let runner = Runner::new(store.clone(), vec![Box::new(Shared(seen.clone()))]);
+        let pinned = crate::providers::supervisor_model(&store, "echo");
+
+        let sup = runner.open_supervisor("echo").unwrap();
+        store.set_model(sup.id, Some("medium")).unwrap();
+        runner.send(&store.session(sup.id).unwrap(), "hello").unwrap();
+        wait_idle(&runner, sup.id).await;
+        assert_eq!(seen.0.lock().unwrap().last().unwrap().1, pinned);
+
+        let err = runner.send(&store.session(sup.id).unwrap(), "/model low").unwrap_err();
+        assert!(err.0.contains("pinned"), "{}", err.0);
+        assert_ne!(store.session(sup.id).unwrap().model.as_deref(), Some("low"));
+        runner.send(&store.session(sup.id).unwrap(), "/model high").unwrap();
+        assert_eq!(store.session(sup.id).unwrap().model.as_deref(), Some("high"));
+
+        let worker = runner
+            .start_session(NewSession { project_id: p.id, agent: "echo".into(), ..Default::default() })
+            .unwrap();
+        runner.send(&worker, "/model low").unwrap();
+        assert_eq!(store.session(worker.id).unwrap().model.as_deref(), Some("low"));
+        runner.send(&store.session(worker.id).unwrap(), "hi").unwrap();
+        wait_idle(&runner, worker.id).await;
+        assert_eq!(seen.0.lock().unwrap().last().unwrap().1.as_deref(), Some("low"));
     }
 
     #[tokio::test]
