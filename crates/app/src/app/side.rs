@@ -184,7 +184,14 @@ impl App {
             format!("{project} / {branch}")
         };
         let when = if s.status.busy() { word.to_string() } else { ago(s.updated_at) };
-        Line::new().note(format!("{place}  {when}")).size(10.0).elided(&mut inner);
+        let (parent, children) = self.family_of(s);
+        let kin = match (parent, children) {
+            (Some((_, title, _)), 0) => format!("  child of {title}"),
+            (Some((_, title, _)), n) => format!("  child of {title}, {n} children"),
+            (None, 0) => String::new(),
+            (None, n) => format!("  {n} children"),
+        };
+        Line::new().note(format!("{place}  {when}{kin}")).size(10.0).elided(&mut inner);
         if resp.clicked() {
             self.open_session(s.id, s.project_id);
         }

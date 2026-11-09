@@ -2168,6 +2168,26 @@ fn clicking_a_chat_in_the_list_replaces_the_focused_tile() {
 }
 
 #[test]
+fn a_child_session_shows_a_parent_chip_that_opens_the_parent() {
+    let rig = rig();
+    let all = rig.store.sessions().unwrap();
+    let parent = all.iter().find(|s| s.title == "say hello").unwrap().clone();
+    let fix = all.iter().find(|s| s.title == "#3 Fix the login loop").unwrap().clone();
+    rig.store.set_parent(fix.id, Some(parent.id)).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    h.get_by_label("chat #3 Fix the login loop").click();
+    h.run_steps(4);
+    assert_eq!(h.state().tile_chat(h.state().focused_tile()), Some(fix.id));
+    assert!(h.query_by_label_contains("1 children").is_none(), "the child has none");
+    click_label(&mut h, "parent say hello");
+    h.run_steps(4);
+    assert_eq!(h.state().tile_chat(h.state().focused_tile()), Some(parent.id));
+    assert!(h.query_by_label_contains("1 children").is_some(), "the parent counts its child");
+}
+
+#[test]
 fn closing_a_tiled_chat_leaves_its_tile_empty() {
     use agentbench::app::Grid;
     let rig = rig();

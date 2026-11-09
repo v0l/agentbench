@@ -275,6 +275,16 @@ impl App {
             .unwrap_or_default()
     }
 
+    pub(super) fn family_of(&self, s: &Session) -> (Option<(SessionId, String, Id)>, usize) {
+        let Some(o) = &self.overview else { return (None, 0) };
+        let parent = s
+            .parent
+            .and_then(|p| o.sessions.iter().find(|x| x.id == p))
+            .map(|p| (p.id, p.title.clone(), p.project_id));
+        let children = o.sessions.iter().filter(|x| x.parent == Some(s.id)).count();
+        (parent, children)
+    }
+
     /// A chat's header, on one row, in a window, a tile or a phone: the status, the project and
     /// worktree as chips like the status box's, and the stop and close keys. The agent, model and
     /// tokens are on hover and in the status line.
@@ -352,6 +362,32 @@ impl App {
                     chip(ui, &project, if supervisor { TRACE } else { READOUT }, true).on_hover_text(&about);
                     if let Some(w) = tree.filter(|_| !home) {
                         chip(ui, &w.label(), VALUE, false).on_hover_text(&about);
+                    }
+                    let family = self.family_of(s);
+                    if let Some((pid, ptitle, pproject)) = family.0 {
+                        let c = chip(ui, &format!("child of {ptitle}"), TRACE, false)
+                            .interact(Sense::click())
+                            .on_hover_text("open the session that started this one");
+                        c.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!("parent {ptitle}"),
+                            )
+                        });
+                        if c.clicked() {
+                            self.open_session(pid, pproject);
+                        }
+                    }
+                    if family.1 > 0 {
+                        let c = chip(ui, &format!("{} children", family.1), VALUE, false);
+                        c.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Label,
+                                true,
+                                format!("{} children", family.1),
+                            )
+                        });
                     }
                     let focus = if supervisor { self.project } else { Some(s.project_id) };
                     if let Some(pid) = focus.filter(|p| !self.is_home(*p))

@@ -7,7 +7,7 @@ All notable changes to Agentbench are listed here. The format follows
 ## [Unreleased]
 
 ### Changed
-- Every session started by another session (the supervisor, the autopilot or any agent) records its parent, and the parent is told each time the child's turn ends, with no `watch_session` call. `list_sessions` shows `parent` and `children`.
+- Every session started by another session (the supervisor, the autopilot or any agent) records its parent, and the parent is told each time the child's turn ends, with no `watch_session` call. `list_sessions` shows `parent` and `children`. A child waiting on a question also tells a non-supervisor parent. The app shows a "child of" chip in the chat header that opens the parent, a children count on the parent, and the parent's name on the session row.
 
 ### Added
 - Each project has a vision: a summary, ordered goals and non-goals, with every version kept. Issues link to a goal or are marked off vision. The supervisor judges work against the vision and its `set_vision` is a proposal you confirm, workers read it in their brief, and the autopilot only starts todo issues linked to an active goal, idling in projects with no vision. The projects page has a Vision panel, issue cards show a goal chip, and the board can group by goal.

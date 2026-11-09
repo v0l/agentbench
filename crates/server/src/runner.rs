@@ -1319,6 +1319,16 @@ impl Sink {
         let _ = self.runner.tell(supervisor, &text, origin);
     }
 
+    fn tell_parent_waiting(&self, asked: &str) {
+        let Some(me) = self.store.session(self.session).ok() else { return };
+        let Some(parent) = me.parent.and_then(|p| self.store.session(p).ok()) else { return };
+        let text = format!(
+            "Session {} (\"{}\", project {}) changed state to waiting on a question: {asked}",
+            me.id, me.title, me.project_id
+        );
+        let _ = self.runner.tell(&parent, &text, Origin::new("watch", Some(me.id)));
+    }
+
     async fn wait(
         &self,
         id: &str,
@@ -1372,6 +1382,9 @@ impl Sink {
             }
         } else if let Some(sup) = supervisor.as_ref() {
             self.tell_supervisor(sup, &asked, false);
+        }
+        if supervisor.is_none() {
+            self.tell_parent_waiting(&asked);
         }
         let answer = match early {
             Some(a) => a,
@@ -3130,6 +3143,29 @@ mod tests {
             })
             .collect();
         assert!(notes.iter().any(|n| n.contains("recommends: blue")), "{notes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_child_waiting_on_a_question_tells_a_non_supervisor_parent_once() {
+        let r = rig(Box::new(Asker), false);
+        let tree = r.store.main_worktree(r.worker.project_id).unwrap();
+        let lead = r.store.add_session(tree.id, "idle", "lead", None, None).unwrap();
+        r.store.set_parent(r.worker.id, Some(lead.id)).unwrap();
+        r.runner.send(&r.worker, "pick").unwrap();
+        assert!(until(|| r.store.session(r.worker.id).unwrap().status == SessionStatus::Waiting).await);
+        assert!(until(|| r.store.deferred_count(lead.id).unwrap() + r.store.messages(lead.id, 0).unwrap().len() > 0).await);
+        let told: Vec<String> = r
+            .store
+            .messages(lead.id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::User { text, .. } => Some(text),
+                _ => None,
+            })
+            .filter(|t| t.contains("red or blue?"))
+            .collect();
+        assert_eq!(told.len() + r.store.deferred_count(lead.id).unwrap() as usize, 1, "{told:?}");
     }
 
     #[tokio::test]
