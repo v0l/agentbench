@@ -157,36 +157,51 @@ fn rig_named(
     };
     let model_url = model_url.to_string();
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    let s = store.clone();
     let models = dir.path().join("models");
-    rt.spawn(async move {
-        let config = agentbench_server::Config {
-            model: agentbench_server::agent::native::Model {
-                url: model_url.clone(),
-                model: model_name,
+    let mut extra = Some(extra);
+    let mut echo = Some(echo);
+    let addr = loop {
+        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let s = store.clone();
+        let models = models.clone();
+        let model_url = model_url.clone();
+        let model_name = model_name.clone();
+        let (extra, echo) = (extra.take().unwrap(), echo.take().unwrap());
+        let (failed_tx, failed_rx) = std::sync::mpsc::channel();
+        rt.spawn(async move {
+            let config = agentbench_server::Config {
+                model: agentbench_server::agent::native::Model {
+                    url: model_url.clone(),
+                    model: model_name,
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        };
-        let model = agentbench_server::agent::native::Shared::new(config.model.clone());
-        let mut agents: Vec<Box<dyn agentbench_server::agent::Agent>> = vec![Box::new(echo)];
-        agents.push(Box::new(agentbench_server::agent::Native::shared(model.clone())));
-        agents.extend(extra);
-        agentbench_server::serve_agents(
-            s,
-            agents,
-            Some(model),
-            addr,
-            models,
-            std::future::pending(),
-        )
-        .await
-        .unwrap();
-    });
-    std::thread::sleep(Duration::from_millis(200));
+            };
+            let model = agentbench_server::agent::native::Shared::new(config.model.clone());
+            let mut agents: Vec<Box<dyn agentbench_server::agent::Agent>> = vec![Box::new(echo)];
+            agents.push(Box::new(agentbench_server::agent::Native::shared(model.clone())));
+            agents.extend(extra);
+            if let Err(e) = agentbench_server::serve_agents(
+                s,
+                agents,
+                Some(model),
+                addr,
+                models,
+                std::future::pending(),
+            )
+            .await
+            {
+                let _ = failed_tx.send(e);
+            }
+        });
+        match failed_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(e) if e.contains("in use") => {}
+            Ok(e) => panic!("{e}"),
+            Err(_) => break addr,
+        }
+    };
     Rig { url: addr.to_string(), store, _dir: dir, _rt: rt }
 }
 

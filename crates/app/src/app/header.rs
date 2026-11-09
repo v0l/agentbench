@@ -180,7 +180,7 @@ impl App {
         };
         let r = chip(ui, &text, tint, true);
         let why = self.offline.as_ref().map(|(e, _)| e.clone()).unwrap_or_default();
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Status, true, &text));
         if !why.is_empty() {
             r.on_hover_text(why);
         }
