@@ -56,6 +56,7 @@ pub enum Reply {
     Screen(SessionId, agentbench_core::Screen),
     Comments(Id, Vec<Comment>),
     Notes(Id, Vec<agentbench_core::NoteHistory>),
+    VisionVersions(Id, Vec<agentbench_core::Vision>),
     Done(String),
     Failed(String),
     Offline(String),
@@ -338,6 +339,26 @@ impl Client {
         );
         self.send(req, move |_: serde_json::Value| Reply::Done("note restored".into()));
         self.notes(project);
+    }
+
+    pub fn vision_versions(&mut self, project: Id) {
+        let req =
+            self.request(Method::GET, &format!("/api/projects/{project}/vision/versions"), None);
+        self.send(req, move |v| Reply::VisionVersions(project, v));
+    }
+
+    pub fn put_vision(&mut self, project: Id, body: &agentbench_core::VisionBody) {
+        self.act(Method::PUT, &format!("/api/projects/{project}/vision"), Some(body), "vision saved");
+    }
+
+    pub fn restore_vision(&mut self, project: Id, version: Id) {
+        let body = Self::json(&serde_json::json!({ "version": version }));
+        let req = self.request(
+            Method::POST,
+            &format!("/api/projects/{project}/vision/restore"),
+            body,
+        );
+        self.send(req, move |_: serde_json::Value| Reply::Done("vision restored".into()));
     }
 
     pub fn sync_project(&mut self, id: Id) {

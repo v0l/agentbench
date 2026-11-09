@@ -211,6 +211,45 @@ pub fn issue_matches(
     query.split_whitespace().all(|word| hay.contains(word))
 }
 
+fn goal_columns<'a>(
+    shown: &[&'a Issue],
+    visions: &[agentbench_core::Vision],
+    names: &HashMap<Id, String>,
+    everything: bool,
+) -> Vec<(String, Option<IssueState>, Vec<&'a Issue>)> {
+    let mut out: Vec<(String, Option<IssueState>, Vec<&'a Issue>)> = Vec::new();
+    for v in visions {
+        let prefix = if everything {
+            names.get(&v.project_id).map(|n| format!("{n} ")).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        for g in v.active_goals() {
+            let mine: Vec<&Issue> = shown
+                .iter()
+                .copied()
+                .filter(|i| i.project_id == v.project_id && i.goal.as_deref() == Some(g.id.as_str()))
+                .collect();
+            if everything && mine.is_empty() {
+                continue;
+            }
+            out.push((format!("{prefix}{}", g.id), None, mine));
+        }
+    }
+    let linked = |i: &&&Issue| {
+        i.goal.as_deref().is_some_and(|g| {
+            visions
+                .iter()
+                .any(|v| v.project_id == i.project_id && v.active_goals().any(|a| a.id == g))
+        })
+    };
+    let rest: Vec<&Issue> = shown.iter().filter(|i| !linked(i)).copied().collect();
+    let (off, none): (Vec<&Issue>, Vec<&Issue>) = rest.into_iter().partition(|i| i.off_vision);
+    out.push(("no goal".to_string(), None, none));
+    out.push(("off vision".to_string(), None, off));
+    out
+}
+
 fn sort_issues(issues: &mut [&Issue], by: Sort) {
     match by {
         Sort::Priority => {
@@ -281,6 +320,46 @@ fn sort_projects(
         ProjectSort::Recent => projects.sort_by(|a, b| {
             head(a, b).then_with(|| touched(b).cmp(&touched(a))).then_with(|| name(a, b))
         }),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Group {
+    State,
+    Goal,
+}
+
+impl Group {
+    const ALL: [Group; 2] = [Group::State, Group::Goal];
+
+    fn label(self) -> &'static str {
+        match self {
+            Group::State => "group by state",
+            Group::Goal => "group by goal",
+        }
+    }
+}
+
+struct VisionEdit {
+    project: Id,
+    summary: String,
+    goals: Vec<agentbench_core::Goal>,
+    non_goals: String,
+    versions: Vec<agentbench_core::Vision>,
+}
+
+impl VisionEdit {
+    fn body(&self) -> agentbench_core::VisionBody {
+        agentbench_core::VisionBody {
+            summary: self.summary.trim().to_string(),
+            goals: self.goals.clone(),
+            non_goals: self
+                .non_goals
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
+        }
     }
 }
 
@@ -617,6 +696,8 @@ pub struct App {
     tag_filter: String,
     edit_tags: Option<(Id, String)>,
     notes_view: Option<(Id, Vec<agentbench_core::NoteHistory>)>,
+    vision_edit: Option<VisionEdit>,
+    group: Group,
     rename_chat: Option<(SessionId, String)>,
     viewer: Option<viewer::Viewer>,
     only_busy: bool,
@@ -798,6 +879,8 @@ impl App {
             tag_filter: String::new(),
             edit_tags: None,
             notes_view: None,
+            vision_edit: None,
+            group: Group::State,
             rename_chat: None,
             viewer: None,
             only_busy: false,
@@ -1757,6 +1840,11 @@ impl App {
                     t.rebuilds += 1;
                 }
             }
+            Reply::VisionVersions(pid, v) => {
+                if let Some(e) = self.vision_edit.as_mut().filter(|e| e.project == pid) {
+                    e.versions = v;
+                }
+            }
             Reply::Notes(pid, n) => {
                 if self.notes_view.as_ref().is_some_and(|(p, _)| *p == pid) {
                     self.notes_view = Some((pid, n));
@@ -2266,6 +2354,33 @@ impl App {
         self.scope = Scope::Everything;
     }
 
+    pub fn group_by_goal(&mut self) {
+        self.group = Group::Goal;
+    }
+
+    pub fn vision_open(&self) -> Option<Id> {
+        self.vision_edit.as_ref().map(|e| e.project)
+    }
+
+    pub fn open_vision(&mut self, project: Id) {
+        let current = self
+            .overview
+            .as_ref()
+            .and_then(|o| o.visions.iter().find(|v| v.project_id == project))
+            .cloned()
+            .unwrap_or_default();
+        self.vision_edit = Some(VisionEdit {
+            project,
+            summary: current.body.summary,
+            goals: current.body.goals,
+            non_goals: current.body.non_goals.join("\n"),
+            versions: Vec::new(),
+        });
+        if let Some(c) = &mut self.client {
+            c.vision_versions(project);
+        }
+    }
+
     pub fn issue_pane_open(&self) -> Option<Id> {
         self.detail.filter(|_| self.tab == Tab::Issues)
     }
@@ -2338,6 +2453,9 @@ impl App {
             ui.allocate_ui(Vec2::new(150.0, KEY_H), |ui| {
                 choice(ui, "sort", &mut self.sort, Sort::ALL.map(|s| (s, s.label().to_string())));
             });
+            ui.allocate_ui(Vec2::new(150.0, KEY_H), |ui| {
+                choice(ui, "group", &mut self.group, Group::ALL.map(|g| (g, g.label().to_string())));
+            });
             if !labels.is_empty() {
                 ui.allocate_ui(Vec2::new(130.0, KEY_H), |ui| {
                     let options = std::iter::once((String::new(), "all labels".to_string()))
@@ -2369,6 +2487,7 @@ impl App {
             return;
         }
         let sessions = o.sessions.clone();
+        let visions = o.visions.clone();
         if everything {
             let rows: Vec<Project> = o
                 .projects
@@ -2379,29 +2498,34 @@ impl App {
             self.board_levels(ui, &rows);
             ui.add_space(8.0);
         }
-        let states: Vec<IssueState> = IssueState::ALL
-            .into_iter()
-            .filter(|s| self.filter == Filter::All || s.is_open())
-            .collect();
+        let columns: Vec<(String, Option<IssueState>, Vec<&Issue>)> = match self.group {
+            Group::State => IssueState::ALL
+                .into_iter()
+                .filter(|s| self.filter == Filter::All || s.is_open())
+                .map(|s| (s.as_str().to_string(), Some(s), shown.iter().copied().filter(|i| i.state == s).collect()))
+                .collect(),
+            Group::Goal => goal_columns(&shown, &visions, &names, everything),
+        };
         let gap = 10.0;
         let height = ui.available_height();
-        let width = ((ui.available_width() - gap * (states.len() - 1) as f32)
-            / states.len() as f32)
+        let width = ((ui.available_width() - gap * (columns.len().max(1) - 1) as f32)
+            / columns.len().max(1) as f32)
             .max(230.0);
         egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                for state in &states {
-                    let group: Vec<&&Issue> = shown.iter().filter(|i| i.state == *state).collect();
+                for (label, state, group) in &columns {
                     let column = ui.allocate_ui_with_layout(
                         Vec2::new(width, height),
                         Layout::top_down(Align::Min),
                         |ui| {
                             ui.set_width(width);
-                            self.board_column(ui, *state, &group, &sessions, &names, everything);
+                            self.board_column(ui, label, group, &sessions, &names, everything);
                         },
                     );
-                    self.drop_on_column(ui, column.response.rect, *state);
+                    if let Some(state) = state {
+                        self.drop_on_column(ui, column.response.rect, *state);
+                    }
                 }
             });
         });
@@ -2473,8 +2597,8 @@ impl App {
     fn board_column(
         &mut self,
         ui: &mut Ui,
-        state: IssueState,
-        group: &[&&Issue],
+        label: &str,
+        group: &[&Issue],
         sessions: &[Session],
         names: &HashMap<Id, String>,
         everything: bool,
@@ -2484,17 +2608,19 @@ impl App {
             .flat_map(|i| sessions.iter().filter(|s| s.issue_id == Some(i.id)))
             .filter(|s| s.status.busy())
             .count();
-        heading(ui, &format!("{} {}", state.as_str(), group.len()));
+        let title = format!("{label} {}", group.len());
+        let head = heading(ui, &title);
+        head.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &title));
         if working > 0 {
             hint(ui, &format!("{working} agent{} working", if working == 1 { "" } else { "s" }));
         }
         ui.add_space(4.0);
         egui::ScrollArea::vertical()
-            .id_salt(("column", state.as_str()))
+            .id_salt(("column", label))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                for issue in group {
+                for issue in group.iter().copied() {
                     let project = if everything { names.get(&issue.project_id) } else { None };
                     self.issue_card(ui, issue, sessions, project.map(String::as_str));
                     ui.add_space(6.0);
@@ -2606,6 +2732,14 @@ impl App {
                             );
                         }
                     });
+                    if let Some(goal) = &issue.goal {
+                        let label = format!("goal {goal}");
+                        let c = chip(ui, goal, READOUT, true);
+                        c.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+                    } else if issue.off_vision {
+                        let c = chip(ui, "off vision", FAULT, false);
+                        c.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "off vision"));
+                    }
                     for s in &mine {
                         let (tint, word) = status_look(s.status);
                         let waiting = s.status == SessionStatus::Waiting;

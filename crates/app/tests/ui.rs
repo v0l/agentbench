@@ -3625,3 +3625,73 @@ fn open_externally_downloads_the_file_and_calls_the_opener() {
     assert_eq!(std::fs::read(&path).unwrap(), b"hello");
     assert!(path.starts_with(dir.path()));
 }
+
+#[test]
+fn the_vision_panel_draws_saves_and_restores_from_the_projects_page() {
+    let rig = rig();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("settings").click();
+    h.run_steps(3);
+    h.state_mut().settings_page("projects");
+    h.run_steps(3);
+    h.get_by_label("project vision").click();
+    until(&mut h, "the panel", |h| h.state().vision_open() == Some(project.id));
+    h.get_by_label("add goal").click();
+    h.run_steps(3);
+    h.get_by_label("vision summary").click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("A fast tracker".into()));
+    h.run_steps(3);
+    h.get_by_label("goal text").click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("fast boards".into()));
+    h.run_steps(3);
+    shot(&mut h, "vision-panel");
+    h.get_by_label("save vision").click();
+    until(&mut h, "saved", |_| rig.store.vision(project.id).unwrap().is_some());
+    let v = rig.store.vision(project.id).unwrap().unwrap();
+    assert_eq!(v.body.summary, "A fast tracker");
+    assert_eq!((v.body.goals[0].id.as_str(), v.body.goals[0].text.as_str()), ("g1", "fast boards"));
+    assert_eq!(v.author, "user");
+    until(&mut h, "the overview carries it", |h| {
+        h.state().overview().is_some_and(|o| o.visions.iter().any(|v| v.project_id == project.id))
+    });
+}
+
+#[test]
+fn an_issue_card_shows_its_goal_and_the_board_groups_by_goal() {
+    let rig = rig();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    rig.store
+        .set_vision(
+            project.id,
+            agentbench_core::VisionBody {
+                summary: "s".into(),
+                goals: vec![agentbench_core::Goal { id: "speed".into(), text: "fast".into(), status: Default::default() }],
+                non_goals: vec![],
+            },
+            "user",
+        )
+        .unwrap();
+    rig.store
+        .add_issue(&NewIssue { project_id: project.id, title: "Cache the board".into(), goal: Some("speed".into()), ..Default::default() })
+        .unwrap();
+    rig.store
+        .add_issue(&NewIssue { project_id: project.id, title: "Add a gimmick".into(), off_vision: true, ..Default::default() })
+        .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some_and(|o| o.issues.len() == 3));
+    click(&mut h, 283.0, 20.0);
+    h.run_steps(3);
+    h.get_by_label("goal speed");
+    h.get_by_label("off vision");
+    shot(&mut h, "goal-chips");
+    h.state_mut().group_by_goal();
+    h.run_steps(3);
+    h.get_by_label_contains("speed 1");
+    h.get_by_label_contains("no goal 1");
+    h.get_by_label_contains("off vision 1");
+    shot(&mut h, "goal-board");
+}

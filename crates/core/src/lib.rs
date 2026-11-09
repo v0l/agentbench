@@ -1514,6 +1514,8 @@ pub struct Overview {
     pub autopilot: Option<AutopilotState>,
     #[serde(default)]
     pub triage: Option<TriageState>,
+    #[serde(default)]
+    pub visions: Vec<Vision>,
     pub cursor: Id,
 }
 

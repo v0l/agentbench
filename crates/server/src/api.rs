@@ -316,6 +316,7 @@ async fn overview(State(api): State<Api>) -> Reply<Overview> {
         supervisor: api.runner.supervisor_session().map(|s| s.id),
         autopilot: Some(crate::autopilot::state(store)),
         triage: Some(crate::triage::state(store)),
+        visions: store.visions()?,
         cursor,
     }))
 }

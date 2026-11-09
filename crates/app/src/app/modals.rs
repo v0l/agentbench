@@ -10,6 +10,7 @@ impl App {
         self.worktree_modal(ctx);
         self.tags_modal(ctx);
         self.notes_modal(ctx);
+        self.vision_modal(ctx);
         self.confirm_modal(ctx);
         self.terminal_modal(ctx);
         self.settings_modal(ctx);
@@ -667,6 +668,110 @@ impl App {
         }
         if close || m.should_close() {
             self.notes_view = None;
+        }
+    }
+
+    pub(super) fn vision_modal(&mut self, ctx: &egui::Context) {
+        let name = self
+            .vision_edit
+            .as_ref()
+            .and_then(|e| {
+                self.overview.as_ref()?.projects.iter().find(|p| p.id == e.project).map(|p| p.name.clone())
+            })
+            .unwrap_or_default();
+        let Some(e) = &mut self.vision_edit else {
+            return;
+        };
+        let (mut save, mut close, mut restore) = (false, false, None);
+        let m = egui::Modal::new(egui::Id::unique("vision"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(modal_width(ctx, 600.0));
+                modal_title(ui, &format!("Vision for {name}"));
+                egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                    section(ui, "summary", "what the project is for", |ui| {
+                        prose(ui, &mut e.summary, "vision summary", 3);
+                    });
+                    section(ui, "goals", "in order; work is judged against the active ones", |ui| {
+                        let mut drop = None;
+                        for (n, g) in e.goals.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                let id = if g.id.is_empty() { "new".to_string() } else { g.id.clone() };
+                                Line::new().value(id).tint(LEGEND).size(11.0).show(ui);
+                                ui.allocate_ui(Vec2::new(110.0, KEY_H), |ui| {
+                                    choice(
+                                        ui,
+                                        ("goal status", n),
+                                        &mut g.status,
+                                        [
+                                            agentbench_core::GoalStatus::Active,
+                                            agentbench_core::GoalStatus::Done,
+                                            agentbench_core::GoalStatus::Dropped,
+                                        ]
+                                        .map(|s| (s, s.as_str().to_string())),
+                                    );
+                                });
+                                if ui.add(Key::new("drop").id_salt(("drop goal", n)).outline(FAULT)).clicked() {
+                                    drop = Some(n);
+                                }
+                            });
+                            field(ui, &mut g.text, "goal text");
+                        }
+                        if let Some(n) = drop {
+                            e.goals.remove(n);
+                        }
+                        let add = ui.add(Key::new("add goal").outline(VALUE));
+                        add.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add goal"));
+                        if add.clicked() {
+                            e.goals.push(agentbench_core::Goal::default());
+                        }
+                    });
+                    section(ui, "non-goals", "one per line", |ui| {
+                        prose(ui, &mut e.non_goals, "non-goals", 3);
+                    });
+                    section(ui, "history", "every version, newest first", |ui| {
+                        if e.versions.is_empty() {
+                            note(ui, "No versions yet.", LEGEND);
+                        }
+                        for (n, v) in e.versions.iter().enumerate() {
+                            let tag = if n == 0 { " (current)" } else { "" };
+                            note(ui, format!("{}{tag}: {}", v.author, v.body.summary), LEGEND);
+                            if n > 0
+                                && ui.add(Key::new(format!("restore {}", v.id)).outline(VALUE)).clicked()
+                            {
+                                restore = Some(v.id);
+                            }
+                        }
+                    });
+                });
+                footer(ui, |ui| {
+                    let key = ui.add(Key::new("save vision").solid(READOUT).min_width(100.0));
+                    key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "save vision"));
+                    if key.clicked() {
+                        save = true;
+                    }
+                    if ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if m.should_close() {
+            close = true;
+        }
+        let project = e.project;
+        if save {
+            let body = e.body();
+            if let Some(c) = &mut self.client {
+                c.put_vision(project, &body);
+            }
+            self.vision_edit = None;
+        } else if let Some(v) = restore {
+            if let Some(c) = &mut self.client {
+                c.restore_vision(project, v);
+            }
+            self.vision_edit = None;
+        } else if close {
+            self.vision_edit = None;
         }
     }
 

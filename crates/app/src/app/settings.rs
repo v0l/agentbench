@@ -422,6 +422,7 @@ impl App {
                     );
                 }
             }
+            Some(ProjectAction::Vision(id)) => self.open_vision(id),
             Some(ProjectAction::Notes(id)) => {
                 self.notes_view = Some((id, Vec::new()));
                 if let Some(c) = &mut self.client {
@@ -911,6 +912,7 @@ enum ProjectAction {
     Remove(Id, String),
     Rescan(Id),
     Notes(Id),
+    Vision(Id),
     NewWorktree(Id),
     RemoveWorktree(Worktree),
     Rename(Id, String),
@@ -1097,6 +1099,13 @@ fn projects_section(
                 }
                 if ui.add(Key::new("new worktree").outline(VALUE)).clicked() {
                     action = Some(ProjectAction::NewWorktree(p.id));
+                }
+                let vision = ui.add(Key::new("vision").outline(VALUE));
+                vision.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "project vision")
+                });
+                if vision.clicked() {
+                    action = Some(ProjectAction::Vision(p.id));
                 }
                 if ui.add(Key::new("notes").outline(VALUE)).clicked() {
                     action = Some(ProjectAction::Notes(p.id));

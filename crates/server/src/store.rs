@@ -1665,6 +1665,14 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn visions(&self) -> Result<Vec<Vision>> {
+        let mut out = Vec::new();
+        for p in self.projects()? {
+            out.extend(self.vision(p.id)?);
+        }
+        Ok(out)
+    }
+
     pub fn set_vision(&self, project_id: Id, body: VisionBody, author: &str) -> Result<Vision> {
         self.project(project_id)?;
         let mut body = body;

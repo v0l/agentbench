@@ -43,6 +43,7 @@ fn main() -> Result<(), String> {
         notes,
         global_notes: store.global_notes().map_err(|e| e.0)?,
         automation: String::new(),
+        vision: String::new(),
     };
     let turn = Turn {
         prompt: "",
