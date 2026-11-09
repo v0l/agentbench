@@ -6,6 +6,8 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-09
+
 ### Changed
 - A supervisor model setting (in settings, under providers) changes the model the supervisor runs on without a provider entry. The default is still high, and a provider's own supervisor model still wins.
 
