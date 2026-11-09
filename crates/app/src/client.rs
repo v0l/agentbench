@@ -70,6 +70,8 @@ pub struct Client {
     patience: Duration,
     watch_wait: u64,
     pub pending: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    writes: tokio::sync::mpsc::UnboundedSender<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
 }
 
 /// How long an ordinary request may take before the window calls the server offline.
@@ -101,6 +103,17 @@ fn reason(e: &reqwest::Error) -> String {
         source = cause.source();
     }
     out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ordered_writes() -> tokio::sync::mpsc::UnboundedSender<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>();
+    crate::spawn(async move {
+        while let Some(task) = rx.recv().await {
+            task.await;
+        }
+    });
+    tx
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -138,6 +151,8 @@ impl Client {
             patience: PATIENCE,
             watch_wait: WATCH_WAIT,
             pending: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            writes: ordered_writes(),
         }
     }
 
@@ -210,8 +225,12 @@ impl Client {
     ) {
         let tx = self.tx.clone();
         let wake = self.wake.clone();
+        let ordered = req
+            .try_clone()
+            .and_then(|r| r.build().ok())
+            .is_some_and(|r| matches!(*r.method(), Method::PUT | Method::PATCH | Method::DELETE));
         self.pending += 1;
-        crate::spawn(async move {
+        let task = async move {
             let res = match req.send().await {
                 Err(e) => Err(Reply::Offline(reason(&e))),
                 Ok(r) if r.status() == 401 => {
@@ -225,7 +244,22 @@ impl Client {
             };
             let _ = tx.send(finish(res));
             wake();
-        });
+        };
+        self.run(task, ordered);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run(&self, task: impl std::future::Future<Output = ()> + Send + 'static, ordered: bool) {
+        if ordered {
+            let _ = self.writes.send(Box::pin(task));
+        } else {
+            crate::spawn(task);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn run(&self, task: impl std::future::Future<Output = ()> + 'static, _ordered: bool) {
+        crate::spawn(task);
     }
 
     fn json<B: Serialize>(body: &B) -> Option<Vec<u8>> {

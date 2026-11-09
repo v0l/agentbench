@@ -146,7 +146,9 @@ pub fn keyboard_height(_ctx: &egui::Context) -> f32 {
 }
 
 static STAND_IN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-static PENDING_PASTE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+fn pending_paste() -> egui::Id {
+    egui::Id::new("pending-paste")
+}
 
 #[doc(hidden)]
 pub fn stand_in_clipboard(text: Option<&str>) {
@@ -184,14 +186,12 @@ pub fn queue_paste(ctx: &egui::Context) {
     if text.is_empty() {
         return;
     }
-    if let Ok(mut pending) = PENDING_PASTE.lock() {
-        *pending = Some(text);
-    }
+    ctx.data_mut(|d| d.insert_temp(pending_paste(), text));
     ctx.request_repaint();
 }
 
 pub fn deliver_paste(ctx: &egui::Context) {
-    let Some(text) = PENDING_PASTE.lock().ok().and_then(|mut p| p.take()) else {
+    let Some(text) = ctx.data_mut(|d| d.remove_temp::<String>(pending_paste())) else {
         return;
     };
     ctx.input_mut(|i| i.events.push(egui::Event::Paste(text)));
