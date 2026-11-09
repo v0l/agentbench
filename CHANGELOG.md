@@ -10,6 +10,7 @@ All notable changes to Agentbench are listed here. The format follows
 - A supervisor model setting (in settings, under providers) changes the model the supervisor runs on without a provider entry. The default is still high, and a provider's own supervisor model still wins.
 
 ### Fixed
+- The window's saves reach the server in the order they were made, so finishing the setup no longer loses the chosen model, and a paste into a field no longer takes text meant for another window.
 - Android: the paired server is kept when the app is closed, swiped away or killed. It is written to its own file the moment pairing succeeds, instead of only when the app exits cleanly.
 - After a WiFi to mobile data switch the app and its background watch reconnect at once. The header shows "reconnecting in Ns" or "offline" while the server can't be reached, retries after 1, 2, 5, 10 and 30 s, and the watch notification says the same.
 

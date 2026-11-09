@@ -161,6 +161,10 @@ pub fn saved_title_model(
         .unwrap_or_else(|| fallback.clone())
 }
 
+async fn bind(listen: SocketAddr) -> Result<tokio::net::TcpListener, String> {
+    tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))
+}
+
 pub async fn serve_config(
     store: store::Store,
     config: &Config,
@@ -181,7 +185,7 @@ pub async fn serve_config(
         Some(model),
         Some(titles),
         Some((speech, voice)),
-        listen,
+        bind(listen).await?,
         web,
         shutdown,
     )
@@ -204,7 +208,7 @@ pub async fn serve_with(
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    serve_inner(store, agents, None, None, None, listen, web, shutdown).await
+    serve_inner(store, agents, None, None, None, bind(listen).await?, web, shutdown).await
 }
 
 /// Serve with these agents, keeping downloaded models in `models` rather than the data folder:
@@ -213,13 +217,13 @@ pub async fn serve_agents(
     store: store::Store,
     agents: Vec<Box<dyn Agent>>,
     model: Option<agent::native::Shared>,
-    listen: SocketAddr,
+    listener: tokio::net::TcpListener,
     models: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
     let speech = speech::Speech::new(models.clone(), &speech_model(&store));
     let voice = voice::Voice::new(models.join("phonon"));
-    serve_inner(store, agents, model, None, Some((speech, voice)), listen, None, shutdown).await
+    serve_inner(store, agents, model, None, Some((speech, voice)), listener, None, shutdown).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -229,10 +233,11 @@ async fn serve_inner(
     model: Option<agent::native::Shared>,
     titles: Option<titles::Titles>,
     speech: Option<(speech::Speech, voice::Voice)>,
-    listen: SocketAddr,
+    listener: tokio::net::TcpListener,
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
+    let listen = listener.local_addr().map_err(|e| e.to_string())?;
     let stale = store.reset_running().map_err(|e| e.0)?;
     if !stale.is_empty() {
         tracing::info!(
@@ -267,8 +272,6 @@ async fn serve_inner(
     autopilot::spawn(api.runner.clone());
     triage::spawn(api.runner.clone());
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
-    let listener =
-        tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{listen}: {e}"))?;
     tracing::info!("listening on http://{}", listener.local_addr().map_err(|e| e.to_string())?);
     let mut app = api::router(api);
     if let Some(dir) = web.filter(|d| d.join("index.html").is_file()) {

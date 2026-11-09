@@ -160,16 +160,12 @@ fn rig_named(
     let models = dir.path().join("models");
     let mut extra = Some(extra);
     let mut echo = Some(echo);
-    let addr = loop {
-        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let addr = listener.local_addr().unwrap();
+    {
         let s = store.clone();
-        let models = models.clone();
-        let model_url = model_url.clone();
         let model_name = model_name.clone();
         let (extra, echo) = (extra.take().unwrap(), echo.take().unwrap());
-        let (failed_tx, failed_rx) = std::sync::mpsc::channel();
         rt.spawn(async move {
             let config = agentbench_server::Config {
                 model: agentbench_server::agent::native::Model {
@@ -183,25 +179,17 @@ fn rig_named(
             let mut agents: Vec<Box<dyn agentbench_server::agent::Agent>> = vec![Box::new(echo)];
             agents.push(Box::new(agentbench_server::agent::Native::shared(model.clone())));
             agents.extend(extra);
-            if let Err(e) = agentbench_server::serve_agents(
+            let _ = agentbench_server::serve_agents(
                 s,
                 agents,
                 Some(model),
-                addr,
+                listener,
                 models,
                 std::future::pending(),
             )
-            .await
-            {
-                let _ = failed_tx.send(e);
-            }
+            .await;
         });
-        match failed_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(e) if e.contains("in use") => {}
-            Ok(e) => panic!("{e}"),
-            Err(_) => break addr,
-        }
-    };
+    }
     Rig { url: addr.to_string(), store, _dir: dir, _rt: rt }
 }
 
@@ -2330,7 +2318,8 @@ fn a_reply_has_a_read_aloud_link() {
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().open_session(s.id, main.project_id);
-    h.run_steps(6);
+    until(&mut h, "the reply", |h| h.state().transcript_len(s.id) == 1);
+    until(&mut h, "the read aloud link", |h| h.query_by_label_contains("read aloud").is_some());
     shot(&mut h, "read-aloud");
     assert!(h.query_by_label_contains("read aloud").is_some(), "the link sits under the reply");
 }
