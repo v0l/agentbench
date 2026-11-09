@@ -7,7 +7,7 @@ All notable changes to Agentbench are listed here. The format follows
 ## [Unreleased]
 
 ### Changed
-- The supervisor now runs on the medium model by default, and the new supervisor setting (in settings, under providers) changes it without a provider entry. A provider's own supervisor model still wins.
+- A supervisor model setting (in settings, under providers) changes the model the supervisor runs on without a provider entry. The default is still high, and a provider's own supervisor model still wins.
 
 ## [0.8.3] - 2026-11-09
 

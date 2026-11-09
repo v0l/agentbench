@@ -3168,7 +3168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_supervisor_chat_defaults_to_the_medium_model_level_and_workers_do_not() {
+    async fn the_supervisor_chat_defaults_to_the_high_model_level_and_workers_do_not() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("r");
         crate::git::testing::repo(&main);
@@ -3178,9 +3178,9 @@ mod tests {
         let runner = Runner::new(store.clone(), vec![script_agent("echo", "read p")]);
 
         let sup = runner.open_supervisor("echo").unwrap();
-        assert_eq!(sup.model.as_deref(), Some("medium"));
+        assert_eq!(sup.model.as_deref(), Some("high"));
         store.set_model(sup.id, None).unwrap();
-        assert_eq!(runner.open_supervisor("echo").unwrap().model.as_deref(), Some("medium"));
+        assert_eq!(runner.open_supervisor("echo").unwrap().model.as_deref(), Some("high"));
 
         let worker = runner
             .start_session(NewSession {
@@ -3227,7 +3227,7 @@ mod tests {
         let pinned = crate::providers::supervisor_model(&store, "echo");
 
         let sup = runner.open_supervisor("echo").unwrap();
-        store.set_model(sup.id, Some("medium")).unwrap();
+        store.set_model(sup.id, Some("high")).unwrap();
         runner.send(&store.session(sup.id).unwrap(), "hello").unwrap();
         wait_idle(&runner, sup.id).await;
         assert_eq!(seen.0.lock().unwrap().last().unwrap().1, pinned);
@@ -3235,10 +3235,10 @@ mod tests {
         let err = runner.send(&store.session(sup.id).unwrap(), "/model low").unwrap_err();
         assert!(err.0.contains("pinned"), "{}", err.0);
         assert_ne!(store.session(sup.id).unwrap().model.as_deref(), Some("low"));
-        let err = runner.send(&store.session(sup.id).unwrap(), "/model high").unwrap_err();
+        let err = runner.send(&store.session(sup.id).unwrap(), "/model medium").unwrap_err();
         assert!(err.0.contains("pinned"), "{}", err.0);
-        runner.send(&store.session(sup.id).unwrap(), "/model medium").unwrap();
-        assert_eq!(store.session(sup.id).unwrap().model.as_deref(), Some("medium"));
+        runner.send(&store.session(sup.id).unwrap(), "/model high").unwrap();
+        assert_eq!(store.session(sup.id).unwrap().model.as_deref(), Some("high"));
 
         let worker = runner
             .start_session(NewSession { project_id: p.id, agent: "echo".into(), ..Default::default() })

@@ -150,8 +150,8 @@ impl App {
                                 providers = true;
                             }
                             if st.supervisor_loaded {
-                                row_help(ui, "supervisor", "The model level or name the supervisor chat runs on when a provider does not set one. Empty uses medium.", |ui| {
-                                    field(ui, &mut st.supervisor_model, "medium");
+                                row_help(ui, "supervisor", "The model level or name the supervisor chat runs on when a provider does not set one. Empty uses high.", |ui| {
+                                    field(ui, &mut st.supervisor_model, "high");
                                 });
                             }
                         });
@@ -319,7 +319,7 @@ impl App {
                     },
                 );
                 ui.add_space(8.0);
-                hint(ui, "Worker agents can call switch_model to go up a level for hard work and down for easy work. A level with no model is left out. In a worker chat, /model high does the same by hand, and /model with nothing goes back to the default. The supervisor never switches: it always runs on the supervisor model chosen per provider, or the supervisor setting under providers (medium by default).");
+                hint(ui, "Worker agents can call switch_model to go up a level for hard work and down for easy work. A level with no model is left out. In a worker chat, /model high does the same by hand, and /model with nothing goes back to the default. The supervisor never switches: it always runs on the supervisor model chosen per provider, or the supervisor setting under providers (high by default).");
                 } else if st.title_loaded {
                     section(
                         ui,

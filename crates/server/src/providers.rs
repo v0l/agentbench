@@ -10,7 +10,7 @@ const STEP: &str = "onboarding_step";
 const PROBE: Duration = Duration::from_secs(30);
 const CLI_STATUS: Duration = Duration::from_secs(8);
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-pub const SUPERVISOR_DEFAULT: &str = "medium";
+pub const SUPERVISOR_DEFAULT: &str = "high";
 pub const SUPERVISOR_SETTING: &str = "supervisor_model";
 
 pub const CLAUDE_INSTALL: &str = "curl -fsSL https://claude.ai/install.sh | bash";
@@ -718,7 +718,7 @@ pub(crate) mod tests {
         assert_eq!(level_model(&store, "claude", "high").as_deref(), Some("opus"));
         assert_eq!(level_model(&store, "codex", "high"), None);
         assert_eq!(level_model(&store, "native", "high"), None);
-        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("medium"));
+        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("high"));
         assert_eq!(supervisor_model(&store, "codex"), None);
         let list = merged(
             &[],
@@ -738,12 +738,12 @@ pub(crate) mod tests {
     #[test]
     fn the_supervisor_setting_overrides_the_default_and_loses_to_the_provider() {
         let store = Store::memory().unwrap();
-        store.set_setting(SUPERVISOR_SETTING, "high").unwrap();
-        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("high"));
+        store.set_setting(SUPERVISOR_SETTING, "medium").unwrap();
+        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("medium"));
         assert_eq!(supervisor_model(&store, "codex"), None);
         store.set_setting(SUPERVISOR_SETTING, "  ").unwrap();
-        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("medium"));
-        store.set_setting(SUPERVISOR_SETTING, "high").unwrap();
+        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("high"));
+        store.set_setting(SUPERVISOR_SETTING, "medium").unwrap();
         let list = merged(
             &[],
             vec![Provider {

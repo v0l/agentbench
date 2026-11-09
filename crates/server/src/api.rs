@@ -1715,15 +1715,15 @@ mod tests {
         let app = router(f.api.clone());
         let (s, got) = call(&app, "GET", "/api/settings/supervisor-model", None, T).await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(got, json!({"model": "", "default": "medium"}));
+        assert_eq!(got, json!({"model": "", "default": "high"}));
         let (s, got) =
-            call(&app, "PUT", "/api/settings/supervisor-model", Some(json!({"model": " high "})), T).await;
+            call(&app, "PUT", "/api/settings/supervisor-model", Some(json!({"model": " medium "})), T).await;
         assert_eq!(s, StatusCode::OK);
-        assert_eq!(got["model"], "high");
+        assert_eq!(got["model"], "medium");
         let store = f.api.runner.store();
-        assert_eq!(crate::providers::supervisor_model(store, "claude").as_deref(), Some("high"));
-        call(&app, "PUT", "/api/settings/supervisor-model", Some(json!({"model": ""})), T).await;
         assert_eq!(crate::providers::supervisor_model(store, "claude").as_deref(), Some("medium"));
+        call(&app, "PUT", "/api/settings/supervisor-model", Some(json!({"model": ""})), T).await;
+        assert_eq!(crate::providers::supervisor_model(store, "claude").as_deref(), Some("high"));
     }
 
     #[tokio::test]
