@@ -1047,8 +1047,8 @@ fn levels(base: &Model) -> Vec<&'static str> {
     agentbench_core::LEVELS.into_iter().filter(|l| base.level(l).is_some()).collect()
 }
 
-fn offered(base: &Model, mcp: bool) -> Vec<Spec> {
-    let any = !levels(base).is_empty();
+fn offered(base: &Model, mcp: bool, supervisor: bool) -> Vec<Spec> {
+    let any = !supervisor && !levels(base).is_empty();
     let mut all: Vec<Spec> =
         specs().into_iter().filter(|t| any || t.name != "switch_model").collect();
     if mcp {
@@ -1057,9 +1057,9 @@ fn offered(base: &Model, mcp: bool) -> Vec<Spec> {
     all
 }
 
-fn tool_list(base: &Model, mcp: bool) -> Value {
+fn tool_list(base: &Model, mcp: bool, supervisor: bool) -> Value {
     Value::Array(
-        offered(base, mcp)
+        offered(base, mcp, supervisor)
             .into_iter()
             .map(|t| {
                 json!({
@@ -1128,7 +1128,7 @@ pub fn system(turn: &Turn, base: &Model, mcp: &Mcp) -> String {
     if let Some(text) = instructions(turn.cwd) {
         out.push_str(&section("project_instructions", &text));
     }
-    out.push_str(&tool_section(&offered(base, servers.is_some())));
+    out.push_str(&tool_section(&offered(base, servers.is_some(), turn.context.supervisor)));
     if !skills.is_empty() {
         out.push_str(&section("skills", &skillset::listing(&skills)));
     }
@@ -1657,7 +1657,9 @@ impl Agent for Native {
         if !messages.first().is_some_and(|m| m["role"] == "system") {
             let mut prompt = system(turn, &base, &self.mcp);
             prompt.push_str(&code_section(&languages));
-            prompt.push_str(&model_levels_section(&base, &model));
+            if !turn.context.supervisor {
+                prompt.push_str(&model_levels_section(&base, &model));
+            }
             let mut opening = vec![json!({ "role": "system", "content": prompt })];
             if let Some(Entry::Summary { text }) = agentbench_core::since_summary(turn.history)
                 .first()
@@ -1673,7 +1675,8 @@ impl Agent for Native {
         let mut failures = 0usize;
         let mut nudged = false;
         messages.prompt(user_message(turn.prompt, turn.files).await);
-        let tools = tool_list(&base, self.mcp.configured(workspace.root()));
+        let tools =
+            tool_list(&base, self.mcp.configured(workspace.root()), turn.context.supervisor);
         let mut broken = still_broken(turn.history);
         io.emit(Event::Usage(serving(&model, self.patience.probe).await));
         if !turn.context.home {
@@ -1781,6 +1784,10 @@ impl Agent for Native {
                     Ok(args) => tokio::time::timeout(limit, async {
                         let args = self.secrets.fill(&session_key, &args)?;
                         match name {
+                        "switch_model" if turn.context.supervisor => Err(
+                            "the supervisor is pinned to the supervisor model and cannot switch; the user picks that model in settings"
+                                .to_string(),
+                        ),
                         "switch_model" => {
                             switch(
                                 &base,
@@ -1853,7 +1860,7 @@ impl Agent for Native {
                     .map_err(|e| self.secrets.scrub(&session_key, &e));
                 failures = if result.is_err() && name != "switch_model" { failures + 1 } else { 0 };
                 let result = match result {
-                    Err(e) if failures >= STRUGGLE && !nudged => {
+                    Err(e) if failures >= STRUGGLE && !nudged && !turn.context.supervisor => {
                         match struggling_hint(&base, &model) {
                             Some(h) => {
                                 nudged = true;
@@ -4137,8 +4144,8 @@ for line in sys.stdin:
     #[test]
     fn without_mcp_servers_the_mcp_tool_is_not_offered() {
         let base = Model::default();
-        assert!(!offered(&base, false).iter().any(|t| t.name == "mcp"));
-        assert!(offered(&base, true).iter().any(|t| t.name == "mcp"));
+        assert!(!offered(&base, false, false).iter().any(|t| t.name == "mcp"));
+        assert!(offered(&base, true, false).iter().any(|t| t.name == "mcp"));
     }
 
     #[tokio::test]
@@ -5505,6 +5512,51 @@ for line in sys.stdin:
             |e| matches!(e, Event::Notice(n) if n.contains("switched to high: big, tricky bug"))
         ));
         assert!(events.iter().any(|e| matches!(e, Event::Text { delta } if delta == "solved")));
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_is_not_offered_switch_model_and_cannot_call_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) =
+            stub(vec![vec![call("c1", "switch_model", json!({"level": "low"}))], vec![say("ok")]]);
+        let native = Native::new(Model { url, ..three_levels() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let c = Context { supervisor: true, ..context() };
+        let turn = Turn {
+            prompt: "plan",
+            files: &[],
+            cwd: dir.path(),
+            model: Some("high"),
+            effort: None,
+            resume: None,
+            history: &[],
+            context: &c,
+        };
+        native.run(&turn, &io).await.unwrap();
+        let first = asked.recv().unwrap();
+        assert_eq!(first["model"], "huge");
+        let names: Vec<&str> = first["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert!(!names.contains(&"switch_model"), "{names:?}");
+        let prompt = first["messages"][0]["content"].as_str().unwrap();
+        assert!(!prompt.contains("model_levels"), "{prompt}");
+        assert!(!prompt.contains("switch_model"), "{prompt}");
+        let second = asked.recv().unwrap();
+        assert_eq!(second["model"], "huge");
+        let last = second["messages"].as_array().unwrap().last().unwrap();
+        assert!(last["content"].as_str().unwrap().contains("pinned"), "{last}");
+        assert!(!io.events().iter().any(|e| matches!(e, Event::Notice(n) if n.contains("switched"))));
+    }
+
+    #[test]
+    fn a_worker_keeps_switch_model_and_the_supervisor_does_not() {
+        let base = three_levels();
+        assert!(offered(&base, false, false).iter().any(|t| t.name == "switch_model"));
+        assert!(!offered(&base, false, true).iter().any(|t| t.name == "switch_model"));
     }
 
     #[tokio::test]
