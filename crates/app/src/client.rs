@@ -32,6 +32,7 @@ pub enum Reply {
     Supervisor(agentbench_core::Session),
     Model(agentbench_core::ModelSettings),
     Title(agentbench_core::TitleSettings),
+    SupervisorModel(String),
     /// Where the server runs its speech models. `None` when the server is too old to say.
     Audio(Option<agentbench_core::AudioStatus>),
     /// The voices the server reads aloud in, as (id, label). `None` when it cannot say.
@@ -455,6 +456,22 @@ impl Client {
                 });
             Reply::Voices(list)
         });
+    }
+
+    pub fn supervisor_model(&mut self) {
+        let req = self.request(Method::GET, "/api/settings/supervisor-model", None);
+        self.dispatch(req, |res| {
+            let model = res
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|v| v["model"].as_str().map(str::to_string));
+            Reply::SupervisorModel(model.unwrap_or_default())
+        });
+    }
+
+    pub fn set_supervisor_model(&mut self, model: &str) {
+        let body = serde_json::json!({ "model": model });
+        self.act(Method::PUT, "/api/settings/supervisor-model", Some(&body), "");
     }
 
     pub fn title(&mut self) {

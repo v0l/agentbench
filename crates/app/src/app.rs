@@ -390,6 +390,8 @@ struct Settings {
     title_loaded: bool,
     title_models: Option<Result<Vec<String>, String>>,
     title_asking: bool,
+    supervisor_model: String,
+    supervisor_loaded: bool,
     /// Where the server runs speech: `None` until it answers, `Some(None)` when it cannot say.
     audio: Option<Option<agentbench_core::AudioStatus>>,
     /// The voices the server reads aloud in: `None` until it answers.
@@ -1122,6 +1124,16 @@ impl App {
         self.settings.as_ref().is_some_and(|s| s.title_loaded)
     }
 
+    pub fn settings_supervisor_loaded(&self) -> bool {
+        self.settings.as_ref().is_some_and(|s| s.supervisor_loaded)
+    }
+
+    pub fn settings_set_supervisor_model(&mut self, model: &str) {
+        if let Some(st) = &mut self.settings {
+            st.supervisor_model = model.into();
+        }
+    }
+
     /// Fill in one model level (low, medium or high) as the settings dialog would.
     pub fn settings_set_level(&mut self, level: &str, url: &str, model: &str) {
         if let Some(st) = &mut self.settings {
@@ -1709,6 +1721,12 @@ impl App {
                 self.agent_models.remove("native");
                 if let Some(c) = &mut self.client {
                     c.overview();
+                }
+            }
+            Reply::SupervisorModel(model) => {
+                if let Some(st) = self.settings.as_mut().filter(|s| !s.supervisor_loaded) {
+                    st.supervisor_model = model;
+                    st.supervisor_loaded = true;
                 }
             }
             Reply::Onboarding(o) => self.onboarding_reply(o),

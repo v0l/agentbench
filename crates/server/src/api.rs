@@ -94,6 +94,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/triage/{id}/accept", post(accept_proposal))
         .route("/api/triage/{id}/reject", post(reject_proposal))
         .route("/api/settings/title", get(get_title).put(put_title))
+        .route("/api/settings/supervisor-model", get(get_supervisor_model).put(put_supervisor_model))
         .route("/api/settings/title/models", post(list_title_models))
         .route("/api/agents/{name}/models", get(agent_models))
         .route("/api/projects", get(list_projects).post(add_project))
@@ -468,6 +469,30 @@ async fn clear_cross(State(api): State<Api>) -> Result<StatusCode, Failure> {
     store.delete_setting("start_session_any_project")?;
     store.delete_setting("start_session_projects")?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_supervisor_model(State(api): State<Api>) -> Reply<serde_json::Value> {
+    let model = api
+        .runner
+        .store()
+        .setting(crate::providers::SUPERVISOR_SETTING)?
+        .unwrap_or_default();
+    Ok(Json(json!({ "model": model, "default": crate::providers::SUPERVISOR_DEFAULT })))
+}
+
+async fn put_supervisor_model(
+    State(api): State<Api>,
+    Json(body): Json<serde_json::Value>,
+) -> Reply<serde_json::Value> {
+    let model = body["model"].as_str().unwrap_or_default().trim();
+    let store = api.runner.store();
+    if model.is_empty() {
+        store.delete_setting(crate::providers::SUPERVISOR_SETTING)?;
+    } else {
+        store.set_setting(crate::providers::SUPERVISOR_SETTING, model)?;
+    }
+    changed(&api);
+    get_supervisor_model(State(api)).await
 }
 
 async fn get_title(State(api): State<Api>) -> Reply<agentbench_core::TitleSettings> {
@@ -1682,6 +1707,23 @@ mod tests {
         assert_eq!(shared.get().model, "other");
         let saved = f.api.runner.store().setting("model").unwrap().unwrap();
         assert!(saved.contains("\"other\""));
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_model_is_a_setting_that_empty_clears() {
+        let f = fixture();
+        let app = router(f.api.clone());
+        let (s, got) = call(&app, "GET", "/api/settings/supervisor-model", None, T).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(got, json!({"model": "", "default": "medium"}));
+        let (s, got) =
+            call(&app, "PUT", "/api/settings/supervisor-model", Some(json!({"model": " high "})), T).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(got["model"], "high");
+        let store = f.api.runner.store();
+        assert_eq!(crate::providers::supervisor_model(store, "claude").as_deref(), Some("high"));
+        call(&app, "PUT", "/api/settings/supervisor-model", Some(json!({"model": ""})), T).await;
+        assert_eq!(crate::providers::supervisor_model(store, "claude").as_deref(), Some("medium"));
     }
 
     #[tokio::test]

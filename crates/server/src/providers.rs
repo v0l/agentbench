@@ -10,7 +10,8 @@ const STEP: &str = "onboarding_step";
 const PROBE: Duration = Duration::from_secs(30);
 const CLI_STATUS: Duration = Duration::from_secs(8);
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const SUPERVISOR_DEFAULT: &str = "high";
+pub const SUPERVISOR_DEFAULT: &str = "medium";
+pub const SUPERVISOR_SETTING: &str = "supervisor_model";
 
 pub const CLAUDE_INSTALL: &str = "curl -fsSL https://claude.ai/install.sh | bash";
 pub const CODEX_INSTALL: &str = "npm install -g @openai/codex";
@@ -337,7 +338,16 @@ pub fn supervisor_model(store: &Store, agent: &str) -> Option<String> {
             .or_else(|| list.iter().find(|p| !p.kind.subscription())),
     };
     let chosen = p.map(|p| p.supervisor.trim().to_string()).filter(|m| !m.is_empty());
-    chosen.or_else(|| (kind != Some(ProviderKind::CodexSubscription)).then(|| SUPERVISOR_DEFAULT.into()))
+    let set = store
+        .setting(SUPERVISOR_SETTING)
+        .ok()
+        .flatten()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
+    chosen.or_else(|| {
+        (kind != Some(ProviderKind::CodexSubscription))
+            .then(|| set.unwrap_or_else(|| SUPERVISOR_DEFAULT.into()))
+    })
 }
 
 fn base(url: &str) -> String {
@@ -708,7 +718,7 @@ pub(crate) mod tests {
         assert_eq!(level_model(&store, "claude", "high").as_deref(), Some("opus"));
         assert_eq!(level_model(&store, "codex", "high"), None);
         assert_eq!(level_model(&store, "native", "high"), None);
-        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("high"));
+        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("medium"));
         assert_eq!(supervisor_model(&store, "codex"), None);
         let list = merged(
             &[],
@@ -722,6 +732,27 @@ pub(crate) mod tests {
         save(&store, &list).unwrap();
         assert_eq!(level_model(&store, "claude", "medium").as_deref(), Some("sonnet-x"));
         assert_eq!(level_model(&store, "claude", "low").as_deref(), Some("haiku"));
+        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("opus-x"));
+    }
+
+    #[test]
+    fn the_supervisor_setting_overrides_the_default_and_loses_to_the_provider() {
+        let store = Store::memory().unwrap();
+        store.set_setting(SUPERVISOR_SETTING, "high").unwrap();
+        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("high"));
+        assert_eq!(supervisor_model(&store, "codex"), None);
+        store.set_setting(SUPERVISOR_SETTING, "  ").unwrap();
+        assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("medium"));
+        store.set_setting(SUPERVISOR_SETTING, "high").unwrap();
+        let list = merged(
+            &[],
+            vec![Provider {
+                kind: ProviderKind::ClaudeSubscription,
+                supervisor: "opus-x".into(),
+                ..Default::default()
+            }],
+        );
+        save(&store, &list).unwrap();
         assert_eq!(supervisor_model(&store, "claude").as_deref(), Some("opus-x"));
     }
 

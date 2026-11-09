@@ -3168,7 +3168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_supervisor_chat_defaults_to_the_high_model_level_and_workers_do_not() {
+    async fn the_supervisor_chat_defaults_to_the_medium_model_level_and_workers_do_not() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("r");
         crate::git::testing::repo(&main);
@@ -3178,9 +3178,9 @@ mod tests {
         let runner = Runner::new(store.clone(), vec![script_agent("echo", "read p")]);
 
         let sup = runner.open_supervisor("echo").unwrap();
-        assert_eq!(sup.model.as_deref(), Some("high"));
+        assert_eq!(sup.model.as_deref(), Some("medium"));
         store.set_model(sup.id, None).unwrap();
-        assert_eq!(runner.open_supervisor("echo").unwrap().model.as_deref(), Some("high"));
+        assert_eq!(runner.open_supervisor("echo").unwrap().model.as_deref(), Some("medium"));
 
         let worker = runner
             .start_session(NewSession {
@@ -3235,8 +3235,10 @@ mod tests {
         let err = runner.send(&store.session(sup.id).unwrap(), "/model low").unwrap_err();
         assert!(err.0.contains("pinned"), "{}", err.0);
         assert_ne!(store.session(sup.id).unwrap().model.as_deref(), Some("low"));
-        runner.send(&store.session(sup.id).unwrap(), "/model high").unwrap();
-        assert_eq!(store.session(sup.id).unwrap().model.as_deref(), Some("high"));
+        let err = runner.send(&store.session(sup.id).unwrap(), "/model high").unwrap_err();
+        assert!(err.0.contains("pinned"), "{}", err.0);
+        runner.send(&store.session(sup.id).unwrap(), "/model medium").unwrap();
+        assert_eq!(store.session(sup.id).unwrap().model.as_deref(), Some("medium"));
 
         let worker = runner
             .start_session(NewSession { project_id: p.id, agent: "echo".into(), ..Default::default() })

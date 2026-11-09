@@ -1239,6 +1239,21 @@ fn the_title_model_is_set_in_the_settings_and_saved_on_the_server() {
 }
 
 #[test]
+fn the_supervisor_model_is_set_in_the_settings_and_saved_on_the_server() {
+    let rig = rig();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("settings").click();
+    h.run_steps(2);
+    until(&mut h, "the supervisor model", |h| h.state().settings_supervisor_loaded());
+    h.state_mut().settings_set_supervisor_model("high");
+    h.run_steps(2);
+    h.state_mut().settings_save();
+    until(&mut h, "the save", |h| h.state().settings_loaded().is_none());
+    assert_eq!(rig.store.setting("supervisor_model").unwrap().as_deref(), Some("high"));
+}
+
+#[test]
 fn the_model_levels_are_set_in_the_settings_and_saved_on_the_server() {
     let rig = rig();
     let mut h = harness(rig.url.clone());
