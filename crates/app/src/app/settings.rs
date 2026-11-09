@@ -273,7 +273,7 @@ impl App {
                 section(
                     ui,
                     "model levels",
-                    "what switch_model and /model low|medium|high move a chat to",
+                    "what switch_model and /model low|medium|high move a worker chat to",
                     |ui| {
                         let own = st.model.url.trim().to_string();
                         let levels = [
@@ -311,7 +311,7 @@ impl App {
                     },
                 );
                 ui.add_space(8.0);
-                hint(ui, "The agent can call switch_model to go up a level for hard work and down for easy work. A level with no model is left out. In a chat, /model high does the same by hand, and /model with nothing goes back to the default.");
+                hint(ui, "Worker agents can call switch_model to go up a level for hard work and down for easy work. A level with no model is left out. In a worker chat, /model high does the same by hand, and /model with nothing goes back to the default. The supervisor never switches: it always runs on the supervisor model chosen per provider.");
                 } else if st.title_loaded {
                     section(
                         ui,

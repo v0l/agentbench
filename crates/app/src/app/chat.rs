@@ -340,10 +340,11 @@ impl App {
                         s.status == SessionStatus::Failed,
                     );
                     let about = format!(
-                        "{}\n{} {}{}\n{} in, {} out",
+                        "{}\n{} {}{}{}\n{} in, {} out",
                         s.title,
                         s.agent,
                         s.model.as_deref().unwrap_or_default(),
+                        if supervisor { " (pinned to the supervisor model)" } else { "" },
                         s.issue_id.map(|i| format!("\nissue #{i}")).unwrap_or_default(),
                         tokens(s.usage.input_tokens + s.usage.cache_read_tokens),
                         tokens(s.usage.output_tokens)
