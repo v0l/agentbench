@@ -2303,4 +2303,19 @@ mod tests {
         assert!(s.messages(kept.id, 0).unwrap().is_empty(), "deletes still cascade");
         assert_eq!(s.messages(other.id, 0).unwrap().len(), 1);
     }
+    #[test]
+    fn a_sessions_parent_survives_reopening_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let (parent, child) = {
+            let s = Store::open(&path).unwrap();
+            let (_, main) = testing::project(&s, "/a");
+            let parent = s.add_session(main.id, "pi", "p", None, None).unwrap();
+            let child = s.add_session(main.id, "pi", "c", None, None).unwrap();
+            s.set_parent(child.id, Some(parent.id)).unwrap();
+            (parent.id, child.id)
+        };
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.session(child).unwrap().parent, Some(parent));
+    }
 }

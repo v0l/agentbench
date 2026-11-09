@@ -398,7 +398,7 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "watch_session",
-            "Be told when a running session finishes. When it does, a message with the session id and its new state (not the reply; read that with read_session) arrives in this chat as a new turn, so you do not have to poll or block. For a worker you started that went idle, the message is a judging request with its reply, diff stat and test runs; answer it with judge_session. Sessions you start from the supervisor chat are watched automatically. Does nothing for a session that is not running.",
+            "Be told when a running session finishes. When it does, a message with the session id and its new state (not the reply; read that with read_session) arrives in this chat as a new turn, so you do not have to poll or block. For a worker you started that went idle, the message is a judging request with its reply, diff stat and test runs; answer it with judge_session. Sessions you started (your children) are reported automatically, so use this only for sessions that are not your children, such as a user's chat. Does nothing for a session that is not running.",
             object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
         ),
         Spec::new(

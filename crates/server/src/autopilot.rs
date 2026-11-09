@@ -1448,6 +1448,18 @@ mod tests {
             .collect()
     }
 
+    fn said_to_boss(r: &Rig) -> Vec<String> {
+        r.store
+            .messages(r.boss.unwrap(), 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::User { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn feed(r: &Rig) -> Vec<String> {
         r.store.autopilot_log(200).unwrap().into_iter().map(|a| a.text).collect()
     }
@@ -1760,6 +1772,7 @@ mod tests {
         }
         let told = boss_told(&r).await;
         assert_eq!(told.len(), 1, "asked once: {told:?}");
+        assert_eq!(said_to_boss(&r).len(), 1, "one message for the turn end: {:?}", said_to_boss(&r));
         let ask = &told[0];
         assert!(ask.contains(&sid.to_string()) && ask.contains("judge_session"), "{ask}");
         assert!(ask.contains("Let me know if you want X"), "the full reply: {ask}");
@@ -1980,6 +1993,10 @@ mod tests {
         assert!(!i.labels.contains(&"needs-user".to_string()));
         assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("blocked") && c.body.contains("quota exceeded")));
         assert!(r.store.workers().unwrap().is_empty());
+        let sid = r.store.sessions().unwrap().iter().find(|s| s.issue_id == Some(a)).unwrap().id;
+        idle(&r, r.boss.unwrap()).await;
+        let notices: Vec<_> = said_to_boss(&r).into_iter().filter(|t| t.contains(&sid.to_string()) && t.contains("changed state to failed")).collect();
+        assert_eq!(notices.len(), 1, "{notices:?}");
         r.ap.tick();
         assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.issue_id == Some(a)).count(), 1, "not started again");
     }

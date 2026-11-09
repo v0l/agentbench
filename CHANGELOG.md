@@ -6,6 +6,9 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Every session started by another session (the supervisor, the autopilot or any agent) records its parent, and the parent is told each time the child's turn ends, with no `watch_session` call. `list_sessions` shows `parent` and `children`.
+
 ## [0.8.4] - 2026-11-09
 
 ### Changed

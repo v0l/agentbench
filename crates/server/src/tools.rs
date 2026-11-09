@@ -36,8 +36,6 @@ pub struct StoreApi {
     runner: Handle,
     /// Sessions the user allowed to start one session in a project, the once.
     once: Mutex<std::collections::HashSet<(SessionId, Id)>>,
-    /// (parent, child): sessions a session started, which it may follow in any project.
-    children: Mutex<std::collections::HashSet<(SessionId, SessionId)>>,
     approved: Mutex<std::collections::HashSet<(SessionId, Id, String)>>,
 }
 
@@ -90,7 +88,6 @@ impl StoreApi {
             changed: None,
             runner: Handle::default(),
             once: Default::default(),
-            children: Default::default(),
             approved: Default::default(),
         }
     }
@@ -105,7 +102,6 @@ impl StoreApi {
             changed: Some(changed),
             runner,
             once: Default::default(),
-            children: Default::default(),
             approved: Default::default(),
         }
     }
@@ -167,8 +163,7 @@ impl StoreApi {
         me: &agentbench_core::Session,
         other: &agentbench_core::Session,
     ) -> Result<(), String> {
-        let child =
-            self.children.lock().unwrap_or_else(|e| e.into_inner()).contains(&(me.id, other.id));
+        let child = other.parent == Some(me.id);
         if other.project_id == me.project_id || child || self.supervises(me) {
             Ok(())
         } else {
@@ -589,10 +584,9 @@ impl Api for StoreApi {
             "list_sessions" => {
                 let trees =
                     s.worktrees(if everywhere { None } else { Some(project) }).map_err(|e| e.0)?;
-                let sessions: Vec<Value> = s
-                    .sessions()
-                    .map_err(|e| e.0)?
-                    .into_iter()
+                let all = s.sessions().map_err(|e| e.0)?;
+                let sessions: Vec<Value> = all
+                    .iter()
                     .filter(|x| everywhere || x.project_id == project)
                     .map(|x| {
                         let branch =
@@ -606,6 +600,8 @@ impl Api for StoreApi {
                             "status": x.status,
                             "worktree": branch,
                             "issue": x.issue_id,
+                            "parent": x.parent,
+                            "children": all.iter().filter(|c| c.parent == Some(x.id)).map(|c| c.id).collect::<Vec<_>>(),
                             "you": x.id == session,
                         })
                     })
@@ -805,7 +801,7 @@ impl Api for StoreApi {
                     return Err("give a `prompt`, or an `issue` to work from".into());
                 }
                 let new = NewSession {
-                    parent: sup.then_some(session),
+                    parent: Some(session),
                     project_id: project,
                     agent,
                     place,
@@ -824,13 +820,6 @@ impl Api for StoreApi {
                         &IssuePatch { state: Some(IssueState::Doing), ..Default::default() },
                     )
                     .map_err(|e| e.0)?;
-                }
-                self.children
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert((session, started.id));
-                if sup {
-                    s.add_watch(started.id, session).map_err(|e| e.0)?;
                 }
                 json!({
                 "session": started.id,
@@ -859,6 +848,9 @@ impl Api for StoreApi {
                 let urgent = body.trim_start().starts_with("BLOCKED");
                 let origin = crate::runner::Origin::new("session", Some(session)).urgent(urgent);
                 runner.tell(&other, &line, origin).map_err(|e| e.0)?;
+                if sup && other.parent.is_none() {
+                    s.add_watch(other.id, session).map_err(|e| e.0)?;
+                }
                 json!({ "sent": other.id, "status": other.status })
             }
             "list_worktrees" => {

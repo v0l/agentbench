@@ -780,16 +780,30 @@ impl Runner {
     }
 
     fn tell_watchers(&self, finished: SessionId) {
-        let Ok(watchers) = self.store.take_watchers(finished) else { return };
+        let Ok(mut watchers) = self.store.take_watchers(finished) else { return };
+        let Ok(done) = self.store.session(finished) else { return };
+        if let Some(parent) = done.parent {
+            if self.store.session(parent).is_ok() && !watchers.contains(&parent) {
+                watchers.push(parent);
+            }
+            let asked_by_autopilot = done.status == SessionStatus::Idle
+                && self.store.workers().is_ok_and(|w| w.iter().any(|w| w.session == finished));
+            if asked_by_autopilot {
+                watchers.retain(|w| *w != parent);
+            }
+        }
         if watchers.is_empty() {
             return;
         }
-        let Ok(done) = self.store.session(finished) else { return };
         let plain = format!(
-            "Watched session {finished} (\"{}\", project {}) changed state to {}. Read its reply with read_session.",
+            "Session {finished} (\"{}\", project {}) changed state to {}. Read its reply with read_session.",
             done.title,
             done.project_id,
             done.status.as_str(),
+        );
+        let child_plain = format!(
+            "{plain} Its last reply: {}",
+            crate::autopilot::last_reply(&self.store, finished).chars().take(400).collect::<String>(),
         );
         for id in watchers {
             if let Ok(watcher) = self.store.session(id) {
@@ -798,6 +812,8 @@ impl Runner {
                     && self.store.project(watcher.project_id).is_ok_and(|p| p.supervisor);
                 let (text, source) = if judges {
                     (crate::autopilot::judge_request(&self.store, &done), "judge")
+                } else if done.parent == Some(id) {
+                    (child_plain.clone(), "watch")
                 } else {
                     (plain.clone(), "watch")
                 };
@@ -2987,7 +3003,7 @@ mod tests {
             })
             .collect();
         assert_eq!(told.len(), 1, "{told:?}");
-        assert!(told[0].contains(&format!("Watched session {}", watched.id)), "{told:?}");
+        assert!(told[0].contains(&format!("Session {}", watched.id)), "{told:?}");
         assert!(!told[0].contains("all done"), "{told:?}");
         assert!(told[0].contains("changed state to idle"), "{told:?}");
         assert!(runner.store().take_watchers(watched.id).unwrap().is_empty(), "fires once");
@@ -3717,5 +3733,68 @@ mod deferred_tests {
         idle(&r.runner, r.boss.id).await;
         let from = said_to(&r, r.boss.id).pop().unwrap().1;
         assert_eq!(from, [format!("watch {}", r.worker.id)]);
+    }
+    #[tokio::test]
+    async fn a_child_reports_every_turn_end_to_its_parent_without_a_watch_call() {
+        let r = rig();
+        r.runner.send(&r.worker, "build").unwrap();
+        idle(&r.runner, r.worker.id).await;
+        idle(&r.runner, r.boss.id).await;
+        let args = serde_json::json!({"id": r.worker.id.to_string(), "text": "more"});
+        r.runner.api.call("send_message", &args, r.boss.id).unwrap();
+        idle(&r.runner, r.worker.id).await;
+        idle(&r.runner, r.boss.id).await;
+        let told: Vec<_> = said_to(&r, r.boss.id).into_iter().filter(|(_, f)| f == &[format!("judge {}", r.worker.id)]).collect();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert!(r.store.watchers(r.worker.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_grandchild_reports_to_its_own_parent_and_not_the_supervisor() {
+        let r = rig();
+        let tree = r.store.main_worktree(r.worker.project_id).unwrap();
+        let grand = r.store.add_session(tree.id, "worker", "grand", None, None).unwrap();
+        r.store.set_parent(grand.id, Some(r.worker.id)).unwrap();
+        r.runner.send(&grand, "build").unwrap();
+        idle(&r.runner, grand.id).await;
+        idle(&r.runner, r.worker.id).await;
+        let to_worker = said_to(&r, r.worker.id);
+        assert!(to_worker.iter().any(|(t, _)| t.contains(&grand.id.to_string()) && t.contains("changed state to idle")), "{to_worker:?}");
+        assert!(said_to(&r, r.boss.id).iter().all(|(t, _)| !t.contains(&grand.id.to_string())));
+    }
+
+    #[tokio::test]
+    async fn a_closed_child_stops_notifying_its_parent() {
+        let r = rig();
+        r.runner.send(&r.worker, "build").unwrap();
+        started(&r, &r.worker_log).await;
+        let args = serde_json::json!({"id": r.worker.id.to_string()});
+        r.runner.api.call("close_session", &args, r.boss.id).unwrap();
+        idle(&r.runner, r.worker.id).await;
+        assert!(said_to(&r, r.boss.id).is_empty());
+        assert_eq!(r.store.deferred_count(r.boss.id).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_child_notifies_its_parent_once() {
+        let r = rig();
+        r.store.set_status(r.worker.id, SessionStatus::Failed).unwrap();
+        r.runner.tell_watchers(r.worker.id);
+        idle(&r.runner, r.boss.id).await;
+        let told = said_to(&r, r.boss.id);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].0.contains("changed state to failed"), "{told:?}");
+    }
+    #[tokio::test]
+    async fn a_session_started_by_a_worker_records_the_worker_as_its_parent() {
+        let r = rig();
+        let args = serde_json::json!({"prompt": "go"});
+        let out = r.runner.api.call("start_session", &args, r.worker.id).unwrap();
+        let id: SessionId = serde_json::from_value(out["session"].clone()).unwrap();
+        assert_eq!(r.store.session(id).unwrap().parent, Some(r.worker.id));
+        idle(&r.runner, id).await;
+        idle(&r.runner, r.worker.id).await;
+        assert!(said_to(&r, r.worker.id).iter().any(|(t, _)| t.contains(&id.to_string())));
+        assert!(said_to(&r, r.boss.id).iter().all(|(t, _)| !t.contains(&id.to_string())));
     }
 }
