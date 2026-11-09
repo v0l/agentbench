@@ -204,6 +204,22 @@ pub fn summary(store: &Store) -> String {
     out
 }
 
+pub fn visions(store: &Store) -> String {
+    let mut out = String::new();
+    for p in store.projects().unwrap_or_default().iter().filter(|p| !p.builtin()) {
+        match store.vision(p.id).ok().flatten() {
+            None => out.push_str(&format!("- {} (id {}): no vision yet\n", p.name, p.id)),
+            Some(v) => {
+                out.push_str(&format!("- {} (id {}): {}\n", p.name, p.id, v.body.summary.trim()));
+                for g in v.active_goals() {
+                    out.push_str(&format!("    {}: {}\n", g.id, g.text.trim()));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn is_active(state: &str) -> bool {
     matches!(state, "working" | "asking")
 }
@@ -211,11 +227,13 @@ fn is_active(state: &str) -> bool {
 pub struct Picked {
     pub issues: Vec<Issue>,
     pub skipped: Vec<(Id, &'static str)>,
+    pub no_vision: Vec<Id>,
 }
 
 pub struct Room<'a> {
     pub enabled: &'a dyn Fn(Id) -> bool,
     pub git_repo: &'a dyn Fn(Id) -> bool,
+    pub vision: &'a dyn Fn(Id) -> Option<agentbench_core::Vision>,
     pub live: &'a HashSet<Id>,
     pub running_by_project: &'a HashMap<Id, u32>,
     pub running: u32,
@@ -233,10 +251,24 @@ pub fn pick(issues: &[Issue], room: &Room) -> Picked {
     });
     let mut by_project = room.running_by_project.clone();
     let mut running = room.running;
-    let mut out = Picked { issues: Vec::new(), skipped: Vec::new() };
+    let mut out = Picked { issues: Vec::new(), skipped: Vec::new(), no_vision: Vec::new() };
     for i in todo {
         let has = |l: &str| i.labels.iter().any(|x| x.eq_ignore_ascii_case(l));
-        if has(NEEDS_USER) {
+        let vision = (room.vision)(i.project_id);
+        let goal_active = |v: &agentbench_core::Vision| {
+            i.goal.as_deref().and_then(|g| v.goal(g)).is_some_and(|g| g.status == agentbench_core::GoalStatus::Active)
+        };
+        if vision.is_none() {
+            if !out.no_vision.contains(&i.project_id) {
+                out.no_vision.push(i.project_id);
+            }
+        } else if i.off_vision {
+            out.skipped.push((i.id, "off vision"));
+        } else if i.goal.is_none() {
+            out.skipped.push((i.id, "no goal"));
+        } else if !vision.as_ref().is_some_and(goal_active) {
+            out.skipped.push((i.id, "its goal is not active"));
+        } else if has(NEEDS_USER) {
             out.skipped.push((i.id, "labelled needs-user"));
         } else if has(BLOCKED) {
             out.skipped.push((i.id, "labelled blocked"));
@@ -953,9 +985,11 @@ impl Autopilot {
             .collect();
         let enabled = |p: Id| enabled_for(store, p);
         let git_repo = |p: Id| repos.get(&p).copied().unwrap_or(false);
+        let vision = |p: Id| store.vision(p).ok().flatten();
         let room = Room {
             enabled: &enabled,
             git_repo: &git_repo,
+            vision: &vision,
             live: &live,
             running_by_project: &by_project,
             running,
@@ -963,6 +997,9 @@ impl Autopilot {
             project_cap: number(store, PROJECT_CAP, DEFAULT_PROJECT_CAP),
         };
         let picked = pick(&issues, &room);
+        for project in &picked.no_vision {
+            self.log_once(Some(*project), None, "no vision set for this project, so no workers start; set one in the project's Vision panel");
+        }
         for (id, why) in &picked.skipped {
             let project = issues.iter().find(|i| i.id == *id).map(|i| i.project_id);
             self.log_once(project, Some(*id), &format!("skipped #{id}: {why}"));
@@ -1175,12 +1212,14 @@ mod tests {
             state,
             priority,
             labels: vec![],
-            goal: None,
+            goal: Some("g1".into()),
             off_vision: false,
             created_at: created,
             updated_at: created,
         }
     }
+
+    const NO_VISION: Id = 77;
 
     struct Fixture {
         live: HashSet<Id>,
@@ -1192,14 +1231,30 @@ mod tests {
             Fixture { live: HashSet::new(), by_project: HashMap::new() }
         }
 
+        fn vision(&self) -> agentbench_core::Vision {
+            let goal = |id: &str, status| agentbench_core::Goal { id: id.into(), text: id.into(), status };
+            agentbench_core::Vision {
+                body: agentbench_core::VisionBody {
+                    goals: vec![
+                        goal("g1", Default::default()),
+                        goal("old", agentbench_core::GoalStatus::Dropped),
+                    ],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+
         fn pick(&self, issues: &[Issue], running: u32, cap: u32, project_cap: u32) -> Picked {
             let enabled = |_: Id| true;
             let repo = |_: Id| true;
+            let vision = |p: Id| (p != NO_VISION).then(|| self.vision());
             pick(
                 issues,
                 &Room {
                     enabled: &enabled,
                     git_repo: &repo,
+                    vision: &vision,
                     live: &self.live,
                     running_by_project: &self.by_project,
                     running,
@@ -1225,6 +1280,29 @@ mod tests {
         ];
         let p = Fixture::new().pick(&issues, 0, 10, 10);
         assert_eq!(ids(&p), [3, 2, 1]);
+    }
+
+    #[test]
+    fn the_picker_skips_issues_without_an_active_goal_and_projects_without_a_vision() {
+        let mut none = issue(1, 1, 9, 1, IssueState::Todo);
+        none.goal = None;
+        let mut off = issue(2, 1, 9, 2, IssueState::Todo);
+        off.goal = None;
+        off.off_vision = true;
+        let mut dropped = issue(3, 1, 9, 3, IssueState::Todo);
+        dropped.goal = Some("old".into());
+        let mut unknown = issue(4, 1, 9, 4, IssueState::Todo);
+        unknown.goal = Some("nope".into());
+        let linked = issue(5, 1, 0, 5, IssueState::Todo);
+        let blind = issue(6, NO_VISION, 9, 6, IssueState::Todo);
+        let p = Fixture::new().pick(&[none, off, dropped, unknown, linked, blind], 0, 10, 10);
+        assert_eq!(ids(&p), [5]);
+        let why = |id| p.skipped.iter().find(|(i, _)| *i == id).map(|(_, w)| *w);
+        assert_eq!(why(1), Some("no goal"));
+        assert_eq!(why(2), Some("off vision"));
+        assert_eq!(why(3), Some("its goal is not active"));
+        assert_eq!(why(4), Some("its goal is not active"));
+        assert_eq!(p.no_vision, [NO_VISION]);
     }
 
     #[test]
@@ -1258,11 +1336,13 @@ mod tests {
         f.live.insert(3);
         let enabled = |_: Id| true;
         let repo = |p: Id| p == 1;
+        let vision = |_: Id| Some(f.vision());
         let p = pick(
             &[needs, blocked, live, elsewhere, fine],
             &Room {
                 enabled: &enabled,
                 git_repo: &repo,
+                vision: &vision,
                 live: &f.live,
                 running_by_project: &f.by_project,
                 running: 0,
@@ -1484,7 +1564,17 @@ mod tests {
         r.ap.tick();
     }
 
+    fn with_vision(r: &Rig) {
+        if r.store.vision(r.project).unwrap().is_none() {
+            let goals = vec![agentbench_core::Goal { id: "g1".into(), text: "ship".into(), status: Default::default() }];
+            r.store
+                .set_vision(r.project, agentbench_core::VisionBody { summary: "s".into(), goals, non_goals: vec![] }, "user")
+                .unwrap();
+        }
+    }
+
     fn todo(r: &Rig, title: &str, priority: i64, labels: &[&str]) -> Id {
+        with_vision(r);
         r.store
             .add_issue(&agentbench_core::NewIssue {
                 project_id: r.project,
@@ -1492,6 +1582,7 @@ mod tests {
                 state: Some(IssueState::Todo),
                 priority: Some(priority),
                 labels: labels.iter().map(|l| l.to_string()).collect(),
+                goal: Some("g1".into()),
                 ..Default::default()
             })
             .unwrap()
@@ -1980,6 +2071,30 @@ mod tests {
         let feed = r.store.autopilot_log(50).unwrap();
         assert!(feed.iter().any(|a| a.text.contains(&format!("skipped #{n}"))));
         assert_eq!(feed.iter().filter(|a| a.text.contains(&format!("skipped #{n}"))).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_loop_starts_only_goal_linked_issues_and_idles_without_a_vision() {
+        let r = rig(DONE);
+        let plain = r
+            .store
+            .add_issue(&agentbench_core::NewIssue { project_id: r.project, title: "plain".into(), state: Some(IssueState::Todo), ..Default::default() })
+            .unwrap()
+            .id;
+        on(&r);
+        r.ap.tick();
+        r.ap.tick();
+        assert!(r.store.sessions().unwrap().iter().all(|s| s.issue_id.is_none()), "no vision, no workers");
+        let said = |r: &Rig| r.store.autopilot_log(50).unwrap().iter().filter(|a| a.text.contains("no vision")).count();
+        assert_eq!(said(&r), 1, "the feed says so once");
+        let linked = todo(&r, "linked", 0, &[]);
+        r.ap.tick();
+        r.ap.tick();
+        let started: Vec<_> = r.store.sessions().unwrap().iter().filter_map(|s| s.issue_id).collect();
+        assert_eq!(started, [linked]);
+        assert_eq!(r.store.issue(plain).unwrap().state, IssueState::Todo);
+        let feed = r.store.autopilot_log(50).unwrap();
+        assert!(feed.iter().any(|a| a.text.contains(&format!("skipped #{plain}: no goal"))));
     }
 
     #[tokio::test]

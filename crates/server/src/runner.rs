@@ -881,6 +881,16 @@ impl Runner {
             notes: self.store.notes(session.project_id).unwrap_or_default(),
             global_notes: self.store.global_notes().unwrap_or_default(),
             automation: if supervisor { crate::autopilot::summary(&self.store) } else { String::new() },
+            vision: if supervisor {
+                crate::autopilot::visions(&self.store)
+            } else {
+                self.store
+                    .vision(session.project_id)
+                    .ok()
+                    .flatten()
+                    .map(|v| v.brief())
+                    .unwrap_or_default()
+            },
         }
     }
 

@@ -42,6 +42,7 @@ pub struct Context {
     pub notes: Vec<(String, String)>,
     pub global_notes: Vec<(String, String)>,
     pub automation: String,
+    pub vision: String,
 }
 
 /// A file the user sent with a message, written out where an agent can read it.
@@ -249,6 +250,12 @@ pub fn brief(c: &Context) -> String {
         url = c.api_url.trim_end_matches('/'),
         pid = c.project_id,
     ));
+    if !c.vision.trim().is_empty() {
+        out.push_str(&format!(
+            "<vision>\nThe user's vision for this project. It is read-only for you; work toward it and file follow-ups with `goal` set to one of these goal ids, or leave them in backlog.\n{}</vision>\n\n",
+            c.vision
+        ));
+    }
     out.push_str(ORCHESTRATION);
     out.push_str("\n\n");
     out.push_str(FILE_TOOLS);
@@ -304,7 +311,9 @@ fn supervisor_brief(c: &Context) -> String {
          - Manage: `stop_session`, `close_session` and `rename_session` work on any session. `list_worktrees`, `create_worktree` and `cleanup_worktree` work in any project (pass `project`). Close or clean up only when the user asked or the work is verified merged.\n\
          - Nudge: `send_message` to a stalled or drifting session. `notify_user` only for what needs the user: a decision, a failure you cannot route around, or a finished piece of work.\n\
          - Remember: `remember` keeps the user's standing preferences and decisions.\n\
+         - Vision: each project has a vision, the user's summary and ordered goals for it. Judge and start work against it: an issue serves a goal (`goal` on `file_issue` and `update_issue`) or is off_vision. File follow-ups with a goal, or leave them in backlog, and never start an off-vision or goalless issue without the user. `get_vision` reads it; `set_vision` is a proposal the user confirms, unless they typed the text themselves. Many issues come from agent reviews and follow-ups, not from the user: do not treat every todo as worth doing.\n\
          </role>\n\n\
+         <vision>\n{vision}</vision>\n\n\
          <answering>\n\
          - Be brief. When asked for status, give a short list grouped by project: running, waiting on the user, stuck, asked for and never done. Name sessions by title and id, issues by number.\n\
          - Say what you verified and what you only inferred. Do not report work as done because a session said so; read it.\n\
@@ -324,6 +333,7 @@ fn supervisor_brief(c: &Context) -> String {
         rules = crate::autopilot::JUDGING_RULES,
         url = c.api_url.trim_end_matches('/'),
         automation = c.automation,
+        vision = c.vision,
     )
 }
 
@@ -444,6 +454,7 @@ pub fn context() -> Context {
         notes: Vec::new(),
         global_notes: Vec::new(),
         automation: String::new(),
+        vision: String::new(),
     }
 }
 
@@ -530,6 +541,18 @@ mod tests {
         assert!(b.contains("set_automation") && b.contains("risky_action") && b.contains("merge_branch"));
         assert!(b.contains("proposal"));
         assert!(!brief(&context()).contains("<automation>"), "only the supervisor gets it");
+    }
+
+    #[test]
+    fn the_briefs_carry_the_vision_and_the_supervisor_judges_by_it() {
+        let v = "Vision: a fast tracker\n- goal g1: boards\n";
+        let worker = brief(&Context { vision: v.into(), ..context() });
+        assert!(worker.contains("<vision>") && worker.contains("- goal g1: boards") && worker.contains("read-only"), "{worker}");
+        assert!(!brief(&context()).contains("<vision>"), "no vision, no block");
+        let sup = brief(&Context { supervisor: true, vision: "- demo (id 1): a fast tracker\n    g1: boards\n".into(), ..context() });
+        assert!(sup.contains("g1: boards"), "{sup}");
+        assert!(sup.contains("never start an off-vision or goalless issue without the user"), "{sup}");
+        assert!(sup.contains("set_vision") && sup.contains("get_vision"));
     }
 
     #[test]
