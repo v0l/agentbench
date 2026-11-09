@@ -766,6 +766,7 @@ fn bash_spec() -> Spec {
             json!({
                 "command": string("The command line, run by bash -c"),
                 "timeout_s": { "type": "integer", "description": "Seconds before it is killed, default 120, at most 600" },
+                "memory_mb": { "type": "integer", "description": "Memory cap in MB for the command and every process it starts, default 1024. The whole tree is killed when it goes over. Raise it for builds, tests and anything heavy (cargo, vLLM); 0 removes the cap. Not applied with background" },
                 "background": { "type": "boolean", "description": "Start it and answer at once with a handle, for a dev server, a watcher or a long build. Read it with bash_output and stop it with bash_kill. Needs no timeout" },
             }),
             &["command"],
@@ -2659,6 +2660,7 @@ impl Native {
                             ws.root(),
                             then,
                             number(&["then_timeout_s", "timeout_s", "timeout"]).map(|n| n as u64),
+                            super::limits::Limits::from_args(args),
                             cx,
                             io,
                         )
@@ -2707,6 +2709,7 @@ impl Native {
                     ws.root(),
                     command,
                     number(&["timeout_s", "timeout"]).map(|n| n as u64),
+                    super::limits::Limits::from_args(args),
                     cx,
                     io,
                 )
@@ -2735,7 +2738,7 @@ impl Native {
                 let out = gated("risky_action", args, cx, io).await?;
                 match (out["run"].as_str(), out["cwd"].as_str()) {
                     (Some(run), Some(cwd)) => {
-                        let ran = bash(Path::new(cwd), run, Some(BASH_MAX), cx, io).await?;
+                        let ran = bash(Path::new(cwd), run, Some(BASH_MAX), Default::default(), cx, io).await?;
                         Ok(format!("{}\n\n{ran}", serde_json::to_string_pretty(&out).unwrap_or_default()))
                     }
                     _ => Ok(serde_json::to_string_pretty(&out).unwrap_or_default()),
@@ -3126,6 +3129,7 @@ async fn bash(
     cwd: &Path,
     command: &str,
     timeout: Option<u64>,
+    limits: super::limits::Limits,
     cx: &Context,
     io: &dyn Io,
 ) -> Result<String, String> {
@@ -3168,10 +3172,16 @@ async fn bash(
     };
     let (out_task, out_buf) = read(child.stdout.take().map(|p| Box::new(p) as _));
     let (err_task, err_buf) = read(child.stderr.take().map(|p| Box::new(p) as _));
+    let mut over_memory = None;
+    let root_pid = child.id();
     let status = tokio::select! {
         s = child.wait() => s.ok(),
         _ = tokio::time::sleep(limit) => None,
         _ = io.stop().cancelled() => None,
+        used = limits.exceeded(root_pid) => {
+            over_memory = Some(used);
+            None
+        }
     };
     if status.is_none() {
         #[cfg(unix)]
@@ -3202,6 +3212,11 @@ async fn bash(
         Some(s) if s.success() => Ok(format!("{text}\n[exit 0 in {took:.1}s]")),
         Some(s) => Err(format!("{text}\n[exit {} in {took:.1}s]", s.code().unwrap_or(-1))),
         None if io.stopped() => Err("stopped".into()),
+        None if over_memory.is_some() => Err(format!(
+            "{text}\n[killed: used {} MB, over memory_mb {}]",
+            over_memory.unwrap_or_default(),
+            limits.memory_mb.unwrap_or_default()
+        )),
         None => {
             Err(format!("{text}\n[killed after {}s: pass a larger timeout_s]", limit.as_secs()))
         }
@@ -3794,6 +3809,26 @@ mod tests {
             .filter(|m| m["role"] == "tool")
             .map(|m| m["content"].as_str().unwrap().to_string())
             .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_kills_a_command_that_goes_over_its_memory_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = TestIo::new(Arc::new(FakeApi));
+        let c = context();
+        let limits = super::super::limits::Limits { memory_mb: Some(100) };
+        let ran = bash(
+            dir.path(),
+            "python3 -c 'b = bytearray(300 << 20); import time; time.sleep(30)'",
+            Some(20),
+            limits,
+            &c,
+            &io,
+        )
+        .await
+        .unwrap_err();
+        assert!(ran.contains("over memory_mb 100"), "{ran}");
     }
 
     #[cfg(unix)]
@@ -4934,15 +4969,15 @@ for line in sys.stdin:
         let dir = tempfile::tempdir().unwrap();
         let io = TestIo::new(Arc::new(FakeApi));
         let c = context();
-        let ok = bash(dir.path(), "pwd; echo $AGENTBENCH_SESSION", None, &c, &io).await.unwrap();
+        let ok = bash(dir.path(), "pwd; echo $AGENTBENCH_SESSION", None, Default::default(), &c, &io).await.unwrap();
         assert!(
             ok.contains(&dir.path().canonicalize().unwrap().display().to_string())
                 || ok.contains(&dir.path().display().to_string())
         );
         assert!(ok.contains(&format!("\n{}\n", crate::agent::test_session())));
-        let bad = bash(dir.path(), "echo oops >&2; exit 3", None, &c, &io).await.unwrap_err();
+        let bad = bash(dir.path(), "echo oops >&2; exit 3", None, Default::default(), &c, &io).await.unwrap_err();
         assert!(bad.contains("oops") && bad.contains("exit 3"), "{bad}");
-        let slow = bash(dir.path(), "sleep 5", Some(1), &c, &io).await.unwrap_err();
+        let slow = bash(dir.path(), "sleep 5", Some(1), Default::default(), &c, &io).await.unwrap_err();
         assert!(slow.contains("killed after 1s"), "{slow}");
     }
 
@@ -4954,7 +4989,7 @@ for line in sys.stdin:
         let started = Instant::now();
         let ran = tokio::time::timeout(
             Duration::from_secs(10),
-            bash(dir.path(), "echo before; cd . && sleep 6 & echo after", None, &c, &io),
+            bash(dir.path(), "echo before; cd . && sleep 6 & echo after", None, Default::default(), &c, &io),
         )
         .await
         .expect("bash waited for a background job that outlived it")

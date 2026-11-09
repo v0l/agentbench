@@ -2,6 +2,7 @@ pub mod browser;
 pub mod code;
 mod command;
 pub mod files;
+pub mod limits;
 pub mod media;
 pub mod native;
 mod process;
