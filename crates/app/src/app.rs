@@ -20,6 +20,7 @@ mod composer;
 mod header;
 mod modals;
 mod onboarding;
+mod pairing;
 mod settings;
 mod side;
 mod transcript;
@@ -703,6 +704,7 @@ pub struct App {
     spoken: String,
     /// A take given through `hear` is under way, as one from the microphone would be.
     hearing: bool,
+    pairing_file: Option<std::path::PathBuf>,
 }
 
 impl App {
@@ -720,9 +722,28 @@ impl App {
         default_url: Option<String>,
         local: Option<LocalServer>,
     ) -> App {
+        App::with_pairing(ctx, storage, default_url, local, None)
+    }
+
+    pub fn with_pairing(
+        ctx: &egui::Context,
+        storage: Option<&dyn eframe::Storage>,
+        default_url: Option<String>,
+        local: Option<LocalServer>,
+        pairing_file: Option<std::path::PathBuf>,
+    ) -> App {
         install(ctx);
-        let url = storage.and_then(|s| s.get_string("url")).or(default_url).unwrap_or_default();
-        let token = storage.and_then(|s| s.get_string("token")).unwrap_or_default();
+        let paired = pairing_file.as_deref().and_then(pairing::read);
+        let url = paired
+            .as_ref()
+            .map(|s| s.url.clone())
+            .or_else(|| storage.and_then(|s| s.get_string("url")))
+            .or(default_url)
+            .unwrap_or_default();
+        let token = paired
+            .map(|s| s.token)
+            .or_else(|| storage.and_then(|s| s.get_string("token")))
+            .unwrap_or_default();
         let remote = local.is_none()
             || storage.and_then(|s| s.get_string("remote")).as_deref() == Some("true");
         let face = Typeface::load(storage);
@@ -844,15 +865,18 @@ impl App {
             triage_open: storage.and_then(|s| s.get_string("triage_open")).as_deref()
                 == Some("true"),
             detail: None,
+            pairing_file,
         };
         if !app.remote {
             app.start_local(ctx);
         } else if url.is_empty() || token.is_empty() {
+            log::info!("agentbench connect screen shown");
             app.open_settings();
             if let Some(st) = &mut app.settings {
                 (st.url, st.token) = (url, token);
             }
         } else {
+            log::info!("agentbench connecting to the saved server");
             app.connect_to(ctx, Server { url, token });
         }
         app
@@ -925,6 +949,7 @@ impl App {
 
     fn connect_to(&mut self, ctx: &egui::Context, server: Server) {
         crate::notify::watch(&server.url, &server.token, self.alerts);
+        self.keep_pairing(&server);
         let ctx = ctx.clone();
         let mut client = Client::new(server, move || ctx.request_repaint());
         client.overview();
@@ -938,6 +963,18 @@ impl App {
         self.onboard_checked = false;
         self.transcripts.clear();
         self.comments.clear();
+    }
+
+    fn keep_pairing(&self, server: &Server) {
+        let Some(file) = self.pairing_file.as_deref().filter(|_| self.remote) else {
+            return;
+        };
+        if pairing::read(file).as_ref() == Some(server) {
+            return;
+        }
+        if let Err(e) = pairing::write(file, server) {
+            log::warn!("could not keep the pairing in {}: {e}", file.display());
+        }
     }
 
     /// Whether a project is the built-in home folder, which has no git repo behind it.

@@ -86,6 +86,7 @@ fn android_main(app: android_activity::AndroidApp) {
     system::register_ime_wake();
     // eframe has no place to keep state on Android, so it is put in the app's private files.
     let persistence_path = app.internal_data_path().map(|d| d.join("app.ron"));
+    let pairing_file = app.internal_data_path().map(|d| d.join("pairing.json"));
     let opts =
         eframe::NativeOptions { android_app: Some(app), persistence_path, ..Default::default() };
     let result = eframe::run_native(
@@ -93,7 +94,7 @@ fn android_main(app: android_activity::AndroidApp) {
         opts,
         Box::new(|cc| {
             log::info!("agentbench frame loop started");
-            Ok(Box::new(App::new(&cc.egui_ctx, cc.storage, None)))
+            Ok(Box::new(App::with_pairing(&cc.egui_ctx, cc.storage, None, None, pairing_file)))
         }),
     );
     if let Err(e) = result {

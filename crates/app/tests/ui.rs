@@ -1117,6 +1117,34 @@ fn on_a_phone_an_open_chat_fits_the_screen() {
 }
 
 #[test]
+fn a_pairing_survives_a_process_killed_without_saving() {
+    let rig = rig();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pairing.json");
+    let pairing_app = |file: PathBuf| {
+        let build = build_lock();
+        let h = Harness::builder().with_size([450.0, 900.0]).build_eframe(move |cc| {
+            App::with_pairing(&cc.egui_ctx, None, None, None, Some(file.clone()))
+        });
+        drop(build);
+        h
+    };
+    let mut first = pairing_app(file.clone());
+    first.run_steps(2);
+    assert_eq!(first.state().settings_loaded(), Some(false), "nothing paired yet");
+    let link = agentbench_core::pairing::Pairing { url: rig.url.clone(), token: TOKEN.into() };
+    let ctx = first.ctx.clone();
+    first.state_mut().pair(&ctx, link);
+    until(&mut first, "the overview", |h| h.state().overview().is_some());
+    std::mem::forget(first);
+
+    let mut second = pairing_app(file);
+    second.run_steps(2);
+    assert_eq!(second.state().settings_loaded(), None, "the connect screen came back");
+    until(&mut second, "the overview", |h| h.state().overview().is_some());
+}
+
+#[test]
 fn settings_pair_a_phone_with_a_code_for_the_external_address() {
     let rig = rig();
     let mut h = harness(rig.url.clone());
