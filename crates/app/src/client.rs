@@ -68,6 +68,7 @@ pub struct Client {
     rx: Receiver<Reply>,
     wake: Arc<dyn Fn() + Send + Sync>,
     patience: Duration,
+    watch_wait: u64,
     pub pending: usize,
 }
 
@@ -135,8 +136,14 @@ impl Client {
             rx,
             wake: Arc::new(wake),
             patience: PATIENCE,
+            watch_wait: WATCH_WAIT,
             pending: 0,
         }
+    }
+
+    pub fn with_watch_wait(mut self, seconds: u64) -> Client {
+        self.watch_wait = seconds;
+        self
     }
 
     /// How long an ordinary request may take before the server is called offline.
@@ -148,7 +155,14 @@ impl Client {
     pub fn poll(&mut self) -> Vec<Reply> {
         let replies: Vec<Reply> = self.rx.try_iter().collect();
         self.pending = self.pending.saturating_sub(replies.len());
+        if replies.iter().any(|r| matches!(r, Reply::Offline(_))) {
+            self.reset();
+        }
         replies
+    }
+
+    pub fn reset(&mut self) {
+        self.http = http();
     }
 
     fn request(
@@ -228,9 +242,10 @@ impl Client {
         struct Changes {
             cursor: Id,
         }
+        let wait = self.watch_wait;
         let req = self
-            .request(Method::GET, &format!("/api/changes?since={since}&wait={WATCH_WAIT}"), None)
-            .timeout(Duration::from_secs(WATCH_WAIT + 10));
+            .request(Method::GET, &format!("/api/changes?since={since}&wait={wait}"), None)
+            .timeout(Duration::from_secs(wait + 5));
         self.send(req, |c: Changes| Reply::Changed(c.cursor));
     }
 

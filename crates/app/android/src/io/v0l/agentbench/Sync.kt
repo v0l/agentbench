@@ -42,15 +42,30 @@ class Config(ctx: Context) {
 }
 
 object Net {
+    @Volatile private var open: HttpURLConnection? = null
+    private val lock = Object()
+
+    fun drop() {
+        android.util.Log.i("agentbench", "watch: network changed, reconnecting")
+        open?.disconnect()
+        synchronized(lock) { lock.notifyAll() }
+    }
+
+    fun sleep(ms: Long) {
+        synchronized(lock) { lock.wait(ms) }
+    }
+
     /** GET a path on the server and return the JSON, or null when it could not be reached. */
     fun get(cfg: Config, path: String, timeoutMs: Int): JSONObject? = try {
         val c = URL(cfg.url + path).openConnection() as HttpURLConnection
         c.connectTimeout = 10_000
         c.readTimeout = timeoutMs
         c.setRequestProperty("Authorization", "Bearer ${cfg.token}")
+        open = c
         try {
             if (c.responseCode == 200) JSONObject(c.inputStream.bufferedReader().readText()) else null
         } finally {
+            open = null
             c.disconnect()
         }
     } catch (e: Exception) {

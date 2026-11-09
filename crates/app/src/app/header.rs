@@ -16,6 +16,9 @@ impl App {
                     self.key_new_chat_short(ui);
                 });
             });
+            if self.link() != Link::Connected && self.remote {
+                ui.horizontal(|ui| self.link_chip(ui));
+            }
         } else {
             ui.horizontal(|ui| {
                 self.header_title(ui);
@@ -164,6 +167,25 @@ impl App {
         }
     }
 
+    pub(super) fn link_chip(&mut self, ui: &mut Ui) {
+        if self.client.is_none() && self.starting.is_none() && self.offline.is_none() {
+            return;
+        }
+        let secs = |d: Duration| d.as_secs() + 1;
+        let (text, tint) = match self.link() {
+            Link::Connected => ("connected".to_string(), OK),
+            Link::Reconnecting(d) if d.is_zero() => ("reconnecting".to_string(), WARN),
+            Link::Reconnecting(d) => (format!("reconnecting in {}s", secs(d)), WARN),
+            Link::Offline(d) => (format!("offline, retry in {}s", secs(d)), FAULT),
+        };
+        let r = chip(ui, &text, tint, true);
+        let why = self.offline.as_ref().map(|(e, _)| e.clone()).unwrap_or_default();
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
+        if !why.is_empty() {
+            r.on_hover_text(why);
+        }
+    }
+
     /// Where the server is, and how many agents are in each state.
     pub(super) fn header_badges(&mut self, ui: &mut Ui) {
         if !self.remote {
@@ -171,6 +193,9 @@ impl App {
         }
         if let Some(o) = &self.overview {
             status_badge(ui, &o.sessions);
+        }
+        if self.remote {
+            self.link_chip(ui);
         }
     }
 }

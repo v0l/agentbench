@@ -433,6 +433,120 @@ fn a_server_that_never_answers_is_offline_not_a_hang() {
 }
 
 #[test]
+fn a_network_switch_mid_poll_reconnects_on_a_fresh_connection() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let rig = rig();
+    let upstream = rig.url.clone();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = listener.local_addr().unwrap().to_string();
+    let generation = Arc::new(AtomicUsize::new(0));
+    let gen_ = generation.clone();
+    std::thread::spawn(move || {
+        for down in listener.incoming().flatten() {
+            let born = gen_.load(Ordering::SeqCst);
+            let up = std::net::TcpStream::connect(&upstream).unwrap();
+            for (mut from, mut to) in
+                [(down.try_clone().unwrap(), up.try_clone().unwrap()), (up, down)]
+            {
+                let gen_ = gen_.clone();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 16384];
+                    while let Ok(n) = from.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        while gen_.load(Ordering::SeqCst) != born {
+                            std::thread::sleep(Duration::from_secs(3600));
+                        }
+                        if to.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url, token: TOKEN.into() },
+        move || {
+            let _ = tx.send(());
+        },
+    )
+    .with_patience(Duration::from_secs(2))
+    .with_watch_wait(1);
+    let mut queue = std::collections::VecDeque::new();
+    let mut next = |c: &mut agentbench::client::Client| loop {
+        if let Some(r) = queue.pop_front() {
+            return r;
+        }
+        rx.recv_timeout(Duration::from_secs(15)).expect("a reply, not a hang");
+        queue.extend(c.poll());
+    };
+    c.overview();
+    c.overview();
+    for _ in 0..2 {
+        assert!(matches!(next(&mut c), agentbench::client::Reply::Overview(_)));
+    }
+    generation.fetch_add(1, Ordering::SeqCst);
+    let started = Instant::now();
+    c.watch(i64::MAX >> 1);
+    match next(&mut c) {
+        agentbench::client::Reply::Offline(_) => {}
+        _ => panic!("a silent long poll must end as offline"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(13), "{:?}", started.elapsed());
+    c.overview();
+    match next(&mut c) {
+        agentbench::client::Reply::Overview(_) => {}
+        agentbench::client::Reply::Offline(e) => panic!("still on the dead connection: {e}"),
+        _ => panic!("odd reply"),
+    }
+}
+
+#[test]
+fn the_header_shows_reconnecting_while_the_server_is_gone_and_connected_after() {
+    let rig = rig();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = listener.local_addr().unwrap().to_string();
+    let open = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let open_ = open.clone();
+    let upstream = rig.url.clone();
+    std::thread::spawn(move || {
+        for down in listener.incoming().flatten() {
+            if !open_.load(std::sync::atomic::Ordering::SeqCst) {
+                drop(down);
+                continue;
+            }
+            let up = std::net::TcpStream::connect(&upstream).unwrap();
+            let (mut a, mut b) = (down.try_clone().unwrap(), up.try_clone().unwrap());
+            std::thread::spawn(move || std::io::copy(&mut a, &mut b));
+            let (mut c, mut d) = (up, down);
+            std::thread::spawn(move || std::io::copy(&mut c, &mut d));
+        }
+    });
+    let mut h = harness_at(url.clone(), [450.0, 900.0]);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    assert!(h.query_by_label_contains("reconnecting").is_none());
+    open.store(false, std::sync::atomic::Ordering::SeqCst);
+    h.state_mut().drop_connection();
+    until(&mut h, "reconnecting", |h| {
+        h.query_by_label_contains("reconnecting").is_some()
+    });
+    shot(&mut h, "reconnecting");
+    open.store(true, std::sync::atomic::Ordering::SeqCst);
+    until(&mut h, "connected again", |h| {
+        h.state().link() == agentbench::app::Link::Connected
+            && h.query_by_label_contains("reconnecting").is_none()
+    });
+    let mut wide = harness(url);
+    until(&mut wide, "the overview", |h| h.state().overview().is_some());
+    wide.get_by_label("connected");
+}
+
+#[test]
 fn without_a_local_server_the_window_asks_where_to_connect() {
     let rig = rig();
     let build = build_lock();

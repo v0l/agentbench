@@ -694,6 +694,20 @@ fn sync_keyboard(now: &ImeText, call: KeyboardCall) {
 fn sync_keyboard(_now: &ImeText, _call: KeyboardCall) {}
 
 #[cfg(target_os = "android")]
+pub fn network_generation() -> i64 {
+    use jni::{jni_sig, jni_str};
+    crate::voice::android::with_activity(|env, activity| {
+        env.call_method(activity, jni_str!("networkGeneration"), jni_sig!("()J"), &[])?.j()
+    })
+    .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn network_generation() -> i64 {
+    0
+}
+
+#[cfg(target_os = "android")]
 extern "system" fn ime_wake_from_java(_env: *mut jni::sys::JNIEnv, _this: jni::sys::jobject) {
     ime_wake();
 }

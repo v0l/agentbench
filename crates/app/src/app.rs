@@ -705,6 +705,22 @@ pub struct App {
     /// A take given through `hear` is under way, as one from the microphone would be.
     hearing: bool,
     pairing_file: Option<std::path::PathBuf>,
+    failures: u32,
+    network: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Link {
+    Connected,
+    Reconnecting(Duration),
+    Offline(Duration),
+}
+
+const BACKOFF: [u64; 5] = [1, 2, 5, 10, 30];
+
+fn backoff(failures: u32) -> Duration {
+    let i = (failures.max(1) as usize - 1).min(BACKOFF.len() - 1);
+    Duration::from_secs(BACKOFF[i])
 }
 
 impl App {
@@ -866,6 +882,8 @@ impl App {
                 == Some("true"),
             detail: None,
             pairing_file,
+            failures: 0,
+            network: crate::system::network_generation(),
         };
         if !app.remote {
             app.start_local(ctx);
@@ -904,6 +922,30 @@ impl App {
 
     pub fn is_local(&self) -> bool {
         !self.remote
+    }
+
+    pub fn drop_connection(&mut self) {
+        if let Some(client) = &mut self.client {
+            client.reset();
+            self.watching = false;
+            self.offline = None;
+            client.overview();
+        }
+    }
+
+    pub fn link(&self) -> Link {
+        match &self.offline {
+            None if self.failures == 0 => Link::Connected,
+            None => Link::Reconnecting(Duration::ZERO),
+            Some((_, at)) => {
+                let wait = backoff(self.failures).saturating_sub(at.elapsed());
+                if self.failures as usize >= BACKOFF.len() {
+                    Link::Offline(wait)
+                } else {
+                    Link::Reconnecting(wait)
+                }
+            }
+        }
     }
 
     fn start_local(&mut self, ctx: &egui::Context) {
@@ -1627,6 +1669,10 @@ impl App {
     fn handle(&mut self, reply: Reply) {
         match reply {
             Reply::Overview(o) => {
+                if self.failures > 0 {
+                    log::info!("agentbench reconnected");
+                }
+                self.failures = 0;
                 self.offline = None;
                 if !self.onboard_checked && !cfg!(target_os = "android") {
                     self.onboard_checked = true;
@@ -1850,6 +1896,8 @@ impl App {
             }
             Reply::Offline(e) => {
                 self.watching = false;
+                self.failures += 1;
+                log::info!("agentbench reconnecting: {e}");
                 self.offline = Some((e, Instant::now()));
             }
         }
@@ -1996,16 +2044,24 @@ impl App {
         for r in replies {
             self.handle(r);
         }
+        let network = crate::system::network_generation();
+        let network_changed = network != self.network;
+        self.network = network;
+        if network_changed && self.remote {
+            log::info!("agentbench network changed, reconnecting");
+            self.drop_connection();
+        }
         let Some(client) = &mut self.client else {
             return;
         };
+        let retry = if self.remote { backoff(self.failures) } else { RETRY };
         match &self.offline {
             Some((_, at)) if at.elapsed() >= RETRY && !self.remote && self.local.is_some() => {
                 self.client = None;
                 self.offline = None;
                 self.start_local(ctx);
             }
-            Some((_, at)) if at.elapsed() >= RETRY => {
+            Some((_, at)) if at.elapsed() >= retry => {
                 self.offline = None;
                 client.overview();
             }
@@ -2805,8 +2861,10 @@ impl App {
             self.markdown.sweep();
         }
         if let Some((_, at)) = &self.offline {
+            let retry = if self.remote { backoff(self.failures) } else { RETRY };
             ctx.request_repaint_after(
-                RETRY.saturating_sub(at.elapsed()) + Duration::from_millis(50),
+                retry.saturating_sub(at.elapsed()).min(Duration::from_secs(1))
+                    + Duration::from_millis(50),
             );
         }
         if (self.tab == Tab::Chat || self.detail.is_some())

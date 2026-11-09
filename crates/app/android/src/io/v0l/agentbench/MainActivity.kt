@@ -221,9 +221,42 @@ class MainActivity : NativeActivity() {
     private val picked = ConcurrentLinkedQueue<Picked>()
     @Volatile private var reading = 0
     @Volatile private var imeView: ImeView? = null
+    @Volatile private var network = 0L
+    private var current: android.net.Network? = null
+    private var watcher: android.net.ConnectivityManager.NetworkCallback? = null
+
+    fun networkGeneration(): Long = network
+
+    private fun watchNetwork() {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        val cb = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(n: android.net.Network) = changed(n)
+            override fun onLost(n: android.net.Network) = changed(null)
+        }
+        try {
+            cm.registerDefaultNetworkCallback(cb)
+            watcher = cb
+        } catch (e: Exception) {
+            android.util.Log.w("agentbench", "no network callback", e)
+        }
+    }
+
+    @Synchronized private fun changed(n: android.net.Network?) {
+        val first = current == null && network == 0L && n != null
+        if (n == current) return
+        current = n
+        if (first) return
+        network += 1
+        android.util.Log.i("agentbench", "default network now $n")
+        try {
+            imeWake()
+        } catch (e: UnsatisfiedLinkError) {
+        }
+    }
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
         super.onCreate(savedInstanceState)
+        watchNetwork()
         val view = ImeView(this) {
             try {
                 imeWake()
