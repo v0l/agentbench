@@ -102,6 +102,9 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects/{id}/sync", post(sync_project))
         .route("/api/projects/{id}/notes", get(list_notes))
         .route("/api/projects/{id}/notes/restore", post(restore_note))
+        .route("/api/projects/{id}/vision", get(get_vision).put(put_vision))
+        .route("/api/projects/{id}/vision/versions", get(vision_history))
+        .route("/api/projects/{id}/vision/restore", post(restore_vision))
         .route("/api/projects/{id}/icon", get(project_icon))
         .route("/api/projects/{id}/worktrees", get(list_worktrees).post(add_worktree))
         .route("/api/worktrees/{id}", delete(remove_worktree))
@@ -773,6 +776,55 @@ async fn restore_note(
     api.runner.store().restore_note(id, req.version, "user", None)?;
     changed(&api);
     Ok(Json(()))
+}
+
+async fn get_vision(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+) -> Reply<Option<agentbench_core::Vision>> {
+    let store = api.runner.store();
+    store.project(id)?;
+    Ok(Json(store.vision(id)?))
+}
+
+async fn put_vision(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+    Json(body): Json<agentbench_core::VisionBody>,
+) -> Reply<agentbench_core::Vision> {
+    let v = api.runner.store().set_vision(id, body, "user")?;
+    changed(&api);
+    Ok(Json(v))
+}
+
+async fn vision_history(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+) -> Reply<Vec<agentbench_core::Vision>> {
+    let store = api.runner.store();
+    store.project(id)?;
+    Ok(Json(store.vision_versions(id)?))
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreVision {
+    version: Id,
+}
+
+async fn restore_vision(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+    Json(req): Json<RestoreVision>,
+) -> Reply<agentbench_core::Vision> {
+    let store = api.runner.store();
+    let old = store
+        .vision_versions(id)?
+        .into_iter()
+        .find(|v| v.id == req.version)
+        .ok_or_else(|| bad(format!("no vision version {}", req.version)))?;
+    let v = store.set_vision(id, old.body, "user")?;
+    changed(&api);
+    Ok(Json(v))
 }
 
 async fn list_worktrees(
@@ -1939,6 +1991,40 @@ mod tests {
         assert!(store.proposal_known("x:2").unwrap(), "and is remembered");
         let (_, list) = call(&f.app, "GET", "/api/triage", None, T).await;
         assert!(list["proposals"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_vision_is_read_written_and_restored_over_http() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let path = format!("/api/projects/{pid}/vision");
+        let (s, none) = call(&f.app, "GET", &path, None, T).await;
+        assert_eq!((s, none), (StatusCode::OK, serde_json::Value::Null));
+        let first = json!({"summary": "One", "goals": [{"id": "", "text": "ship"}], "non_goals": ["cloud"]});
+        let (s, v) = call(&f.app, "PUT", &path, Some(first), T).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!((v["summary"].as_str(), v["author"].as_str()), (Some("One"), Some("user")));
+        assert_eq!(v["goals"][0]["id"], "g1");
+        assert_eq!(v["goals"][0]["status"], "active");
+        let (s, v2) = call(&f.app, "PUT", &path, Some(json!({"summary": "Two"})), T).await;
+        assert_eq!(s, StatusCode::OK);
+        let (_, now) = call(&f.app, "GET", &path, None, T).await;
+        assert_eq!(now["summary"], "Two");
+        let (_, versions) = call(&f.app, "GET", &format!("{path}/versions"), None, T).await;
+        assert_eq!(versions.as_array().unwrap().len(), 2);
+        let first_id = versions[1]["id"].clone();
+        assert_ne!(first_id, v2["id"]);
+        let (s, back) = call(&f.app, "POST", &format!("{path}/restore"), Some(json!({"version": first_id})), T).await;
+        assert_eq!((s, back["summary"].as_str()), (StatusCode::OK, Some("One")));
+        let (_, versions) = call(&f.app, "GET", &format!("{path}/versions"), None, T).await;
+        assert_eq!(versions.as_array().unwrap().len(), 3, "a restore is a new version");
+        let (s, _) = call(&f.app, "POST", &format!("{path}/restore"), Some(json!({"version": 9999})), T).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        let (s, _) = call(&f.app, "GET", "/api/projects/9999/vision", None, T).await;
+        assert_ne!(s, StatusCode::OK);
+        let (_, issue) = call(&f.app, "POST", "/api/issues", Some(json!({"project_id": pid, "title": "t", "goal": "g1"})), T).await;
+        assert_eq!(issue["goal"], "g1");
+        assert_eq!(issue["off_vision"], false);
     }
 
     #[tokio::test]

@@ -22,6 +22,87 @@ pub struct NoteHistory {
     pub versions: Vec<NoteVersion>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    #[default]
+    Active,
+    Done,
+    Dropped,
+}
+
+impl GoalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GoalStatus::Active => "active",
+            GoalStatus::Done => "done",
+            GoalStatus::Dropped => "dropped",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<GoalStatus> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "active" => Some(GoalStatus::Active),
+            "done" => Some(GoalStatus::Done),
+            "dropped" => Some(GoalStatus::Dropped),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Goal {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub status: GoalStatus,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VisionBody {
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub goals: Vec<Goal>,
+    #[serde(default)]
+    pub non_goals: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Vision {
+    #[serde(default)]
+    pub id: Id,
+    #[serde(default)]
+    pub project_id: Id,
+    #[serde(flatten)]
+    pub body: VisionBody,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+impl Vision {
+    pub fn active_goals(&self) -> impl Iterator<Item = &Goal> {
+        self.body.goals.iter().filter(|g| g.status == GoalStatus::Active)
+    }
+
+    pub fn goal(&self, id: &str) -> Option<&Goal> {
+        self.body.goals.iter().find(|g| g.id == id)
+    }
+
+    pub fn brief(&self) -> String {
+        let mut out = format!("Vision: {}\n", self.body.summary.trim());
+        for g in self.active_goals() {
+            out.push_str(&format!("- goal {}: {}\n", g.id, g.text.trim()));
+        }
+        if !self.body.non_goals.is_empty() {
+            out.push_str(&format!("Non-goals: {}\n", self.body.non_goals.join("; ")));
+        }
+        out
+    }
+}
+
 /// A chat's id. Never reused, so nothing cached under one id can surface in another chat.
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
@@ -289,6 +370,10 @@ pub struct Issue {
     pub state: IssueState,
     pub priority: i64,
     pub labels: Vec<String>,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub off_vision: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1287,6 +1372,10 @@ pub struct NewIssue {
     pub priority: Option<i64>,
     #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub off_vision: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1301,6 +1390,10 @@ pub struct IssuePatch {
     pub priority: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_vision: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1809,6 +1902,8 @@ mod tests {
             state: IssueState::Todo,
             priority: 0,
             labels: vec![],
+            goal: None,
+            off_vision: false,
             created_at: 0,
             updated_at: 0,
         };

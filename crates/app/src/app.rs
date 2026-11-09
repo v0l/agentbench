@@ -2925,6 +2925,8 @@ mod tests {
             state: IssueState::Todo,
             priority,
             labels: labels.iter().map(|l| l.to_string()).collect(),
+            goal: None,
+            off_vision: false,
             created_at: 0,
             updated_at: id,
         }

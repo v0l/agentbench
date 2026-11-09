@@ -286,7 +286,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 30] = [
+pub const AGENTBENCH_TOOLS: [&str; 32] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -312,6 +312,8 @@ pub const AGENTBENCH_TOOLS: [&str; 30] = [
     "send_file",
     "autopilot",
     "set_automation",
+    "get_vision",
+    "set_vision",
     "merge_branch",
     "risky_action",
     "answer_session",
@@ -333,7 +335,7 @@ fn agentbench_specs() -> Vec<Spec> {
             "list_issues",
             "List this project's issues with their state. Pass state to filter: backlog, todo, doing, review or done.",
             object(
-                json!({ "state": string("Only issues in this state"), "project": string("Supervisor chat only: the project by name or id. Without it, list tools cover every project"), }),
+                json!({ "state": string("Only issues in this state"), "goal": string("Only issues linked to this goal id"), "project": string("Supervisor chat only: the project by name or id. Without it, list tools cover every project"), }),
                 &[],
             ),
         ),
@@ -353,6 +355,8 @@ fn agentbench_specs() -> Vec<Spec> {
                     "labels": labels_schema(),
                     "state": string("backlog (default), todo, doing, review or done"),
                     "priority": id("Higher is more urgent"),
+                    "goal": string("The id of one active goal of the project's vision this serves"),
+                    "off_vision": json!({ "type": "boolean", "description": "Mark the issue as outside the vision" }),
                 }),
                 &["title"],
             ),
@@ -368,6 +372,8 @@ fn agentbench_specs() -> Vec<Spec> {
                     "body": string("A new description"),
                     "labels": labels_schema_replacing(),
                     "priority": id("Higher is more urgent"),
+                    "goal": string("A goal id of the project's vision to link it to; empty clears it"),
+                    "off_vision": json!({ "type": "boolean", "description": "Mark the issue as outside the vision" }),
                 }),
                 &["id"],
             ),
@@ -581,6 +587,25 @@ fn agentbench_specs() -> Vec<Spec> {
                     "deploy": string("The command that deploys the project, run from its main checkout"),
                 }),
                 &[],
+            ),
+        ),
+        Spec::new(
+            "get_vision",
+            "Read the project's vision: the summary, the goals with their ids and status, and the non-goals. Work is judged against it.",
+            object(json!({ "project": string("Supervisor chat only: the project by name or id") }), &[]),
+        ),
+        Spec::new(
+            "set_vision",
+            "Supervisor chat only. Set a project's vision: summary, goals (list of {id, text, status active, done or dropped}; leave id empty for a new goal) and non_goals. Fields left out keep their value. \
+             It is a proposal the user confirms in chat, unless the user typed that vision text themselves in their last message.",
+            object(
+                json!({
+                    "project": string("The project by name or id"),
+                    "summary": string("One or two sentences on what the project is for"),
+                    "goals": json!({ "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "text": { "type": "string" }, "status": { "type": "string" } } }, "description": "The ordered goals" }),
+                    "non_goals": json!({ "type": "array", "items": { "type": "string" }, "description": "What the project is not for" }),
+                }),
+                &["project"],
             ),
         ),
         Spec::new(

@@ -380,6 +380,7 @@ pub fn build(store: &Store, raw: &Value) -> Option<(String, Proposal)> {
                     state: Some(IssueState::Backlog),
                     priority: None,
                     labels: vec![],
+                    ..Default::default()
                 },
             });
             for i in &evidence {

@@ -1175,6 +1175,8 @@ mod tests {
             state,
             priority,
             labels: vec![],
+            goal: None,
+            off_vision: false,
             created_at: created,
             updated_at: created,
         }

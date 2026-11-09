@@ -47,6 +47,7 @@ const ALLOWED_ANY: &str = "start_session_any_project";
 pub const PROPOSAL: &str = "proposal:";
 
 const SET_AUTOMATION: &str = "set_automation";
+const SET_VISION: &str = "set_vision";
 
 pub fn required(tool: &str) -> Option<Automation> {
     Some(match tool {
@@ -143,8 +144,46 @@ fn labels(args: &Value) -> Result<Option<Vec<String>>, String> {
 fn issue_json(i: &agentbench_core::Issue) -> Value {
     json!({
         "id": i.id, "title": i.title, "state": i.state, "body": i.body,
-        "labels": i.labels, "priority": i.priority,
+        "labels": i.labels, "priority": i.priority, "goal": i.goal, "off_vision": i.off_vision,
     })
+}
+
+fn flag(args: &Value, key: &str) -> Option<bool> {
+    args.get(key).and_then(Value::as_bool)
+}
+
+fn vision_json(v: &agentbench_core::Vision) -> Value {
+    json!({
+        "summary": v.body.summary, "goals": v.body.goals, "non_goals": v.body.non_goals,
+        "updated_at": v.updated_at, "author": v.author,
+    })
+}
+
+fn squash(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+fn vision_from(args: &Value, current: Option<&agentbench_core::Vision>) -> Result<agentbench_core::VisionBody, String> {
+    let mut body = current.map(|v| v.body.clone()).unwrap_or_default();
+    if let Some(summary) = text(args, "summary") {
+        body.summary = summary;
+    }
+    match args.get("goals") {
+        None | Some(Value::Null) => {}
+        Some(v) => {
+            body.goals = serde_json::from_value(v.clone()).map_err(|e| {
+                format!("`goals` is a list of {{id, text, status}} with status active, done or dropped: {e}")
+            })?;
+        }
+    }
+    match args.get("non_goals") {
+        None | Some(Value::Null) => {}
+        Some(v) => {
+            body.non_goals = serde_json::from_value(v.clone())
+                .map_err(|_| "`non_goals` is a list of strings".to_string())?;
+        }
+    }
+    Ok(body)
 }
 
 fn state(args: &Value) -> Result<Option<IssueState>, String> {
@@ -354,6 +393,51 @@ impl StoreApi {
         }))
     }
 
+    fn typed_by_user(&self, me: SessionId, given: &agentbench_core::VisionBody) -> bool {
+        let last = self.store.messages_page(me, 0, None, 20).unwrap_or_default().into_iter().rev().find_map(
+            |m| match m.entry {
+                agentbench_core::Entry::User { text, from, .. } if from.is_empty() => Some(squash(&text)),
+                _ => None,
+            },
+        );
+        let Some(said) = last else { return false };
+        let parts = std::iter::once(&given.summary)
+            .chain(given.goals.iter().map(|g| &g.text))
+            .chain(given.non_goals.iter());
+        let mut any = false;
+        for p in parts.filter(|p| !p.trim().is_empty()) {
+            any = true;
+            if !said.contains(&squash(p)) {
+                return false;
+            }
+        }
+        any
+    }
+
+    fn set_vision(&self, args: &Value, project: Id, me: SessionId) -> Result<Value, String> {
+        let p = self.store.project(project).map_err(|e| e.0)?;
+        if p.builtin() {
+            return Err(format!("{} is built in and has no vision", p.name));
+        }
+        let current = self.store.vision(p.id).map_err(|e| e.0)?;
+        let body = vision_from(args, current.as_ref())?;
+        let given = vision_from(args, None)?;
+        let by_user = self.typed_by_user(me, &given);
+        if !by_user && !self.take_approval(me, p.id, SET_VISION) {
+            let goals: Vec<String> = body.goals.iter().map(|g| format!("{} ({})", g.text, g.status.as_str())).collect();
+            let what = format!(
+                "set the vision of {}: {} Goals: {}",
+                p.name,
+                clip(body.summary.trim(), 200),
+                clip(&goals.join("; "), 400)
+            );
+            return Err(proposal(&what, SET_VISION, Some(&p), "the user's confirmation", crate::autopilot::level_of(&self.store, &p)));
+        }
+        let author = if by_user { "user" } else { "supervisor, approved by the user" };
+        let v = self.store.set_vision(p.id, body, author).map_err(|e| e.0)?;
+        Ok(vision_json(&v))
+    }
+
     fn risky_action(&self, args: &Value, me: SessionId) -> Result<Value, String> {
         let v = args.get("project").filter(|v| !v.is_null()).ok_or("name the `project`")?;
         let p = self.find_project(v)?;
@@ -516,12 +600,14 @@ impl Api for StoreApi {
         let out = match tool {
             "list_issues" => {
                 let filter = state(args)?;
+                let goal = text(args, "goal").map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
                 let issues: Vec<Value> = s
                     .issues()
                     .map_err(|e| e.0)?
                     .into_iter()
                     .filter(|i| everywhere || i.project_id == project)
                     .filter(|i| filter.is_none_or(|f| i.state == f))
+                    .filter(|i| goal.as_deref().is_none_or(|g| i.goal.as_deref() == Some(g)))
                     .map(|i| {
                         let mut out = issue_json(&i);
                         if sup {
@@ -542,6 +628,8 @@ impl Api for StoreApi {
                         state: state(args)?,
                         priority: args.get("priority").and_then(Value::as_i64),
                         labels: labels(args)?.unwrap_or_default(),
+                        goal: text(args, "goal"),
+                        off_vision: flag(args, "off_vision").unwrap_or(false),
                     })
                     .map_err(|e| e.0)?;
                 json!({ "filed": i.id, "title": i.title })
@@ -555,9 +643,11 @@ impl Api for StoreApi {
                     state: state(args)?,
                     priority: args.get("priority").and_then(Value::as_i64),
                     labels: labels(args)?,
+                    goal: text(args, "goal"),
+                    off_vision: flag(args, "off_vision"),
                 };
                 let i = s.update_issue(issue, &patch).map_err(|e| e.0)?;
-                json!({ "id": i.id, "title": i.title, "state": i.state, "labels": i.labels })
+                json!({ "id": i.id, "title": i.title, "state": i.state, "labels": i.labels, "goal": i.goal, "off_vision": i.off_vision })
             }
             "get_issue" => {
                 let issue = id(args)?;
@@ -1088,7 +1178,7 @@ impl Api for StoreApi {
                 let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
                 json!(state)
             }
-            "merge_branch" | "set_automation" | "risky_action" | "approve_action" if !sup => {
+            "merge_branch" | "set_automation" | "risky_action" | "approve_action" | "set_vision" if !sup => {
                 return Err(format!("only the supervisor chat can use {tool}"));
             }
             "merge_branch" => {
@@ -1112,6 +1202,11 @@ impl Api for StoreApi {
                 }
             }
             "set_automation" => self.set_automation(args, session)?,
+            "get_vision" => match s.vision(project).map_err(|e| e.0)? {
+                Some(v) => vision_json(&v),
+                None => json!({ "vision": null }),
+            },
+            "set_vision" => self.set_vision(args, project, session)?,
             "risky_action" => self.risky_action(args, session)?,
             "approve_action" => self.approve(args, session)?,
             "set_model" => {
@@ -1279,6 +1374,53 @@ mod tests {
         assert!(proposed(&b.api.call("file_issue", &file, b.boss)));
         at(&b, Automation::Assist);
         assert!(b.api.call("file_issue", &file, b.boss).is_ok(), "the project's own level wins");
+    }
+
+    fn say(b: &Boss, text: &str) {
+        b.s.add_message(b.boss, &agentbench_core::Entry::User { text: text.into(), attachments: vec![], from: vec![] }).unwrap();
+    }
+
+    #[test]
+    fn a_supervisor_vision_is_a_proposal_unless_the_user_typed_it() {
+        let b = boss();
+        let set = json!({"project": b.project, "summary": "Be the best tracker", "goals": [{"id": "", "text": "fast boards"}]});
+        assert!(proposed(&b.api.call("set_vision", &set, b.boss)));
+        assert!(b.s.vision(b.project).unwrap().is_none(), "nothing is saved before the user agrees");
+        assert!(b.api.call("set_vision", &set, b.worker).is_err(), "supervisor only");
+        b.api.call("approve_action", &json!({"tool": "set_vision", "project": b.project, "scope": "once"}), b.boss).unwrap();
+        let out = b.api.call("set_vision", &set, b.boss).unwrap();
+        assert_eq!(out["goals"][0]["id"], "g1");
+        assert_eq!(b.s.vision(b.project).unwrap().unwrap().author, "supervisor, approved by the user");
+        assert!(proposed(&b.api.call("set_vision", &set, b.boss)), "an approval is used once");
+
+        let typed = json!({"project": b.project, "summary": "Offline first"});
+        assert!(proposed(&b.api.call("set_vision", &typed, b.boss)));
+        say(&b, "Set the vision: offline  first, thanks");
+        assert!(b.api.call("set_vision", &typed, b.boss).is_ok(), "the user typed that text");
+        let v = b.s.vision(b.project).unwrap().unwrap();
+        assert_eq!((v.author.as_str(), v.body.goals.len()), ("user", 1), "goals not named are kept");
+        let invented = json!({"project": b.project, "summary": "Offline first and world peace"});
+        assert!(proposed(&b.api.call("set_vision", &invented, b.boss)), "text the user did not type");
+    }
+
+    #[test]
+    fn get_vision_and_the_goal_fields_work_in_the_tools() {
+        let b = boss();
+        assert_eq!(b.api.call("get_vision", &json!({"project": b.project}), b.boss).unwrap()["vision"], Value::Null);
+        b.s.set_vision(b.project, agentbench_core::VisionBody { summary: "S".into(), goals: vec![agentbench_core::Goal { id: "a".into(), text: "t".into(), status: Default::default() }], non_goals: vec![] }, "user").unwrap();
+        let v = b.api.call("get_vision", &json!({}), b.worker).unwrap();
+        assert_eq!(v["summary"], "S");
+        b.api.call("update_issue", &json!({"id": b.issue, "goal": "a"}), b.worker).unwrap();
+        let filed = b.api.call("file_issue", &json!({"title": "n", "goal": "a"}), b.worker).unwrap();
+        b.api.call("file_issue", &json!({"title": "o", "off_vision": true}), b.worker).unwrap();
+        assert!(b.api.call("file_issue", &json!({"title": "bad", "goal": "zzz"}), b.worker).is_err());
+        let listed = b.api.call("list_issues", &json!({"goal": "a"}), b.worker).unwrap();
+        let ids: Vec<_> = listed.as_array().unwrap().iter().map(|i| i["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&filed["filed"].as_i64().unwrap()));
+        let all = b.api.call("list_issues", &json!({}), b.worker).unwrap();
+        assert_eq!(all.as_array().unwrap().len(), 3);
+        assert!(all.as_array().unwrap().iter().any(|i| i["off_vision"] == true));
     }
 
     #[test]

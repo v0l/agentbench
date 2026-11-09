@@ -1,6 +1,6 @@
 use agentbench_core::{
     Automation, Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue,
-    NoteVersion, Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Worktree,
+    NoteVersion, Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Vision, VisionBody, Worktree,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::Path;
@@ -255,6 +255,16 @@ CREATE TABLE deferred (
 );
 CREATE INDEX deferred_session ON deferred(session, id);
 "#,
+    r#"
+CREATE TABLE vision_versions (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    body TEXT NOT NULL,
+    author TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX vision_versions_project ON vision_versions(project_id, id);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -269,6 +279,8 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("projects", "risky", "TEXT NOT NULL DEFAULT '[]'"),
     ("projects", "deploy", "TEXT"),
     ("sessions", "queue_system", "INTEGER NOT NULL DEFAULT 0"),
+    ("issues", "goal", "TEXT"),
+    ("issues", "off_vision", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
@@ -408,6 +420,8 @@ fn issue_row(row: &Row) -> rusqlite::Result<Issue> {
         state: IssueState::parse(&state).unwrap_or(IssueState::Backlog),
         priority: row.get("priority")?,
         labels: serde_json::from_str(&labels).unwrap_or_default(),
+        goal: row.get("goal")?,
+        off_vision: row.get::<_, i64>("off_vision")? != 0,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -904,12 +918,14 @@ impl Store {
             return Err(StoreError("an issue needs a title".into()));
         }
         self.project(new.project_id)?;
+        let goal = self.checked_goal(new.project_id, new.goal.as_deref())?;
+        let goal = goal.as_deref();
         let t = now();
         let id = {
             let db = self.db();
             db.execute(
-                "INSERT INTO issues (project_id, title, body, state, priority, labels, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                "INSERT INTO issues (project_id, title, body, state, priority, labels, goal, off_vision, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?8, ?9, ?7, ?7)",
                 params![
                     new.project_id,
                     new.title.trim(),
@@ -917,7 +933,9 @@ impl Store {
                     new.state.unwrap_or(IssueState::Todo).as_str(),
                     new.priority.unwrap_or(0),
                     serde_json::to_string(&new.labels).unwrap_or_else(|_| "[]".into()),
-                    t
+                    t,
+                    goal,
+                    new.off_vision && goal.is_none()
                 ],
             )?;
             let id = db.last_insert_rowid();
@@ -947,11 +965,23 @@ impl Store {
         if let Some(labels) = &patch.labels {
             issue.labels = labels.clone();
         }
+        if let Some(goal) = &patch.goal {
+            issue.goal = self.checked_goal(issue.project_id, Some(goal))?;
+            if issue.goal.is_some() {
+                issue.off_vision = false;
+            }
+        }
+        if let Some(off) = patch.off_vision {
+            issue.off_vision = off;
+            if off {
+                issue.goal = None;
+            }
+        }
         {
             let db = self.db();
             db.execute(
                 "UPDATE issues SET title = ?1, body = ?2, state = ?3, priority = ?4,
-                 labels = ?5, updated_at = ?6 WHERE id = ?7",
+                 labels = ?5, updated_at = ?6, goal = ?8, off_vision = ?9 WHERE id = ?7",
                 params![
                     issue.title,
                     issue.body,
@@ -959,7 +989,9 @@ impl Store {
                     issue.priority,
                     serde_json::to_string(&issue.labels).unwrap_or_else(|_| "[]".into()),
                     now(),
-                    id
+                    id,
+                    issue.goal,
+                    issue.off_vision
                 ],
             )?;
             Store::changed(&db, "issue", id)?;
@@ -1600,6 +1632,84 @@ impl Store {
         self.proposal(id)
     }
 
+    fn checked_goal(&self, project_id: Id, goal: Option<&str>) -> Result<Option<String>> {
+        let Some(goal) = goal.map(str::trim).filter(|g| !g.is_empty()) else {
+            return Ok(None);
+        };
+        match self.vision(project_id)? {
+            Some(v) if v.goal(goal).is_some() => Ok(Some(goal.to_string())),
+            _ => Err(StoreError(format!("project {project_id} has no goal `{goal}`"))),
+        }
+    }
+
+    pub fn vision(&self, project_id: Id) -> Result<Option<Vision>> {
+        Ok(self.vision_versions(project_id)?.into_iter().next())
+    }
+
+    pub fn vision_versions(&self, project_id: Id) -> Result<Vec<Vision>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT id, project_id, body, author, created_at FROM vision_versions
+             WHERE project_id = ?1 ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([project_id], |r| {
+            let body: String = r.get(2)?;
+            Ok(Vision {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+                body: serde_json::from_str(&body).unwrap_or_default(),
+                author: r.get(3)?,
+                updated_at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_vision(&self, project_id: Id, body: VisionBody, author: &str) -> Result<Vision> {
+        self.project(project_id)?;
+        let mut body = body;
+        body.summary = body.summary.trim().to_string();
+        body.non_goals =
+            body.non_goals.iter().map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();
+        body.goals.retain(|g| !g.text.trim().is_empty());
+        let mut seen: Vec<String> = Vec::new();
+        for g in &mut body.goals {
+            g.text = g.text.trim().to_string();
+            g.id = g.id.trim().to_string();
+            if !g.id.is_empty() {
+                if seen.contains(&g.id) {
+                    return Err(StoreError(format!("goal id `{}` is used twice", g.id)));
+                }
+                seen.push(g.id.clone());
+            }
+        }
+        let mut next = 1;
+        for g in &mut body.goals {
+            if g.id.is_empty() {
+                while seen.contains(&format!("g{next}")) {
+                    next += 1;
+                }
+                g.id = format!("g{next}");
+                seen.push(g.id.clone());
+            }
+        }
+        let id = {
+            let db = self.db();
+            db.execute(
+                "INSERT INTO vision_versions (project_id, body, author, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![project_id, serde_json::to_string(&body).unwrap_or_default(), author, now()],
+            )?;
+            let id = db.last_insert_rowid();
+            Store::changed(&db, "project", project_id)?;
+            id
+        };
+        self.vision_versions(project_id)?
+            .into_iter()
+            .find(|v| v.id == id)
+            .ok_or_else(|| not_found("vision", id))
+    }
+
     pub fn note_versions(&self, project_id: Id, topic: &str) -> Result<Vec<NoteVersion>> {
         let db = self.db();
         let mut stmt = db.prepare(
@@ -1821,6 +1931,64 @@ mod tests {
         store
             .add_issue(&NewIssue { project_id, title: title.into(), ..Default::default() })
             .unwrap()
+    }
+
+    fn vision_body(goals: &[(&str, &str)]) -> VisionBody {
+        VisionBody {
+            summary: " Ship it ".into(),
+            goals: goals
+                .iter()
+                .map(|(id, text)| agentbench_core::Goal {
+                    id: id.to_string(),
+                    text: text.to_string(),
+                    status: Default::default(),
+                })
+                .collect(),
+            non_goals: vec!["  ".into(), "no cloud".into()],
+        }
+    }
+
+    #[test]
+    fn a_vision_round_trips_and_keeps_every_version() {
+        let s = Store::memory().unwrap();
+        let (p, _) = project(&s, "/v");
+        assert!(s.vision(p.id).unwrap().is_none());
+        let a = s.set_vision(p.id, vision_body(&[("", "first"), ("x", "second"), ("", "third")]), "user").unwrap();
+        assert_eq!(a.body.summary, "Ship it");
+        let ids: Vec<_> = a.body.goals.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, ["g1", "x", "g2"]);
+        assert_eq!(a.body.non_goals, ["no cloud"]);
+        assert_eq!(a.author, "user");
+        let b = s.set_vision(p.id, vision_body(&[("g1", "only")]), "supervisor").unwrap();
+        assert_eq!(s.vision(p.id).unwrap().unwrap(), b);
+        let versions = s.vision_versions(p.id).unwrap();
+        assert_eq!(versions.len(), 2);
+        assert_eq!(versions[1], a);
+        assert!(s.set_vision(p.id, vision_body(&[("a", "1"), ("a", "2")]), "user").is_err());
+        assert_eq!(s.vision_versions(p.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_issue_links_to_a_goal_of_its_project_or_is_off_vision() {
+        let s = Store::memory().unwrap();
+        let (p, _) = project(&s, "/g");
+        let i = issue(&s, p.id, "plain");
+        assert_eq!((i.goal.clone(), i.off_vision), (None, false));
+        assert!(s.update_issue(i.id, &IssuePatch { goal: Some("g1".into()), ..Default::default() }).is_err());
+        s.set_vision(p.id, vision_body(&[("g1", "one")]), "user").unwrap();
+        let linked = s.update_issue(i.id, &IssuePatch { goal: Some("g1".into()), ..Default::default() }).unwrap();
+        assert_eq!(linked.goal.as_deref(), Some("g1"));
+        let off = s.update_issue(i.id, &IssuePatch { off_vision: Some(true), ..Default::default() }).unwrap();
+        assert_eq!((off.goal, off.off_vision), (None, true));
+        let cleared = s.update_issue(i.id, &IssuePatch { goal: Some("".into()), ..Default::default() }).unwrap();
+        assert_eq!(cleared.goal, None);
+        let born = s
+            .add_issue(&NewIssue { project_id: p.id, title: "t".into(), goal: Some("g1".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(born.goal.as_deref(), Some("g1"));
+        assert!(s
+            .add_issue(&NewIssue { project_id: p.id, title: "t".into(), goal: Some("nope".into()), ..Default::default() })
+            .is_err());
     }
 
     #[test]
