@@ -90,6 +90,24 @@ pub struct Turn<'a> {
     pub context: &'a Context,
 }
 
+/// When an idle chat has its oldest part folded into a summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Folding {
+    pub idle: std::time::Duration,
+    pub at: u64,
+}
+
+/// The oldest `covers` messages of a chat's replay, summarised, and how many bytes the replay
+/// took before and after.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folded {
+    pub covers: usize,
+    pub topic: String,
+    pub text: String,
+    pub before: usize,
+    pub after: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Started { agent_session: String },
@@ -152,6 +170,19 @@ pub trait Agent: Send + Sync {
         0
     }
     async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String>;
+
+    fn folding(&self) -> Option<Folding> {
+        None
+    }
+
+    async fn fold(
+        &self,
+        _entries: &[Entry],
+        _model: Option<&str>,
+        _stop: &CancellationToken,
+    ) -> Result<Option<Folded>, String> {
+        Ok(None)
+    }
 
     fn end(&self, _session: SessionId) {}
 

@@ -195,6 +195,14 @@ fn entry_lines(m: &Message, expanded: bool, width: usize) -> Vec<Line<'static>> 
         Entry::Summary { text } if text.is_empty() => {
             vec![line(piece("── cleared: the agent starts afresh here ──", dim()))]
         }
+        Entry::Section { text, covers, topic } => {
+            let mut rows = vec![line(piece(
+                &format!("── folded {covers} older messages (topic: {topic}) into a summary ──"),
+                dim(),
+            ))];
+            rows.extend(markdown(text, width));
+            rows
+        }
         Entry::Summary { text } => {
             let mut rows =
                 vec![line(piece("── compacted: the agent carries on from this summary ──", dim()))];

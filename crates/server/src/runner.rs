@@ -66,6 +66,7 @@ impl Origin {
 pub const URGENT_AFTER_SETTING: &str = "supervisor_urgent_secs";
 const URGENT_AFTER_DEFAULT: u64 = 600;
 const DIGEST_MAX: usize = 12;
+const MAX_FOLDS: usize = 6;
 
 #[derive(Clone)]
 pub struct Runner {
@@ -73,6 +74,7 @@ pub struct Runner {
     agents: Arc<HashMap<String, Arc<dyn Agent>>>,
     live: Arc<Mutex<HashMap<SessionId, Live>>>,
     routed: Arc<Mutex<HashMap<SessionId, Routed>>>,
+    folded: Arc<Mutex<HashMap<SessionId, i64>>>,
     api: Arc<dyn Api>,
     titles: Option<Titles>,
     pub base: Arc<Mutex<Base>>,
@@ -110,6 +112,7 @@ impl Runner {
             agents: Arc::new(agents),
             live: Arc::new(Mutex::new(HashMap::new())),
             routed: Arc::new(Mutex::new(HashMap::new())),
+            folded: Arc::new(Mutex::new(HashMap::new())),
             api,
             titles: None,
             base: Arc::new(Mutex::new(Base::default())),
@@ -707,76 +710,226 @@ impl Runner {
         drop(all);
         let runner = self.clone();
         let session_id = session.id;
-        tokio::spawn(async move {
-            let Live { stop, inbox, questions } = live;
-            let mut next = Some(first);
-            let mut gone = false;
-            while let Some(prompt) = next.take() {
-                if stop.is_cancelled() {
-                    break;
-                }
-                let session = match runner.store.session(session_id) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
+        tokio::spawn(runner.drive(agent, session_id, live, Some(first), mode));
+        Ok(())
+    }
+
+    async fn drive(
+        self,
+        agent: Arc<dyn Agent>,
+        session_id: SessionId,
+        live: Live,
+        first: Option<Message>,
+        mode: Mode,
+    ) {
+        let runner = self;
+        let Live { stop, inbox, questions } = live;
+        let mut gone = false;
+        let mut next = first;
+        let ran = next.is_some();
+        if next.is_none() {
+            runner.fold_sections(agent.as_ref(), session_id, &stop, true).await;
+            next = runner.next_message(session_id, &inbox, &mut gone);
+        }
+        while let Some(prompt) = next.take() {
+            if stop.is_cancelled() {
+                break;
+            }
+            let session = match runner.store.session(session_id) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let status = runner
+                .turn(agent.as_ref(), &session, &prompt, &stop, &inbox, &questions, mode)
+                .await;
+            let _ = runner.store.set_status(session_id, status);
+            runner.changed.notify_waiters();
+            if status == SessionStatus::Idle && mode == Mode::Chat {
+                runner.retitle(session_id, false);
+            }
+            if status != SessionStatus::Idle || mode == Mode::Compact {
+                break;
+            }
+            if runner.full(agent.as_ref(), session_id) {
+                runner.fold_sections(agent.as_ref(), session_id, &stop, false).await;
+            }
+            if runner.full(agent.as_ref(), session_id) {
                 let status = runner
-                    .turn(agent.as_ref(), &session, &prompt, &stop, &inbox, &questions, mode)
+                    .auto_compact(agent.as_ref(), session_id, &stop, &inbox, &questions)
                     .await;
                 let _ = runner.store.set_status(session_id, status);
                 runner.changed.notify_waiters();
-                if status == SessionStatus::Idle && mode == Mode::Chat {
-                    runner.retitle(session_id, false);
-                }
-                if status != SessionStatus::Idle || mode == Mode::Compact {
+                if status != SessionStatus::Idle {
                     break;
                 }
-                if runner.full(agent.as_ref(), session_id) {
-                    let status = runner
-                        .auto_compact(agent.as_ref(), session_id, &stop, &inbox, &questions)
-                        .await;
-                    let _ = runner.store.set_status(session_id, status);
-                    runner.changed.notify_waiters();
-                    if status != SessionStatus::Idle {
-                        break;
-                    }
-                }
-                let mut all = runner.live();
-                let queued: Vec<Message> =
-                    inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
-                next = if queued.is_empty() {
-                    runner.digest(session_id, |_| true)
-                } else {
-                    Some(Message {
-                        text: queued
-                            .iter()
-                            .map(|m| m.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n\n"),
-                        attachments: queued.into_iter().flat_map(|m| m.attachments).collect(),
-                        from: Vec::new(),
-                    })
-                };
-                if next.is_none() {
-                    all.remove(&session_id);
-                    gone = true;
-                }
             }
-            // A turn that failed or was stopped never reads what was waiting.
-            let left: Vec<Message> =
-                inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
-            if !gone {
-                runner.live().remove(&session_id);
-            }
-            if !left.is_empty() {
-                runner.not_sent(session_id, "the turn ended first", left);
-            }
-            runner.changed.notify_waiters();
+            next = runner.next_message(session_id, &inbox, &mut gone);
+        }
+        // A turn that failed or was stopped never reads what was waiting.
+        let left: Vec<Message> =
+            inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+        if !gone {
+            runner.live().remove(&session_id);
+        }
+        if !left.is_empty() {
+            runner.not_sent(session_id, "the turn ended first", left);
+        }
+        runner.changed.notify_waiters();
+        if ran {
             runner.tell_watchers(session_id);
-            if runner.store.session(session_id).is_ok_and(|s| s.status == SessionStatus::Idle) {
-                let _ = runner.deliver_deferred(session_id);
+        }
+        if runner.store.session(session_id).is_ok_and(|s| s.status == SessionStatus::Idle) {
+            let _ = runner.deliver_deferred(session_id);
+        }
+    }
+
+    fn next_message(
+        &self,
+        session_id: SessionId,
+        inbox: &Arc<Mutex<Vec<Message>>>,
+        gone: &mut bool,
+    ) -> Option<Message> {
+        let mut all = self.live();
+        let queued: Vec<Message> =
+            inbox.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+        let next = if queued.is_empty() {
+            self.digest(session_id, |_| true)
+        } else {
+            Some(Message {
+                text: queued.iter().map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n\n"),
+                attachments: queued.into_iter().flat_map(|m| m.attachments).collect(),
+                from: Vec::new(),
+            })
+        };
+        if next.is_none() {
+            all.remove(&session_id);
+            *gone = true;
+        }
+        next
+    }
+
+    pub fn fold_idle(&self, now: i64) -> usize {
+        let Ok(sessions) = self.store.sessions() else { return 0 };
+        let mut started = 0;
+        for session in sessions {
+            if session.status != SessionStatus::Idle {
+                continue;
             }
-        });
-        Ok(())
+            let Some(agent) = self.agent(&session.agent) else { continue };
+            let Some(folding) = agent.folding() else { continue };
+            if !session.usage.past(folding.at)
+                || now.saturating_sub(session.updated_at) < folding.idle.as_millis() as i64
+                || self.folded_at().get(&session.id) == Some(&session.updated_at)
+            {
+                continue;
+            }
+            let mut all = self.live();
+            if all.contains_key(&session.id) {
+                continue;
+            }
+            let live = Live {
+                stop: CancellationToken::new(),
+                inbox: Arc::new(Mutex::new(Vec::new())),
+                questions: Arc::new(Mutex::new(HashMap::new())),
+            };
+            all.insert(session.id, live.clone());
+            drop(all);
+            self.folded_at().insert(session.id, session.updated_at);
+            started += 1;
+            let runner = self.clone();
+            let id = session.id;
+            tokio::spawn(async move {
+                runner.clone().drive(agent, id, live, None, Mode::Chat).await;
+                if let Ok(after) = runner.store.session(id) {
+                    runner.folded_at().insert(id, after.updated_at);
+                }
+            });
+        }
+        started
+    }
+
+    fn folded_at(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, i64>> {
+        self.folded.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    async fn fold_sections(
+        &self,
+        agent: &dyn Agent,
+        id: SessionId,
+        stop: &CancellationToken,
+        idle: bool,
+    ) {
+        if agent.folding().is_none() {
+            return;
+        }
+        let mut rounds = 0;
+        while rounds < MAX_FOLDS && (idle && rounds == 0 || !idle && self.full(agent, id)) {
+            rounds += 1;
+            if !self.fold_once(agent, id, stop, idle).await {
+                break;
+            }
+        }
+    }
+
+    async fn fold_once(
+        &self,
+        agent: &dyn Agent,
+        id: SessionId,
+        stop: &CancellationToken,
+        idle: bool,
+    ) -> bool {
+        let Ok(session) = self.store.session(id) else { return false };
+        let entries: Vec<Entry> = self
+            .store
+            .messages(id, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| m.entry)
+            .collect();
+        let chosen = match self.pinned_model(&session) {
+            Some(pinned) => pinned,
+            None => session.model.clone(),
+        };
+        let model = self.cli_model(&session.agent, chosen.as_deref());
+        let folded = tokio::select! {
+            _ = stop.cancelled() => return false,
+            done = agent.fold(&entries, model.as_deref(), stop) => done,
+        };
+        if stop.is_cancelled() {
+            return false;
+        }
+        match folded {
+            Ok(Some(f)) => {
+                let _ = self.store.add_message(
+                    id,
+                    &Entry::Section { text: f.text, covers: f.covers, topic: f.topic.clone() },
+                );
+                let while_idle = if idle { " while idle" } else { "" };
+                let _ = self.store.add_message(
+                    id,
+                    &Entry::Notice {
+                        text: format!(
+                            "folded {} older messages (topic: {}) into a summary{while_idle}",
+                            f.covers, f.topic
+                        ),
+                    },
+                );
+                if f.before > 0 {
+                    let context = session.usage.context as u128 * f.after as u128 / f.before as u128;
+                    let _ = self.store.set_context(id, context as u64);
+                }
+                self.changed.notify_waiters();
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                let _ = self
+                    .store
+                    .add_message(id, &Entry::Warning { text: format!("could not fold the older messages: {e}") });
+                self.changed.notify_waiters();
+                false
+            }
+        }
     }
 
     fn tell_watchers(&self, finished: SessionId) {
@@ -2411,6 +2564,208 @@ mod tests {
         let msgs: Vec<Entry> =
             runner.store().messages(s.id, 0).unwrap().into_iter().map(|m| m.entry).collect();
         assert!(msgs.contains(&Entry::Summary { text: "A summary.".into() }), "{msgs:?}");
+    }
+
+    #[derive(Clone)]
+    struct Foldy {
+        log: Arc<Mutex<Vec<String>>>,
+        context: u64,
+        compact_at: u64,
+        shrinks: Arc<Mutex<Vec<usize>>>,
+        delay: u64,
+        idle: u64,
+    }
+
+    impl Foldy {
+        fn new(context: u64, compact_at: u64, shrinks: &[usize]) -> Foldy {
+            Foldy {
+                log: Arc::default(),
+                context,
+                compact_at,
+                shrinks: Arc::new(Mutex::new(shrinks.to_vec())),
+                delay: 0,
+                idle: 240,
+            }
+        }
+
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Agent for Foldy {
+        fn name(&self) -> &str {
+            "foldy"
+        }
+        fn label(&self) -> &str {
+            "Foldy"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        fn compact_at(&self) -> u64 {
+            self.compact_at
+        }
+        fn folding(&self) -> Option<crate::agent::Folding> {
+            Some(crate::agent::Folding { idle: Duration::from_secs(self.idle), at: 50 })
+        }
+        async fn fold(
+            &self,
+            _entries: &[Entry],
+            _model: Option<&str>,
+            _stop: &CancellationToken,
+        ) -> Result<Option<crate::agent::Folded>, String> {
+            tokio::time::sleep(Duration::from_millis(self.delay)).await;
+            self.log.lock().unwrap().push("fold".into());
+            let mut shrinks = self.shrinks.lock().unwrap();
+            if shrinks.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(crate::agent::Folded {
+                covers: 2,
+                topic: "login".into(),
+                text: "we fixed login".into(),
+                before: 1000,
+                after: shrinks.remove(0),
+            }))
+        }
+        async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            if turn.prompt.starts_with("Summarise") {
+                io.emit(Event::Text { delta: "A summary.".into() });
+                return Ok(());
+            }
+            self.log.lock().unwrap().push(format!("turn: {}", turn.prompt));
+            if turn.prompt == "slow" {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            io.emit(Event::Usage(Usage {
+                context: self.context,
+                window: 1000,
+                ..Usage::default()
+            }));
+            Ok(())
+        }
+    }
+
+    fn rows(runner: &Runner, id: SessionId) -> Vec<Entry> {
+        runner.store().messages(id, 0).unwrap().into_iter().map(|m| m.entry).collect()
+    }
+
+    fn folds(rows: &[Entry]) -> usize {
+        rows.iter().filter(|e| matches!(e, Entry::Section { .. })).count()
+    }
+
+    async fn idle_chat(agent: &Foldy) -> (Runner, Session) {
+        let (runner, s) = setup(Box::new(agent.clone()));
+        runner.send(&s, "hello").unwrap();
+        let done = wait_idle(&runner, s.id).await;
+        (runner, done)
+    }
+
+    #[tokio::test]
+    async fn an_idle_chat_is_folded_once_the_delay_has_passed() {
+        let agent = Foldy::new(600, 0, &[400]);
+        let (runner, s) = idle_chat(&agent).await;
+        let delay = 240_000;
+        assert_eq!(runner.fold_idle(s.updated_at + delay - 1), 0);
+        assert_eq!(agent.log(), ["turn: hello"]);
+        assert_eq!(runner.fold_idle(s.updated_at + delay), 1);
+        wait_idle(&runner, s.id).await;
+        assert_eq!(agent.log(), ["turn: hello", "fold"]);
+        let rows = rows(&runner, s.id);
+        assert!(
+            rows.contains(&Entry::Section {
+                text: "we fixed login".into(),
+                covers: 2,
+                topic: "login".into()
+            }),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|e| matches!(e, Entry::Notice { text }
+            if text == "folded 2 older messages (topic: login) into a summary while idle")));
+        let after = runner.store().session(s.id).unwrap();
+        assert_eq!(after.usage.context, 240, "the reading shrinks with the replay");
+        assert_eq!(runner.fold_idle(i64::MAX / 2), 0, "once per quiet spell");
+    }
+
+    #[tokio::test]
+    async fn a_chat_under_the_threshold_is_not_folded() {
+        let agent = Foldy::new(400, 0, &[100]);
+        let (runner, _) = idle_chat(&agent).await;
+        assert_eq!(runner.fold_idle(i64::MAX / 2), 0);
+        assert_eq!(agent.log(), ["turn: hello"]);
+    }
+
+    #[tokio::test]
+    async fn a_chat_with_a_turn_running_is_not_folded() {
+        let agent = Foldy::new(600, 0, &[100]);
+        let (runner, s) = setup(Box::new(agent.clone()));
+        runner.send(&s, "slow").unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(runner.fold_idle(i64::MAX / 2), 0);
+        wait_idle(&runner, s.id).await;
+        assert_eq!(agent.log(), ["turn: slow"]);
+    }
+
+    #[tokio::test]
+    async fn a_message_during_an_idle_fold_is_delivered_after_it() {
+        let mut agent = Foldy::new(600, 0, &[400]);
+        agent.delay = 200;
+        let (runner, s) = idle_chat(&agent).await;
+        assert_eq!(runner.fold_idle(s.updated_at + 240_000), 1);
+        runner.send(&s, "later").unwrap();
+        for _ in 0..200 {
+            if agent.log().len() == 3 && !runner.is_running(s.id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(agent.log(), ["turn: hello", "fold", "turn: later"]);
+        let rows = rows(&runner, s.id);
+        assert_eq!(folds(&rows), 1);
+        assert!(rows.contains(&Entry::user("later")));
+    }
+
+    #[tokio::test]
+    async fn stopping_an_idle_fold_writes_nothing() {
+        let mut agent = Foldy::new(600, 0, &[400]);
+        agent.delay = 300;
+        let (runner, s) = idle_chat(&agent).await;
+        assert_eq!(runner.fold_idle(s.updated_at + 240_000), 1);
+        assert!(runner.interrupt(s.id));
+        wait_idle(&runner, s.id).await;
+        assert_eq!(folds(&rows(&runner, s.id)), 0);
+    }
+
+    #[tokio::test]
+    async fn a_full_chat_is_folded_before_it_is_compacted() {
+        let agent = Foldy::new(900, 80, &[400]);
+        let (runner, s) = setup(Box::new(agent.clone()));
+        runner.send(&s, "hello").unwrap();
+        wait_idle(&runner, s.id).await;
+        let rows = rows(&runner, s.id);
+        assert_eq!(folds(&rows), 1);
+        assert!(!rows.iter().any(|e| matches!(e, Entry::Summary { .. })), "{rows:?}");
+        assert_eq!(agent.log(), ["turn: hello", "fold"]);
+    }
+
+    #[tokio::test]
+    async fn full_compaction_is_the_last_resort_when_folds_cannot_make_room() {
+        let agent = Foldy::new(900, 80, &[900]);
+        let (runner, s) = setup(Box::new(agent.clone()));
+        runner.send(&s, "hello").unwrap();
+        let done = wait_idle(&runner, s.id).await;
+        let rows = rows(&runner, s.id);
+        assert_eq!(folds(&rows), 1);
+        assert!(rows.contains(&Entry::Summary { text: "A summary.".into() }), "{rows:?}");
+        assert_eq!(done.usage.context, 0);
     }
 
     #[tokio::test]

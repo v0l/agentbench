@@ -44,6 +44,12 @@ pub struct Model {
     /// Compact a chat once its context is this many percent full. 0 turns it off.
     #[serde(default = "default_compact_at")]
     pub compact_at: u64,
+    #[serde(default = "default_fold_idle_secs")]
+    pub fold_idle_secs: u64,
+    #[serde(default = "default_fold_at")]
+    pub fold_at: u64,
+    #[serde(default = "default_fold_keep")]
+    pub fold_keep: u64,
     /// The models a chat can be switched to, by the agent or by the user.
     #[serde(default)]
     pub low: Level,
@@ -80,6 +86,18 @@ fn default_compact_at() -> u64 {
     agentbench_core::DEFAULT_COMPACT_AT
 }
 
+fn default_fold_idle_secs() -> u64 {
+    agentbench_core::DEFAULT_FOLD_IDLE_SECS
+}
+
+fn default_fold_at() -> u64 {
+    agentbench_core::DEFAULT_FOLD_AT
+}
+
+fn default_fold_keep() -> u64 {
+    agentbench_core::DEFAULT_FOLD_KEEP
+}
+
 fn default_request_budget() -> usize {
     24 << 20
 }
@@ -107,6 +125,9 @@ impl Default for Model {
             key: String::new(),
             steps: default_steps(),
             compact_at: default_compact_at(),
+            fold_idle_secs: default_fold_idle_secs(),
+            fold_at: default_fold_at(),
+            fold_keep: default_fold_keep(),
             low: Level::default(),
             medium: Level::default(),
             high: Level::default(),
@@ -1263,6 +1284,10 @@ fn symbol_hint(symbol: &str) -> String {
 }
 
 fn history(entries: &[Entry]) -> Vec<Value> {
+    crate::fold::apply(&replay(entries), &crate::fold::sections(entries))
+}
+
+fn replay(entries: &[Entry]) -> Vec<Value> {
     let mut rows: Vec<&Vec<Sent>> = agentbench_core::since_summary(entries)
         .iter()
         .filter_map(|e| match e {
@@ -1665,6 +1690,48 @@ impl Agent for Native {
         self.model.get().compact_at
     }
 
+    fn folding(&self) -> Option<super::Folding> {
+        let m = self.model.get();
+        (m.fold_idle_secs > 0 && m.fold_at > 0).then(|| super::Folding {
+            idle: Duration::from_secs(m.fold_idle_secs),
+            at: m.fold_at,
+        })
+    }
+
+    async fn fold(
+        &self,
+        entries: &[Entry],
+        model: Option<&str>,
+        stop: &super::CancellationToken,
+    ) -> Result<Option<super::Folded>, String> {
+        let base = self.model.get();
+        let model = base.choose(model.unwrap_or_default());
+        if model.model.trim().is_empty() {
+            return Err("pick a server and model for the native agent under settings".into());
+        }
+        let raw = replay(entries);
+        let mut sections = crate::fold::sections(entries);
+        let folded: usize = sections.iter().map(|s| s.covers).sum();
+        let Some(covers) = crate::fold::plan(&raw, folded, base.fold_keep) else {
+            return Ok(None);
+        };
+        let upto = crate::fold::head_len(&raw) + folded + covers;
+        let mut ask = crate::fold::apply(&raw[..upto], &sections);
+        ask.iter_mut().for_each(|m| {
+            agentbench_core::remove_pictures(m);
+        });
+        ask.push(json!({ "role": "user", "content": crate::fold::FOLD_PROMPT }));
+        let reply = complete(&model, &ask, &json!([]), self.patience, &Quiet(stop)).await?;
+        let (topic, text) = crate::fold::split_topic(&reply.text);
+        if text.is_empty() {
+            return Err("the model gave no summary".into());
+        }
+        let before = crate::fold::size(&raw);
+        sections.push(crate::fold::Section { text: text.clone(), covers });
+        let after = crate::fold::size(&crate::fold::apply(&raw, &sections));
+        Ok(Some(super::Folded { covers, topic, text, before, after }))
+    }
+
     async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
         let base = self.model.get();
         let mut model = base.choose(turn.model.unwrap_or_default());
@@ -2018,6 +2085,36 @@ impl Io for Silent<'_> {
     }
     fn api(&self) -> &dyn super::Api {
         self.0.api()
+    }
+}
+
+struct Quiet<'a>(&'a super::CancellationToken);
+
+struct NoApi;
+
+impl super::Api for NoApi {
+    fn call(&self, _tool: &str, _args: &Value, _session: agentbench_core::SessionId) -> Result<Value, String> {
+        Err("not available while folding".into())
+    }
+}
+
+#[async_trait]
+impl Io for Quiet<'_> {
+    fn emit(&self, _event: Event) {}
+    fn stop(&self) -> &super::CancellationToken {
+        self.0
+    }
+    fn steer(&self) -> Option<super::Steer> {
+        None
+    }
+    async fn ask(&self, _question: Question) -> Result<String, String> {
+        Err("not available while folding".into())
+    }
+    async fn ask_many(&self, _questions: Vec<Question>) -> Result<Vec<String>, String> {
+        Err("not available while folding".into())
+    }
+    fn api(&self) -> &dyn super::Api {
+        &NoApi
     }
 }
 
@@ -4625,6 +4722,44 @@ for line in sys.stdin:
             .filter(|m| matches!(&m.entry, Entry::Tool { call_id, .. } if call_id == "c2"))
             .count();
         assert_eq!(c2_rows, 1, "a kept message is not shown a second time");
+    }
+
+    #[tokio::test]
+    async fn the_oldest_section_is_folded_and_replayed_ahead_of_the_rest() {
+        let (url, asked) = stub(vec![vec![say("Topic: login\n\nWe fixed login.")]]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let plain = |message: Value| Sent { message, said: Said::Plain };
+        let filler = "x".repeat(400);
+        let mut entries = vec![Entry::Wire {
+            messages: vec![plain(json!({ "role": "system", "content": "sys" }))],
+        }];
+        for name in ["login", "billing", "deploys"] {
+            entries.push(Entry::Wire {
+                messages: vec![
+                    plain(json!({ "role": "user", "content": format!("about {name} {filler}") })),
+                    plain(json!({ "role": "assistant", "content": format!("{name} done") })),
+                ],
+            });
+        }
+        let stop = crate::agent::CancellationToken::new();
+        let folded = native.fold(&entries, None, &stop).await.unwrap().unwrap();
+        assert_eq!((folded.covers, folded.topic.as_str()), (2, "login"));
+        assert_eq!(folded.text, "We fixed login.");
+        assert!(folded.after < folded.before);
+        let sent = asked.recv().unwrap();
+        let ask = sent["messages"].as_array().unwrap();
+        assert_eq!(ask.len(), 4, "system, the oldest section, the prompt: {ask:?}");
+        assert_eq!(ask[3]["content"], crate::fold::FOLD_PROMPT);
+        assert!(ask[1]["content"].as_str().unwrap().contains("about login"));
+        entries.push(Entry::Section {
+            text: folded.text,
+            covers: folded.covers,
+            topic: folded.topic,
+        });
+        let replayed = history(&entries);
+        assert_eq!(replayed.len(), 6);
+        assert!(replayed[1]["content"].as_str().unwrap().contains("We fixed login."));
+        assert!(replayed[2]["content"].as_str().unwrap().contains("about billing"));
     }
 
     #[tokio::test]

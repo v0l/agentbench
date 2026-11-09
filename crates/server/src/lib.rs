@@ -2,6 +2,7 @@ pub mod agent;
 pub mod api;
 pub mod autopilot;
 pub mod cli;
+pub mod fold;
 pub mod git;
 pub mod http;
 pub mod local;
@@ -271,6 +272,7 @@ async fn serve_inner(
     api.runner.deliver_backlog();
     autopilot::spawn(api.runner.clone());
     triage::spawn(api.runner.clone());
+    fold_watch(api.runner.clone());
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     tracing::info!("listening on http://{}", listener.local_addr().map_err(|e| e.to_string())?);
     let mut app = api::router(api);
@@ -279,6 +281,15 @@ async fn serve_inner(
         app = app.fallback_service(tower_http::services::ServeDir::new(dir));
     }
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await.map_err(|e| e.to_string())
+}
+
+fn fold_watch(runner: runner::Runner) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            runner.fold_idle(store::now());
+        }
+    });
 }
 
 #[cfg(test)]

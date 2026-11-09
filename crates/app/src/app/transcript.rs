@@ -203,6 +203,13 @@ impl App {
             Entry::Summary { text } if text.is_empty() => {
                 heading(ui, "cleared: the agent starts afresh here");
             }
+            Entry::Section { text, covers, topic } => {
+                heading(ui, &format!("folded {covers} older messages (topic: {topic}) into a summary"));
+                rail_block(ui, OK, PANEL, |ui| {
+                    markdown::show(ui, &mut self.markdown, text, m.id as usize);
+                });
+                ui.add_space(4.0);
+            }
             Entry::Summary { text } => {
                 heading(ui, "compacted: the agent carries on from this summary");
                 rail_block(ui, OK, PANEL, |ui| {

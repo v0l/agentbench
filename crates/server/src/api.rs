@@ -369,6 +369,9 @@ fn masked(m: &crate::agent::native::Model) -> agentbench_core::ModelSettings {
         has_key: !m.key.trim().is_empty(),
         steps: m.steps,
         compact_at: m.compact_at,
+        fold_idle_secs: m.fold_idle_secs,
+        fold_at: m.fold_at,
+        fold_keep: m.fold_keep,
         low: level_masked(&m.low),
         medium: level_masked(&m.medium),
         high: level_masked(&m.high),
@@ -428,6 +431,9 @@ async fn put_model(
         m.steps = new.steps.min(100_000);
     }
     m.compact_at = new.compact_at.min(100);
+    m.fold_idle_secs = new.fold_idle_secs.min(3600);
+    m.fold_at = new.fold_at.min(100);
+    m.fold_keep = new.fold_keep.clamp(10, 90);
     m.effort = clean_effort(&new.effort);
     m.low = level_merged(&m.low, &new.low);
     m.medium = level_merged(&m.medium, &new.medium);

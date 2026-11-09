@@ -38,6 +38,9 @@ impl App {
                 has_key: false,
                 steps: 0,
                 compact_at: agentbench_core::DEFAULT_COMPACT_AT,
+                fold_idle_secs: agentbench_core::DEFAULT_FOLD_IDLE_SECS,
+                fold_at: agentbench_core::DEFAULT_FOLD_AT,
+                fold_keep: agentbench_core::DEFAULT_FOLD_KEEP,
                 low: Default::default(),
                 medium: Default::default(),
                 high: Default::default(),
@@ -264,6 +267,30 @@ impl App {
                         "Summarise a chat and start it afresh once its context is this full, in percent. 0 never does. Only the native agent needs this; the others manage their own.",
                         |ui| {
                             ui.add(egui::DragValue::new(&mut st.model.compact_at).range(0..=100).suffix("%"));
+                        },
+                    );
+                    row_help(
+                        ui,
+                        "fold after idle",
+                        "Seconds a chat sits idle before its oldest part is folded into a summary, kept under the provider's prompt cache lifetime of about 5 minutes. 0 never does.",
+                        |ui| {
+                            ui.add(egui::DragValue::new(&mut st.model.fold_idle_secs).range(0..=3600).suffix(" s"));
+                        },
+                    );
+                    row_help(
+                        ui,
+                        "fold at",
+                        "Fold an idle chat once its context is this full, in percent.",
+                        |ui| {
+                            ui.add(egui::DragValue::new(&mut st.model.fold_at).range(0..=100).suffix("%"));
+                        },
+                    );
+                    row_help(
+                        ui,
+                        "fold keeps",
+                        "The share of the conversation a fold leaves as it was, newest first, in percent.",
+                        |ui| {
+                            ui.add(egui::DragValue::new(&mut st.model.fold_keep).range(10..=90).suffix("%"));
                         },
                     );
                     row_help(ui, "thinking", EFFORT_HELP, |ui| {

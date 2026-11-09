@@ -1282,7 +1282,7 @@ fn kind(e: &Entry) -> &'static str {
         Entry::Diagnostics { .. } => "diagnostics",
         Entry::Wire { .. } => "sent",
         Entry::Unknown => "unknown",
-        Entry::Summary { .. } => "summary",
+        Entry::Summary { .. } | Entry::Section { .. } => "summary",
     }
 }
 

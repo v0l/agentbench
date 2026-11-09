@@ -730,6 +730,14 @@ pub enum Entry {
     Summary {
         text: String,
     },
+    /// The oldest `covers` messages of the replay, folded into a summary while the rest stay as
+    /// they were. Sections stack in order and are never summarised again.
+    Section {
+        text: String,
+        covers: usize,
+        #[serde(default)]
+        topic: String,
+    },
     /// A file an agent sent the user, kept on the server to download.
     File {
         #[serde(default)]
@@ -981,7 +989,7 @@ impl Entry {
             Entry::Questions { questions, .. } => {
                 questions.first().map(|q| q.text.as_str()).unwrap_or_default()
             }
-            Entry::Summary { text } => text,
+            Entry::Summary { text } | Entry::Section { text, .. } => text,
             Entry::Wire { messages } => {
                 messages.iter().find_map(|s| s.message["content"].as_str()).unwrap_or_default()
             }
@@ -1034,6 +1042,16 @@ pub struct ModelSettings {
     /// Compact a chat once its context is this many percent full. 0 turns it off.
     #[serde(default = "default_compact_at")]
     pub compact_at: u64,
+    /// Seconds a chat sits idle before its oldest sections are folded into summaries, under
+    /// the provider's prompt cache lifetime. 0 turns it off.
+    #[serde(default = "default_fold_idle_secs")]
+    pub fold_idle_secs: u64,
+    /// Fold while idle once the context is this many percent full.
+    #[serde(default = "default_fold_at")]
+    pub fold_at: u64,
+    /// The share of the conversation, in percent, that a fold leaves as it was.
+    #[serde(default = "default_fold_keep")]
+    pub fold_keep: u64,
     /// The models the agent and the user can switch a chat to. Anything left
     /// empty in one uses the native agent's own setting.
     #[serde(default)]
@@ -1076,6 +1094,21 @@ pub fn host_of(url: &str) -> String {
 /// The window assumed for a model whose server does not say.
 pub const DEFAULT_CONTEXT: u64 = 128_000;
 pub const DEFAULT_COMPACT_AT: u64 = 80;
+pub const DEFAULT_FOLD_IDLE_SECS: u64 = 240;
+pub const DEFAULT_FOLD_AT: u64 = 50;
+pub const DEFAULT_FOLD_KEEP: u64 = 40;
+
+fn default_fold_idle_secs() -> u64 {
+    DEFAULT_FOLD_IDLE_SECS
+}
+
+fn default_fold_at() -> u64 {
+    DEFAULT_FOLD_AT
+}
+
+fn default_fold_keep() -> u64 {
+    DEFAULT_FOLD_KEEP
+}
 
 fn default_compact_at() -> u64 {
     DEFAULT_COMPACT_AT

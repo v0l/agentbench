@@ -1104,6 +1104,17 @@ impl Store {
         Store::changed(&db, "session", id)
     }
 
+    pub fn set_context(&self, id: SessionId, context: u64) -> Result<()> {
+        let mut usage = self.session(id)?.usage;
+        usage.context = context;
+        let db = self.db();
+        db.execute(
+            "UPDATE sessions SET usage = ?1, updated_at = ?2 WHERE id = ?3",
+            params![serde_json::to_string(&usage).unwrap_or_default(), now(), id],
+        )?;
+        Store::changed(&db, "session", id)
+    }
+
     /// Forget the agent's own session, so it starts afresh. The context it held is gone
     /// with it, so the reading of how full it was goes too.
     pub fn clear_agent_session(&self, id: SessionId) -> Result<()> {
