@@ -6,8 +6,15 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-09
+
 ### Fixed
+- Android: opening the app again after closing it works. The background sync and watch services run in their own process, and the window process ends with its activity, so a relaunch starts clean and the keyboard wakes the new window.
 - Android: the keyboard no longer pops up while speech is written into the draft. Only a tap on a text field brings it up, and a keyboard you put away stays away while dictation text arrives.
+- Tests that make git commits turn off commit signing, so they pass on machines that sign commits by default.
+
+### Changed
+- The supervisor always runs on the supervisor model. It no longer gets the `switch_model` tool, `/model` in its chat cannot move it to another model, and the chat header says it is pinned. Settings describe the model levels as being for worker chats.
 
 ## [0.8.2] - 2026-11-07
 
