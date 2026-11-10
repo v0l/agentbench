@@ -145,8 +145,8 @@ pub(super) fn usage_badges(ui: &mut Ui, report: Option<&agentbench_core::UsageRe
     let Some(report) = report else { return };
     let now = agentbench_core::now_ms();
     for (text, hot) in usage_labels(report, project, now).into_iter().rev() {
-        chip(ui, &text, if hot { READOUT } else { LEGEND }, hot)
-            .on_hover_text("model quota and spend");
+        let short = text.split(", ").next().unwrap_or(&text).replace(" today", "");
+        chip(ui, &short, if hot { READOUT } else { LEGEND }, hot).on_hover_text(text);
     }
 }
 

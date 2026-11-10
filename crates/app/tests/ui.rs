@@ -2187,6 +2187,56 @@ fn a_child_session_shows_a_parent_chip_that_opens_the_parent() {
     assert!(h.query_by_label_contains("1 children").is_some(), "the parent counts its child");
 }
 
+fn quota_server(used_pct: u32, resets_in_secs: i64) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let resets = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + resets_in_secs;
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let body = format!(r#"{{"window":"5h","used_pct":{used_pct},"resets_at":{resets}}}"#);
+        for stream in listener.incoming().flatten() {
+            let mut stream = stream;
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://{addr}/v1")
+}
+
+#[test]
+fn the_header_shows_the_quota_and_spend() {
+    let rig = rig_on(&quota_server(78, 7800), Vec::new());
+    let first = rig.store.sessions().unwrap()[0].clone();
+    let usage = agentbench_core::Usage { cost_usd: 1.25, turns: 1, ..Default::default() };
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the quota", |h| {
+        rig.store.add_usage(first.id, &agentbench_core::Usage::default()).unwrap();
+        h.state()
+            .overview()
+            .and_then(|o| o.usage.as_ref())
+            .is_some_and(|u| !u.quotas.is_empty())
+    });
+    rig.store.add_usage(first.id, &usage).unwrap();
+    until(&mut h, "the spend", |h| {
+        h.state().overview().and_then(|o| o.usage.as_ref()).is_some_and(|u| u.spend.today_usd > 1.0)
+    });
+    h.run_steps(3);
+    let report = h.state().overview().unwrap().usage.clone().unwrap();
+    let labels = agentbench::app::usage_labels(&report, None, agentbench_core::now_ms());
+    assert!(labels.iter().any(|(t, hot)| t.starts_with("5h 78%, resets ") && *hot), "{labels:?}");
+    assert!(labels.iter().any(|(t, _)| t.starts_with("$1.25 today")), "{labels:?}");
+    shot(&mut h, "quota-header");
+}
+
 #[test]
 fn the_header_shows_spend_today() {
     let rig = rig();

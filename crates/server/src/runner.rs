@@ -3069,6 +3069,43 @@ mod tests {
         assert!(crate::quota::paused_until(runner.store(), s.id).is_none());
     }
 
+    #[tokio::test]
+    async fn the_real_yalr_rate_limit_error_waits_for_the_reset_instead_of_failing() {
+        use crate::agent::native::{Model, Native};
+        use crate::quota::fake::{ok, server};
+        use serde_json::json;
+        let refusal = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"error": {"message": "Provider error: Rate limit exceeded. Retry after: 387042000ms"}})
+        );
+        let done = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices": [{"delta": {"content": "back"}}]})
+        );
+        let (url, _) = server(vec![ok(refusal), ok(done)], None);
+        let start = crate::quota::now();
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.pace.clock = crate::quota::Clock::fake(start);
+        let clock = native.pace.clock.clone();
+        let (runner, s) = setup(Box::new(native));
+        runner.send(&s, "go").unwrap();
+        let done = wait_idle(&runner, s.id).await;
+        assert_eq!(done.status, SessionStatus::Idle, "not failed");
+        assert_eq!(clock.now(), start + 387_042_000, "resumed at the reset");
+        let msgs = runner.store().messages(s.id, 0).unwrap();
+        assert!(!msgs.iter().any(|m| matches!(m.entry, Entry::Error { .. })), "{msgs:?}");
+        let wait = msgs
+            .iter()
+            .find_map(|m| match &m.entry {
+                Entry::Warning { text } if text.contains("quota exhausted, resumes at") => Some(text.clone()),
+                _ => None,
+            })
+            .expect("a waiting notice in the chat");
+        assert!(wait.contains("4d 11h"), "{wait}");
+        let notices = crate::tools::NOTICES.lock().unwrap();
+        assert!(notices.iter().any(|(t, m)| t == "quota exhausted" && m.contains("resumes at")), "{notices:?}");
+    }
+
     struct Thinker;
 
     #[async_trait]

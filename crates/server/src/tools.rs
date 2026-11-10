@@ -1266,8 +1266,11 @@ pub(crate) fn desktop_notice(title: &str, message: &str) {
         }
     }
     #[cfg(test)]
-    let _ = (title, message);
+    NOTICES.lock().unwrap_or_else(|e| e.into_inner()).push((title.to_string(), message.to_string()));
 }
+
+#[cfg(test)]
+pub(crate) static NOTICES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 fn kind(e: &Entry) -> &'static str {
     match e {

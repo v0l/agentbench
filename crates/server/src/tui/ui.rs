@@ -815,6 +815,40 @@ mod tests {
     }
 
     #[test]
+    fn the_status_line_shows_the_quota_and_spend() {
+        let mut a = app();
+        let now = crate::store::now();
+        a.report = Some(agentbench_core::UsageReport {
+            spend: agentbench_core::Spend {
+                today_usd: 1.25,
+                total_usd: 1.25,
+                projects: vec![agentbench_core::ProjectSpend {
+                    project_id: a.project.id,
+                    today_usd: 1.25,
+                    total_usd: 1.25,
+                }],
+            },
+            quotas: vec![agentbench_core::Quota {
+                host: "h".into(),
+                window: "5h".into(),
+                used_pct: 78.0,
+                resets_at: now + 7_800_000,
+                updated_at: now,
+                ..Default::default()
+            }],
+        });
+        a.open(session(SessionStatus::Idle), vec![]);
+        let out = render(&mut a, 100, 10);
+        let last = out.last().unwrap();
+        assert!(last.contains("5h 78%, resets "), "{last}");
+        assert!(last.contains("$1.25 today, $1.25 project"), "{last}");
+        let mut paused = session(SessionStatus::Waiting);
+        paused.paused_until = Some(now + 7_800_000);
+        a.open(paused, vec![]);
+        assert!(render(&mut a, 100, 10).last().unwrap().contains("quota exhausted, resumes at"));
+    }
+
+    #[test]
     fn the_status_line_shows_progress_the_model_and_cost() {
         let mut a = app();
         let mut s = session(SessionStatus::Running);

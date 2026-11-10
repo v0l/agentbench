@@ -3093,7 +3093,7 @@ where
                 Some(data) => {
                     if let Ok(v) = serde_json::from_str::<Value>(data) {
                         if let Some(e) = stream_error(&v) {
-                            return Err(Failure::Fatal(e));
+                            return Err(refusal(e));
                         }
                         take(&v, &mut reply, io);
                     }
@@ -3106,7 +3106,7 @@ where
         && let Ok(v) = serde_json::from_str::<Value>(data)
     {
         if let Some(e) = stream_error(&v) {
-            return Err(Failure::Fatal(e));
+            return Err(refusal(e));
         }
         take(&v, &mut reply, io);
     }
@@ -3149,6 +3149,15 @@ fn stream_error(v: &Value) -> Option<String> {
         .map(str::to_string)
         .unwrap_or_else(|| e.to_string());
     Some(format!("the model server refused the request: {text}"))
+}
+
+fn refusal(message: String) -> Failure {
+    let lower = message.to_ascii_lowercase();
+    let limited = lower.contains("rate limit") || lower.contains("quota");
+    match crate::quota::retry_after_ms(&reqwest::header::HeaderMap::new(), &message) {
+        Some(ms) if limited => Failure::Limited { message, retry_after_ms: Some(ms) },
+        _ => Failure::Fatal(message),
+    }
 }
 
 fn sse_data(line: &str) -> Option<&str> {
