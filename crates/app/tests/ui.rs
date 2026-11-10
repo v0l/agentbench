@@ -2232,7 +2232,7 @@ fn the_header_shows_the_quota_and_spend() {
     h.run_steps(3);
     let report = h.state().overview().unwrap().usage.clone().unwrap();
     let labels = agentbench::app::usage_labels(&report, None, agentbench_core::now_ms());
-    assert!(labels.iter().any(|(t, hot)| t.starts_with("5h 78%, resets ") && *hot), "{labels:?}");
+    assert!(labels.iter().any(|(t, hot)| t.contains("5h 78%, resets ") && *hot), "{labels:?}");
     assert!(labels.iter().any(|(t, _)| t.starts_with("$1.25 today")), "{labels:?}");
     shot(&mut h, "quota-header");
 }

@@ -120,7 +120,7 @@ pub enum Event {
     Steered { text: String },
     Usage(Usage),
     Notice(String),
-    Paused { until: i64, text: String, long: bool },
+    Paused { until: i64, text: String, long: bool, model: String },
     Resumed,
     Warning(String),
     PicturesRemoved,

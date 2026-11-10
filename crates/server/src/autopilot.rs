@@ -973,7 +973,8 @@ impl Autopilot {
     fn start_more(&self) {
         let store = self.store();
         let now = crate::quota::now();
-        match self.runner.quotas.exhausted_until(now) {
+        let start_model = self.runner.quotas.start_model();
+        match self.runner.quotas.exhausted_until(&start_model, now) {
             Some(until) => {
                 self.log_once(
                     None,
@@ -1803,7 +1804,7 @@ mod tests {
         let a = todo(&r, "a", 0, &[]);
         on(&r);
         let now = crate::quota::now();
-        r.ap.runner.quotas.block(now + 3_600_000);
+        r.ap.runner.quotas.block("", now + 3_600_000);
         r.ap.tick();
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Todo, "not started");
@@ -1812,6 +1813,22 @@ mod tests {
         r.ap.runner.quotas.unblock(now + 3_600_001);
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "started after the reset");
+    }
+
+    #[tokio::test]
+    async fn a_block_on_another_model_does_not_stop_workers_starting_on_the_default_model() {
+        let r = rig(DONE);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        let now = crate::quota::now();
+        r.ap.runner.quotas.set_start_model("code-high");
+        r.ap.runner.quotas.block("code-x-high", now + 3_600_000);
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "started");
+        r.ap.runner.quotas.block("code-high", now + 3_600_000);
+        let b = todo(&r, "b", 0, &[]);
+        r.ap.tick();
+        assert_eq!(r.store.issue(b).unwrap().state, IssueState::Todo, "the start model is blocked");
     }
 
     #[tokio::test]

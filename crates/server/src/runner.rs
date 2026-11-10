@@ -1662,9 +1662,9 @@ impl Io for Sink {
                     self.runner.observe_quota(q);
                 }
             }
-            Event::Paused { until, text, long } => {
+            Event::Paused { until, text, long, model } => {
                 crate::quota::set_paused(&self.store, self.session, Some(until));
-                self.runner.quotas.block(until);
+                self.runner.quotas.block(&model, until);
                 self.entry(Entry::Warning { text: text.clone() });
                 let _ = self.store.set_status(self.session, SessionStatus::Waiting);
                 if long {
@@ -3034,7 +3034,7 @@ mod tests {
             let resets = crate::quota::now() + 7_200_000;
             io.emit(Event::Usage(reading(78.0, resets)));
             io.emit(Event::Usage(reading(80.0, resets)));
-            io.emit(Event::Paused { until: resets, text: "h: quota exhausted, resumes at 14:30 UTC".into(), long: true });
+            io.emit(Event::Paused { until: resets, text: "h: quota exhausted, resumes at 14:30 UTC".into(), long: true, model: String::new() });
             self.0.notified().await;
             io.emit(Event::Resumed);
             Ok(())
@@ -3055,7 +3055,7 @@ mod tests {
         let paused = runner.store().session(s.id).unwrap();
         assert_eq!(paused.status, SessionStatus::Waiting);
         assert!(runner.with_queued(vec![paused])[0].paused_until.is_some());
-        assert!(runner.quotas.exhausted_until(crate::quota::now()).is_some());
+        assert!(runner.quotas.exhausted_until("", crate::quota::now()).is_some());
         let msgs = runner.store().messages(s.id, 0).unwrap();
         let hints = msgs
             .iter()

@@ -1543,6 +1543,8 @@ impl SessionStatus {
 pub struct Quota {
     #[serde(default)]
     pub host: String,
+    #[serde(default)]
+    pub model: String,
     pub window: String,
     pub used_pct: f64,
     pub resets_at: i64,
@@ -1579,8 +1581,16 @@ impl Quota {
         }
     }
 
+    pub fn applies_to(&self, model: &str) -> bool {
+        model.is_empty() || self.model.is_empty() || self.model == model
+    }
+
     pub fn label(&self, now: i64) -> String {
-        let used = format!("{} {:.0}%", self.window, self.used_pct);
+        let used = if self.model.is_empty() {
+            format!("{} {:.0}%", self.window, self.used_pct)
+        } else {
+            format!("{}: {} {:.0}%", self.model, self.window, self.used_pct)
+        };
         match self.exhausted_until(now) {
             Some(t) => format!("{used}, exhausted until {}", clock_hm(t)),
             None if self.resets_at > now => format!("{used}, resets {}", clock_hm(self.resets_at)),
@@ -1589,7 +1599,8 @@ impl Quota {
     }
 
     pub fn hint(&self, now: i64) -> String {
-        let used = format!("Quota {} at {:.0}%", self.window, self.used_pct);
+        let named = if self.model.is_empty() { String::new() } else { format!("{} ", self.model) };
+        let used = format!("Quota {named}{} at {:.0}%", self.window, self.used_pct);
         match self.exhausted_until(now).or((self.resets_at > now).then_some(self.resets_at)) {
             Some(t) => format!("{used}, resets at {} (in {})", clock_hm(t), span(t - now)),
             None => used,

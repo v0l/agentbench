@@ -183,6 +183,7 @@ fn quota_of(v: &Value, host: &str, now: i64) -> Option<Quota> {
     let used_pct = percent(v.get("used_pct")?)?;
     Some(Quota {
         host: host.to_string(),
+        model: v.get("model").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
         window: v.get("window").and_then(Value::as_str).unwrap_or("quota").to_string(),
         used_pct,
         resets_at: v.get("resets_at").and_then(|t| time_ms(t, now)).unwrap_or(0),
@@ -193,6 +194,32 @@ fn quota_of(v: &Value, host: &str, now: i64) -> Option<Quota> {
 
 pub fn from_usage(usage: &Value, host: &str, now: i64) -> Option<Quota> {
     quota_of(usage.get("quota")?, host, now)
+}
+
+fn model_entry(entry: &Value, host: &str, model: &str, now: i64) -> Option<Quota> {
+    let summary = entry.get("summary")?;
+    let mut q = quota_of(summary, host, now)?;
+    q.model = model.to_string();
+    if summary.get("exhausted").and_then(Value::as_bool) == Some(true) {
+        q.used_pct = q.used_pct.max(100.0);
+    }
+    Some(q)
+}
+
+pub fn from_models(body: &Value, host: &str, now: i64) -> Vec<Quota> {
+    let Some(models) = body.get("models").and_then(Value::as_object) else { return Vec::new() };
+    let mut all: Vec<Quota> =
+        models.iter().filter_map(|(name, e)| model_entry(e, host, name, now)).collect();
+    all.sort_by(|a, b| a.model.cmp(&b.model));
+    all
+}
+
+pub fn for_model(body: &Value, host: &str, model: &str, now: i64) -> Option<Quota> {
+    let named = body.pointer(&format!("/models/{}", model.replace('~', "~0").replace('/', "~1")));
+    if let Some(q) = named.and_then(|e| model_entry(e, host, model, now)) {
+        return Some(q);
+    }
+    from_status(body, host, now).map(|q| Quota { model: model.to_string(), ..q })
 }
 
 pub fn from_status(body: &Value, host: &str, now: i64) -> Option<Quota> {
@@ -210,6 +237,7 @@ pub fn from_status(body: &Value, host: &str, now: i64) -> Option<Quota> {
         .filter_map(found)
         .max_by(|a, b| a.used_pct.total_cmp(&b.used_pct))
         .or_else(|| found(body))
+        .or_else(|| body.get("summary").and_then(found))
         .or_else(|| body.get("quota").and_then(found))?;
     if best.next_available_at.is_none() {
         best.next_available_at = top;
@@ -227,10 +255,12 @@ pub fn from_headers(h: &HeaderMap, host: &str, now: i64) -> Option<Quota> {
     let resets = header(h, "x-yalr-quota-resets-at")
         .and_then(|t| time_ms(&Value::String(t.into()), now))
         .unwrap_or(0);
+    let exhausted = header(h, "x-yalr-quota-exhausted").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
     Some(Quota {
         host: host.to_string(),
+        model: header(h, "x-yalr-quota-model").unwrap_or_default().trim().to_string(),
         window: header(h, "x-yalr-quota-window").unwrap_or("quota").to_string(),
-        used_pct,
+        used_pct: if exhausted { used_pct.max(100.0) } else { used_pct },
         resets_at: resets,
         next_available_at: header(h, "x-yalr-quota-next-available-at")
             .and_then(|t| time_ms(&Value::String(t.into()), now)),
@@ -292,41 +322,95 @@ pub fn retry_after_ms(h: &HeaderMap, body: &str) -> Option<i64> {
     Some(if rest.starts_with("ms") { n } else { n * 1000 })
 }
 
-pub async fn fetch(base: &str, key: &str, host: &str, timeout: Duration) -> Option<Quota> {
-    let mut req = crate::http::client().get(format!("{}/quota", base.trim_end_matches('/'))).timeout(timeout);
+async fn status(base: &str, key: &str, model: &str, timeout: Duration) -> Option<Value> {
+    let mut url = format!("{}/quota", base.trim_end_matches('/'));
+    if !model.is_empty() {
+        let escaped: String = model
+            .bytes()
+            .map(|b| match b {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        url.push_str(&format!("?model={escaped}"));
+    }
+    let mut req = crate::http::client().get(url).timeout(timeout);
     if !key.trim().is_empty() {
         req = req.bearer_auth(key.trim());
     }
     let resp = req.send().await.ok()?.error_for_status().ok()?;
-    let body: Value = resp.json().await.ok()?;
-    from_status(&body, host, now())
+    resp.json().await.ok()
+}
+
+pub async fn fetch(base: &str, key: &str, host: &str, model: &str, timeout: Duration) -> Option<Quota> {
+    let body = status(base, key, model, timeout).await?;
+    if model.is_empty() {
+        from_status(&body, host, now())
+    } else {
+        for_model(&body, host, model, now())
+    }
 }
 
 pub const POLL_EVERY: Duration = Duration::from_secs(180);
 
-pub fn servers(model: &crate::agent::native::Model) -> Vec<(String, String)> {
-    let mut all = vec![(model.url.clone(), model.key.clone())];
-    for level in [&model.low, &model.medium, &model.high] {
-        if !level.url.trim().is_empty() {
-            all.push((level.url.clone(), level.key.clone()));
+pub struct Target {
+    pub base: String,
+    pub key: String,
+    pub models: Vec<String>,
+}
+
+pub fn servers(model: &crate::agent::native::Model) -> Vec<Target> {
+    let mut all: Vec<(String, String, String)> = Vec::new();
+    let mut add = |url: &str, key: &str, name: &str| {
+        if !url.trim().is_empty() && !name.trim().is_empty() {
+            all.push((base_of(url), key.to_string(), name.trim().to_string()));
+        }
+    };
+    add(&model.url, &model.key, &model.model);
+    for name in agentbench_core::LEVELS {
+        if let Some(m) = model.level(name) {
+            add(&m.url, &m.key, &m.model);
         }
     }
-    all.retain(|(u, _)| !u.trim().is_empty());
-    all.iter_mut().for_each(|(u, _)| *u = base_of(u));
     all.sort();
-    all.dedup_by(|a, b| a.0 == b.0);
-    all
+    all.dedup_by(|a, b| a.0 == b.0 && a.2 == b.2);
+    let mut out: Vec<Target> = Vec::new();
+    for (base, key, name) in all {
+        match out.iter_mut().find(|t| t.base == base) {
+            Some(t) => t.models.push(name),
+            None => out.push(Target { base, key, models: vec![name] }),
+        }
+    }
+    out
+}
+
+pub fn readings(body: &Value, host: &str, models: &[String], now: i64) -> Vec<Quota> {
+    let listed = from_models(body, host, now);
+    if !listed.is_empty() {
+        return listed.into_iter().filter(|q| models.contains(&q.model)).collect();
+    }
+    match from_status(body, host, now) {
+        Some(q) => models.iter().map(|m| Quota { model: m.clone(), ..q.clone() }).collect(),
+        None => Vec::new(),
+    }
 }
 
 pub async fn poll_once(runner: &crate::runner::Runner, model: &crate::agent::native::Model) {
-    for (base, key) in servers(model) {
-        let host = agentbench_core::host_of(&base);
+    runner.quotas.set_start_model(
+        &model.level("medium").map_or_else(|| model.model.clone(), |m| m.model),
+    );
+    for target in servers(model) {
+        let host = agentbench_core::host_of(&target.base);
+        let Some(body) = status(&target.base, &target.key, "", Duration::from_secs(5)).await else {
+            continue;
+        };
         let now = now();
-        if let Some(q) = fetch(&base, &key, &host, Duration::from_secs(5)).await {
+        for q in readings(&body, &host, &target.models, now) {
             let block = q.exhausted_until(now);
+            let name = q.model.clone();
             runner.observe_quota(q);
             if let Some(t) = block {
-                runner.quotas.block(t);
+                runner.quotas.block(&name, t);
             }
         }
     }
@@ -346,7 +430,8 @@ pub fn spawn_poll(runner: crate::runner::Runner, model: crate::agent::native::Sh
 struct Held {
     quotas: HashMap<String, Quota>,
     announced: HashMap<String, (i64, u8)>,
-    blocked: i64,
+    blocked: HashMap<String, i64>,
+    start_model: String,
 }
 
 #[derive(Clone, Default)]
@@ -356,57 +441,74 @@ pub struct Hint {
     pub text: String,
 }
 
+fn key_of(q: &Quota) -> String {
+    format!("{}\n{}", q.host, q.model)
+}
+
 impl Quotas {
     fn map(&self) -> std::sync::MutexGuard<'_, Held> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn block(&self, until: i64) {
+    pub fn set_start_model(&self, model: &str) {
+        self.map().start_model = model.trim().to_string();
+    }
+
+    pub fn start_model(&self) -> String {
+        self.map().start_model.clone()
+    }
+
+    pub fn block(&self, model: &str, until: i64) {
         let mut held = self.map();
-        held.blocked = held.blocked.max(until);
+        let at = held.blocked.entry(model.to_string()).or_insert(0);
+        *at = (*at).max(until);
     }
 
     pub fn unblock(&self, now: i64) {
-        let mut held = self.map();
-        if held.blocked <= now {
-            held.blocked = 0;
-        }
+        self.map().blocked.retain(|_, t| *t > now);
     }
 
-    pub fn blocked_until(&self, now: i64) -> Option<i64> {
-        Some(self.map().blocked).filter(|t| *t > now)
+    pub fn blocked_until(&self, model: &str, now: i64) -> Option<i64> {
+        self.map()
+            .blocked
+            .iter()
+            .filter(|(m, _)| m.is_empty() || model.is_empty() || m.as_str() == model)
+            .map(|(_, t)| *t)
+            .filter(|t| *t > now)
+            .max()
     }
 
     pub fn observe(&self, quota: Quota, now: i64) -> Option<Hint> {
         let mut held = self.map();
-        let host = quota.host.clone();
-        let seen = held.announced.get(&host).copied();
+        let key = key_of(&quota);
+        let seen = held.announced.get(&key).copied();
         let level = quota.level(now);
         let announced = match seen {
             Some((resets, announced)) if resets == quota.resets_at => announced,
             _ => 0,
         };
         let hint = (level > announced).then(|| Hint { text: quota.hint(now) });
-        held.announced.insert(host.clone(), (quota.resets_at, announced.max(level)));
-        held.quotas.insert(host, quota);
+        held.announced.insert(key.clone(), (quota.resets_at, announced.max(level)));
+        held.quotas.insert(key, quota);
         hint
     }
 
     pub fn set(&self, quota: Quota) {
-        self.map().quotas.insert(quota.host.clone(), quota);
+        self.map().quotas.insert(key_of(&quota), quota);
     }
 
     pub fn all(&self) -> Vec<Quota> {
         let mut all: Vec<Quota> = self.map().quotas.values().cloned().collect();
-        all.sort_by(|a, b| a.host.cmp(&b.host));
+        all.sort_by(|a, b| (&a.host, &a.model).cmp(&(&b.host, &b.model)));
         all
     }
 
-    pub fn exhausted_until(&self, now: i64) -> Option<i64> {
+    pub fn exhausted_until(&self, model: &str, now: i64) -> Option<i64> {
         self.all()
             .iter()
+            .filter(|q| q.applies_to(model))
             .filter_map(|q| q.exhausted_until(now))
-            .chain(self.blocked_until(now))
+            .chain(self.blocked_until(model, now))
             .max()
     }
 
@@ -429,11 +531,18 @@ impl Quotas {
             .all()
             .iter()
             .filter(|q| !q.expired(now))
-            .map(|q| format!("- {}: {}\n", q.host, q.label(now)))
+            .map(|q| match q.model.is_empty() {
+                true => format!("- {}: {}\n", q.host, q.label(now)),
+                false => format!("- {} {}\n", q.host, q.label(now)),
+            })
             .collect();
-        if let Some(t) = self.blocked_until(now) {
+        let mut blocked: Vec<(String, i64)> =
+            self.map().blocked.iter().filter(|(_, t)| **t > now).map(|(m, t)| (m.clone(), *t)).collect();
+        blocked.sort();
+        for (model, t) in blocked {
+            let who = if model.is_empty() { String::new() } else { format!(" on {model}") };
             out.push_str(&format!(
-                "- exhausted: no new workers start until {} (in {})\n",
+                "- exhausted{who}: no new workers start{who} until {} (in {})\n",
                 agentbench_core::clock_hm(t),
                 agentbench_core::span(t - now)
             ));
@@ -490,7 +599,7 @@ pub(crate) mod fake {
                     }
                 };
                 log.lock().unwrap().push(path.clone());
-                let reply = if path.ends_with("/quota") {
+                let reply = if path.split('?').next().unwrap_or_default().ends_with("/quota") {
                     match &quota {
                         Some(b) => ok(b.clone()),
                         None => Reply { status: 404, headers: vec![], body: "{}".into() },
@@ -574,12 +683,12 @@ mod tests {
             resets_at: 9_000,
             ..Quota::default()
         });
-        assert_eq!(held.exhausted_until(1_000), Some(9_000));
-        assert_eq!(held.exhausted_until(9_000), None);
-        held.block(12_000);
-        assert_eq!(held.exhausted_until(9_500), Some(12_000));
+        assert_eq!(held.exhausted_until("", 1_000), Some(9_000));
+        assert_eq!(held.exhausted_until("", 9_000), None);
+        held.block("", 12_000);
+        assert_eq!(held.exhausted_until("", 9_500), Some(12_000));
         held.unblock(12_000);
-        assert_eq!(held.exhausted_until(12_000), None);
+        assert_eq!(held.exhausted_until("", 12_000), None);
     }
 
     #[test]
@@ -683,5 +792,79 @@ mod tests {
         assert_eq!(q.level(now), 1);
         assert_eq!(Quota { used_pct: 91.0, ..q.clone() }.level(now), 2);
         assert_eq!(q.level(q.resets_at), 0);
+    }
+
+    fn two_models() -> String {
+        json!({
+            "summary": {"used_pct": 100, "window": "7d", "resets_at": 1_900_000_000},
+            "models": {
+                "code-x-high": {"summary": {"used_pct": 100, "window": "7d", "resets_at": 1_900_000_000, "exhausted": true, "next_available_at": 1_900_000_000}, "windows": []},
+                "code-high": {"summary": {"used_pct": 17, "window": "7d", "resets_at": 1_900_000_000, "exhausted": false, "next_available_at": null}, "windows": []}
+            }})
+        .to_string()
+    }
+
+    fn levels(url: &str) -> crate::agent::native::Model {
+        use crate::agent::native::{Level, Model};
+        Model {
+            url: url.into(),
+            model: "code".into(),
+            high: Level { model: "code-x-high".into(), ..Level::default() },
+            medium: Level { model: "code-high".into(), ..Level::default() },
+            ..Model::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_exhausted_model_is_blocked_when_the_server_reports_models() {
+        let (url, paths) = fake::server(vec![], Some(two_models()));
+        let runner = crate::runner::Runner::new(crate::store::Store::memory().unwrap(), vec![]);
+        let model = levels(&url);
+        assert_eq!(servers(&model).len(), 1);
+        poll_once(&runner, &model).await;
+        assert_eq!(paths.lock().unwrap().len(), 1, "one call covers every model");
+        let now = 1_800_000_000_000;
+        assert!(runner.quotas.exhausted_until("code-x-high", now).is_some());
+        assert!(runner.quotas.exhausted_until("code-high", now).is_none());
+        assert!(runner.quotas.exhausted_until("code", now).is_none());
+        assert_eq!(runner.quotas.start_model(), "code-high");
+        let summary = runner.quotas.summary(now);
+        assert!(summary.contains("code-x-high: 7d 100%, exhausted until"), "{summary}");
+        assert!(summary.contains("code-high: 7d 17%"), "{summary}");
+    }
+
+    #[tokio::test]
+    async fn a_server_without_models_still_reads_its_top_level_summary() {
+        let body = json!({"summary": {"used_pct": 40, "window": "5h", "resets_at": 1_900_000_000}}).to_string();
+        let (url, _) = fake::server(vec![], Some(body));
+        let runner = crate::runner::Runner::new(crate::store::Store::memory().unwrap(), vec![]);
+        poll_once(&runner, &levels(&url)).await;
+        let all = runner.quotas.all();
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().all(|q| q.used_pct == 40.0 && q.window == "5h"));
+        let old = json!({"windows": [{"window": "5h", "used_pct": 62, "resets_at": 1_900_000_000}]});
+        let q = for_model(&old, "h", "code", 0).unwrap();
+        assert_eq!((q.model.as_str(), q.used_pct), ("code", 62.0));
+    }
+
+    #[test]
+    fn a_response_names_its_model_from_the_body_or_the_header() {
+        let v = json!({"usage": {"quota": {"model": "code-x-high", "window": "7d", "used_pct": 50, "resets_at": 1_900_000_000}}});
+        assert_eq!(from_usage(&v["usage"], "h", 0).unwrap().model, "code-x-high");
+        let mut h = HeaderMap::new();
+        h.insert("x-yalr-quota-used-pct", "20".parse().unwrap());
+        h.insert("x-yalr-quota-model", "code-high".parse().unwrap());
+        assert_eq!(from_headers(&h, "h", 0).unwrap().model, "code-high");
+        h.insert("x-yalr-quota-exhausted", "true".parse().unwrap());
+        h.insert("x-yalr-quota-next-available-at", "1900000000".parse().unwrap());
+        let q = from_headers(&h, "h", 0).unwrap();
+        assert_eq!((q.used_pct, q.next_available_at), (100.0, Some(1_900_000_000_000)));
+    }
+
+    #[test]
+    fn the_hint_and_label_name_the_model() {
+        let q = Quota { model: "code-x-high".into(), window: "7d".into(), used_pct: 100.0, resets_at: 16 * 3_600_000, ..Quota::default() };
+        assert_eq!(q.label(0), "code-x-high: 7d 100%, exhausted until 16:00 UTC");
+        assert!(q.hint(0).starts_with("Quota code-x-high 7d at 100%"));
     }
 }

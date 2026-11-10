@@ -2539,6 +2539,7 @@ async fn known_reset(model: &Model, pace: &Pace, retry_after_ms: Option<i64>) ->
         &crate::quota::base_of(&model.url),
         &model.key,
         &host,
+        &model.model,
         Duration::from_secs(5),
     )
     .await
@@ -2556,11 +2557,12 @@ async fn wait_for_reset(
     let now = pace.clock.now();
     let host = agentbench_core::host_of(&model.url);
     let text = format!(
-        "{host}: quota exhausted, resumes at {} (in {}). {message}",
+        "{host} {}: quota exhausted, resumes at {} (in {}). {message}",
+        model.model,
         agentbench_core::clock_hm(until),
         agentbench_core::span(until - now)
     );
-    io.emit(Event::Paused { until, text, long: until - now > LONG_PAUSE_MS });
+    io.emit(Event::Paused { until, text, long: until - now > LONG_PAUSE_MS, model: model.model.clone() });
     let wait = Duration::from_millis((until - now).max(0) as u64);
     let slept = tokio::select! {
         _ = io.stop().cancelled() => None,
@@ -2639,6 +2641,9 @@ async fn attempt_once(
         crate::quota::apply_headers(u, &headers, &host, now);
         if let Some(q) = u.quota.as_mut() {
             q.host = host;
+            if q.model.is_empty() {
+                q.model = model.model.clone();
+            }
         }
         if u.cost_usd <= 0.0 {
             u.cost_usd = pace.prices.cost(
@@ -6001,7 +6006,7 @@ for line in sys.stdin:
         let paused = events
             .iter()
             .find_map(|e| match e {
-                Event::Paused { until, text, long } => Some((*until, text.clone(), *long)),
+                Event::Paused { until, text, long, .. } => Some((*until, text.clone(), *long)),
                 _ => None,
             })
             .expect("paused");
@@ -6011,7 +6016,7 @@ for line in sys.stdin:
         let at = events.iter().position(|e| matches!(e, Event::Paused { .. })).unwrap();
         assert!(events[at..].iter().any(|e| matches!(e, Event::Resumed)));
         assert_eq!(native.pace.clock.now(), start + 7_200_000);
-        assert!(paths.lock().unwrap().iter().any(|p| p.ends_with("/quota")));
+        assert!(paths.lock().unwrap().iter().any(|p| p.contains("/quota")));
         assert_eq!(usages(&io).len(), 1);
     }
 
