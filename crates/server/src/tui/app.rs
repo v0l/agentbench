@@ -54,6 +54,7 @@ pub enum Reply {
     Interrupted(SessionId, Vec<String>),
     Sessions(Vec<Session>),
     Changed(Result<Id, String>),
+    Usage(agentbench_core::UsageReport),
     Failed(String),
 }
 
@@ -102,6 +103,7 @@ pub struct App {
     pub dirty: bool,
     pub lines_stale: bool,
     pub opening: bool,
+    pub report: Option<agentbench_core::UsageReport>,
 }
 
 impl App {
@@ -129,6 +131,7 @@ impl App {
             dirty: true,
             lines_stale: true,
             opening: false,
+            report: None,
         }
     }
 
@@ -247,6 +250,10 @@ impl App {
                 if matches!(self.overlay, Overlay::Sessions { .. }) {
                     self.overlay = Overlay::Sessions { items, at: 0 };
                 }
+            }
+            Reply::Usage(report) => {
+                self.report = Some(report);
+                self.dirty = true;
             }
             Reply::Changed(Ok(_)) => self.online = true,
             Reply::Changed(Err(_)) => self.online = false,
@@ -756,6 +763,7 @@ pub mod tests {
             queued: Vec::new(),
             deferred: 0,
             queue_system: false,
+            paused_until: None,
             no_plan_reads: None,
             parent: None,
         }

@@ -224,6 +224,13 @@ pub struct Native {
     pub speech: Option<crate::speech::Speech>,
     pub browsers: super::browser::Browsers,
     pub mcp: Arc<Mcp>,
+    pub pace: Pace,
+}
+
+#[derive(Clone, Default)]
+pub struct Pace {
+    pub clock: crate::quota::Clock,
+    pub prices: crate::quota::Prices,
 }
 
 /// How long the model server may stay silent before a request is given up and sent again.
@@ -259,6 +266,7 @@ impl Default for Native {
             speech: None,
             browsers: Default::default(),
             mcp: Arc::new(Mcp::new(mcp_settings())),
+            pace: Pace::default(),
         }
     }
 }
@@ -1615,6 +1623,7 @@ struct Reply {
     text: String,
     calls: Vec<Call>,
     usage: Option<Usage>,
+    cache_write: u64,
     finish: Option<String>,
     refusal: String,
 }
@@ -1722,7 +1731,7 @@ impl Agent for Native {
             agentbench_core::remove_pictures(m);
         });
         ask.push(json!({ "role": "user", "content": crate::fold::FOLD_PROMPT }));
-        let reply = complete(&model, &ask, &json!([]), self.patience, &Quiet(stop)).await?;
+        let reply = complete(&model, &ask, &json!([]), self.patience, &self.pace, &Quiet(stop)).await?;
         let (topic, text) = crate::fold::split_topic(&reply.text);
         if text.is_empty() {
             return Err("the model gave no summary".into());
@@ -1788,7 +1797,7 @@ impl Agent for Native {
                 crowded.window = window;
                 crowded.past(base.compact_at)
             } {
-                match roll(&model, &mut messages, window, self.patience, io).await {
+                match roll(&model, &mut messages, window, self.patience, &self.pace, io).await {
                     Ok(()) => crowded.context = 0,
                     Err(e) if io.stopped() => return Err(e),
                     Err(e) => {
@@ -1806,7 +1815,7 @@ impl Agent for Native {
                 )));
             }
             if fitted.size > budget && messages.len() > ROLLING_MIN {
-                match roll(&model, &mut messages, window, self.patience, io).await {
+                match roll(&model, &mut messages, window, self.patience, &self.pace, io).await {
                     Ok(()) => crowded.context = 0,
                     Err(e) if io.stopped() => return Err(e),
                     Err(e) => io.emit(Event::Warning(format!("could not compact the conversation: {e}"))),
@@ -1814,7 +1823,7 @@ impl Agent for Native {
             }
             let mut shrunk = false;
             let reply = loop {
-                match complete(&model, &messages, &tools, self.patience, io).await {
+                match complete(&model, &messages, &tools, self.patience, &self.pace, io).await {
                     Ok(reply) => break reply,
                     Err(e) if refused_picture(&e) && messages.strip_pictures() => {
                         io.emit(Event::Warning(
@@ -2068,7 +2077,7 @@ struct Silent<'a>(&'a dyn Io);
 #[async_trait]
 impl Io for Silent<'_> {
     fn emit(&self, event: Event) {
-        if matches!(event, Event::Usage(_) | Event::Notice(_) | Event::Warning(_)) {
+        if matches!(event, Event::Usage(_) | Event::Notice(_) | Event::Warning(_) | Event::Paused { .. } | Event::Resumed) {
             self.0.emit(event);
         }
     }
@@ -2152,6 +2161,7 @@ async fn roll(
     messages: &mut Log<'_>,
     window: u64,
     patience: Patience,
+    pace: &Pace,
     io: &dyn Io,
 ) -> Result<(), String> {
     let cut = tail_start(messages, window).unwrap_or(messages.len());
@@ -2160,7 +2170,7 @@ async fn roll(
         agentbench_core::remove_pictures(m);
     });
     ask.push(json!({ "role": "user", "content": ROLLING_PROMPT }));
-    let reply = complete(model, &ask, &json!([]), patience, &Silent(io)).await?;
+    let reply = complete(model, &ask, &json!([]), patience, pace, &Silent(io)).await?;
     let text = reply.text.trim().to_string();
     if text.is_empty() {
         return Err("the model gave no summary".into());
@@ -2431,6 +2441,7 @@ async fn complete(
     messages: &[Value],
     tools: &Value,
     patience: Patience,
+    pace: &Pace,
     io: &dyn Io,
 ) -> Result<Reply, String> {
     let mut body = json!({
@@ -2447,10 +2458,22 @@ async fn complete(
         body["reasoning_effort"] = json!(effort);
     }
     let mut attempt = 0;
+    let mut limits = 0;
     loop {
-        let failure = match attempt_once(model, &body, patience, io).await {
+        let failure = match attempt_once(model, &body, patience, pace, io).await {
             Ok(reply) => return Ok(reply),
             Err(Failure::Fatal(e)) => return Err(e),
+            Err(Failure::Limited { message, retry_after_ms }) => {
+                limits += 1;
+                let until = known_reset(model, pace, retry_after_ms).await;
+                match until {
+                    Some(until) if limits <= MAX_PAUSES => {
+                        wait_for_reset(model, until, &message, pace, io).await?;
+                        continue;
+                    }
+                    _ => return Err(message),
+                }
+            }
             Err(Failure::Transient(e)) => e,
             Err(Failure::Truncated) => {
                 let current = body.get("reasoning_effort").and_then(Value::as_str).unwrap_or("");
@@ -2507,7 +2530,51 @@ fn refused_picture(error: &str) -> bool {
     error.contains("refused the request") && (error.contains("image") || error.contains("picture"))
 }
 
+const MAX_PAUSES: u32 = 12;
+
+async fn known_reset(model: &Model, pace: &Pace, retry_after_ms: Option<i64>) -> Option<i64> {
+    let now = pace.clock.now();
+    let host = agentbench_core::host_of(&model.url);
+    let asked = crate::quota::fetch(
+        &crate::quota::base_of(&model.url),
+        &model.key,
+        &host,
+        Duration::from_secs(5),
+    )
+    .await
+    .and_then(|q| q.exhausted_until(now));
+    asked.or(retry_after_ms.map(|ms| now + ms))
+}
+
+async fn wait_for_reset(
+    model: &Model,
+    until: i64,
+    message: &str,
+    pace: &Pace,
+    io: &dyn Io,
+) -> Result<(), String> {
+    let now = pace.clock.now();
+    let host = agentbench_core::host_of(&model.url);
+    let text = format!(
+        "{host}: quota exhausted, resumes at {} (in {}). {message}",
+        agentbench_core::clock_hm(until),
+        agentbench_core::span(until - now)
+    );
+    io.emit(Event::Paused { until, text, long: until - now > LONG_PAUSE_MS });
+    let wait = Duration::from_millis((until - now).max(0) as u64);
+    let slept = tokio::select! {
+        _ = io.stop().cancelled() => None,
+        _ = pace.clock.sleep(wait) => Some(()),
+    };
+    io.emit(Event::Resumed);
+    slept.ok_or_else(|| "stopped".to_string())
+}
+
+const LONG_PAUSE_MS: i64 = 3_600_000;
+
 enum Failure {
+    /// The server refused for want of quota, and may say when it comes back.
+    Limited { message: String, retry_after_ms: Option<i64> },
     /// Worth sending again: the server never answered, went quiet or dropped the line.
     Transient(String),
     /// The server answered with a refusal, or the user stopped the turn.
@@ -2532,6 +2599,7 @@ async fn attempt_once(
     model: &Model,
     body: &Value,
     patience: Patience,
+    pace: &Pace,
     io: &dyn Io,
 ) -> Result<Reply, Failure> {
     let mut req = crate::http::client().post(model.endpoint()).json(body);
@@ -2550,16 +2618,39 @@ async fn attempt_once(
         },
     };
     let status = resp.status();
+    let headers = resp.headers().clone();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
         let e = error_text(status, &text);
+        if status.as_u16() == 429 {
+            let retry_after_ms = crate::quota::retry_after_ms(&headers, &text);
+            return Err(Failure::Limited { message: e, retry_after_ms });
+        }
         return Err(if status.is_server_error() && status.as_u16() != 500 {
             Failure::Transient(e)
         } else {
             Failure::Fatal(e)
         });
     }
-    read_stream(resp.bytes_stream(), patience.stall, io).await
+    let mut reply = read_stream(resp.bytes_stream(), patience.stall, io).await?;
+    if let Some(u) = reply.usage.as_mut() {
+        let host = agentbench_core::host_of(&model.url);
+        let now = pace.clock.now();
+        crate::quota::apply_headers(u, &headers, &host, now);
+        if let Some(q) = u.quota.as_mut() {
+            q.host = host;
+        }
+        if u.cost_usd <= 0.0 {
+            u.cost_usd = pace.prices.cost(
+                &model.model,
+                u.input_tokens,
+                u.output_tokens,
+                u.cache_read_tokens,
+                reply.cache_write,
+            );
+        }
+    }
+    Ok(reply)
 }
 
 fn error_text(status: reqwest::StatusCode, body: &str) -> String {
@@ -3075,18 +3166,9 @@ fn stalled(stall: Duration, reply: &Reply) -> String {
 }
 
 fn take(v: &Value, reply: &mut Reply, io: &dyn Io) {
-    if let Some(u) = v.get("usage").filter(|u| !u.is_null()) {
-        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let cached =
-            u.pointer("/prompt_tokens_details/cached_tokens").and_then(Value::as_u64).unwrap_or(0);
-        reply.usage = Some(Usage {
-            input_tokens: n("prompt_tokens").saturating_sub(cached),
-            output_tokens: n("completion_tokens"),
-            cache_read_tokens: cached,
-            cost_usd: 0.0,
-            turns: 1,
-            ..Usage::default()
-        });
+    if let Some(u) = crate::quota::usage_of(v, "", crate::quota::now()) {
+        reply.usage = Some(u);
+        reply.cache_write = crate::quota::cache_write_of(v);
     }
     if let Some(reason) = v.pointer("/choices/0/finish_reason").and_then(Value::as_str) {
         reply.finish = Some(reason.to_string());
@@ -5808,6 +5890,150 @@ for line in sys.stdin:
         let e = run(&Native::default(), dir.path(), "x", &io).await.unwrap_err();
         assert!(e.contains("pick a server and model"), "{e}");
     }
+
+    fn sse(events: &[Value]) -> String {
+        let mut out = String::new();
+        for e in events {
+            out.push_str(&format!("data: {e}\n\n"));
+        }
+        out.push_str("data: [DONE]\n\n");
+        out
+    }
+
+    fn usage_events(extra: Value) -> String {
+        let mut usage = json!({"prompt_tokens": 1000, "completion_tokens": 100});
+        for (k, v) in extra.as_object().unwrap() {
+            usage[k] = v.clone();
+        }
+        sse(&[say("hi"), json!({"choices": [], "usage": usage})])
+    }
+
+    fn usages(io: &TestIo) -> Vec<Usage> {
+        io.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Usage(u) if u.turns > 0 => Some(u),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn cost_and_quota_come_from_the_stream() {
+        use crate::quota::fake::{ok, server};
+        let body = usage_events(json!({
+            "cost_usd": 0.42,
+            "quota": {"window": "5h", "used_pct": 62, "resets_at": 1_900_000_000}
+        }));
+        let (url, _) = server(vec![ok(body)], None);
+        let native = Native::new(Model { url, model: "claude-sonnet-4-5".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, Path::new("."), "go", &io).await.unwrap();
+        let u = &usages(&io)[0];
+        assert_eq!(u.cost_usd, 0.42);
+        let q = u.quota.as_ref().unwrap();
+        assert_eq!((q.window.as_str(), q.used_pct), ("5h", 62.0));
+        assert!(!q.host.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cost_and_quota_come_from_the_headers_when_the_body_has_none() {
+        use crate::quota::fake::{Reply, server};
+        let reply = Reply {
+            status: 200,
+            headers: vec![
+                ("x-yalr-cost-usd", "0.07".into()),
+                ("x-yalr-quota-window", "5h".into()),
+                ("x-yalr-quota-used-pct", "40".into()),
+                ("x-yalr-quota-resets-at", "1900000000".into()),
+            ],
+            body: usage_events(json!({})),
+        };
+        let (url, _) = server(vec![reply], None);
+        let native = Native::new(Model { url, model: "local-model".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, Path::new("."), "go", &io).await.unwrap();
+        let u = &usages(&io)[0];
+        assert_eq!(u.cost_usd, 0.07);
+        assert_eq!(u.quota.as_ref().map(|q| q.used_pct), Some(40.0));
+    }
+
+    #[tokio::test]
+    async fn the_price_table_fills_in_a_missing_cost_and_local_models_stay_free() {
+        use crate::quota::fake::{ok, server};
+        let (url, _) = server(vec![ok(usage_events(json!({})))], None);
+        let native = Native::new(Model { url, model: "claude-sonnet-4-5".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, Path::new("."), "go", &io).await.unwrap();
+        let want = (1000.0 * 3.0 + 100.0 * 15.0) / 1_000_000.0;
+        assert!((usages(&io)[0].cost_usd - want).abs() < 1e-9);
+        let (url, _) = server(vec![ok(usage_events(json!({})))], None);
+        let native = Native::new(Model { url, model: "qwen3".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, Path::new("."), "go", &io).await.unwrap();
+        assert_eq!(usages(&io)[0].cost_usd, 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_with_a_known_reset_pauses_then_resumes_on_the_fake_clock() {
+        use crate::quota::fake::{Reply, ok, server};
+        let start = 1_900_000_000_000;
+        let limited = Reply {
+            status: 429,
+            headers: vec![],
+            body: "Rate limit exceeded. Retry after: 7200000ms".into(),
+        };
+        let (url, paths) = server(vec![limited, ok(usage_events(json!({})))], None);
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.pace.clock = crate::quota::Clock::fake(start);
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, Path::new("."), "go", &io).await.unwrap();
+        let events = io.events();
+        let paused = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Paused { until, text, long } => Some((*until, text.clone(), *long)),
+                _ => None,
+            })
+            .expect("paused");
+        assert_eq!(paused.0, start + 7_200_000);
+        assert!(paused.1.contains("quota exhausted, resumes at"), "{}", paused.1);
+        assert!(paused.2, "over an hour is flagged");
+        let at = events.iter().position(|e| matches!(e, Event::Paused { .. })).unwrap();
+        assert!(events[at..].iter().any(|e| matches!(e, Event::Resumed)));
+        assert_eq!(native.pace.clock.now(), start + 7_200_000);
+        assert!(paths.lock().unwrap().iter().any(|p| p.ends_with("/quota")));
+        assert_eq!(usages(&io).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_quota_endpoint_sets_the_resume_time_over_the_retry_after() {
+        use crate::quota::fake::{Reply, ok, server};
+        let start = 1_900_000_000_000;
+        let limited = Reply { status: 429, headers: vec![], body: "slow down".into() };
+        let quota = json!({"window": "5h", "used_pct": 100, "resets_at": 1_900_003_600,
+            "next_available_at": 1_900_001_800})
+        .to_string();
+        let (url, _) = server(vec![limited, ok(usage_events(json!({})))], Some(quota));
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.pace.clock = crate::quota::Clock::fake(start);
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, Path::new("."), "go", &io).await.unwrap();
+        assert_eq!(native.pace.clock.now(), 1_900_001_800_000);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_with_no_known_reset_still_fails() {
+        use crate::quota::fake::{Reply, server};
+        let limited = Reply { status: 429, headers: vec![], body: "too many".into() };
+        let (url, _) = server(vec![limited], None);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let err = run(&native, Path::new("."), "go", &io).await.unwrap_err();
+        assert!(err.contains("429"), "{err}");
+        assert!(!io.events().iter().any(|e| matches!(e, Event::Paused { .. })));
+    }
+
 }
 
 #[cfg(test)]

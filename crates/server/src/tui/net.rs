@@ -92,6 +92,10 @@ impl Net {
         req.send().await.map_err(|e| reason(&e))
     }
 
+    pub async fn usage(&self) -> Result<agentbench_core::UsageReport, String> {
+        self.get("/api/usage").await
+    }
+
     pub async fn overview(&self) -> Result<Overview, String> {
         self.get("/api/overview").await
     }

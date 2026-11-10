@@ -80,6 +80,7 @@ pub struct Runner {
     pub base: Arc<Mutex<Base>>,
     pub changed: Arc<Notify>,
     pub terminals: crate::terminal::Terminals,
+    pub quotas: crate::quota::Quotas,
     /// This runner, as the tracker tools see it, for starting and messaging sessions.
     me: crate::tools::Handle,
 }
@@ -118,6 +119,7 @@ impl Runner {
             base: Arc::new(Mutex::new(Base::default())),
             changed,
             terminals: Default::default(),
+            quotas: Default::default(),
             me,
         };
         runner.me.set(runner.clone());
@@ -129,6 +131,29 @@ impl Runner {
         self.titles = Some(titles);
         self.me.set(self.clone());
         self
+    }
+
+    pub fn observe_quota(&self, quota: agentbench_core::Quota) {
+        let now = crate::quota::now();
+        if let Some(hint) = self.quotas.observe(quota, now) {
+            self.broadcast_notice(&hint.text);
+        }
+        self.changed.notify_waiters();
+    }
+
+    pub fn expire_quotas(&self) {
+        let now = crate::quota::now();
+        for q in self.quotas.expire(now) {
+            self.broadcast_notice(&format!("Quota {} reset", q.window));
+        }
+        self.quotas.unblock(now);
+    }
+
+    fn broadcast_notice(&self, text: &str) {
+        let ids: Vec<SessionId> = self.live().keys().copied().collect();
+        for id in ids {
+            let _ = self.store.add_message(id, &Entry::Notice { text: text.to_string() });
+        }
     }
 
     pub fn titles(&self) -> Option<&Titles> {
@@ -371,6 +396,7 @@ impl Runner {
                 .flatten()
                 .and_then(|n| n.parse().ok());
             s.deferred = self.store.deferred_count(s.id).unwrap_or_default();
+            s.paused_until = crate::quota::paused_until(&self.store, s.id);
         }
         sessions
     }
@@ -1034,6 +1060,7 @@ impl Runner {
             notes: self.store.notes(session.project_id).unwrap_or_default(),
             global_notes: self.store.global_notes().unwrap_or_default(),
             automation: if supervisor { crate::autopilot::summary(&self.store) } else { String::new() },
+            quota: if supervisor { self.quotas.summary(crate::store::now()) } else { String::new() },
             vision: if supervisor {
                 crate::autopilot::visions(&self.store)
             } else {
@@ -1091,6 +1118,7 @@ impl Runner {
         };
         let files = self.materialise(session.id, &msg.attachments);
         let _ = self.store.set_status(session.id, SessionStatus::Running);
+        crate::quota::set_paused(&self.store, session.id, None);
         self.changed.notify_waiters();
         let cwd = PathBuf::from(&session.cwd);
         let context = self.context(session);
@@ -1628,7 +1656,27 @@ impl Io for Sink {
             }
             Event::Steered { .. } => {}
             Event::Usage(u) => {
+                let quota = u.quota.clone();
                 let _ = self.store.add_usage(self.session, &u);
+                if let Some(q) = quota {
+                    self.runner.observe_quota(q);
+                }
+            }
+            Event::Paused { until, text, long } => {
+                crate::quota::set_paused(&self.store, self.session, Some(until));
+                self.runner.quotas.block(until);
+                self.entry(Entry::Warning { text: text.clone() });
+                let _ = self.store.set_status(self.session, SessionStatus::Waiting);
+                if long {
+                    crate::tools::desktop_notice("quota exhausted", &text);
+                }
+                self.changed.notify_waiters();
+            }
+            Event::Resumed => {
+                crate::quota::set_paused(&self.store, self.session, None);
+                self.runner.quotas.unblock(crate::quota::now());
+                let _ = self.store.set_status(self.session, SessionStatus::Running);
+                self.changed.notify_waiters();
             }
             Event::Notice(text) => {
                 self.entry(Entry::Notice { text });
@@ -2951,6 +2999,74 @@ mod tests {
         let want = ["system", "user", "assistant", "tool", "user"];
         assert_eq!(roles(&asked[0]), want);
         assert_eq!(roles(&asked[1])[..5], want, "the replay keeps the answer before the prompt");
+    }
+
+    struct Pacer(Arc<tokio::sync::Notify>);
+
+    #[async_trait]
+    impl Agent for Pacer {
+        fn name(&self) -> &str {
+            "pacer"
+        }
+        fn label(&self) -> &str {
+            "Pacer"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            let reading = |pct: f64, resets: i64| Usage {
+                quota: Some(agentbench_core::Quota {
+                    host: "h".into(),
+                    window: "5h".into(),
+                    used_pct: pct,
+                    resets_at: resets,
+                    ..Default::default()
+                }),
+                ..Usage::default()
+            };
+            let resets = crate::quota::now() + 7_200_000;
+            io.emit(Event::Usage(reading(78.0, resets)));
+            io.emit(Event::Usage(reading(80.0, resets)));
+            io.emit(Event::Paused { until: resets, text: "h: quota exhausted, resumes at 14:30 UTC".into(), long: true });
+            self.0.notified().await;
+            io.emit(Event::Resumed);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quota_pause_waits_instead_of_failing_and_a_hint_goes_to_each_running_chat_once() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (runner, s) = setup(Box::new(Pacer(gate.clone())));
+        runner.send(&s, "go").unwrap();
+        for _ in 0..200 {
+            if runner.store().session(s.id).unwrap().status == SessionStatus::Waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let paused = runner.store().session(s.id).unwrap();
+        assert_eq!(paused.status, SessionStatus::Waiting);
+        assert!(runner.with_queued(vec![paused])[0].paused_until.is_some());
+        assert!(runner.quotas.exhausted_until(crate::quota::now()).is_some());
+        let msgs = runner.store().messages(s.id, 0).unwrap();
+        let hints = msgs
+            .iter()
+            .filter(|m| matches!(&m.entry, Entry::Notice { text } if text.starts_with("Quota 5h at 78%")))
+            .count();
+        assert_eq!(hints, 1, "{msgs:?}");
+        assert!(msgs.iter().any(|m| matches!(&m.entry, Entry::Warning { text } if text.contains("quota exhausted, resumes at"))));
+        gate.notify_one();
+        let done = wait_idle(&runner, s.id).await;
+        assert_eq!(done.status, SessionStatus::Idle);
+        assert!(crate::quota::paused_until(runner.store(), s.id).is_none());
     }
 
     struct Thinker;

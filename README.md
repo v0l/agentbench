@@ -273,6 +273,37 @@ url = "http://localhost:11434/v1"
 model = "qwen2.5:1.5b"
 ```
 
+## Quota and cost
+
+The native agent reads `usage.cost_usd` and `usage.quota` (`window`, `used_pct`,
+`resets_at`) from each reply, or the `x-yalr-cost-usd` and `x-yalr-quota-*`
+headers, and polls `GET {server}/quota` every three minutes. The header bar of
+the app and the status line of the TUI show it as `5h 62%, resets 14:30 UTC`,
+with spend as `$1.20 today, $0.80 project`. `GET /api/usage` returns the same.
+
+- At 75% and again at 90% of a window, every running chat gets one notice:
+  `Quota 5h at 78%, resets at 14:30 UTC (in 2h 10m)`. The supervisor's system
+  prompt carries the current quota beside the automation levels.
+- A rate limit with a known reset (the server's `next_available_at`, else the
+  retry-after) does not fail the chat. It waits, shown as `quota exhausted,
+  resumes at HH:MM UTC`, and carries on at that time. A wait over an hour also
+  raises a desktop notice.
+- While any model server is exhausted the autopilot starts no workers, logs
+  `paused for quota until HH:MM UTC`, and goes on after the reset.
+
+When a server sends no cost, it is worked out from a price table, in USD per
+million tokens. Claude models have defaults; a model with no entry, such as a
+local one, costs 0. Entries match the start of the model name, the longest wins,
+and yours override the defaults:
+
+```toml
+[prices."claude-sonnet-4-5"]
+input = 3.0
+output = 15.0
+cache_read = 0.3
+cache_write = 3.75
+```
+
 ## Switching models
 
 A chat can move to a stronger model when it needs one, and back again.

@@ -193,6 +193,7 @@ impl App {
         }
         if let Some(o) = &self.overview {
             status_badge(ui, &o.sessions);
+            usage_badges(ui, o.usage.as_ref(), self.project);
         }
         if self.remote {
             self.link_chip(ui);

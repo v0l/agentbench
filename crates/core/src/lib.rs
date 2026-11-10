@@ -448,6 +448,8 @@ pub struct Session {
     pub deferred: usize,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub queue_system: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_until: Option<i64>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -487,6 +489,8 @@ pub struct Usage {
     /// Calls to write_file, edit_file and replace_in_files. A total.
     #[serde(default)]
     pub file_edits: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<Quota>,
 }
 
 /// How far a language server has got.
@@ -543,6 +547,9 @@ impl Usage {
         }
         if !other.lsp.is_empty() {
             self.lsp = other.lsp.clone();
+        }
+        if other.quota.is_some() {
+            self.quota = other.quota.clone();
         }
     }
 
@@ -1532,6 +1539,110 @@ impl SessionStatus {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Quota {
+    #[serde(default)]
+    pub host: String,
+    pub window: String,
+    pub used_pct: f64,
+    pub resets_at: i64,
+    #[serde(default)]
+    pub next_available_at: Option<i64>,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+pub const HINT_AT: f64 = 75.0;
+pub const HINT_AGAIN_AT: f64 = 90.0;
+
+impl Quota {
+    pub fn expired(&self, now: i64) -> bool {
+        self.resets_at > 0 && now >= self.resets_at
+    }
+
+    pub fn exhausted_until(&self, now: i64) -> Option<i64> {
+        if let Some(t) = self.next_available_at.filter(|t| *t > now) {
+            return Some(t);
+        }
+        (self.used_pct >= 100.0 && self.resets_at > now).then_some(self.resets_at)
+    }
+
+    pub fn level(&self, now: i64) -> u8 {
+        if self.expired(now) {
+            0
+        } else if self.used_pct >= HINT_AGAIN_AT {
+            2
+        } else if self.used_pct >= HINT_AT {
+            1
+        } else {
+            0
+        }
+    }
+
+    pub fn label(&self, now: i64) -> String {
+        let used = format!("{} {:.0}%", self.window, self.used_pct);
+        match self.exhausted_until(now) {
+            Some(t) => format!("{used}, exhausted until {}", clock_hm(t)),
+            None if self.resets_at > now => format!("{used}, resets {}", clock_hm(self.resets_at)),
+            None => used,
+        }
+    }
+
+    pub fn hint(&self, now: i64) -> String {
+        let used = format!("Quota {} at {:.0}%", self.window, self.used_pct);
+        match self.exhausted_until(now).or((self.resets_at > now).then_some(self.resets_at)) {
+            Some(t) => format!("{used}, resets at {} (in {})", clock_hm(t), span(t - now)),
+            None => used,
+        }
+    }
+}
+
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+pub fn clock_hm(ms: i64) -> String {
+    let secs = ms.div_euclid(1000).rem_euclid(86_400);
+    format!("{:02}:{:02} UTC", secs / 3600, secs / 60 % 60)
+}
+
+pub fn span(ms: i64) -> String {
+    let minutes = (ms.max(0) + 59_999) / 60_000;
+    let (days, hours, mins) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else {
+        format!("{mins}m")
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSpend {
+    pub project_id: Id,
+    pub today_usd: f64,
+    pub total_usd: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Spend {
+    pub today_usd: f64,
+    pub total_usd: f64,
+    #[serde(default)]
+    pub projects: Vec<ProjectSpend>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageReport {
+    pub spend: Spend,
+    #[serde(default)]
+    pub quotas: Vec<Quota>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Overview {
     pub version: String,
@@ -1549,6 +1660,8 @@ pub struct Overview {
     pub triage: Option<TriageState>,
     #[serde(default)]
     pub visions: Vec<Vision>,
+    #[serde(default)]
+    pub usage: Option<UsageReport>,
     pub cursor: Id,
 }
 

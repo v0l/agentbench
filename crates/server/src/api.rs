@@ -74,6 +74,7 @@ const BODY_MAX: usize =
 pub fn router(api: Api) -> Router {
     let protected = Router::new()
         .route("/api/overview", get(overview))
+        .route("/api/usage", get(usage))
         .route("/api/changes", get(changes))
         .route("/api/agents", get(agents))
         .route("/api/settings/model", get(get_model).put(put_model))
@@ -298,6 +299,18 @@ fn changed(api: &Api) {
     api.runner.changed.notify_waiters();
 }
 
+fn usage_report(api: &Api) -> Result<agentbench_core::UsageReport, StoreError> {
+    let now = crate::quota::now();
+    Ok(agentbench_core::UsageReport {
+        spend: api.runner.store().spend(now)?,
+        quotas: api.runner.quotas.all().into_iter().filter(|q| !q.expired(now)).collect(),
+    })
+}
+
+async fn usage(State(api): State<Api>) -> Reply<agentbench_core::UsageReport> {
+    Ok(Json(usage_report(&api)?))
+}
+
 async fn overview(State(api): State<Api>) -> Reply<Overview> {
     let store = api.runner.store();
     let cursor = store.cursor()?;
@@ -317,6 +330,7 @@ async fn overview(State(api): State<Api>) -> Reply<Overview> {
         autopilot: Some(crate::autopilot::state(store)),
         triage: Some(crate::triage::state(store)),
         visions: store.visions()?,
+        usage: Some(usage_report(&api)?),
         cursor,
     }))
 }

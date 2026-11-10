@@ -43,6 +43,7 @@ pub struct Context {
     pub notes: Vec<(String, String)>,
     pub global_notes: Vec<(String, String)>,
     pub automation: String,
+    pub quota: String,
     pub vision: String,
 }
 
@@ -119,6 +120,8 @@ pub enum Event {
     Steered { text: String },
     Usage(Usage),
     Notice(String),
+    Paused { until: i64, text: String, long: bool },
+    Resumed,
     Warning(String),
     PicturesRemoved,
     Trimmed(Vec<agentbench_core::Trim>),
@@ -359,12 +362,18 @@ fn supervisor_brief(c: &Context) -> String {
          - When the user gives a standing decision in chat (\"always merge and push here\", \"never touch billing\"), record it with `set_automation`, not a note, and confirm the new level in one line. Raising asks the user to confirm; lowering applies at once.\n\
          Levels now:\n{automation}\
          </automation>\n\n\
+         {quota}\
          The agentbench REST API is at {url} and needs the header `Authorization: Bearer $AGENTBENCH_TOKEN` \
          (also in the environment as AGENTBENCH_URL, AGENTBENCH_TOKEN and AGENTBENCH_SESSION).",
         session = c.session,
         rules = crate::autopilot::JUDGING_RULES,
         url = c.api_url.trim_end_matches('/'),
         automation = c.automation,
+        quota = if c.quota.trim().is_empty() {
+            String::new()
+        } else {
+            format!("<quota>\nModel quota now (pace the work to it; do not start more workers than it can pay for):\n{}</quota>\n\n", c.quota)
+        },
         vision = c.vision,
     )
 }
@@ -486,6 +495,7 @@ pub fn context() -> Context {
         notes: Vec::new(),
         global_notes: Vec::new(),
         automation: String::new(),
+        quota: String::new(),
         vision: String::new(),
     }
 }

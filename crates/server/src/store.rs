@@ -265,6 +265,14 @@ CREATE TABLE vision_versions (
 );
 CREATE INDEX vision_versions_project ON vision_versions(project_id, id);
 "#,
+    r#"
+CREATE TABLE spend (
+    day INTEGER NOT NULL,
+    project_id INTEGER NOT NULL,
+    usd REAL NOT NULL,
+    PRIMARY KEY (day, project_id)
+);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -389,6 +397,8 @@ fn note_version_row(r: &Row) -> rusqlite::Result<NoteVersion> {
     })
 }
 
+const MS_PER_DAY: i64 = 86_400_000;
+
 pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
@@ -453,6 +463,7 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         no_plan_reads: None,
         deferred: 0,
         queue_system: row.get::<_, i64>("queue_system")? != 0,
+        paused_until: None,
     })
 }
 
@@ -1220,10 +1231,41 @@ impl Store {
         Store::changed(&db, "session", id)
     }
 
+    pub fn spend(&self, now_ms: i64) -> Result<agentbench_core::Spend> {
+        let today = now_ms.div_euclid(MS_PER_DAY);
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT project_id, COALESCE(SUM(CASE WHEN day = ?1 THEN usd ELSE 0 END), 0), SUM(usd) \
+             FROM spend GROUP BY project_id ORDER BY project_id",
+        )?;
+        let projects = stmt
+            .query_map([today], |r| {
+                Ok(agentbench_core::ProjectSpend {
+                    project_id: r.get(0)?,
+                    today_usd: r.get(1)?,
+                    total_usd: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(agentbench_core::Spend {
+            today_usd: projects.iter().map(|p| p.today_usd).sum(),
+            total_usd: projects.iter().map(|p| p.total_usd).sum(),
+            projects,
+        })
+    }
+
     pub fn add_usage(&self, id: SessionId, delta: &Usage) -> Result<()> {
-        let mut usage = self.session(id)?.usage;
+        let session = self.session(id)?;
+        let mut usage = session.usage;
         usage.add(delta);
         let db = self.db();
+        if delta.cost_usd > 0.0 {
+            db.execute(
+                "INSERT INTO spend (day, project_id, usd) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(day, project_id) DO UPDATE SET usd = usd + excluded.usd",
+                params![now().div_euclid(MS_PER_DAY), session.project_id, delta.cost_usd],
+            )?;
+        }
         db.execute(
             "UPDATE sessions SET usage = ?1, updated_at = ?2 WHERE id = ?3",
             params![serde_json::to_string(&usage).unwrap_or_default(), now(), id],
@@ -2206,6 +2248,22 @@ mod tests {
         assert_eq!(got.input_tokens, 20);
         assert_eq!(got.turns, 2);
         assert_eq!(got.cost_usd, 1.0);
+    }
+
+    #[test]
+    fn spend_is_summed_per_project_and_per_day() {
+        let s = Store::memory().unwrap();
+        let (p, main) = project(&s, "/r");
+        let sess = s.add_session(main.id, "pi", "t", None, None).unwrap();
+        let u = Usage { cost_usd: 0.25, turns: 1, ..Default::default() };
+        s.add_usage(sess.id, &u).unwrap();
+        s.add_usage(sess.id, &u).unwrap();
+        let spend = s.spend(now()).unwrap();
+        assert_eq!((spend.today_usd, spend.total_usd), (0.5, 0.5));
+        assert_eq!(spend.projects.len(), 1);
+        assert_eq!(spend.projects[0].project_id, p.id);
+        let later = s.spend(now() + 2 * MS_PER_DAY).unwrap();
+        assert_eq!((later.today_usd, later.total_usd), (0.0, 0.5));
     }
 
     #[test]

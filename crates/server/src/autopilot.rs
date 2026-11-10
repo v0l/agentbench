@@ -477,6 +477,14 @@ impl Autopilot {
         self.runner.changed.notify_waiters();
     }
 
+    fn resume_note(&self, paused: bool) {
+        let was = self.said.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|k| k.contains("paused for quota"));
+        if !paused && was {
+            self.said.lock().unwrap_or_else(|e| e.into_inner()).retain(|k| !k.contains("paused for quota"));
+            self.log(None, None, "quota is back, starting workers again");
+        }
+    }
+
     fn log_once(&self, project: Option<Id>, issue: Option<Id>, text: &str) {
         let key = format!("{issue:?}/{text}");
         if self.said.lock().unwrap_or_else(|e| e.into_inner()).insert(key) {
@@ -752,6 +760,9 @@ impl Autopilot {
 
     fn watch(&self, w: &Worker, session: &Session, now: i64) {
         let store = self.store();
+        if crate::quota::paused_until(store, session.id).is_some() {
+            return;
+        }
         if session.status == SessionStatus::Waiting {
             if w.state != "asking" {
                 let _ = store.set_worker(w.session, "asking", false);
@@ -961,6 +972,19 @@ impl Autopilot {
 
     fn start_more(&self) {
         let store = self.store();
+        let now = crate::quota::now();
+        match self.runner.quotas.exhausted_until(now) {
+            Some(until) => {
+                self.log_once(
+                    None,
+                    None,
+                    &format!("paused for quota until {}", agentbench_core::clock_hm(until)),
+                );
+                self.resume_note(true);
+                return;
+            }
+            None => self.resume_note(false),
+        }
         let workers = store.workers().unwrap_or_default();
         let issues = store.issues().unwrap_or_default();
         let mut live: HashSet<Id> = workers.iter().map(|w| w.issue).collect();
@@ -1771,6 +1795,23 @@ mod tests {
         apply(&r.store, &AutopilotPatch { default_level: Some(Automation::Autowork), ..Default::default() }).unwrap();
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "the default reaches autowork");
+    }
+
+    #[tokio::test]
+    async fn the_loop_starts_nothing_while_quota_is_exhausted_and_resumes_after() {
+        let r = rig(DONE);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        let now = crate::quota::now();
+        r.ap.runner.quotas.block(now + 3_600_000);
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Todo, "not started");
+        let paused: Vec<String> = feed(&r).into_iter().filter(|l| l.contains("paused for quota until")).collect();
+        assert_eq!(paused.len(), 1, "logged once: {paused:?}");
+        r.ap.runner.quotas.unblock(now + 3_600_001);
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "started after the reset");
     }
 
     #[tokio::test]

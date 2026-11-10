@@ -281,6 +281,30 @@ fn usage_text(u: &Usage) -> String {
     parts.join("  ")
 }
 
+fn spend_text(app: &App) -> String {
+    let Some(report) = &app.report else { return String::new() };
+    let now = crate::store::now();
+    let mut parts: Vec<String> = report
+        .quotas
+        .iter()
+        .filter(|q| !q.expired(now))
+        .map(|q| q.label(now))
+        .collect();
+    if report.spend.total_usd > 0.0 {
+        let mine = report
+            .spend
+            .projects
+            .iter()
+            .find(|p| p.project_id == app.project.id)
+            .map_or(0.0, |p| p.total_usd);
+        parts.push(format!(
+            "${:.2} today, ${mine:.2} project",
+            report.spend.today_usd
+        ));
+    }
+    if parts.is_empty() { String::new() } else { format!("{}  ", parts.join("  ")) }
+}
+
 fn status_line(app: &App, width: usize) -> Line<'static> {
     let (tone, text) = match &app.flash {
         Some((Tone::Error, t, _)) => (Color::Red, t.clone()),
@@ -297,7 +321,11 @@ fn status_line(app: &App, width: usize) -> Line<'static> {
             Style::default().fg(Color::Yellow),
         )),
         Some(SessionStatus::Waiting) => {
-            left.push(("? waiting for your answer".into(), Style::default().fg(Color::Magenta)))
+            let text = match app.session.as_ref().and_then(|s| s.paused_until) {
+                Some(t) => format!("quota exhausted, resumes at {}", agentbench_core::clock_hm(t)),
+                None => "? waiting for your answer".to_string(),
+            };
+            left.push((text, Style::default().fg(Color::Magenta)))
         }
         Some(SessionStatus::Failed) => {
             left.push(("failed".into(), Style::default().fg(Color::Red)))
@@ -307,11 +335,12 @@ fn status_line(app: &App, width: usize) -> Line<'static> {
     if !app.online {
         left.push(("  offline".into(), Style::default().fg(Color::Red)));
     }
+    let spend = spend_text(app);
     let right = match &app.session {
-        Some(s) => format!("{}  {}", s.agent, usage_text(&s.usage)),
+        Some(s) => format!("{}{}  {}", spend, s.agent, usage_text(&s.usage)),
         None => {
             let model = app.model.as_deref().map(|m| format!("  {m}")).unwrap_or_default();
-            format!("{}{model}", app.agent)
+            format!("{spend}{}{model}", app.agent)
         }
     };
     let used: usize = left.iter().map(|(t, _)| cols(t)).sum();

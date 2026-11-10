@@ -2188,6 +2188,21 @@ fn a_child_session_shows_a_parent_chip_that_opens_the_parent() {
 }
 
 #[test]
+fn the_header_shows_spend_today() {
+    let rig = rig();
+    let first = rig.store.sessions().unwrap()[0].clone();
+    let usage = agentbench_core::Usage { cost_usd: 1.25, turns: 1, ..Default::default() };
+    rig.store.add_usage(first.id, &usage).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    let report = h.state().overview().unwrap().usage.clone().unwrap();
+    assert_eq!(report.spend.today_usd, 1.25);
+    let labels = agentbench::app::usage_labels(&report, None, 0);
+    assert!(labels.iter().any(|(t, _)| t.starts_with("$1.25 today")), "{labels:?}");
+}
+
+#[test]
 fn closing_a_tiled_chat_leaves_its_tile_empty() {
     use agentbench::app::Grid;
     let rig = rig();

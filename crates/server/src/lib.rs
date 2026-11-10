@@ -7,6 +7,7 @@ pub mod git;
 pub mod http;
 pub mod local;
 pub mod projects;
+pub mod quota;
 pub mod providers;
 pub mod runner;
 pub mod speech;
@@ -38,6 +39,8 @@ pub struct Config {
     pub code: agent::code::Settings,
     #[serde(default, rename = "agent")]
     pub agents: Vec<JsonCommand>,
+    #[serde(default)]
+    pub prices: quota::Prices,
 }
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7420";
@@ -107,6 +110,7 @@ impl Config {
         let mut native = agent::Native::shared(model);
         native.titles = titles;
         native.speech = speech;
+        native.pace.prices = self.prices.clone();
         native.browsers = agent::browser::Browsers::saved_in(home());
         native.code =
             std::sync::Arc::new(agent::code::Code::new(agent::code::unconfined(self.code.clone())));
@@ -271,6 +275,9 @@ async fn serve_inner(
     api.runner.resume(&stale);
     api.runner.deliver_backlog();
     autopilot::spawn(api.runner.clone());
+    if let Some(m) = api.model.clone() {
+        quota::spawn_poll(api.runner.clone(), m);
+    }
     triage::spawn(api.runner.clone());
     fold_watch(api.runner.clone());
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));

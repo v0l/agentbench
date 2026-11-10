@@ -122,6 +122,34 @@ pub(super) fn status_badge(ui: &mut Ui, sessions: &[Session]) {
     }
 }
 
+pub fn usage_labels(report: &agentbench_core::UsageReport, project: Option<agentbench_core::Id>, now: i64) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = report
+        .quotas
+        .iter()
+        .filter(|q| !q.expired(now))
+        .map(|q| (q.label(now), q.level(now) > 0 || q.exhausted_until(now).is_some()))
+        .collect();
+    if report.spend.total_usd > 0.0 {
+        let mine = project
+            .and_then(|id| report.spend.projects.iter().find(|p| p.project_id == id))
+            .map_or(0.0, |p| p.total_usd);
+        out.push((
+            format!("${:.2} today, ${mine:.2} project", report.spend.today_usd),
+            false,
+        ));
+    }
+    out
+}
+
+pub(super) fn usage_badges(ui: &mut Ui, report: Option<&agentbench_core::UsageReport>, project: Option<agentbench_core::Id>) {
+    let Some(report) = report else { return };
+    let now = agentbench_core::now_ms();
+    for (text, hot) in usage_labels(report, project, now).into_iter().rev() {
+        chip(ui, &text, if hot { READOUT } else { LEGEND }, hot)
+            .on_hover_text("model quota and spend");
+    }
+}
+
 pub(super) fn spinner(ui: &Ui, center: egui::Pos2, radius: f32, tint: egui::Color32) {
     let t = ui.input(|i| i.time) as f32;
     let start = t * std::f32::consts::TAU * 1.2;

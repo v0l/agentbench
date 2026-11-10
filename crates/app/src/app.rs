@@ -28,7 +28,7 @@ mod viewer;
 mod widgets;
 
 use self::settings::{model_input, pairing_of};
-pub use self::widgets::status_counts;
+pub use self::widgets::{status_counts, usage_labels};
 use self::widgets::*;
 
 const SIDE_W: f32 = 320.0;
@@ -2629,13 +2629,22 @@ impl App {
     }
 
     fn session_data(ui: &mut Ui, s: &Session) {
-        let (tint, word) = status_look(s.status);
+        let (tint, word) = match (s.status, s.paused_until) {
+            (SessionStatus::Waiting, Some(t)) => (
+                READOUT,
+                format!("quota, resumes {}", agentbench_core::clock_hm(t)),
+            ),
+            _ => {
+                let (tint, word) = status_look(s.status);
+                (tint, word.to_string())
+            }
+        };
         let model = if s.usage.model.is_empty() {
             s.model.clone().unwrap_or_default()
         } else {
             s.usage.model.clone()
         };
-        let mut line = Line::new().value(&s.agent).gap(6.0).value(word).tint(tint).size(10.5);
+        let mut line = Line::new().value(&s.agent).gap(6.0).value(&word).tint(tint).size(10.5);
         if !model.is_empty() {
             line = line.gap(6.0).note(model).size(10.5);
         }
@@ -3298,6 +3307,7 @@ mod tests {
             queued: Vec::new(),
             deferred: 0,
             queue_system: false,
+            paused_until: None,
             no_plan_reads: None,
             parent: None,
         };

@@ -210,6 +210,8 @@ impl Loop {
                 self.seen = *c;
                 if moved || !app.online {
                     self.refresh(app);
+                    let net = self.net.clone();
+                    self.spawn(async move { Ok(Some(Reply::Usage(net.usage().await?))) });
                 }
             }
             Reply::Refreshed(..) => {
@@ -330,6 +332,7 @@ pub async fn run(server: Server, opts: Options) -> Result<(), String> {
     if let Some(prompt) = opts.prompt.filter(|p| !p.trim().is_empty()) {
         lp.command(&mut app, Cmd::Send(prompt));
     }
+    app.report = overview.usage.clone();
     spawn_watch(net, overview.cursor, tx);
 
     let guard = Guard::enter().map_err(|e| e.to_string())?;
