@@ -4360,4 +4360,23 @@ mod deferred_tests {
         assert!(said_to(&r, r.worker.id).iter().any(|(t, _)| t.contains(&id.to_string())));
         assert!(said_to(&r, r.boss.id).iter().all(|(t, _)| !t.contains(&id.to_string())));
     }
+
+    #[tokio::test]
+    async fn a_released_child_tells_nobody_and_an_adopted_one_is_judged_again() {
+        let r = rig();
+        let id = r.worker.id;
+        r.store.add_watch(id, r.boss.id).unwrap();
+        assert!(crate::autopilot::release(&r.store, id, "user").unwrap());
+        r.runner.send(&r.store.session(id).unwrap(), "build").unwrap();
+        idle(&r.runner, id).await;
+        assert!(said_to(&r, r.boss.id).is_empty(), "released: no report, no judge request");
+        assert_eq!(r.store.deferred_count(r.boss.id).unwrap(), 0);
+
+        crate::autopilot::adopt(&r.store, id, r.boss.id).unwrap();
+        r.runner.send(&r.store.session(id).unwrap(), "build").unwrap();
+        idle(&r.runner, id).await;
+        idle(&r.runner, r.boss.id).await;
+        let from = said_to(&r, r.boss.id).pop().unwrap().1;
+        assert_eq!(from, [format!("judge {id}")]);
+    }
 }

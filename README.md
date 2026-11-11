@@ -80,6 +80,10 @@ a chat that is already on screen just focuses its tile. The focused tile is the 
 gets dropped or pasted files and that **new chat** fills. Each tile has its own draft.
 Narrow windows show one chat.
 
+## Taking control of a supervised session
+
+A session the supervisor or the autopilot started reports to its parent. To work in it yourself, right click it and choose **take control**: it is released, shows as user controlled, and the supervisor and autopilot stop messaging, judging, nudging or merging it. Chatting in it does not release it by itself. **hand back to supervisor** (or the supervisor's `watch_session` with `adopt`) puts it under the supervisor again. The same is `POST /api/sessions/{id}/release` and `/adopt`.
+
 ## Agents
 
 `agentbench` is the built in agent: it talks to any OpenAI compatible server, works
@@ -361,6 +365,7 @@ That script is the only Android build (needs `cargo-ndk`, the SDK and NDK). `car
 | `POST /api/sessions/{id}/messages` `{text, attachments?}` | next turn; each attachment is `{name, mime, data}`, data base64 |
 | `GET /api/sessions/{id}/attachments/{file}` | the bytes of a file sent in that chat |
 | `POST /api/sessions/{id}/answer` `{question, answer}` | answer an agent's question |
+| `POST /api/sessions/{id}/release`, `/adopt` | take a session from the supervisor, or hand it back |
 | `POST /api/sessions/{id}/interrupt` | stop the turn; replies `{interrupted, queued}` with the unread messages it took back |
 
 Sessions are named by UUID, so a deleted chat's id is never handed to a new one.

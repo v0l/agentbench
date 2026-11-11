@@ -450,6 +450,8 @@ pub struct Session {
     pub queue_system: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_until: Option<i64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub released: bool,
 }
 
 fn is_zero(n: &usize) -> bool {

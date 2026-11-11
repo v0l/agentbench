@@ -289,6 +289,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("sessions", "queue_system", "INTEGER NOT NULL DEFAULT 0"),
     ("issues", "goal", "TEXT"),
     ("issues", "off_vision", "INTEGER NOT NULL DEFAULT 0"),
+    ("sessions", "released", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
@@ -464,6 +465,7 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         deferred: 0,
         queue_system: row.get::<_, i64>("queue_system")? != 0,
         paused_until: None,
+        released: row.get::<_, i64>("released")? != 0,
     })
 }
 
@@ -1062,6 +1064,20 @@ impl Store {
         db.execute("UPDATE sessions SET parent = ?1 WHERE id = ?2", params![parent, id])?;
         Store::changed(&db, "session", id)?;
         Ok(())
+    }
+
+    pub fn set_released(&self, id: SessionId, released: bool) -> Result<()> {
+        let db = self.db();
+        db.execute("UPDATE sessions SET released = ?1 WHERE id = ?2", params![released as i64, id])?;
+        Store::changed(&db, "session", id)?;
+        Ok(())
+    }
+
+    pub fn remove_watch(&self, watched: SessionId, watcher: SessionId) -> Result<bool> {
+        let n = self
+            .db()
+            .execute("DELETE FROM watches WHERE watched = ?1 AND watcher = ?2", params![watched, watcher])?;
+        Ok(n > 0)
     }
 
     pub fn add_session(

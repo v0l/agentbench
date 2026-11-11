@@ -764,6 +764,7 @@ pub mod tests {
             deferred: 0,
             queue_system: false,
             paused_until: None,
+            released: false,
             no_plan_reads: None,
             parent: None,
         }

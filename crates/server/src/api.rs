@@ -118,6 +118,8 @@ pub fn router(api: Api) -> Router {
         .route("/api/sessions/{id}", get(session).patch(rename_session).delete(delete_session))
         .route("/api/sessions/{id}/messages", get(messages).post(send))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
+        .route("/api/sessions/{id}/release", post(release))
+        .route("/api/sessions/{id}/adopt", post(adopt))
         .route(
             "/api/sessions/{id}/terminal",
             get(terminal_screen).post(terminal_input).delete(terminal_close),
@@ -1312,6 +1314,29 @@ async fn attachment(
         .into_response())
 }
 
+async fn release(State(api): State<Api>, Path(id): Path<SessionId>) -> Reply<agentbench_core::Session> {
+    let store = api.runner.store();
+    store.session(id)?;
+    crate::autopilot::release(store, id, "user")?;
+    changed(&api);
+    Ok(Json(store.session(id)?))
+}
+
+async fn adopt(State(api): State<Api>, Path(id): Path<SessionId>) -> Reply<agentbench_core::Session> {
+    let store = api.runner.store();
+    let session = store.session(id)?;
+    let supervisor = api
+        .runner
+        .supervisor_session()
+        .ok_or_else(|| bad("there is no supervisor chat to hand it to"))?;
+    if session.project_id == supervisor.project_id {
+        return Err(bad("the supervisor chat cannot be handed to itself"));
+    }
+    crate::autopilot::adopt(store, id, supervisor.id)?;
+    changed(&api);
+    Ok(Json(store.session(id)?))
+}
+
 async fn interrupt(
     State(api): State<Api>,
     Path(id): Path<SessionId>,
@@ -1914,6 +1939,35 @@ mod tests {
 
         let (_, overview) = call(&f.app, "GET", "/api/overview", None, T).await;
         assert_eq!(overview["supervisor"], first["id"]);
+    }
+
+    #[tokio::test]
+    async fn release_and_adopt_move_a_session_between_the_user_and_the_supervisor() {
+        let f = fixture();
+        let store = f.api.runner.store().clone();
+        let dir = tempfile::tempdir().unwrap();
+        let (_, main) = crate::store::testing::project(&store, "/a");
+        let child = store.add_session(main.id, "echo", "child", None, None).unwrap();
+        let uri = |verb: &str| format!("/api/sessions/{}/{verb}", child.id);
+
+        assert_eq!(call(&f.app, "POST", &uri("release"), None, None).await.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(call(&f.app, "POST", &uri("adopt"), None, None).await.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(call(&f.app, "POST", &uri("adopt"), None, T).await.0, StatusCode::BAD_REQUEST, "no supervisor");
+
+        let sup = crate::projects::ensure_supervisor(&store, dir.path()).unwrap();
+        let sup_main = store.main_worktree(sup.id).unwrap();
+        let boss = store.add_session(sup_main.id, "echo", "boss", None, None).unwrap();
+        store.set_parent(child.id, Some(boss.id)).unwrap();
+
+        let (s, body) = call(&f.app, "POST", &uri("release"), None, T).await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(body["released"], true);
+        assert!(body["parent"].is_null());
+
+        let (s, body) = call(&f.app, "POST", &uri("adopt"), None, T).await;
+        assert_eq!(s, StatusCode::OK, "{body}");
+        assert_eq!(body["parent"], json!(boss.id));
+        assert!(body["released"].is_null());
     }
 
     #[tokio::test]

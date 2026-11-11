@@ -2,7 +2,7 @@ use crate::runner::{Origin, Runner};
 use crate::store::{Judged, Store, StoreError, Worker};
 use agentbench_core::{
     Automation, AutopilotPatch, AutopilotState, Entry, Id, Issue, IssuePatch, IssueState,
-    NewComment, NewSession, Place, Project, ProjectPatch, Risky, Session, SessionStatus,
+    NewComment, NewSession, Place, Project, ProjectPatch, Risky, Session, SessionId, SessionStatus,
     issue_prompt,
 };
 use std::collections::{HashMap, HashSet};
@@ -115,6 +115,47 @@ pub fn migrate(store: &Store) -> Result<(), StoreError> {
     }
     store.delete_setting(MERGE)?;
     store.set_setting(MIGRATED, "1")
+}
+
+pub fn release(store: &Store, id: SessionId, by: &str) -> Result<bool, crate::store::StoreError> {
+    let session = store.session(id)?;
+    let held = session.parent.is_some()
+        || !store.watchers(id)?.is_empty()
+        || store.workers()?.iter().any(|w| w.session == id);
+    if !held {
+        return Ok(false);
+    }
+    store.set_parent(id, None)?;
+    store.set_released(id, true)?;
+    store.take_watchers(id)?;
+    store.remove_worker(id)?;
+    let line = format!("{by} took control of session {id}");
+    let _ = store.log_autopilot(Some(session.project_id), session.issue_id, &line);
+    if let Some(issue) = session.issue_id {
+        let _ = store.add_comment(
+            issue,
+            &agentbench_core::NewComment { author: Some("agentbench".into()), body: line },
+        );
+    }
+    Ok(true)
+}
+
+pub fn adopt(store: &Store, id: SessionId, supervisor: SessionId) -> Result<(), crate::store::StoreError> {
+    let session = store.session(id)?;
+    store.set_parent(id, Some(supervisor))?;
+    store.set_released(id, false)?;
+    if let Some(issue) = session.issue_id {
+        store.add_worker(id, issue, session.project_id)?;
+    }
+    let line = format!("supervisor {supervisor} took session {id} back");
+    let _ = store.log_autopilot(Some(session.project_id), session.issue_id, &line);
+    if let Some(issue) = session.issue_id {
+        let _ = store.add_comment(
+            issue,
+            &agentbench_core::NewComment { author: Some("agentbench".into()), body: line },
+        );
+    }
+    Ok(())
 }
 
 pub fn state(store: &Store) -> AutopilotState {
@@ -2212,6 +2253,25 @@ mod tests {
         r.ap.tick_at(now);
         assert_eq!(r.store.workers().unwrap()[0].nudges, 1);
         let _ = a;
+    }
+
+    #[tokio::test]
+    async fn a_released_session_is_neither_nudged_nor_stopped_and_keeps_its_issue_state() {
+        let r = rig(r#"read p; sleep 30"#);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        r.ap.tick();
+        let sid = r.store.workers().unwrap()[0].session;
+        let started = r.store.session(sid).unwrap().updated_at;
+        assert!(release(&r.store, sid, "user").unwrap());
+        r.ap.tick_at(started + 16 * 60_000);
+        r.ap.tick_at(started + 40 * 60_000);
+        assert!(r.store.workers().unwrap().is_empty());
+        assert!(r.ap.runner.is_running(sid), "not stopped");
+        assert_eq!(r.store.session(sid).unwrap().queued.len(), 0);
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing);
+        assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.issue_id == Some(a)).count(), 1);
+        assert!(r.store.autopilot_log(20).unwrap().iter().any(|l| l.text.contains("took control")));
     }
 
     #[tokio::test]

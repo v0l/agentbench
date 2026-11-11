@@ -741,6 +741,14 @@ impl Client {
         self.act(Method::PATCH, &format!("/api/sessions/{session}"), Some(&patch), "");
     }
 
+    pub fn release_session(&mut self, session: SessionId) {
+        self.act::<()>(Method::POST, &format!("/api/sessions/{session}/release"), None, "");
+    }
+
+    pub fn adopt_session(&mut self, session: SessionId) {
+        self.act::<()>(Method::POST, &format!("/api/sessions/{session}/adopt"), None, "");
+    }
+
     pub fn delete_session(&mut self, session: SessionId) {
         self.act::<()>(
             Method::DELETE,

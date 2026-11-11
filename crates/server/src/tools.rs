@@ -723,6 +723,13 @@ impl Api for StoreApi {
                 if other.id == session {
                     return Err("that is this session".into());
                 }
+                if args.get("adopt").and_then(Value::as_bool).unwrap_or(false) {
+                    if !sup {
+                        return Err("only the supervisor chat can adopt a session".into());
+                    }
+                    crate::autopilot::adopt(s, other.id, session).map_err(|e| e.0)?;
+                    return Ok(json!({ "session": other.id, "adopted": true, "status": other.status }));
+                }
                 let running = self.runner.get().ok().is_some_and(|r| r.is_running(other.id));
                 if !running {
                     return Ok(json!({
@@ -734,6 +741,28 @@ impl Api for StoreApi {
                 }
                 s.add_watch(other.id, session).map_err(|e| e.0)?;
                 json!({ "session": other.id, "watching": true, "status": other.status })
+            }
+            "unwatch_session" => {
+                let other = s.session(session_id(args)?).map_err(|e| e.0)?;
+                self.reaches(&me, &other)?;
+                if other.id == session {
+                    return Err("that is this session".into());
+                }
+                let by = format!("the user, through session {session},");
+                let released = if other.parent == Some(session) {
+                    crate::autopilot::release(s, other.id, &by).map_err(|e| e.0)?
+                } else {
+                    s.remove_watch(other.id, session).map_err(|e| e.0)?
+                };
+                if released {
+                    json!({ "session": other.id, "unwatched": true })
+                } else {
+                    json!({
+                        "session": other.id,
+                        "unwatched": false,
+                        "note": "you neither watch nor parent that session, so nothing changed",
+                    })
+                }
             }
             "user_asks" => {
                 let per = args.get("per_session").and_then(Value::as_u64).unwrap_or(5).clamp(1, 50)
@@ -1751,6 +1780,45 @@ mod tests {
         assert!(api.call("watch_session", &json!({"id": boss.id.to_string()}), boss.id).is_err());
         let mate = s.add_session(main.id, "native", "mate", None, None).unwrap();
         assert!(api.call("watch_session", &json!({"id": other.id.to_string()}), mate.id).is_ok());
+    }
+
+    #[test]
+    fn unwatch_releases_a_child_and_is_a_no_op_otherwise() {
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/a");
+        let dir = tempfile::tempdir().unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, dir.path()).unwrap();
+        let sup_main = s.main_worktree(sup.id).unwrap();
+        let boss = s.add_session(sup_main.id, "native", "boss", None, None).unwrap();
+        let issue = s
+            .add_issue(&agentbench_core::NewIssue { project_id: main.id, title: "t".into(), ..Default::default() })
+            .unwrap();
+        let child = s.add_session(main.id, "native", "child", None, Some(issue.id)).unwrap();
+        let stranger = s.add_session(main.id, "native", "stranger", None, None).unwrap();
+        s.set_parent(child.id, Some(boss.id)).unwrap();
+        s.add_worker(child.id, issue.id, main.id).unwrap();
+        s.add_watch(child.id, stranger.id).unwrap();
+        let api = StoreApi::new(s.clone());
+
+        let out = api.call("unwatch_session", &json!({"id": stranger.id.to_string()}), boss.id).unwrap();
+        assert_eq!(out["unwatched"], false);
+        assert!(out["note"].as_str().unwrap().contains("nothing changed"));
+
+        let out = api.call("unwatch_session", &json!({"id": child.id.to_string()}), boss.id).unwrap();
+        assert_eq!(out["unwatched"], true);
+        let c = s.session(child.id).unwrap();
+        assert_eq!(c.parent, None);
+        assert!(c.released);
+        assert!(s.take_watchers(child.id).unwrap().is_empty());
+        assert!(s.workers().unwrap().is_empty());
+        assert!(s.comments(issue.id).unwrap().iter().any(|c| c.body.contains("took control")));
+
+        assert!(api.call("watch_session", &json!({"id": child.id.to_string(), "adopt": true}), stranger.id).is_err());
+        api.call("watch_session", &json!({"id": child.id.to_string(), "adopt": true}), boss.id).unwrap();
+        let c = s.session(child.id).unwrap();
+        assert_eq!(c.parent, Some(boss.id));
+        assert!(!c.released);
+        assert_eq!(s.workers().unwrap().len(), 1);
     }
 
     #[test]

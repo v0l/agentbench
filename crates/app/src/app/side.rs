@@ -186,6 +186,7 @@ impl App {
         let when = if s.status.busy() { word.to_string() } else { ago(s.updated_at) };
         let (parent, children) = self.family_of(s);
         let kin = match (parent, children) {
+            _ if s.released => "  user controlled".to_string(),
             (Some((_, title, _)), 0) => format!("  child of {title}"),
             (Some((_, title, _)), n) => format!("  child of {title}, {n} children"),
             (None, 0) => String::new(),
@@ -243,6 +244,21 @@ impl App {
                     self.open_in_tile(s.id, at);
                     ui.close();
                 }
+            }
+            if s.released {
+                if ui.add(Key::new("hand back to supervisor").outline(VALUE).min_width(width)).clicked() {
+                    if let Some(c) = &mut self.client {
+                        c.adopt_session(s.id);
+                    }
+                    ui.close();
+                }
+            } else if s.parent.is_some()
+                && ui.add(Key::new("take control").outline(VALUE).min_width(width)).clicked()
+            {
+                if let Some(c) = &mut self.client {
+                    c.release_session(s.id);
+                }
+                ui.close();
             }
             if ui.add(Key::new("rename chat").outline(VALUE).min_width(width)).clicked() {
                 self.rename_chat = Some((s.id, s.title.clone()));

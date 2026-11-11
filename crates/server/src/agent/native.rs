@@ -315,7 +315,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 32] = [
+pub const AGENTBENCH_TOOLS: [&str; 33] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -326,6 +326,7 @@ pub const AGENTBENCH_TOOLS: [&str; 32] = [
     "session_status",
     "user_asks",
     "watch_session",
+    "unwatch_session",
     "stop_session",
     "close_session",
     "rename_session",
@@ -434,6 +435,11 @@ fn agentbench_specs() -> Vec<Spec> {
         Spec::new(
             "watch_session",
             "Be told when a running session finishes. When it does, a message with the session id and its new state (not the reply; read that with read_session) arrives in this chat as a new turn, so you do not have to poll or block. For a worker you started that went idle, the message is a judging request with its reply, diff stat and test runs; answer it with judge_session. Sessions you started (your children) are reported automatically, so use this only for sessions that are not your children, such as a user's chat. Does nothing for a session that is not running.",
+            object(json!({ "id": string("The session id, as list_sessions gives it"), "adopt": json!({ "type": "boolean", "description": "Supervisor chat only: take the session over as its parent, and register it with the autopilot again, so its next turn end comes back as a judge request" }) }), &["id"]),
+        ),
+        Spec::new(
+            "unwatch_session",
+            "Stop watching a session. For a session you started, this releases it: it is no longer your child, you get no more reports or judge requests, and the autopilot drops it. Use it when the user takes control of a session. Hand it back with `watch_session` and `adopt: true`.",
             object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
         ),
         Spec::new(
