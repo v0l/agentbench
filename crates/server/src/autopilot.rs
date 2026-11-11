@@ -1816,6 +1816,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_fresh_reading_for_the_start_model_lifts_a_stale_block_and_the_loop_starts_work() {
+        let r = rig(DONE);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        let now = crate::quota::now();
+        r.ap.runner.quotas.set_start_model("code-high");
+        r.ap.runner.quotas.block("code-high", now + 3 * 86_400_000);
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Todo, "paused");
+        r.ap.runner.observe_quota(agentbench_core::Quota {
+            model: "code-high".into(),
+            window: "5h".into(),
+            used_pct: 35.0,
+            resets_at: now + 3_600_000,
+            ..Default::default()
+        });
+        assert_eq!(r.ap.runner.quotas.exhausted_until("code-high", now), None);
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "started");
+    }
+
+    #[tokio::test]
     async fn a_block_on_another_model_does_not_stop_workers_starting_on_the_default_model() {
         let r = rig(DONE);
         let a = todo(&r, "a", 0, &[]);

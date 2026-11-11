@@ -480,6 +480,9 @@ impl Quotas {
 
     pub fn observe(&self, quota: Quota, now: i64) -> Option<Hint> {
         let mut held = self.map();
+        if quota.exhausted_until(now).is_none() {
+            held.blocked.remove(&quota.model);
+        }
         let key = key_of(&quota);
         let seen = held.announced.get(&key).copied();
         let level = quota.level(now);
@@ -831,6 +834,31 @@ mod tests {
         let summary = runner.quotas.summary(now);
         assert!(summary.contains("code-x-high: 7d 100%, exhausted until"), "{summary}");
         assert!(summary.contains("code-high: 7d 17%"), "{summary}");
+    }
+
+    fn fine(model: &str) -> Quota {
+        Quota { model: model.into(), window: "5h".into(), used_pct: 35.0, resets_at: 1_900_000_000_000, ..Quota::default() }
+    }
+
+    #[test]
+    fn a_fresh_reading_that_is_not_exhausted_clears_that_models_block() {
+        let quotas = Quotas::default();
+        let now = 1_800_000_000_000;
+        quotas.block("code-high", now + 3 * 86_400_000);
+        quotas.block("code-x-high", now + 3 * 86_400_000);
+        assert!(quotas.exhausted_until("code-high", now).is_some());
+        quotas.observe(fine("code-high"), now);
+        assert_eq!(quotas.exhausted_until("code-high", now), None);
+        assert!(quotas.exhausted_until("code-x-high", now).is_some(), "other models keep their block");
+    }
+
+    #[test]
+    fn a_retry_after_block_holds_without_a_newer_reading() {
+        let quotas = Quotas::default();
+        let now = 1_800_000_000_000;
+        quotas.block("code-high", now + 60_000);
+        assert_eq!(quotas.exhausted_until("code-high", now), Some(now + 60_000));
+        assert_eq!(quotas.exhausted_until("code-high", now + 60_001), None);
     }
 
     #[tokio::test]
