@@ -295,6 +295,10 @@ impl Runner {
         let prompt = new.prompt.clone().filter(|p| !p.trim().is_empty()).or_else(|| {
             issue.as_ref().map(|i| issue_prompt(i, &store.comments(i.id).unwrap_or_default()))
         });
+        let prompt = match (prompt, new.parent) {
+            (Some(p), Some(parent)) if !p.contains("PARENT=") => Some(format!("{p}\n\nPARENT={parent}")),
+            (p, _) => p,
+        };
         if prompt.is_some() || !new.attachments.is_empty() {
             self.send_with(&session, prompt.as_deref().unwrap_or_default(), &new.attachments)?;
         }
@@ -4348,6 +4352,11 @@ mod deferred_tests {
         assert_eq!(r.store.session(id).unwrap().parent, Some(r.worker.id));
         idle(&r.runner, id).await;
         idle(&r.runner, r.worker.id).await;
+        let first = r.store.messages(id, 0).unwrap();
+        assert!(
+            matches!(&first[0].entry, Entry::User { text, .. } if text.ends_with(&format!("PARENT={}", r.worker.id))),
+            "{first:?}"
+        );
         assert!(said_to(&r, r.worker.id).iter().any(|(t, _)| t.contains(&id.to_string())));
         assert!(said_to(&r, r.boss.id).iter().all(|(t, _)| !t.contains(&id.to_string())));
     }

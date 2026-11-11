@@ -203,7 +203,8 @@ impl StoreApi {
         other: &agentbench_core::Session,
     ) -> Result<(), String> {
         let child = other.parent == Some(me.id);
-        if other.project_id == me.project_id || child || self.supervises(me) {
+        let parent = me.parent == Some(other.id);
+        if other.project_id == me.project_id || child || parent || self.supervises(me) {
             Ok(())
         } else {
             Err("that session belongs to another project".into())
@@ -1706,6 +1707,31 @@ mod tests {
         );
         let e = api.call("close_session", &id(&b), boss.id).unwrap_err();
         assert!(e.contains("cannot be started"), "{e}");
+    }
+
+    #[test]
+    fn a_child_reaches_its_parent_supervisor_in_another_project() {
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/a");
+        let (_, other_main) = crate::store::testing::project(&s, "/b");
+        let dir = tempfile::tempdir().unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, dir.path()).unwrap();
+        let sup_main = s.main_worktree(sup.id).unwrap();
+        let boss = s.add_session(sup_main.id, "native", "boss", None, None).unwrap();
+        let child = s.add_session(main.id, "native", "child", None, None).unwrap();
+        s.set_parent(child.id, Some(boss.id)).unwrap();
+        let stranger = s.add_session(main.id, "native", "stranger", None, None).unwrap();
+        let sibling = s.add_session(other_main.id, "native", "sibling", None, None).unwrap();
+        s.set_parent(sibling.id, Some(boss.id)).unwrap();
+        let api = StoreApi::new(s.clone());
+        let me = s.session(child.id).unwrap();
+        let target = |x: &agentbench_core::Session| s.session(x.id).unwrap();
+
+        assert!(api.reaches(&me, &target(&boss)).is_ok(), "a child reaches its parent");
+        let stranger = s.session(stranger.id).unwrap();
+        assert!(api.reaches(&stranger, &target(&boss)).is_err(), "an unrelated session does not");
+        assert!(api.reaches(&target(&sibling), &target(&boss)).is_ok());
+        assert!(api.reaches(&target(&sibling), &me).is_err(), "a sibling in another project does not");
     }
 
     #[test]
