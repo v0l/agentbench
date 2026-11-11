@@ -119,8 +119,9 @@ impl App {
         let (tint, word) = status_look(s.status);
         let (row, resp) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
+        let released = if s.released { ", user controlled" } else { "" };
         resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("chat {}", s.title))
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("chat {}{released}", s.title))
         });
         let tiled =
             self.grid_now().slots() > 1 && self.tab == Tab::Chat && self.shown().contains(&s.id);
@@ -246,19 +247,27 @@ impl App {
                 }
             }
             if s.released {
-                if ui.add(Key::new("hand back to supervisor").outline(VALUE).min_width(width)).clicked() {
+                let back = ui.add(Key::new("hand back to supervisor").outline(VALUE).min_width(width));
+                back.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, "hand back to supervisor")
+                });
+                if back.clicked() {
                     if let Some(c) = &mut self.client {
                         c.adopt_session(s.id);
                     }
                     ui.close();
                 }
-            } else if s.parent.is_some()
-                && ui.add(Key::new("take control").outline(VALUE).min_width(width)).clicked()
-            {
-                if let Some(c) = &mut self.client {
-                    c.release_session(s.id);
+            } else if s.parent.is_some() {
+                let take = ui.add(Key::new("take control").outline(VALUE).min_width(width));
+                take.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, "take control")
+                });
+                if take.clicked() {
+                    if let Some(c) = &mut self.client {
+                        c.release_session(s.id);
+                    }
+                    ui.close();
                 }
-                ui.close();
             }
             if ui.add(Key::new("rename chat").outline(VALUE).min_width(width)).clicked() {
                 self.rename_chat = Some((s.id, s.title.clone()));

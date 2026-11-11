@@ -2187,6 +2187,40 @@ fn a_child_session_shows_a_parent_chip_that_opens_the_parent() {
     assert!(h.query_by_label_contains("1 children").is_some(), "the parent counts its child");
 }
 
+#[test]
+fn take_control_releases_a_child_and_hand_back_adopts_it() {
+    let rig = rig();
+    let dir = tempfile::tempdir().unwrap();
+    let sup = agentbench_server::projects::ensure_supervisor(&rig.store, dir.path()).unwrap();
+    let sup_tree = rig.store.main_worktree(sup.id).unwrap();
+    let boss = rig.store.add_session(sup_tree.id, "echo", "boss", None, None).unwrap();
+    let fix = rig
+        .store
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.title == "#3 Fix the login loop")
+        .unwrap();
+    rig.store.set_parent(fix.id, Some(boss.id)).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("user controlled").is_none());
+
+    h.get_by_label("chat #3 Fix the login loop").click_secondary();
+    h.run_steps(8);
+    h.get_by_label("take control").click();
+    until(&mut h, "the release", |_| rig.store.session(fix.id).unwrap().released);
+    assert_eq!(rig.store.session(fix.id).unwrap().parent, None);
+    until(&mut h, "the badge", |h| h.query_by_label_contains("user controlled").is_some());
+
+    h.get_by_label_contains("Fix the login loop").click_secondary();
+    h.run_steps(2);
+    h.get_by_label("hand back to supervisor").click();
+    until(&mut h, "the adoption", |_| rig.store.session(fix.id).unwrap().parent == Some(boss.id));
+    assert!(!rig.store.session(fix.id).unwrap().released);
+}
+
 fn quota_server(used_pct: u32, resets_in_secs: i64) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
