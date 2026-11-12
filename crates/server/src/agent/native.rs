@@ -6059,6 +6059,20 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn a_rate_limit_with_headroom_on_the_quota_endpoint_rechecks_within_minutes() {
+        use crate::quota::fake::{Reply, ok, server};
+        let start = 1_900_000_000_000;
+        let limited = Reply { status: 429, headers: vec![], body: "Rate limit exceeded. Retry after: 7200000ms".into() };
+        let quota = json!({"window": "7d", "used_pct": 56, "resets_at": 1_900_500_000}).to_string();
+        let (url, _) = server(vec![limited, ok(usage_events(json!({})))], Some(quota));
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.pace.clock = crate::quota::Clock::fake(start);
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, Path::new("."), "go", &io).await.unwrap();
+        assert_eq!(native.pace.clock.now(), start + 300_000);
+    }
+
+    #[tokio::test]
     async fn a_rate_limit_with_no_known_reset_still_fails() {
         use crate::quota::fake::{Reply, server};
         let limited = Reply { status: 429, headers: vec![], body: "too many".into() };
