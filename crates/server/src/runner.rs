@@ -134,25 +134,37 @@ impl Runner {
     }
 
     pub fn observe_quota(&self, quota: agentbench_core::Quota) {
-        let now = crate::quota::now();
+        self.observe_quota_at(quota, crate::quota::now());
+    }
+
+    fn observe_quota_at(&self, quota: agentbench_core::Quota, now: i64) {
         if let Some(hint) = self.quotas.observe(quota, now) {
-            self.broadcast_notice(&hint.text);
+            self.notify_model(&hint.model, &hint.text, hint.exhausted, now);
         }
         self.changed.notify_waiters();
     }
 
     pub fn expire_quotas(&self) {
-        let now = crate::quota::now();
+        self.expire_quotas_at(crate::quota::now());
+    }
+
+    fn expire_quotas_at(&self, now: i64) {
         for q in self.quotas.expire(now) {
-            self.broadcast_notice(&format!("Quota {} reset", q.window));
+            self.notify_model(&q.model, &format!("Quota {} reset", q.window), false, now);
         }
         self.quotas.unblock(now);
     }
 
-    fn broadcast_notice(&self, text: &str) {
+    fn notify_model(&self, model: &str, text: &str, exhausted: bool, now: i64) {
         let ids: Vec<SessionId> = self.live().keys().copied().collect();
         for id in ids {
-            let _ = self.store.add_message(id, &Entry::Notice { text: text.to_string() });
+            let Ok(session) = self.store.session(id) else { continue };
+            if !self.quotas.resolves_to(session.model.as_deref(), model) {
+                continue;
+            }
+            if self.quotas.may_notify(id, model, exhausted, now) {
+                let _ = self.store.add_message(id, &Entry::Notice { text: text.to_string() });
+            }
         }
     }
 
@@ -1806,6 +1818,131 @@ mod tests {
         let (_, main) = crate::store::testing::project(&store, "/tmp");
         let s = store.add_session(main.id, agent.name(), "t", None, None).unwrap();
         (Runner::new(store, vec![agent]), s)
+    }
+
+    fn quota_runner() -> (Runner, Session, Session) {
+        let (runner, high) = setup(script_agent("echo", "true"));
+        let store = runner.store().clone();
+        let other = store.add_session(high.project_id, "echo", "o", None, None).unwrap();
+        store.set_model(high.id, Some("high")).unwrap();
+        store.set_model(other.id, Some("local-vllm")).unwrap();
+        let base = crate::agent::native::Model {
+            model: "code".into(),
+            high: crate::agent::native::Level { model: "code-high".into(), ..Default::default() },
+            ..Default::default()
+        };
+        runner.quotas.set_base(&base);
+        for id in [high.id, other.id] {
+            runner.live().insert(
+                id,
+                Live {
+                    stop: CancellationToken::new(),
+                    inbox: Arc::new(Mutex::new(Vec::new())),
+                    questions: Arc::new(Mutex::new(HashMap::new())),
+                },
+            );
+        }
+        (runner, high, other)
+    }
+
+    fn notices(runner: &Runner, s: &Session) -> usize {
+        runner
+            .store()
+            .messages(s.id, 0)
+            .unwrap()
+            .iter()
+            .filter(|m| matches!(m.entry, Entry::Notice { .. }))
+            .count()
+    }
+
+    fn reading(window: &str, pct: f64, resets: i64) -> agentbench_core::Quota {
+        agentbench_core::Quota {
+            host: "h".into(),
+            model: "code-high".into(),
+            window: window.into(),
+            used_pct: pct,
+            resets_at: resets,
+            ..Default::default()
+        }
+    }
+
+    const T0: i64 = 1_800_000_000_000;
+    const MIN: i64 = 60_000;
+
+    #[tokio::test]
+    async fn a_quota_hint_reaches_only_sessions_on_that_model() {
+        let (runner, high, other) = quota_runner();
+        runner.observe_quota_at(reading("5h", 80.0, T0 + 3_600_000), T0);
+        assert_eq!(notices(&runner, &high), 1);
+        assert_eq!(notices(&runner, &other), 0);
+    }
+
+    #[tokio::test]
+    async fn a_quota_reset_notice_reaches_only_sessions_on_that_model() {
+        let (runner, high, other) = quota_runner();
+        runner.observe_quota_at(reading("5h", 50.0, T0 + MIN), T0);
+        runner.expire_quotas_at(T0 + 2 * MIN);
+        assert_eq!(notices(&runner, &high), 1);
+        assert_eq!(notices(&runner, &other), 0);
+    }
+
+    #[tokio::test]
+    async fn a_drifting_reset_time_gives_one_hint() {
+        let (runner, high, _) = quota_runner();
+        let end = T0 + 4 * 3_600_000;
+        for i in 0..20i64 {
+            let drift = (i % 3 - 1) * 2 * MIN;
+            runner.observe_quota_at(reading("5h", 100.0, end + drift), T0 + i * 3 * MIN);
+        }
+        assert_eq!(notices(&runner, &high), 1);
+    }
+
+    #[test]
+    fn a_six_minute_forward_jump_is_a_new_window() {
+        let held = crate::quota::Quotas::default();
+        assert!(held.observe(reading("5h", 80.0, T0 + 3_600_000), T0).is_some());
+        assert!(held.observe(reading("5h", 80.0, T0 + 3_600_000 + 4 * MIN), T0 + 1).is_none());
+        assert!(held.observe(reading("5h", 80.0, T0 + 3_600_000 + 6 * MIN), T0 + 2).is_some());
+    }
+
+    #[test]
+    fn windows_switching_at_100_percent_announce_each_once() {
+        let held = crate::quota::Quotas::default();
+        let end = T0 + 3_600_000;
+        let mut sent = 0;
+        for i in 0..12i64 {
+            let q = match i % 3 {
+                0 => reading("5h", 100.0, end),
+                1 => reading("7d", 100.0, end + 86_400_000),
+                _ => reading("extra", 100.0, 0),
+            };
+            sent += held.observe(q, T0 + i * MIN).is_some() as i32;
+        }
+        assert_eq!(sent, 3);
+    }
+
+    #[test]
+    fn a_reset_notice_does_not_repeat_for_a_window_that_comes_back_drifted() {
+        let held = crate::quota::Quotas::default();
+        held.observe(reading("5h", 50.0, T0 + MIN), T0);
+        assert_eq!(held.expire(T0 + 2 * MIN).len(), 1);
+        held.observe(reading("5h", 50.0, T0 + 3 * MIN), T0 + 2 * MIN);
+        assert_eq!(held.expire(T0 + 4 * MIN).len(), 0);
+    }
+
+    #[tokio::test]
+    async fn notices_are_limited_to_one_per_half_hour_but_exhaustion_goes_through() {
+        let (runner, high, _) = quota_runner();
+        let end = T0 + 5 * 3_600_000;
+        for i in 0..20i64 {
+            let (w, p) = if i % 2 == 0 { ("5h", 80.0) } else { ("7d", 95.0) };
+            runner.observe_quota_at(reading(w, p, end + i * 7 * MIN), T0 + i * 30_000);
+        }
+        assert_eq!(notices(&runner, &high), 1);
+        runner.observe_quota_at(reading("5h", 100.0, end), T0 + 11 * MIN);
+        assert_eq!(notices(&runner, &high), 2);
+        runner.observe_quota_at(reading("7d", 100.0, end + 3_600_000), T0 + 12 * MIN);
+        assert_eq!(notices(&runner, &high), 2);
     }
 
     #[tokio::test]

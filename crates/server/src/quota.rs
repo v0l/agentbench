@@ -396,6 +396,7 @@ pub fn readings(body: &Value, host: &str, models: &[String], now: i64) -> Vec<Qu
 }
 
 pub async fn poll_once(runner: &crate::runner::Runner, model: &crate::agent::native::Model) {
+    runner.quotas.set_base(model);
     runner.quotas.set_start_model(
         &model.level("medium").map_or_else(|| model.model.clone(), |m| m.model),
     );
@@ -430,19 +431,38 @@ pub fn spawn_poll(runner: crate::runner::Runner, model: crate::agent::native::Sh
 struct Held {
     quotas: HashMap<String, Quota>,
     announced: HashMap<String, (i64, u8)>,
+    reset_told: HashMap<String, i64>,
+    sent: HashMap<(agentbench_core::SessionId, String), (i64, bool)>,
+    base: Option<crate::agent::native::Model>,
     blocked: HashMap<String, i64>,
     start_model: String,
 }
+
+const SAME_WINDOW_DRIFT_MS: i64 = 5 * 60_000;
+const NOTICE_EVERY_MS: i64 = 30 * 60_000;
 
 #[derive(Clone, Default)]
 pub struct Quotas(Arc<Mutex<Held>>);
 
 pub struct Hint {
     pub text: String,
+    pub model: String,
+    pub exhausted: bool,
 }
 
 fn key_of(q: &Quota) -> String {
     format!("{}\n{}", q.host, q.model)
+}
+
+fn window_key(q: &Quota) -> String {
+    format!("{}\n{}\n{}", q.host, q.model, q.window)
+}
+
+fn same_window(old: i64, new: i64, now: i64) -> bool {
+    if old == 0 || new == 0 {
+        return true;
+    }
+    now < old && (new - old).abs() <= SAME_WINDOW_DRIFT_MS
 }
 
 impl Quotas {
@@ -452,6 +472,35 @@ impl Quotas {
 
     pub fn set_start_model(&self, model: &str) {
         self.map().start_model = model.trim().to_string();
+    }
+
+    pub fn set_base(&self, model: &crate::agent::native::Model) {
+        self.map().base = Some(model.clone());
+    }
+
+    pub fn resolves_to(&self, chosen: Option<&str>, model: &str) -> bool {
+        if model.is_empty() {
+            return true;
+        }
+        match &self.map().base {
+            Some(base) => base.choose(chosen.unwrap_or_default()).model == model,
+            None => chosen == Some(model),
+        }
+    }
+
+    pub fn may_notify(&self, session: agentbench_core::SessionId, model: &str, exhausted: bool, now: i64) -> bool {
+        let mut held = self.map();
+        let key = (session, model.to_string());
+        let allowed = match held.sent.get(&key) {
+            None => true,
+            Some((at, was_exhausted)) => {
+                now - at >= NOTICE_EVERY_MS || (exhausted && !was_exhausted)
+            }
+        };
+        if allowed {
+            held.sent.insert(key, (now, exhausted));
+        }
+        allowed
     }
 
     pub fn start_model(&self) -> String {
@@ -484,14 +533,24 @@ impl Quotas {
             held.blocked.remove(&quota.model);
         }
         let key = key_of(&quota);
-        let seen = held.announced.get(&key).copied();
+        let wkey = window_key(&quota);
+        let seen = held.announced.get(&wkey).copied();
         let level = quota.level(now);
         let announced = match seen {
-            Some((resets, announced)) if resets == quota.resets_at => announced,
+            Some((resets, announced)) if same_window(resets, quota.resets_at, now) => announced,
             _ => 0,
         };
-        let hint = (level > announced).then(|| Hint { text: quota.hint(now) });
-        held.announced.insert(key.clone(), (quota.resets_at, announced.max(level)));
+        let hint = (level > announced).then(|| Hint {
+            text: quota.hint(now),
+            model: quota.model.clone(),
+            exhausted: quota.used_pct >= 100.0 || quota.exhausted_until(now).is_some(),
+        });
+        let kept = if level == 0 { 0 } else { announced.max(level) };
+        let anchor = match seen {
+            Some((resets, _)) if resets != 0 && same_window(resets, quota.resets_at, now) => resets,
+            _ => quota.resets_at,
+        };
+        held.announced.insert(wkey, (anchor, kept));
         held.quotas.insert(key, quota);
         hint
     }
@@ -523,10 +582,19 @@ impl Quotas {
             .filter(|(_, q)| q.expired(now))
             .map(|(h, _)| h.clone())
             .collect();
-        for h in &gone {
-            held.announced.remove(h);
-        }
-        gone.iter().filter_map(|h| held.quotas.remove(h)).collect()
+        let gone: Vec<Quota> = gone.iter().filter_map(|h| held.quotas.remove(h)).collect();
+        gone.into_iter()
+            .filter(|q| {
+                let wkey = window_key(q);
+                match held.reset_told.get(&wkey) {
+                    Some(told) if q.resets_at <= told + SAME_WINDOW_DRIFT_MS => false,
+                    _ => {
+                        held.reset_told.insert(wkey, q.resets_at);
+                        true
+                    }
+                }
+            })
+            .collect()
     }
 
     pub fn summary(&self, now: i64) -> String {

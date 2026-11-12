@@ -6,6 +6,10 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Quota notices go only to sessions on the quota's model, are sent once per window (5 minute drift tolerance), and are limited to one per session per model per 30 minutes, with an immediate notice when the quota becomes exhausted.
+
 ### Changed
 - A child session can `send_message` to and read its own parent even when the parent is the supervisor in another project. Every child's first message now starts with `PARENT=<parent id>`, so workers know who to report to. The autopilot already sets the supervisor as parent.
 - Every session started by another session (the supervisor, the autopilot or any agent) records its parent, and the parent is told each time the child's turn ends, with no `watch_session` call. `list_sessions` shows `parent` and `children`. A child waiting on a question also tells a non-supervisor parent. The app shows a "child of" chip in the chat header that opens the parent, a children count on the parent, and the parent's name on the session row.
