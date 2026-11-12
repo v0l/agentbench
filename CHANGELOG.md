@@ -9,6 +9,7 @@ All notable changes to Agentbench are listed here. The format follows
 ### Fixed
 
 - Quota notices go only to sessions on the quota's model, are sent once per window (5 minute drift tolerance), and are limited to one per session per model per 30 minutes, with an immediate notice when the quota becomes exhausted.
+- A session paused on a quota error now wakes as soon as a quota poll or a queued message finds the model has headroom, instead of sleeping until the 7d reset. The pause time is the earliest moment the model is free.
 
 ### Changed
 - A child session can `send_message` to and read its own parent even when the parent is the supervisor in another project. Every child's first message now starts with `PARENT=<parent id>`, so workers know who to report to. The autopilot already sets the supervisor as parent.

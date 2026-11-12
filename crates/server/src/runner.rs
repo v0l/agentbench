@@ -20,6 +20,8 @@ const ANSWER_PATIENCE: Duration = Duration::from_secs(24 * 3600);
 /// Questions put to the user, each waiting on the channel its answers arrive on.
 type Waiting = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<String>>>>>;
 
+type Pauses = Arc<Mutex<HashMap<SessionId, (String, Arc<Notify>)>>>;
+
 #[derive(Clone)]
 struct Live {
     stop: CancellationToken,
@@ -75,6 +77,7 @@ pub struct Runner {
     live: Arc<Mutex<HashMap<SessionId, Live>>>,
     routed: Arc<Mutex<HashMap<SessionId, Routed>>>,
     folded: Arc<Mutex<HashMap<SessionId, i64>>>,
+    pauses: Pauses,
     api: Arc<dyn Api>,
     titles: Option<Titles>,
     pub base: Arc<Mutex<Base>>,
@@ -114,6 +117,7 @@ impl Runner {
             live: Arc::new(Mutex::new(HashMap::new())),
             routed: Arc::new(Mutex::new(HashMap::new())),
             folded: Arc::new(Mutex::new(HashMap::new())),
+            pauses: Arc::new(Mutex::new(HashMap::new())),
             api,
             titles: None,
             base: Arc::new(Mutex::new(Base::default())),
@@ -141,6 +145,32 @@ impl Runner {
         if let Some(hint) = self.quotas.observe(quota, now) {
             self.notify_model(&hint.model, &hint.text, hint.exhausted, now);
         }
+        self.changed.notify_waiters();
+    }
+
+    fn pauses(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, (String, Arc<Notify>)>> {
+        self.pauses.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn wake_paused(&self) {
+        let ids: Vec<SessionId> = self.pauses().keys().copied().collect();
+        for id in ids {
+            self.wake_paused_session(id);
+        }
+    }
+
+    fn wake_paused_session(&self, id: SessionId) {
+        let now = crate::quota::now();
+        let Some((model, wake)) = self.pauses().get(&id).cloned() else { return };
+        if self.quotas.exhausted_until(&model, now).is_some() {
+            return;
+        }
+        if self.pauses().remove(&id).is_none() {
+            return;
+        }
+        crate::quota::set_paused(&self.store, id, None);
+        let _ = self.store.add_message(id, &Entry::Notice { text: "quota available again, resuming".into() });
+        wake.notify_one();
         self.changed.notify_waiters();
     }
 
@@ -738,6 +768,7 @@ impl Runner {
             let Some(msg) = make(true) else { return Ok(()) };
             l.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
             drop(all);
+            self.wake_paused_session(session.id);
             self.store.touch_session(session.id)?;
             self.changed.notify_waiters();
             return Ok(());
@@ -1679,6 +1710,7 @@ impl Io for Sink {
                 }
             }
             Event::Paused { until, text, long, model } => {
+                self.runner.pauses().insert(self.session, (model.clone(), Arc::new(Notify::new())));
                 crate::quota::set_paused(&self.store, self.session, Some(until));
                 self.runner.quotas.block(&model, until);
                 self.entry(Entry::Warning { text: text.clone() });
@@ -1689,6 +1721,7 @@ impl Io for Sink {
                 self.changed.notify_waiters();
             }
             Event::Resumed => {
+                self.runner.pauses().remove(&self.session);
                 crate::quota::set_paused(&self.store, self.session, None);
                 self.runner.quotas.unblock(crate::quota::now());
                 let _ = self.store.set_status(self.session, SessionStatus::Running);
@@ -1721,6 +1754,10 @@ impl Io for Sink {
 
     fn stop(&self) -> &CancellationToken {
         &self.stop
+    }
+
+    fn wake(&self) -> Option<Arc<Notify>> {
+        self.runner.pauses().get(&self.session).map(|(_, n)| n.clone())
     }
 
     fn steer(&self) -> Option<Steer> {
@@ -3208,6 +3245,105 @@ mod tests {
         let done = wait_idle(&runner, s.id).await;
         assert_eq!(done.status, SessionStatus::Idle);
         assert!(crate::quota::paused_until(runner.store(), s.id).is_none());
+    }
+
+    struct Sleeper(std::sync::atomic::AtomicBool);
+
+    #[async_trait]
+    impl Agent for Sleeper {
+        fn name(&self) -> &str {
+            "sleeper"
+        }
+        fn label(&self) -> &str {
+            "Sleeper"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn about(&self) -> String {
+            "test".into()
+        }
+        fn resumable(&self) -> bool {
+            false
+        }
+        async fn run(&self, _turn: &Turn<'_>, io: &dyn Io) -> Result<(), String> {
+            if self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Ok(());
+            }
+            let until = crate::quota::now() + 3 * 86_400_000;
+            io.emit(Event::Paused { until, text: "h: quota exhausted, resumes in 3d".into(), long: true, model: "m".into() });
+            let wake = io.wake().expect("a paused turn can be woken");
+            wake.notified().await;
+            io.emit(Event::Resumed);
+            Ok(())
+        }
+    }
+
+    async fn paused_sleeper() -> (Runner, Session) {
+        let (runner, s) = setup(Box::new(Sleeper(Default::default())));
+        runner.send(&s, "go").unwrap();
+        for _ in 0..200 {
+            if crate::quota::paused_until(runner.store(), s.id).is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(crate::quota::paused_until(runner.store(), s.id).is_some());
+        (runner, s)
+    }
+
+    fn woke_notice(runner: &Runner, id: SessionId) -> usize {
+        runner
+            .store()
+            .messages(id, 0)
+            .unwrap()
+            .iter()
+            .filter(|m| matches!(&m.entry, Entry::Notice { text } if text == "quota available again, resuming"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_session_paused_for_days_resumes_when_a_poll_shows_the_model_free() {
+        use crate::quota::fake::server;
+        let (runner, s) = paused_sleeper().await;
+        let body = serde_json::json!({"models": {"m": {"summary": {"used_pct": 56, "window": "7d", "resets_at": 1_900_000_000, "exhausted": false}}}}).to_string();
+        let (url, _) = server(vec![], Some(body));
+        let model = crate::agent::native::Model { url, model: "m".into(), ..Default::default() };
+        crate::quota::poll_once(&runner, &model).await;
+        let done = wait_idle(&runner, s.id).await;
+        assert_eq!(done.status, SessionStatus::Idle);
+        assert!(crate::quota::paused_until(runner.store(), s.id).is_none());
+        assert_eq!(woke_notice(&runner, s.id), 1);
+    }
+
+    #[tokio::test]
+    async fn a_poll_that_still_shows_the_model_exhausted_keeps_the_pause() {
+        use crate::quota::fake::server;
+        let (runner, s) = paused_sleeper().await;
+        let body = serde_json::json!({"models": {"m": {"summary": {"used_pct": 100, "window": "7d", "resets_at": 4_000_000_000_i64, "exhausted": true, "next_available_at": 4_000_000_000_i64}}}}).to_string();
+        let (url, _) = server(vec![], Some(body));
+        let model = crate::agent::native::Model { url, model: "m".into(), ..Default::default() };
+        crate::quota::poll_once(&runner, &model).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(runner.is_running(s.id));
+        assert!(crate::quota::paused_until(runner.store(), s.id).is_some());
+        assert_eq!(woke_notice(&runner, s.id), 0);
+    }
+
+    #[tokio::test]
+    async fn a_queued_message_wakes_a_paused_session_when_the_model_is_free() {
+        let (runner, s) = paused_sleeper().await;
+        runner.send(&s, "are you there").unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(runner.is_running(s.id), "the model is still blocked");
+        runner.quotas.observe(
+            agentbench_core::Quota { model: "m".into(), window: "5h".into(), used_pct: 30.0, ..Default::default() },
+            crate::quota::now(),
+        );
+        runner.send(&s, "now").unwrap();
+        let done = wait_idle(&runner, s.id).await;
+        assert_eq!(done.status, SessionStatus::Idle);
+        assert_eq!(woke_notice(&runner, s.id), 1);
     }
 
     #[tokio::test]

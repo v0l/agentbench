@@ -239,7 +239,7 @@ pub fn from_status(body: &Value, host: &str, now: i64) -> Option<Quota> {
         .or_else(|| found(body))
         .or_else(|| body.get("summary").and_then(found))
         .or_else(|| body.get("quota").and_then(found))?;
-    if best.next_available_at.is_none() {
+    if top.is_some() {
         best.next_available_at = top;
     }
     Some(best)
@@ -416,6 +416,7 @@ pub async fn poll_once(runner: &crate::runner::Runner, model: &crate::agent::nat
         }
     }
     runner.expire_quotas();
+    runner.wake_paused();
 }
 
 pub fn spawn_poll(runner: crate::runner::Runner, model: crate::agent::native::Shared) {
@@ -906,6 +907,18 @@ mod tests {
 
     fn fine(model: &str) -> Quota {
         Quota { model: model.into(), window: "5h".into(), used_pct: 35.0, resets_at: 1_900_000_000_000, ..Quota::default() }
+    }
+
+    #[test]
+    fn a_pause_takes_the_earliest_time_the_model_is_free_not_the_7d_reset() {
+        let body = json!({
+            "next_available_at": 1_900_001_800,
+            "windows": [
+                {"window": "7d", "used_pct": 100, "resets_at": 1_900_500_000, "next_available_at": 1_900_500_000},
+                {"window": "5h", "used_pct": 96, "resets_at": 1_900_003_600}
+            ]});
+        let q = from_status(&body, "h", 1_800_000_000_000).unwrap();
+        assert_eq!(q.exhausted_until(1_800_000_000_000), Some(1_900_001_800_000));
     }
 
     #[test]

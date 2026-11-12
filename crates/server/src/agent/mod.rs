@@ -144,6 +144,9 @@ pub trait Io: Send + Sync {
     fn stopped(&self) -> bool {
         self.stop().is_cancelled()
     }
+    fn wake(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        None
+    }
     fn steer(&self) -> Option<Steer>;
     async fn ask(&self, question: Question) -> Result<String, String>;
     /// Put several questions at once; one answer back for each, in order.

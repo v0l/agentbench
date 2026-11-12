@@ -2548,10 +2548,18 @@ async fn known_reset(model: &Model, pace: &Pace, retry_after_ms: Option<i64>) ->
         &model.model,
         Duration::from_secs(5),
     )
-    .await
-    .and_then(|q| q.exhausted_until(now));
-    asked.or(retry_after_ms.map(|ms| now + ms))
+    .await;
+    let retry = retry_after_ms.map(|ms| now + ms);
+    match asked {
+        Some(q) => match q.exhausted_until(now) {
+            Some(until) => Some(until),
+            None => retry.map(|t| t.min(now + RECHECK_MS)),
+        },
+        None => retry,
+    }
 }
+
+const RECHECK_MS: i64 = 300_000;
 
 async fn wait_for_reset(
     model: &Model,
@@ -2570,9 +2578,17 @@ async fn wait_for_reset(
     );
     io.emit(Event::Paused { until, text, long: until - now > LONG_PAUSE_MS, model: model.model.clone() });
     let wait = Duration::from_millis((until - now).max(0) as u64);
+    let woken = io.wake();
+    let early = async {
+        match &woken {
+            Some(n) => n.notified().await,
+            None => std::future::pending().await,
+        }
+    };
     let slept = tokio::select! {
         _ = io.stop().cancelled() => None,
         _ = pace.clock.sleep(wait) => Some(()),
+        _ = early => Some(()),
     };
     io.emit(Event::Resumed);
     slept.ok_or_else(|| "stopped".to_string())
