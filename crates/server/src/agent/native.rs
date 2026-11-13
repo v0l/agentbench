@@ -6059,6 +6059,53 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn a_30_hour_retry_after_with_quota_at_77_percent_pauses_only_until_the_recheck() {
+        use crate::quota::fake::{Reply, ok, server};
+        let start = 1_900_000_000_000;
+        let limited = Reply {
+            status: 429,
+            headers: vec![("retry-after", "108607".into())],
+            body: "Rate limit exceeded".into(),
+        };
+        let quota = json!({"window": "7d", "used_pct": 77, "resets_at": 1_900_500_000}).to_string();
+        let (url, _) = server(vec![limited, ok(usage_events(json!({})))], Some(quota));
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.pace.clock = crate::quota::Clock::fake(start);
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, Path::new("."), "go", &io).await.unwrap();
+        let until = io
+            .events()
+            .iter()
+            .find_map(|e| match e {
+                Event::Paused { until, .. } => Some(*until),
+                _ => None,
+            })
+            .expect("paused");
+        assert_eq!(until, start + 300_000);
+        assert_eq!(native.pace.clock.now(), start + 300_000);
+    }
+
+    #[tokio::test]
+    async fn a_503_retries_and_never_pauses() {
+        use crate::quota::fake::{Reply, ok, server};
+        let start = 1_900_000_000_000;
+        let down = Reply {
+            status: 503,
+            headers: vec![("retry-after", "108607".into())],
+            body: "credential validation failed".into(),
+        };
+        let (url, _) = server(vec![down, ok(usage_events(json!({})))], None);
+        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        native.pace.clock = crate::quota::Clock::fake(start);
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, Path::new("."), "go", &io).await.unwrap();
+        let events = io.events();
+        assert!(!events.iter().any(|e| matches!(e, Event::Paused { .. })));
+        assert!(events.iter().any(|e| matches!(e, Event::Warning(w) if w.contains("retrying"))));
+        assert_eq!(native.pace.clock.now(), start);
+    }
+
+    #[tokio::test]
     async fn a_rate_limit_with_headroom_on_the_quota_endpoint_rechecks_within_minutes() {
         use crate::quota::fake::{Reply, ok, server};
         let start = 1_900_000_000_000;

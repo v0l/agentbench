@@ -2630,9 +2630,9 @@ impl App {
 
     fn session_data(ui: &mut Ui, s: &Session) {
         let (tint, word) = match (s.status, s.paused_until) {
-            (SessionStatus::Waiting, Some(t)) => (
+            (SessionStatus::Running, Some(t)) => (
                 READOUT,
-                format!("quota, resumes {}", agentbench_core::clock_hm(t)),
+                format!("paused for quota until {}", agentbench_core::clock_hm(t)),
             ),
             _ => {
                 let (tint, word) = status_look(s.status);

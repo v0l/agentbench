@@ -3814,3 +3814,66 @@ fn an_issue_card_shows_its_goal_and_the_board_groups_by_goal() {
     h.get_by_label_contains("off vision 1");
     shot(&mut h, "goal-board");
 }
+
+struct QuotaPauser;
+
+#[agentbench_server::agent::async_trait]
+impl agentbench_server::agent::Agent for QuotaPauser {
+    fn name(&self) -> &str {
+        "quotapauser"
+    }
+    fn label(&self) -> &str {
+        "Quota pauser"
+    }
+    fn available(&self) -> bool {
+        true
+    }
+    fn about(&self) -> String {
+        "test".into()
+    }
+    fn resumable(&self) -> bool {
+        false
+    }
+    async fn run(
+        &self,
+        _turn: &agentbench_server::agent::Turn<'_>,
+        io: &dyn agentbench_server::agent::Io,
+    ) -> Result<(), String> {
+        let until = agentbench_server::store::now() + 108_000_000;
+        io.emit(agentbench_server::agent::Event::Paused {
+            until,
+            text: "h: quota exhausted".into(),
+            long: false,
+            model: "m".into(),
+        });
+        io.stop().cancelled().await;
+        Ok(())
+    }
+}
+
+#[test]
+fn a_quota_paused_session_reads_paused_and_is_not_counted_as_needing_you() {
+    let rig = rig_with(vec![Box::new(QuotaPauser)]);
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: rig.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    c.add_session(&agentbench_core::NewSession {
+        project_id: project,
+        agent: "quotapauser".into(),
+        title: Some("slow chat".into()),
+        prompt: Some("go".into()),
+        ..Default::default()
+    });
+    until(&mut h, "paused", |h| {
+        h.state()
+            .overview()
+            .is_some_and(|o| o.sessions.iter().any(|s| s.agent == "quotapauser" && s.paused_until.is_some()))
+    });
+    assert_eq!(h.state().overview().map(|o| agentbench::waiting_on_you(&o.sessions)), Some(0));
+    assert_eq!(marker_count(&h), 0);
+    assert_eq!(agentbench::window_title(0), "agentbench");
+}

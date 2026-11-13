@@ -316,16 +316,18 @@ fn status_line(app: &App, width: usize) -> Line<'static> {
     }
     let mut left: Vec<Piece> = Vec::new();
     match app.session.as_ref().map(|s| s.status) {
-        Some(SessionStatus::Running) => left.push((
-            format!("{} working", SPINNER[app.frame % SPINNER.len()]),
-            Style::default().fg(Color::Yellow),
-        )),
+        Some(SessionStatus::Running) => match app.session.as_ref().and_then(|s| s.paused_until) {
+            Some(t) => left.push((
+                format!("paused for quota until {}", agentbench_core::clock_hm(t)),
+                Style::default().fg(Color::Magenta),
+            )),
+            None => left.push((
+                format!("{} working", SPINNER[app.frame % SPINNER.len()]),
+                Style::default().fg(Color::Yellow),
+            )),
+        },
         Some(SessionStatus::Waiting) => {
-            let text = match app.session.as_ref().and_then(|s| s.paused_until) {
-                Some(t) => format!("quota exhausted, resumes at {}", agentbench_core::clock_hm(t)),
-                None => "? waiting for your answer".to_string(),
-            };
-            left.push((text, Style::default().fg(Color::Magenta)))
+            left.push(("? waiting for your answer".to_string(), Style::default().fg(Color::Magenta)))
         }
         Some(SessionStatus::Failed) => {
             left.push(("failed".into(), Style::default().fg(Color::Red)))
@@ -842,10 +844,12 @@ mod tests {
         let last = out.last().unwrap();
         assert!(last.contains("5h 78%, resets "), "{last}");
         assert!(last.contains("$1.25 today, $1.25 project"), "{last}");
-        let mut paused = session(SessionStatus::Waiting);
+        let mut paused = session(SessionStatus::Running);
         paused.paused_until = Some(now + 7_800_000);
         a.open(paused, vec![]);
-        assert!(render(&mut a, 100, 10).last().unwrap().contains("quota exhausted, resumes at"));
+        let last = render(&mut a, 100, 10).last().unwrap().clone();
+        assert!(last.contains("paused for quota until"), "{last}");
+        assert!(!last.contains("waiting for your answer"), "{last}");
     }
 
     #[test]

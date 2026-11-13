@@ -6,6 +6,7 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+- A quota pause no longer shows as needs you: the session stays running, reads "paused for quota until HH:MM" and sends no needs-you notice. A far Retry-After is capped by the quota endpoint's own reading, and a 503 retries instead of pausing.
 ### Fixed
 
 - Quota notices go only to sessions on the quota's model, are sent once per window (5 minute drift tolerance), and are limited to one per session per model per 30 minutes, with an immediate notice when the quota becomes exhausted.

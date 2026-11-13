@@ -1714,7 +1714,7 @@ impl Io for Sink {
                 crate::quota::set_paused(&self.store, self.session, Some(until));
                 self.runner.quotas.block(&model, until);
                 self.entry(Entry::Warning { text: text.clone() });
-                let _ = self.store.set_status(self.session, SessionStatus::Waiting);
+                let _ = self.store.set_status(self.session, SessionStatus::Running);
                 if long {
                     crate::tools::desktop_notice("quota exhausted", &text);
                 }
@@ -1921,6 +1921,20 @@ mod tests {
         runner.expire_quotas_at(T0 + 2 * MIN);
         assert_eq!(notices(&runner, &high), 1);
         assert_eq!(notices(&runner, &other), 0);
+    }
+
+    #[tokio::test]
+    async fn the_flipping_7d_readings_from_the_field_give_one_notice_per_30_minutes() {
+        let (runner, high, _) = quota_runner();
+        let reset = T0 + 3_600_000;
+        let pcts = [77.0, 78.0, 78.0, 79.0];
+        for i in 0..40i64 {
+            let flip = if i % 2 == 0 { 0 } else { MIN - 30_000 };
+            let mut q = reading("7d", pcts[(i as usize / 2) % 4], reset + flip);
+            q.model = if i % 4 < 2 { "code-high".into() } else { "code-x-high".into() };
+            runner.observe_quota_at(q, T0 + i * MIN);
+        }
+        assert!(notices(&runner, &high) <= 2, "{}", notices(&runner, &high));
     }
 
     #[tokio::test]
@@ -3225,13 +3239,13 @@ mod tests {
         let (runner, s) = setup(Box::new(Pacer(gate.clone())));
         runner.send(&s, "go").unwrap();
         for _ in 0..200 {
-            if runner.store().session(s.id).unwrap().status == SessionStatus::Waiting {
+            if crate::quota::paused_until(runner.store(), s.id).is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let paused = runner.store().session(s.id).unwrap();
-        assert_eq!(paused.status, SessionStatus::Waiting);
+        assert_eq!(paused.status, SessionStatus::Running, "a quota pause is not a question");
         assert!(runner.with_queued(vec![paused])[0].paused_until.is_some());
         assert!(runner.quotas.exhausted_until("", crate::quota::now()).is_some());
         let msgs = runner.store().messages(s.id, 0).unwrap();
