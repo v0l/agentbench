@@ -1,0 +1,42 @@
+[package]
+name = "agent-core"
+description = "The UI-free parts of a coding agent: file, shell, code, web and skill tools, an MCP client, folder grants and a sandbox"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+
+[features]
+default = ["mcp"]
+mcp = []
+sandbox = ["dep:nono"]
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+nono = { version = "0.80", default-features = false, optional = true }
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.23"
+dirs = "6"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+ignore = "0.4"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+scraper = { version = "0.25", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "fs"] }
+tokio-util = "0.7"
+url = "2"
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
+
+[[test]]
+name = "agent_sandbox"
+path = "tests/agent_sandbox.rs"
+harness = false
+required-features = ["sandbox"]
