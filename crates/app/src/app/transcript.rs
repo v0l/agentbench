@@ -1,5 +1,6 @@
 //! The transcript: one entry per message, its tool rows and questions, and the text that summarises a tool call.
 
+use super::widgets::rail_block;
 use super::*;
 
 impl App {
