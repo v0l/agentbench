@@ -3183,8 +3183,37 @@ fn refusal(message: String) -> Failure {
     let limited = lower.contains("rate limit") || lower.contains("quota");
     match crate::quota::retry_after_ms(&reqwest::header::HeaderMap::new(), &message) {
         Some(ms) if limited => Failure::Limited { message, retry_after_ms: Some(ms) },
+        _ if provider_outage(&lower) => Failure::Transient(message),
         _ => Failure::Fatal(message),
     }
+}
+
+fn provider_outage(lower: &str) -> bool {
+    let client_error = [
+        "status: some(4",
+        "insufficient credits",
+        "not supported",
+        "bad request",
+        "too long",
+        "invalid api key",
+        "invalid key",
+    ];
+    if client_error.iter().any(|s| lower.contains(s)) {
+        return false;
+    }
+    [
+        "status: some(5",
+        "overloaded",
+        "server error",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "timed out",
+        "connection reset",
+        "credential validation failed",
+    ]
+    .iter()
+    .any(|s| lower.contains(s))
 }
 
 fn sse_data(line: &str) -> Option<&str> {
@@ -6103,6 +6132,40 @@ for line in sys.stdin:
         assert!(!events.iter().any(|e| matches!(e, Event::Paused { .. })));
         assert!(events.iter().any(|e| matches!(e, Event::Warning(w) if w.contains("retrying"))));
         assert_eq!(native.pace.clock.now(), start);
+    }
+
+    #[tokio::test]
+    async fn a_503_sent_inside_a_200_stream_retries() {
+        use crate::quota::fake::{ok, server};
+        for message in [
+            "Provider error: Server error:  (status: Some(503))",
+            "Server error: credential validation failed (status: Some(503))",
+        ] {
+            let failed = ok(sse(&[json!({"error": {"message": message}})]));
+            let (url, seen) = server(vec![failed, ok(usage_events(json!({})))], None);
+            let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+            let io = TestIo::new(Arc::new(FakeApi));
+            run(&native, Path::new("."), "go", &io).await.unwrap();
+            assert_eq!(seen.lock().unwrap().len(), 2, "{message}");
+            assert!(io.events().iter().any(|e| matches!(e, Event::Warning(w) if w.contains("retrying"))));
+        }
+    }
+
+    #[tokio::test]
+    async fn client_errors_sent_inside_a_200_stream_stay_fatal() {
+        use crate::quota::fake::{ok, server};
+        for message in [
+            "Provider error: insufficient credits (status: Some(402))",
+            "reasoning.effort is not supported for this model (status: Some(400))",
+        ] {
+            let failed = ok(sse(&[json!({"error": {"message": message}})]));
+            let (url, seen) = server(vec![failed, ok(usage_events(json!({})))], None);
+            let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+            let io = TestIo::new(Arc::new(FakeApi));
+            let e = run(&native, Path::new("."), "go", &io).await.unwrap_err();
+            assert!(e.contains("refused the request"), "{e}");
+            assert_eq!(seen.lock().unwrap().len(), 1, "{message}");
+        }
     }
 
     #[tokio::test]
