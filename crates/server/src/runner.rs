@@ -3345,6 +3345,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_30_hour_retry_after_with_quota_at_77_percent_resumes_on_the_next_poll() {
+        use crate::agent::native::{Model, Native};
+        use crate::quota::fake::{Reply, ok, server};
+        use serde_json::json;
+        let limited = Reply {
+            status: 429,
+            headers: vec![("retry-after", "108607".into())],
+            body: "Rate limit exceeded".into(),
+        };
+        let done = format!("data: {}\n\ndata: [DONE]\n\n", json!({"choices": [{"delta": {"content": "back"}}]}));
+        let quota = json!({"models": {"m": {"summary": {"used_pct": 77, "window": "7d", "resets_at": 1_900_500_000, "exhausted": false}}}}).to_string();
+        let (url, _) = server(vec![limited, ok(done)], Some(quota));
+        let model = Model { url, model: "m".into(), ..Model::default() };
+        let (runner, s) = setup(Box::new(Native::new(model.clone())));
+        runner.send(&s, "go").unwrap();
+        for _ in 0..200 {
+            if crate::quota::paused_until(runner.store(), s.id).is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let until = crate::quota::paused_until(runner.store(), s.id).expect("paused");
+        assert!(until - crate::quota::now() <= 300_000, "capped to the recheck, not 30 h");
+        assert_eq!(runner.store().session(s.id).unwrap().status, SessionStatus::Running);
+        crate::quota::poll_once(&runner, &model).await;
+        let done = wait_idle(&runner, s.id).await;
+        assert_eq!(done.status, SessionStatus::Idle);
+        assert_eq!(woke_notice(&runner, s.id), 1);
+    }
+
+    #[tokio::test]
     async fn a_queued_message_wakes_a_paused_session_when_the_model_is_free() {
         let (runner, s) = paused_sleeper().await;
         runner.send(&s, "are you there").unwrap();
