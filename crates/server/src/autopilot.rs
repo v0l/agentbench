@@ -365,11 +365,7 @@ impl Verdict {
 const JUDGE_MINUTES: &str = "autopilot_judge_minutes";
 pub const DEFAULT_JUDGE_MINUTES: u64 = 15;
 
-pub const JUDGING_RULES: &str = "Decide from what the worker actually did, not its tone. \
-     Idle after \"let me know if you want X\" is needs_followup unless X is a real user decision. \
-     A claim of passing tests without test output in the transcript is not a pass. \
-     Leftover items the worker could do itself mean needs_followup. \
-     Check the diff against the issue's acceptance criteria.";
+pub use agent_native::JUDGING_RULES;
 
 pub fn head_of(store: &Store, session: &Session) -> Option<String> {
     let tree = store.worktree(session.worktree_id).ok()?;

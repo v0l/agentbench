@@ -5,7 +5,7 @@ The agent is split into two library crates in this repo, plus the pieces that st
 | crate | licence | depends on | holds |
 |---|---|---|---|
 | `crates/agent-core` | MIT | no egui, no agentbench types | the UI-free agent kit that used to live in `egui_bench::agent` |
-| `crates/agent-native` | GPL-3.0-only | `agent-core`, `agentbench-core`, `egui_bench` (only `voice::audio`) | the native agent loop, its tools, and the contract the runner drives agents through |
+| `crates/agent-native` | GPL-3.0-only | `agent-core`, `agentbench-core` | the native agent loop, its tools, and the contract the runner drives agents through |
 | `crates/server` | GPL-3.0-only | both | runner, store, API, autopilot, and the external CLI agents |
 | `egui_bench` (branch `agent-core`) | MIT | `agent-core` | chat, pane, settings and `Agent<H>`/`Host`/`serve`, re-exporting `agent-core` under `egui_bench::agent` |
 
@@ -51,7 +51,8 @@ Boundary types that cross from UI to core: `Desk` (built from `Desk::new(ring)`,
 | `media.rs`, `screenshot.rs` | 812 | native | pictures, sound and video for `read_file`; screenshots |
 | `mod.rs`: `Context`, `Attached`, `Steer`, `Turn`, `Event`, `Decoder`, `Io`, `Api`, `Agent`, `Folding`, `Folded`, `resolve`, `brief` and its prompts, test helpers | about 520 | native | the contract between a runner and an agent; needs only `agentbench-core` |
 | `mod.rs`: `defaults()` | 3 | server glue | builds `Native` |
-| `process.rs`, `command.rs` | 438 | server glue | external CLI agents (`claude`, `codex`, `JsonCommand`); use the contract and `agent_native::tree::kill_tree` |
+| `process.rs` | 159 | native | the `Cli` trait and its blanket `impl Agent for T: Cli` (the orphan rule needs it beside `Agent`), plus `tree::kill_tree` |
+| `command.rs` | 279 | server glue | `JsonCommand`, the configurable external CLI agent |
 
 ## agentbench items outside `agent/` that native needs
 
@@ -61,7 +62,9 @@ Boundary types that cross from UI to core: `Desk` (built from `Desk::new(ring)`,
 | `http.rs` | server | native `http` | `pub use agent_native::http` |
 | `quota.rs`: `Price`, `Prices`, `Clock`, header and body parsing, `fetch`, `Quotas`, `Hint` | server | native `quota` | server `quota.rs` re-exports them and keeps `paused_until`, `set_paused`, `servers`, `poll_once`, `spawn_poll` (store and runner) |
 | `tools.rs`: `PROPOSAL`, `required` | server | native `gate` | `pub use` from `tools.rs`; `StoreApi` stays in the server |
-| `autopilot.rs`: `JUDGING_RULES` | server | native `brief` | `pub use` from `autopilot.rs` |
+| `gated`, `confirm_project` | native | native `native` (now `pub`) | they only talk to the `Api` trait; their two store-backed tests moved to the server (`agent::gate_tests`) |
+| `autopilot.rs`: `JUDGING_RULES` | server | native lib root | `pub use` from `autopilot.rs` |
+| `egui_bench::voice::audio` (`read_wav`, `to_whisper_rate`, `SPEECH_RATE`) | egui_bench | native `audio` | a copy of the three functions the agent needs, so native no longer needs egui_bench |
 | `titles::Titles` (web_fetch answers) | server | trait `agent_core::web::Reader` | `Native::with_reader`; `Titles` implements `Reader` |
 | `speech::Speech` (Whisper for sound files) | server | trait `agent_native::Ears` | `Native::with_ears`; `Speech` implements `Ears` |
 | `titles::fake`, `quota::fake` test servers | server | native `testing` (feature `testing`) | server tests use them through a dev-dependency |
@@ -74,7 +77,8 @@ Boundary types that cross from UI to core: `Desk` (built from `Desk::new(ring)`,
 ## Wiring
 
 - `egui_bench` (branch `agent-core`) depends on `agent-core` by git (`v0l/agentbench`, `master`).
-- agentbench depends on `egui_bench` by git (`agent-core` branch) and patches `agent-core` back to `crates/agent-core`, so both sides build from this checkout:
+- super-radio pins `egui_bench` 0.5.4 on egui 0.35, so it cannot take the branch yet. The `egui_bench::agent` paths it uses are all still re-exported.
+- agentbench replaces `egui_bench` with the `agent-core` branch through `[patch.crates-io]` and patches `agent-core` back to `crates/agent-core`, so both sides build from this checkout:
 
 ```toml
 [patch."https://github.com/v0l/agentbench"]
