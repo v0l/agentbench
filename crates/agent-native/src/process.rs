@@ -1,12 +1,11 @@
-use super::{Agent, Decoder, Event, Io, Turn, async_trait, brief, resolve, with_files};
+use crate::tree::kill_tree;
+use crate::{Agent, Decoder, Event, Io, Turn, async_trait, brief, resolve, with_files};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
 const STDERR_KEPT: usize = 4000;
-const TERM_GRACE: Duration = Duration::from_secs(3);
 
 pub struct Launch {
     pub program: PathBuf,
@@ -138,22 +137,4 @@ async fn run_process<T: Cli + ?Sized>(
     let code = exit.and_then(|s| s.code()).map(|c| format!(" (exit {c})")).unwrap_or_default();
     let detail = if stderr.is_empty() { "no output".to_string() } else { stderr };
     Err(format!("{} failed{code}: {detail}", cli.name()))
-}
-
-/// Stop a child and everything it started: TERM to its process group, then KILL if it lingers.
-pub(super) async fn kill_tree(child: &mut Child) {
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        signal_group(pid, "-TERM").await;
-        if tokio::time::timeout(TERM_GRACE, child.wait()).await.is_ok() {
-            return;
-        }
-        signal_group(pid, "-KILL").await;
-    }
-    let _ = child.kill().await;
-}
-
-#[cfg(unix)]
-pub(super) async fn signal_group(pid: u32, signal: &str) {
-    let _ = Command::new("kill").args([signal, &format!("-{pid}")]).status().await;
 }

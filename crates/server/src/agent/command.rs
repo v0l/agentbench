@@ -1,4 +1,4 @@
-use super::{Cli, Decoder, Event, Launch, Turn, content_text, parse};
+use agent_native::{Cli, Decoder, Event, Launch, Turn, content_text, parse};
 use agentbench_core::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -46,7 +46,7 @@ impl JsonCommand {
     }
 }
 
-#[super::async_trait]
+#[agent_native::async_trait]
 impl Cli for JsonCommand {
     fn name(&self) -> &str {
         &self.name
@@ -173,7 +173,7 @@ impl Decoder for PointerDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::decode_all;
+    use agent_native::decode_all;
 
     fn spec() -> JsonCommand {
         toml_like(serde_json::json!({
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn the_prompt_goes_on_stdin_unless_an_argument_takes_it() {
-        let c = crate::agent::context();
+        let c = agent_native::context();
         let turn = Turn {
             files: &[],
             prompt: "do it",
@@ -277,7 +277,7 @@ mod tests {
         let mut s = spec();
         s.session = None;
         assert!(!s.resumable());
-        let c = crate::agent::context();
+        let c = agent_native::context();
         let turn = Turn {
             files: &[],
             prompt: "x",

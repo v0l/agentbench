@@ -1,7 +1,7 @@
 use super::files::{self, number};
 use super::search::{EXCLUDE, INCLUDE, SKIPPED, flag, globs};
-use egui_bench::agent::grants::Access;
-use egui_bench::agent::workspace::Workspace;
+use agent_core::grants::Access;
+use agent_core::workspace::Workspace;
 use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 use regex::RegexBuilder;

@@ -7,8 +7,8 @@
 
 use super::files;
 use base64::{Engine, engine::general_purpose::STANDARD};
-use egui_bench::agent::grants::Access;
-use egui_bench::agent::workspace::Workspace;
+use agent_core::grants::Access;
+use agent_core::workspace::Workspace;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -191,7 +191,7 @@ fn image(file: &Path, shown: &str, bytes: u64) -> Result<Media, String> {
 /// A sound file as 16 kHz mono samples, the first `AUDIO_SECONDS` at most: what Whisper reads.
 /// A WAV is read here; anything else goes through ffmpeg.
 pub fn samples(file: &Path, shown: &str) -> Result<Vec<f32>, String> {
-    use egui_bench::voice::audio::{SPEECH_RATE, read_wav, to_whisper_rate};
+    use crate::audio::{SPEECH_RATE, read_wav, to_whisper_rate};
     let cut = |pcm: Vec<f32>| -> Vec<f32> {
         pcm.into_iter().take((AUDIO_SECONDS * SPEECH_RATE) as usize).collect()
     };

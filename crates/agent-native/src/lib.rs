@@ -1,0 +1,653 @@
+pub mod audio;
+pub mod browser;
+pub mod code;
+pub mod files;
+pub mod fold;
+pub mod gate;
+pub mod http;
+pub mod limits;
+pub mod media;
+pub mod native;
+mod process;
+pub mod progress;
+pub mod quota;
+pub mod replace;
+pub mod screenshot;
+pub mod search;
+pub mod secrets;
+pub mod steer;
+pub mod tree;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
+pub use async_trait::async_trait;
+pub use native::Native;
+pub use process::{Cli, Launch};
+pub use tokio_util::sync::CancellationToken;
+
+use agentbench_core::{AgentInfo, Entry, Question, SessionId, Usage};
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+#[cfg(any(test, feature = "testing"))]
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Debug)]
+pub struct Context {
+    pub session: SessionId,
+    pub project_id: agentbench_core::Id,
+    pub project: String,
+    pub project_path: String,
+    pub branch: Option<String>,
+    /// A chat in the user's home folder, which belongs to no git repository.
+    pub home: bool,
+    /// The supervisor chat, which sees every project, issue and session.
+    pub supervisor: bool,
+    pub issue: Option<agentbench_core::Id>,
+    pub api_url: String,
+    pub token: String,
+    /// What was remembered about the project with `remember`: topic and note.
+    pub notes: Vec<(String, String)>,
+    pub global_notes: Vec<(String, String)>,
+    pub automation: String,
+    pub quota: String,
+    pub vision: String,
+}
+
+/// A file the user sent with a message, written out where an agent can read it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attached {
+    pub name: String,
+    pub mime: String,
+    pub path: PathBuf,
+}
+
+/// A message sent while the agent works, and anything sent with it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Steer {
+    pub text: String,
+    pub files: Vec<Attached>,
+}
+
+impl From<&str> for Steer {
+    fn from(text: &str) -> Steer {
+        Steer { text: text.to_string(), files: Vec::new() }
+    }
+}
+
+/// The prompt with a line naming each attached file, for agents that read files themselves.
+pub fn with_files(prompt: &str, files: &[Attached]) -> String {
+    if files.is_empty() {
+        return prompt.to_string();
+    }
+    let mut out = prompt.to_string();
+    out.push_str("\n\nAttached files, read them from these paths:\n");
+    for f in files {
+        out.push_str(&format!("- {} ({}): {}\n", f.name, f.mime, f.path.display()));
+    }
+    out
+}
+
+pub struct Turn<'a> {
+    pub prompt: &'a str,
+    pub files: &'a [Attached],
+    pub cwd: &'a Path,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub resume: Option<&'a str>,
+    pub history: &'a [Entry],
+    pub context: &'a Context,
+}
+
+/// When an idle chat has its oldest part folded into a summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Folding {
+    pub idle: std::time::Duration,
+    pub at: u64,
+}
+
+/// The oldest `covers` messages of a chat's replay, summarised, and how many bytes the replay
+/// took before and after.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folded {
+    pub covers: usize,
+    pub topic: String,
+    pub text: String,
+    pub before: usize,
+    pub after: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    Started { agent_session: String },
+    Text { delta: String },
+    Thinking { text: String },
+    ToolStart { call_id: String, name: String, input: Value },
+    ToolEnd { call_id: String, name: String, output: String, error: bool },
+    Steered { text: String },
+    Usage(Usage),
+    Notice(String),
+    Paused { until: i64, text: String, long: bool, model: String },
+    Resumed,
+    Warning(String),
+    PicturesRemoved,
+    Trimmed(Vec<agentbench_core::Trim>),
+    Diagnostics { text: String, broken: Vec<String> },
+    Sent(Vec<agentbench_core::Sent>),
+    Summary(String),
+    Error(String),
+    Done,
+}
+
+pub trait Decoder: Send {
+    fn line(&mut self, line: &str) -> Vec<Event>;
+}
+
+#[async_trait]
+pub trait Io: Send + Sync {
+    fn emit(&self, event: Event);
+    /// Cancelled when the user stops the turn; anything waiting should race it.
+    fn stop(&self) -> &CancellationToken;
+    fn stopped(&self) -> bool {
+        self.stop().is_cancelled()
+    }
+    fn wake(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        None
+    }
+    fn steer(&self) -> Option<Steer>;
+    async fn ask(&self, question: Question) -> Result<String, String>;
+    /// Put several questions at once; one answer back for each, in order.
+    async fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String>;
+    fn api(&self) -> &dyn Api;
+}
+
+pub trait Api: Send + Sync {
+    fn call(&self, tool: &str, args: &Value, session: SessionId) -> Result<Value, String>;
+}
+
+#[async_trait]
+pub trait Agent: Send + Sync {
+    fn name(&self) -> &str;
+    fn label(&self) -> &str;
+    fn available(&self) -> bool;
+    fn about(&self) -> String;
+    fn resumable(&self) -> bool;
+    fn steerable(&self) -> bool {
+        false
+    }
+    fn writes_log(&self) -> bool {
+        false
+    }
+    /// Once a chat's context is this many percent full, agentbench summarises it and starts the
+    /// agent afresh. 0 for agents that manage their own context.
+    fn compact_at(&self) -> u64 {
+        0
+    }
+    async fn run(&self, turn: &Turn<'_>, io: &dyn Io) -> Result<(), String>;
+
+    fn folding(&self) -> Option<Folding> {
+        None
+    }
+
+    async fn fold(
+        &self,
+        _entries: &[Entry],
+        _model: Option<&str>,
+        _stop: &CancellationToken,
+    ) -> Result<Option<Folded>, String> {
+        Ok(None)
+    }
+
+    fn end(&self, _session: SessionId) {}
+
+    fn jobs(&self, _session: SessionId) -> Vec<agentbench_core::Job> {
+        Vec::new()
+    }
+
+    async fn kill_job(&self, _session: SessionId, _handle: &str) -> Result<(), String> {
+        Err("this agent has no background commands".into())
+    }
+
+    /// The models this agent can be told to use. Empty when it cannot say, and then the
+    /// window offers a plain text field instead of a dropdown.
+    async fn models(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn info(&self) -> AgentInfo {
+        AgentInfo {
+            name: self.name().to_string(),
+            label: self.label().to_string(),
+            available: self.available(),
+            resumable: self.resumable(),
+            about: self.about(),
+        }
+    }
+}
+
+pub fn resolve(program: &Path) -> Option<PathBuf> {
+    if program.components().count() > 1 {
+        return program.is_file().then(|| program.to_path_buf());
+    }
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths).map(|dir| dir.join(program)).find(|p| p.is_file())
+}
+
+pub fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(Value::as_str)
+}
+
+pub fn u64_at(v: &Value, key: &str) -> u64 {
+    v.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+pub fn parse(line: &str) -> Option<Value> {
+    let line = line.trim();
+    if !line.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(line).ok()
+}
+
+pub fn content_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| {
+                b.as_str().map(str::to_string).or_else(|| str_at(b, "text").map(str::to_string))
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+pub fn brief(c: &Context) -> String {
+    if c.supervisor {
+        return supervisor_brief(c);
+    }
+    if c.home {
+        return home_brief(c);
+    }
+    let mut out = format!(
+        "You are running inside agentbench, a harness that runs coding agents in git worktrees and keeps an issue tracker beside them. \
+         This is session {} in the project {} ({}).",
+        c.session, c.project, c.project_path
+    );
+    if let Some(b) = &c.branch {
+        out.push_str(&format!(" You are working on the branch {b}."));
+    }
+    if let Some(i) = c.issue {
+        out.push_str(&format!(" You were started on issue #{i}."));
+    }
+    out.push_str(&format!(
+        "\n\nThe agentbench REST API is at {url} and needs the header `Authorization: Bearer $AGENTBENCH_TOKEN` \
+         (also in the environment as AGENTBENCH_URL, AGENTBENCH_TOKEN, AGENTBENCH_SESSION and AGENTBENCH_PROJECT). \
+         Use it to keep the tracker true:\n\
+         - GET {url}/api/issues lists issues; filter by project_id {pid}.\n\
+         - POST {url}/api/issues with {{\"project_id\": {pid}, \"title\", \"body\"}} files one when you find work that is out of scope.\n\
+         - PATCH {url}/api/issues/ID with {{\"state\": \"review\"}} when you finish one, or \"done\" when it is merged.\n\
+         - POST {url}/api/issues/ID/comments with {{\"body\"}} to leave a note for the user.\n\
+         Other agents may be working in other worktrees of this project. Stay in your own worktree. \
+         When you need another worktree, create it with git worktree add beside the main checkout and agentbench will pick it up.\n\n",
+        url = c.api_url.trim_end_matches('/'),
+        pid = c.project_id,
+    ));
+    if !c.vision.trim().is_empty() {
+        out.push_str(&format!(
+            "<vision>\nThe user's vision for this project. It is read-only for you; work toward it and file follow-ups with `goal` set to one of these goal ids, or leave them in backlog.\n{}</vision>\n\n",
+            c.vision
+        ));
+    }
+    out.push_str(ORCHESTRATION);
+    out.push_str("\n\n");
+    out.push_str(FILE_TOOLS);
+    out.push_str("\n\n");
+    out.push_str(PLANNING);
+    out
+}
+
+pub const FILE_TOOLS: &str = "<file_tools>\n\
+Create files with write_file, change files with edit_file (several files and `then` for a test run in one call) or replace_in_files (a regex across files). Use bash only for programs: builds, tests, git. Do not write or edit files with sed -i, cat > or tee heredocs, or inline python or perl.\n\
+</file_tools>";
+
+const PLANNING: &str = "<planning>\n\
+Before any edit, read context, then plan the steps.\n\n\
+1. Read context first, time boxed: read the issue and its comments, `recall` the project notes, read the named files, and use code_outline and search for call sites. About 10 read-only calls. Do not design before this is done.\n\
+2. Plan the implementation steps with `todo_write` before the first edit. Each step is one coherent change that can be committed and checked on its own, with the files it touches named. A one line fix is a one item list.\n\
+3. Work the list one step at a time: failing test first, make the change, run the narrow test, commit, tick the item. If a step turns out to need more steps, add them to the list; do not fold them into the step in hand.\n\
+4. Decide once, then write. The plan is the steps, not a design document. Pick the simplest approach that satisfies the tests and record open questions as later items, not blockers. The first non-read-only call must come within 10 calls after the plan.\n\
+5. Run the full suite once at the end, narrow tests while working.\n\
+</planning>";
+
+const ORCHESTRATION: &str = "<orchestration>\n\
+When you start sub-sessions, you are the parent.\n\n\
+- Put your own session id (`$AGENTBENCH_SESSION`) in every worker prompt as `PARENT=<id>`.\n\
+- Do not block on `wait_for_session`. After `start_session`, start the next worker or do your own work. Finished workers report to you by message.\n\
+- Keep N workers running (default 3). When a report arrives, start the next todo issue straight away.\n\
+- If nothing is runnable and workers are still busy, use `wait_for_session` on the oldest one as a fallback, with a long timeout.\n\
+- Verify a report with `read_session` before moving the issue to `review`.\n\
+- Stop and `notify_user` if the same issue fails twice, or when `todo` is empty and no workers are running.\n\
+- Record the queue state in an issue comment or `remember` so a fresh parent can resume.\n\n\
+When your prompt contains `PARENT=<id>`, you are a worker.\n\n\
+- Stay in your worktree and on your issue. File out-of-scope work with `file_issue`.\n\
+- When finished, `update_issue state=review`, then as your last action `send_message id=<PARENT>` with one line: `DONE #<issue> <branch> tests:<pass|fail> <one-line result>`.\n\
+- If blocked, send `BLOCKED #<issue> <reason>` instead and stop.\n\
+- Always send exactly one final message, including when you fail.\n\
+ - When your prompt names a PARENT, questions go to that supervisor, not the user. Decide yourself when you can, and ask only when you cannot. Secrets still go to the user.\n\
+- Finish the work. Do the tests, the verification and every follow-up you can do yourself before reporting. End with a conclusion in one of two states: rigid (verified, tests pass, nothing left) or needs more work, listing only what you genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). Never end with a todo list of things you could have done.\n\
+</orchestration>";
+
+fn supervisor_brief(c: &Context) -> String {
+    format!(
+        "You are the supervisor in agentbench, a harness that runs coding agents in git worktrees and keeps an issue tracker beside them. \
+         This is session {session}, the one standing chat above all the projects. The user runs many sessions across many projects and loses track of the bugs and features they asked for. \
+         You are their memory and their project manager: you know what was asked, what was done, what is stuck and what was forgotten, and you keep the tracker true. \
+         You are not a coding agent. You never edit code or run builds. Real work is done by other sessions that you start and follow.\n\n\
+         <role>\n\
+         - Track: `user_asks` is what the user typed to every session. `list_sessions` and `list_issues` cover every project (pass `project` to narrow). `read_session` shows what a session actually did. Compare asks, replies and issues to find what is unfinished, never answered, failed, stopped, or has no issue.\n\
+         - Record: every ask that deserves an issue gets one (`file_issue` with `project`). Search the issue list first and never duplicate. Keep states honest with `update_issue` and `comment_on_issue`: doing while a session works on it, review when it reports done, done only when verified.\n\
+         - Delegate: when work must be done, `start_session` (with `project`, and `issue` when one exists) with a self-contained prompt. Hand the worker an issue whose body lists the implementation steps, or tell it to read the context and write its steps with `todo_write` before the first edit. Sessions you start, and the autopilot's, are your children: you are told every time one of them changes state, with no watch call.\n\
+         - Follow: your children are reported automatically. Use `watch_session` only for a session that is not your child, such as a user's chat. Do not poll and do not block on `wait_for_session`. When a child or watched session changes state, a message with its session id and new state arrives here. Then read the full reply with `read_session`, check it against the issue, update the tracker, and start the next step or tell the user.\n\
+         - Released sessions: when the user takes control of a session (the app's take control action, or they ask you to stop watching it), it is released and shows as user controlled. A released session is the user's: do not message, judge, stop or merge it until it is adopted again. Release one at the user's request with `unwatch_session`; take it back only when they ask, with `watch_session` and `adopt: true`.\n\
+         - Conclusion check: you are the judge of every finished worker. When the autopilot or a watched session's turn ends you get its reply, the issue, the diff stat and its test runs; answer with `judge_session` (concluded_pass, concluded_fail, needs_followup with the `followup` it should get, waiting_on_user, blocked) and a reason. Nothing is reviewed, merged or closed without your verdict, and a new commit voids it. {rules} A conclusion is either rigid (verified, tests pass, nothing left) or needs more work, listing only items the session genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). Never relay a worker's leftover list as the user's todo.\n\
+         - Autopilot: the `autopilot` tool reads the server's own worker loop (pause switch, caps, activity feed). It starts workers on todo issues in projects at autowork or above, hands each finished worker to you to judge, acts on your verdict (review, follow-up, labels), nudges stuck sessions, and in projects at ship or above merges and pushes branches you judged concluded_pass. Do not duplicate its work on the same issues; when the user asks to pause, resume or change it, call the tool and confirm the new state.\n\
+         - Manage: `stop_session`, `close_session` and `rename_session` work on any session. `list_worktrees`, `create_worktree` and `cleanup_worktree` work in any project (pass `project`). Close or clean up only when the user asked or the work is verified merged.\n\
+         - Nudge: `send_message` to a stalled or drifting session. `notify_user` only for what needs the user: a decision, a failure you cannot route around, or a finished piece of work.\n\
+         - Remember: `remember` keeps the user's standing preferences and decisions.\n\
+         - Vision: each project has a vision, the user's summary and ordered goals for it. Judge and start work against it: an issue serves a goal (`goal` on `file_issue` and `update_issue`) or is off_vision. File follow-ups with a goal, or leave them in backlog, and never start an off-vision or goalless issue without the user. `get_vision` reads it; `set_vision` is a proposal the user confirms, unless they typed the text themselves. Many issues come from agent reviews and follow-ups, not from the user: do not treat every todo as worth doing.\n\
+         </role>\n\n\
+         <vision>\n{vision}</vision>\n\n\
+         <answering>\n\
+         - Be brief. When asked for status, give a short list grouped by project: running, waiting on the user, stuck, asked for and never done. Name sessions by title and id, issues by number.\n\
+         - Say what you verified and what you only inferred. Do not report work as done because a session said so; read it.\n\
+         - When a watched session finishes and nothing needs the user, update the tracker and stay quiet.\n\
+         - You see everything, so act only on what the user asked or what keeps the tracker true. Do not start unrequested work, and do not remove worktrees or sessions without being asked.\n\
+         </answering>\n\n\
+         <automation>\n\
+         Each project has an automation level, or follows the global default. The levels, lowest first: manual (only track and report), assist (file issues, comment, keep states true, propose next work), delegate (start workers on issues the user names, send sessions back, close finished ones), autowork (the autopilot picks todo issues itself), ship (also merge concluded branches into the default branch and push, with `merge_branch`), full_auto (also the risky actions switched on for that project).\n\
+         - The tool layer enforces them. A call above the project's level does not run: it comes back as a proposal, and the user is asked in this chat. Do not try to get round a proposal another way (bash git merge, a different tool); say what you propose and why.\n\
+         - Before any risky action (deploy, prod data changes, external messages, publishing a release, spending money) call `risky_action` for that project and go on only when it says allowed. It is allowed only at full_auto with that action switched on.\n\
+         - When the user gives a standing decision in chat (\"always merge and push here\", \"never touch billing\"), record it with `set_automation`, not a note, and confirm the new level in one line. Raising asks the user to confirm; lowering applies at once.\n\
+         Levels now:\n{automation}\
+         </automation>\n\n\
+         {quota}\
+         The agentbench REST API is at {url} and needs the header `Authorization: Bearer $AGENTBENCH_TOKEN` \
+         (also in the environment as AGENTBENCH_URL, AGENTBENCH_TOKEN and AGENTBENCH_SESSION).",
+        session = c.session,
+        rules = JUDGING_RULES,
+        url = c.api_url.trim_end_matches('/'),
+        automation = c.automation,
+        quota = if c.quota.trim().is_empty() {
+            String::new()
+        } else {
+            format!("<quota>\nModel quota now (pace the work to it; do not start more workers than it can pay for):\n{}</quota>\n\n", c.quota)
+        },
+        vision = c.vision,
+    )
+}
+
+/// The brief for a chat in the home folder: no repository, branch or worktrees, just a place to
+/// do whatever the user asks.
+fn home_brief(c: &Context) -> String {
+    format!(
+        "You are running inside agentbench, a harness that runs agents and keeps an issue tracker beside them. \
+         This is session {session}, a general chat in the user's home folder ({path}). It is not tied to a git repository: \
+         expect odd jobs such as parsing or converting files, running skills, looking things up or small scripts. \
+         Work wherever the task is, and keep files you make out of the way unless the user wants them.\n\n\
+         The agentbench REST API is at {url} and needs the header `Authorization: Bearer $AGENTBENCH_TOKEN` \
+         (also in the environment as AGENTBENCH_URL, AGENTBENCH_TOKEN and AGENTBENCH_SESSION). \
+         It holds the user's projects and issues; use it only if asked to.",
+        session = c.session,
+        path = c.project_path,
+        url = c.api_url.trim_end_matches('/'),
+    )
+}
+
+impl Context {
+    pub fn env(&self) -> Vec<(String, String)> {
+        let mut pairs = vec![
+            ("URL", self.api_url.clone()),
+            ("TOKEN", self.token.clone()),
+            ("SESSION", self.session.to_string()),
+            ("PROJECT", self.project_id.to_string()),
+        ];
+        if let Some(i) = self.issue {
+            pairs.push(("ISSUE", i.to_string()));
+        }
+        pairs.into_iter().map(|(k, v)| (format!("AGENTBENCH_{k}"), v)).collect()
+    }
+}
+
+pub const JUDGING_RULES: &str = "Decide from what the worker actually did, not its tone. \
+     Idle after \"let me know if you want X\" is needs_followup unless X is a real user decision. \
+     A claim of passing tests without test output in the transcript is not a pass. \
+     Leftover items the worker could do itself mean needs_followup. \
+     Check the diff against the issue's acceptance criteria.";
+
+pub fn defaults() -> Vec<Box<dyn Agent>> {
+    vec![Box::new(Native::default())]
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub struct TestIo {
+    pub events: Mutex<Vec<Event>>,
+    pub stop: CancellationToken,
+    pub inbox: Mutex<Vec<Steer>>,
+    pub answers: Mutex<Vec<String>>,
+    pub api: Arc<dyn Api>,
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl TestIo {
+    pub fn new(api: Arc<dyn Api>) -> TestIo {
+        TestIo {
+            events: Mutex::new(Vec::new()),
+            stop: CancellationToken::new(),
+            inbox: Mutex::new(Vec::new()),
+            answers: Mutex::new(Vec::new()),
+            api,
+        }
+    }
+
+    pub fn events(&self) -> Vec<Event> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+#[async_trait]
+impl Io for TestIo {
+    fn emit(&self, event: Event) {
+        self.events.lock().unwrap().push(event);
+    }
+    fn stop(&self) -> &CancellationToken {
+        &self.stop
+    }
+    fn steer(&self) -> Option<Steer> {
+        let mut inbox = self.inbox.lock().unwrap();
+        (!inbox.is_empty()).then(|| inbox.remove(0))
+    }
+    async fn ask(&self, _question: Question) -> Result<String, String> {
+        let mut a = self.answers.lock().unwrap();
+        if a.is_empty() { Err("no answer".into()) } else { Ok(a.remove(0)) }
+    }
+    async fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String> {
+        let mut a = self.answers.lock().unwrap();
+        if a.len() < questions.len() {
+            return Err("no answer".into());
+        }
+        Ok(a.drain(..questions.len()).collect())
+    }
+    fn api(&self) -> &dyn Api {
+        self.api.as_ref()
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub struct NoApi;
+
+#[cfg(any(test, feature = "testing"))]
+impl Api for NoApi {
+    fn call(&self, tool: &str, _args: &Value, _session: SessionId) -> Result<Value, String> {
+        Err(format!("no api for {tool}"))
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn context() -> Context {
+    Context {
+        session: test_session(),
+        project_id: 4,
+        project: "demo".into(),
+        project_path: "/tmp/demo".into(),
+        branch: Some("main".into()),
+        home: false,
+        supervisor: false,
+        issue: None,
+        api_url: "http://127.0.0.1:7420".into(),
+        token: "t".into(),
+        notes: Vec::new(),
+        global_notes: Vec::new(),
+        automation: String::new(),
+        quota: String::new(),
+        vision: String::new(),
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn test_session() -> SessionId {
+    "00000000-0000-4000-8000-000000000001".parse().unwrap()
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub fn decode_all(agent: &dyn Cli, lines: &[&str]) -> Vec<Event> {
+    let mut d = agent.decoder();
+    lines.iter().flat_map(|l| d.line(l)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_text_reads_strings_and_blocks() {
+        assert_eq!(content_text(&serde_json::json!("hi")), "hi");
+        assert_eq!(
+            content_text(
+                &serde_json::json!([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}])
+            ),
+            "a\nb"
+        );
+        assert_eq!(content_text(&Value::Null), "");
+    }
+
+    #[test]
+    fn parse_skips_non_json_lines() {
+        assert!(parse("Reading additional input from stdin...").is_none());
+        assert!(parse("  {\"a\":1}  ").is_some());
+        assert!(parse("{broken").is_none());
+    }
+
+    #[test]
+    fn resolve_finds_programs_on_path_and_by_path() {
+        assert!(resolve(Path::new("sh")).is_some());
+        assert!(resolve(Path::new("/bin/sh")).is_some());
+        assert!(resolve(Path::new("definitely-not-a-real-binary-xyz")).is_none());
+    }
+
+    #[test]
+    fn every_default_agent_has_a_distinct_name() {
+        let agents = defaults();
+        let mut names: Vec<_> = agents.iter().map(|a| a.name().to_string()).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), agents.len());
+    }
+
+    #[test]
+    fn the_brief_names_the_session_and_the_api() {
+        let b = brief(&context());
+        assert!(b.contains("inside agentbench"));
+        assert!(b.contains(&format!("session {} in the project demo", test_session())));
+        assert!(b.contains("http://127.0.0.1:7420/api/issues"));
+        assert!(b.contains("branch main"));
+        assert!(b.contains("\"project_id\": 4"));
+        assert!(b.contains("<orchestration>") && b.contains("PARENT=<id>"));
+    }
+
+    #[test]
+    fn the_worker_brief_requires_reading_then_a_step_list_and_no_size_classes() {
+        let b = brief(&context());
+        assert!(b.contains("<planning>") && b.contains("`todo_write`"), "{b}");
+        assert!(b.contains("About 10 read-only calls") && b.contains("A one line fix is a one item list"));
+        for word in ["SMALL", "MEDIUM", "LARGE"] {
+            assert!(!b.contains(word), "{word}");
+        }
+        let sup = brief(&Context { supervisor: true, ..context() });
+        assert!(sup.contains("implementation steps") && sup.contains("todo_write"));
+        for word in ["SMALL", "MEDIUM", "LARGE"] {
+            assert!(!sup.contains(word), "{word}");
+        }
+    }
+
+    #[test]
+    fn the_supervisor_brief_carries_the_levels_and_says_they_are_enforced() {
+        let b = brief(&Context { supervisor: true, automation: "Global default: delegate.\n- billing (id 2): manual".into(), ..context() });
+        assert!(b.contains("- billing (id 2): manual"), "{b}");
+        assert!(b.contains("set_automation") && b.contains("risky_action") && b.contains("merge_branch"));
+        assert!(b.contains("proposal"));
+        assert!(!brief(&context()).contains("<automation>"), "only the supervisor gets it");
+    }
+
+    #[test]
+    fn the_briefs_carry_the_vision_and_the_supervisor_judges_by_it() {
+        let v = "Vision: a fast tracker\n- goal g1: boards\n";
+        let worker = brief(&Context { vision: v.into(), ..context() });
+        assert!(worker.contains("<vision>") && worker.contains("- goal g1: boards") && worker.contains("read-only"), "{worker}");
+        assert!(!brief(&context()).contains("<vision>"), "no vision, no block");
+        let sup = brief(&Context { supervisor: true, vision: "- demo (id 1): a fast tracker\n    g1: boards\n".into(), ..context() });
+        assert!(sup.contains("g1: boards"), "{sup}");
+        assert!(sup.contains("never start an off-vision or goalless issue without the user"), "{sup}");
+        assert!(sup.contains("set_vision") && sup.contains("get_vision"));
+    }
+
+    #[test]
+    fn the_supervisor_brief_names_its_job_and_not_a_repository() {
+        let b = brief(&Context { supervisor: true, ..context() });
+        assert!(b.contains("You are the supervisor"), "{b}");
+        assert!(b.contains("user_asks") && b.contains("watch_session") && b.contains("`autopilot` tool"));
+        assert!(b.contains("You are not a coding agent"));
+        assert!(!b.contains("demo") && !b.contains("<orchestration>"));
+    }
+
+    #[test]
+    fn the_prompts_require_a_conclusion_not_a_leftover_list() {
+        let worker = brief(&context());
+        assert!(worker.contains("End with a conclusion") && worker.contains("rigid"));
+        let sup = brief(&Context { supervisor: true, ..context() });
+        assert!(sup.contains("Conclusion check") && sup.contains("Never relay a worker's leftover list"));
+    }
+
+    #[test]
+    fn the_brief_for_the_home_folder_has_no_repository_in_it() {
+        let b = brief(&Context { home: true, project_path: "/home/me".into(), ..context() });
+        assert!(b.contains("general chat in the user's home folder (/home/me)"), "{b}");
+        assert!(b.contains(&test_session().to_string()));
+        assert!(!b.contains("worktree") && !b.contains("branch"), "{b}");
+    }
+
+    #[test]
+    fn attached_files_are_named_with_their_paths_for_cli_agents() {
+        let files = [Attached {
+            name: "shot.png".into(),
+            mime: "image/png".into(),
+            path: PathBuf::from("/tmp/agentbench/x/1.png"),
+        }];
+        let p = with_files("look", &files);
+        assert!(p.starts_with("look\n\nAttached files"), "{p}");
+        assert!(p.contains("- shot.png (image/png): /tmp/agentbench/x/1.png"), "{p}");
+        assert_eq!(with_files("look", &[]), "look");
+    }
+}

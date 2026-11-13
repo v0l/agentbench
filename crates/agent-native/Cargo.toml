@@ -1,0 +1,36 @@
+[package]
+name = "agent-native"
+description = "agentbench's native agent: the model loop, its tools, quota pacing and the contract a runner drives agents through"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+testing = []
+
+[dependencies]
+agentbench-core.workspace = true
+agent-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait = "0.1"
+base64 = "0.23"
+dirs = "6"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+ignore = "0.4.33"
+regex = "1.13.1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "net", "fs"] }
+tokio-tungstenite = "0.29"
+tokio-util = "0.7"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile = "3"
+toml = "0.9"

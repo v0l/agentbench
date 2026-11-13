@@ -1,9 +1,10 @@
 use super::{Agent, Context, Event, Io, Turn, async_trait, brief, files, media};
+use crate::audio::SPEECH_RATE;
 use agentbench_core::{Entry, Question, SUMMARY_PREAMBLE, Said, Sent, Usage};
-use egui_bench::agent::mcp::Mcp;
-use egui_bench::agent::skillset;
-use egui_bench::agent::tools::{self, Spec, boolean, integer, object, string};
-use egui_bench::agent::workspace::Workspace;
+use agent_core::mcp::Mcp;
+use agent_core::skillset;
+use agent_core::tools::{self, Spec, boolean, integer, object, string};
+use agent_core::workspace::Workspace;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -107,7 +108,7 @@ fn default_keep_pictures() -> usize {
 }
 
 fn default_url() -> String {
-    egui_bench::agent::config::DEFAULT_URL.to_string()
+    agent_core::config::DEFAULT_URL.to_string()
 }
 
 pub const DEFAULT_STEPS: usize = 1000;
@@ -213,15 +214,15 @@ pub struct Native {
     pub model: Shared,
     pub patience: Patience,
     /// The small model that answers `prompt` about a page for `web_fetch`.
-    pub titles: Option<crate::titles::Titles>,
+    pub reader: Option<Arc<dyn agent_core::web::Reader>>,
     /// Commands the agents left running with `bash` and `background`.
-    pub jobs: egui_bench::agent::jobs::Jobs,
+    pub jobs: agent_core::jobs::Jobs,
     pub secrets: super::secrets::Secrets,
     /// Language servers, for the `code_*` tools and the errors shown after an edit.
     pub code: std::sync::Arc<super::code::Code>,
     /// Whisper, for a sound file `read_file` is asked for: the model gets the words, since most
     /// models behind a router take no audio and refuse the turn if they are sent some.
-    pub speech: Option<crate::speech::Speech>,
+    pub ears: Option<Arc<dyn Ears>>,
     pub browsers: super::browser::Browsers,
     pub mcp: Arc<Mcp>,
     pub pace: Pace,
@@ -247,7 +248,7 @@ pub struct Patience {
 impl Default for Patience {
     fn default() -> Self {
         // The stub servers in tests answer one request per reply, so they are not probed.
-        let probe = if cfg!(test) { Duration::ZERO } else { Duration::from_secs(4) };
+        let probe = if cfg!(any(test, feature = "testing")) { Duration::ZERO } else { Duration::from_secs(4) };
         Patience { headers: HEADERS, stall: STALL, probe, tool: TOOL_LIMIT }
     }
 }
@@ -257,13 +258,13 @@ impl Default for Native {
         Native {
             model: Shared::default(),
             patience: Patience::default(),
-            titles: None,
+            reader: None,
             jobs: Default::default(),
             secrets: Default::default(),
             code: std::sync::Arc::new(super::code::Code::new(super::code::unconfined(
                 super::code::Settings::default(),
             ))),
-            speech: None,
+            ears: None,
             browsers: Default::default(),
             mcp: Arc::new(Mcp::new(mcp_settings())),
             pace: Pace::default(),
@@ -271,8 +272,8 @@ impl Default for Native {
     }
 }
 
-pub fn mcp_settings() -> egui_bench::agent::mcp::Settings {
-    egui_bench::agent::mcp::Settings {
+pub fn mcp_settings() -> agent_core::mcp::Settings {
+    agent_core::mcp::Settings {
         project_files: vec![".mcp.json".into()],
         client: "agentbench".into(),
         ..Default::default()
@@ -288,8 +289,8 @@ impl Native {
             .filter(|l| {
                 !matches!(
                     l.health,
-                    egui_bench::agent::code::Health::Missing
-                        | egui_bench::agent::code::Health::Failed
+                    agent_core::code::Health::Missing
+                        | agent_core::code::Health::Failed
                 )
             })
             .map(|l| l.name)
@@ -307,9 +308,13 @@ impl Native {
         Native { model, ..Native::default() }
     }
 
-    /// Answer `web_fetch` prompts with the title model.
-    pub fn with_titles(mut self, titles: crate::titles::Titles) -> Native {
-        self.titles = Some(titles);
+    pub fn with_reader(mut self, reader: Arc<dyn agent_core::web::Reader>) -> Native {
+        self.reader = Some(reader);
+        self
+    }
+
+    pub fn with_ears(mut self, ears: Arc<dyn Ears>) -> Native {
+        self.ears = Some(ears);
         self
     }
 }
@@ -1113,7 +1118,7 @@ fn offered(base: &Model, mcp: bool, supervisor: bool) -> Vec<Spec> {
     let mut all: Vec<Spec> =
         specs().into_iter().filter(|t| any || t.name != "switch_model").collect();
     if mcp {
-        all.push(egui_bench::agent::mcp::spec());
+        all.push(agent_core::mcp::spec());
     }
     all
 }
@@ -1908,9 +1913,9 @@ impl Agent for Native {
                             )
                             .await
                         }
-                        "read_file" if media::is_audio(&args) && self.speech.is_some() => {
-                            let speech = self.speech.clone().unwrap_or_default();
-                            transcribe(&workspace, &args, &speech).await
+                        "read_file" if media::is_audio(&args) && self.ears.is_some() => {
+                            let ears = self.ears.clone().expect("checked above");
+                            transcribe(&workspace, &args, ears.as_ref()).await
                         }
                         "read_file" => {
                             let found = {
@@ -1939,7 +1944,7 @@ impl Agent for Native {
                                 .act(&turn.context.session.to_string(), &workspace, &args, io.stop())
                                 .await
                         }
-                        egui_bench::agent::mcp::NAME => {
+                        agent_core::mcp::NAME => {
                             self.mcp.run(&args, workspace.root(), io.stop()).await.map(|a| {
                                 attached.extend(
                                     a.images.iter().map(|i| media::inline_picture(&i.mime, &i.data)),
@@ -2313,15 +2318,21 @@ async fn ask_window(url: &str, key: &str, model: &str) -> Option<u64> {
     ollama_window(&shown)
 }
 
+#[async_trait]
+pub trait Ears: Send + Sync {
+    fn pick(&self, asked: &str) -> String;
+    async fn read(&self, id: &str, pcm: Vec<f32>) -> Result<(String, &'static str), String>;
+}
+
 /// A sound file read as the words in it, with Whisper. The model is told it is a transcript, so it
 /// knows it has the words and not the voice.
 async fn transcribe(
     ws: &Workspace,
     args: &Value,
-    speech: &crate::speech::Speech,
+    speech: &dyn Ears,
 ) -> Result<String, String> {
     let path = files::text(args, &files::PATH).ok_or("missing `path`")?.to_string();
-    let file = ws.resolve_for(&path, egui_bench::agent::grants::Access::Read)?;
+    let file = ws.resolve_for(&path, agent_core::grants::Access::Read)?;
     let shown = ws.shown(&file);
     let pcm = {
         let (file, shown) = (file.clone(), shown.clone());
@@ -2329,7 +2340,7 @@ async fn transcribe(
             .await
             .map_err(|e| e.to_string())??
     };
-    let seconds = pcm.len() as f32 / egui_bench::voice::audio::SPEECH_RATE as f32;
+    let seconds = pcm.len() as f32 / SPEECH_RATE as f32;
     let model = speech.pick("");
     let (text, on) = speech.read(&model, pcm).await?;
     let text = text.trim();
@@ -2715,7 +2726,7 @@ pub fn describe(e: &reqwest::Error) -> String {
 
 /// How long to wait before retry number `attempt` (1-based): 2s, 4s, 8s.
 fn backoff(attempt: u32) -> Duration {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "testing")) {
         return Duration::from_millis(5);
     }
     Duration::from_secs(1 << attempt.min(6))
@@ -2795,7 +2806,7 @@ impl Native {
             }
             "bash" if args.get("background").and_then(Value::as_bool).unwrap_or(false) => {
                 let command = files::text(args, &["command", "cmd"]).ok_or("missing `command`")?;
-                let confine = egui_bench::agent::spawn::Confine::Open { env: cx.env() };
+                let confine = agent_core::spawn::Confine::Open { env: cx.env() };
                 let handle =
                     self.jobs.start(&cx.session.to_string(), ws.root(), command, &confine)?;
                 Ok(format!(
@@ -2819,7 +2830,7 @@ impl Native {
                 let wait = number(&["timeout_s", "timeout"]).map_or(WAIT_DEFAULT, |n| n as u64);
                 wait_for_session(args, Duration::from_secs(wait.clamp(1, WAIT_MAX)), cx, io).await
             }
-            "todo_write" => egui_bench::agent::todo::write(args),
+            "todo_write" => agent_core::todo::write(args),
             "bash" => {
                 let command = files::text(args, &["command", "cmd"]).ok_or("missing `command`")?;
                 let note = steer_note(command, io);
@@ -2840,12 +2851,12 @@ impl Native {
             n if super::code::TOOLS.contains(&n) => {
                 self.watched(self.code.run(n, args, ws, io.stop()), ws.root(), io).await
             }
-            "web_search" => egui_bench::agent::web::search(args, io.stop()).await,
+            "web_search" => agent_core::web::search(args, io.stop()).await,
             "web_fetch" => {
-                let reader = self.titles.as_ref().map(|t| t as &dyn egui_bench::agent::web::Reader);
-                egui_bench::agent::web::fetch(args, ws, reader, io.stop()).await
+                let reader = self.reader.as_deref();
+                agent_core::web::fetch(args, ws, reader, io.stop()).await
             }
-            "find_skills" => egui_bench::agent::skills::find(args, io.stop()).await,
+            "find_skills" => agent_core::skills::find(args, io.stop()).await,
             "start_session" if args.get("project").is_some_and(|p| !p.is_null()) => {
                 confirm_project(args, cx, io).await?;
                 gated("start_session", args, cx, io)
@@ -2943,10 +2954,10 @@ const DENY: &str = "Deny";
 const DO_ONCE: &str = "Do it this once";
 const NOT_NOW: &str = "No";
 
-async fn gated(tool: &str, args: &Value, cx: &Context, io: &dyn Io) -> Result<Value, String> {
+pub async fn gated(tool: &str, args: &Value, cx: &Context, io: &dyn Io) -> Result<Value, String> {
     let api = io.api();
     let e = match api.call(tool, args, cx.session) {
-        Err(e) if e.starts_with(crate::tools::PROPOSAL) => e,
+        Err(e) if e.starts_with(crate::gate::PROPOSAL) => e,
         other => return other,
     };
     let detail: Value = e
@@ -2958,7 +2969,7 @@ async fn gated(tool: &str, args: &Value, cx: &Context, io: &dyn Io) -> Result<Va
     let project = detail["project"].clone();
     let name = detail["project_name"].as_str().unwrap_or("the project").to_string();
     let needs = detail["needs"].as_str().unwrap_or_default().to_string();
-    let raise = crate::tools::required(&key).map(|l| format!("Raise {name} to {}", l.label()));
+    let raise = crate::gate::required(&key).map(|l| format!("Raise {name} to {}", l.label()));
     let mut options = vec![DO_ONCE.to_string()];
     options.extend(raise.clone());
     options.push(NOT_NOW.into());
@@ -2984,7 +2995,7 @@ async fn gated(tool: &str, args: &Value, cx: &Context, io: &dyn Io) -> Result<Va
 
 /// Before a session is started in another project, ask the user, unless they have said always.
 /// Only the user's answer records a permission; the model cannot.
-async fn confirm_project(args: &Value, cx: &Context, io: &dyn Io) -> Result<(), String> {
+pub async fn confirm_project(args: &Value, cx: &Context, io: &dyn Io) -> Result<(), String> {
     let api = io.api();
     let target = args.get("project").cloned().unwrap_or(Value::Null);
     let found = api.call("check_project", &json!({ "project": target }), cx.session)?;
@@ -3030,7 +3041,7 @@ async fn wait_for_session(
 ) -> Result<String, String> {
     let id = args.get("id").cloned().ok_or("missing `id`")?;
     let started = Instant::now();
-    let poll = if cfg!(test) { Duration::from_millis(20) } else { Duration::from_secs(2) };
+    let poll = if cfg!(any(test, feature = "testing")) { Duration::from_millis(20) } else { Duration::from_secs(2) };
     loop {
         let status = io.api().call("session_status", &json!({ "id": id }), cx.session)?;
         let busy = status["busy"].as_bool().unwrap_or(false);
@@ -3333,7 +3344,7 @@ async fn bash(
     if status.is_none() {
         #[cfg(unix)]
         if let Some(pid) = child.id() {
-            super::process::signal_group(pid, "-KILL").await;
+            crate::tree::signal_group(pid, "-KILL").await;
         }
         let _ = child.kill().await;
     }
@@ -3373,7 +3384,7 @@ async fn bash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{Api, TestIo, context};
+    use crate::{Api, TestIo, context};
     use std::io::{Read, Write};
     use std::sync::Arc;
 
@@ -3615,7 +3626,7 @@ mod tests {
             vec![say("done")],
         ]);
         let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
-        native.code = Arc::new(super::super::code::Code::new(super::super::code::unconfined(
+        native.code = Arc::new(crate::code::Code::new(crate::code::unconfined(
             Default::default(),
         )));
         let io = TestIo::new(Arc::new(FakeApi));
@@ -3624,7 +3635,7 @@ mod tests {
         let system = first["messages"][0]["content"].as_str().unwrap().to_string();
         if native.usable_languages(dir.path()).is_empty() {
             assert!(
-                super::super::resolve(Path::new("rust-analyzer")).is_none(),
+                crate::resolve(Path::new("rust-analyzer")).is_none(),
                 "rust-analyzer is installed but no language was found"
             );
             assert!(!system.contains("<code_navigation>"));
@@ -3646,7 +3657,7 @@ mod tests {
     /// Needs rust-analyzer; skipped where it is not installed.
     #[tokio::test(flavor = "multi_thread")]
     async fn errors_from_the_language_server_follow_an_edit_in_the_configured_role() {
-        if super::super::resolve(Path::new("rust-analyzer")).is_none() {
+        if crate::resolve(Path::new("rust-analyzer")).is_none() {
             eprintln!("rust-analyzer is not installed; skipping");
             return;
         }
@@ -3669,8 +3680,8 @@ mod tests {
                 vec![say("fixing")],
             ]);
             let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
-            native.code = Arc::new(super::super::code::Code::new(super::super::code::unconfined(
-                super::super::code::Settings { role: role.into(), ..Default::default() },
+            native.code = Arc::new(crate::code::Code::new(crate::code::unconfined(
+                crate::code::Settings { role: role.into(), ..Default::default() },
             )));
             let io = TestIo::new(Arc::new(FakeApi));
             run(&native, dir.path(), "break it", &io).await.unwrap();
@@ -3698,7 +3709,7 @@ mod tests {
     /// Needs rust-analyzer; skipped where it is not installed.
     #[tokio::test(flavor = "multi_thread")]
     async fn diagnostics_from_an_earlier_turn_are_replayed_and_a_fix_in_a_later_one_is_reported() {
-        if super::super::resolve(Path::new("rust-analyzer")).is_none() {
+        if crate::resolve(Path::new("rust-analyzer")).is_none() {
             eprintln!("rust-analyzer is not installed; skipping");
             return;
         }
@@ -3725,8 +3736,8 @@ mod tests {
             vec![say("fixed")],
         ]);
         let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
-        native.code = Arc::new(super::super::code::Code::new(super::super::code::unconfined(
-            super::super::code::Settings { role: "developer".into(), ..Default::default() },
+        native.code = Arc::new(crate::code::Code::new(crate::code::unconfined(
+            crate::code::Settings { role: "developer".into(), ..Default::default() },
         )));
         let first = TestIo::new(Arc::new(FakeApi));
         run(&native, dir.path(), "break it", &first).await.unwrap();
@@ -3964,7 +3975,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let io = TestIo::new(Arc::new(FakeApi));
         let c = context();
-        let limits = super::super::limits::Limits { memory_mb: Some(100) };
+        let limits = crate::limits::Limits { memory_mb: Some(100) };
         let ran = bash(
             dir.path(),
             "python3 -c 'b = bytearray(300 << 20); import time; time.sleep(30)'",
@@ -4081,96 +4092,6 @@ mod tests {
             wait_for_session(&json!({"id": "x"}), Duration::ZERO, &context(), &io).await.unwrap();
         assert!(out.contains("still busy"), "{out}");
         assert!(wait_for_session(&json!({}), Duration::ZERO, &context(), &io).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn a_proposal_asks_the_user_and_runs_only_what_they_allowed() {
-        use agentbench_core::{Automation, ProjectPatch};
-        let dir = tempfile::tempdir().unwrap();
-        let s = crate::store::Store::memory().unwrap();
-        let (p, _) = crate::store::testing::project(&s, "/a");
-        let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
-        let boss = s.add_session(s.main_worktree(sup.id).unwrap().id, "native", "boss", None, None).unwrap();
-        s.update_project(p.id, &ProjectPatch { automation: Some(Some(Automation::Manual)), ..Default::default() }).unwrap();
-        let mut c = context();
-        c.session = boss.id;
-        let api = Arc::new(crate::tools::StoreApi::new(s.clone()));
-        let file = json!({"project": p.id, "title": "found it"});
-        let ask = |answer: &str| {
-            let io = TestIo::new(api.clone());
-            io.answers.lock().unwrap().push(answer.to_string());
-            io
-        };
-        let count = || s.issues().unwrap().len();
-
-        let e = gated("file_issue", &file, &c, &ask("No")).await.unwrap_err();
-        assert!(e.contains("said no") && e.contains("needs assist"), "{e}");
-        assert!(gated("file_issue", &file, &c, &TestIo::new(api.clone())).await.is_err(), "no answer");
-        assert_eq!(count(), 0);
-
-        gated("file_issue", &file, &c, &ask("Do it this once")).await.unwrap();
-        assert_eq!(count(), 1);
-        assert_eq!(s.project(p.id).unwrap().automation, Some(Automation::Manual));
-        assert!(gated("file_issue", &file, &c, &ask("No")).await.is_err(), "once is once");
-
-        let name = s.project(p.id).unwrap().name;
-        gated("file_issue", &file, &c, &ask(&format!("Raise {name} to assist"))).await.unwrap();
-        assert_eq!(s.project(p.id).unwrap().automation, Some(Automation::Assist));
-        gated("file_issue", &file, &c, &TestIo::new(api.clone())).await.unwrap();
-        assert_eq!(count(), 3);
-
-        let up = json!({"project": p.id, "level": "ship"});
-        gated("set_automation", &up, &c, &ask("Do it this once")).await.unwrap();
-        assert_eq!(s.project(p.id).unwrap().automation, Some(Automation::Ship), "a raise confirmed in chat persists");
-        assert!(!AGENTBENCH_TOOLS.contains(&"approve_action"), "the model cannot approve its own proposals");
-    }
-
-    #[tokio::test]
-    async fn another_project_is_entered_only_after_the_user_says_so() {
-        let s = crate::store::Store::memory().unwrap();
-        let (_, main) = crate::store::testing::project(&s, "/a");
-        let other = s.add_project("other", "/b", Some("main"), None).unwrap();
-        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
-        let mut c = context();
-        c.session = me.id;
-        let api = Arc::new(crate::tools::StoreApi::new(s.clone()));
-        let args = json!({"project": other.id, "prompt": "go"});
-        let ask = |answer: &str| {
-            let io = TestIo::new(api.clone());
-            io.answers.lock().unwrap().push(answer.to_string());
-            io
-        };
-
-        assert!(confirm_project(&args, &c, &ask("Deny")).await.is_err());
-        assert!(confirm_project(&args, &c, &ask("anything else")).await.is_err());
-        assert!(confirm_project(&args, &c, &TestIo::new(api.clone())).await.is_err(), "no answer");
-
-        confirm_project(&args, &c, &ask("Allow once")).await.unwrap();
-        assert!(s.setting("start_session_projects").unwrap().is_none());
-
-        confirm_project(&args, &c, &ask("Always allow in other")).await.unwrap();
-        assert_eq!(
-            s.setting("start_session_projects").unwrap().unwrap(),
-            format!("[{}]", other.id)
-        );
-        // Now it does not ask: with no answer queued it still passes.
-        confirm_project(&args, &c, &TestIo::new(api.clone())).await.unwrap();
-
-        let s2 = crate::store::Store::memory().unwrap();
-        let (_, main2) = crate::store::testing::project(&s2, "/a");
-        let other2 = s2.add_project("other", "/b", Some("main"), None).unwrap();
-        let me2 = s2.add_session(main2.id, "native", "me", None, None).unwrap();
-        c.session = me2.id;
-        let api2 = Arc::new(crate::tools::StoreApi::new(s2.clone()));
-        let io = TestIo::new(api2.clone());
-        io.answers.lock().unwrap().push("Always allow, any project".into());
-        confirm_project(&json!({"project": "other"}), &c, &io).await.unwrap();
-        assert_eq!(s2.setting("start_session_any_project").unwrap().as_deref(), Some("1"));
-        let _ = other2;
-        // Naming the session's own project never asks.
-        confirm_project(&json!({"project": main2.project_id}), &c, &TestIo::new(api2))
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
@@ -4408,7 +4329,7 @@ mod tests {
             vec![say("a board")],
         ]);
         let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
-        native.mcp = Arc::new(Mcp::new(egui_bench::agent::mcp::Settings {
+        native.mcp = Arc::new(Mcp::new(agent_core::mcp::Settings {
             files: Vec::new(),
             ..mcp_settings()
         }));
@@ -4481,26 +4402,30 @@ for line in sys.stdin:
         assert!(tool_at < messages.len() - 1, "media must follow every tool result");
     }
 
-    /// The trigger was a WAV read on a model behind a router that takes no audio: the router
-    /// refused the whole turn. Now the model gets Whisper's words and no sound at all. Needs a
-    /// Whisper model on disc, in AGENTBENCH_TEST_MODELS (a folder holding whisper-base.en), and a
-    /// recording of speech in AGENTBENCH_TEST_WAV; skipped without them.
+    struct FixedEars;
+
+    #[async_trait]
+    impl Ears for FixedEars {
+        fn pick(&self, _asked: &str) -> String {
+            "whisper-base.en".into()
+        }
+
+        async fn read(&self, _id: &str, pcm: Vec<f32>) -> Result<(String, &'static str), String> {
+            assert_eq!(pcm.len(), 1600);
+            Ok(("hello from agentbench".into(), "CPU"))
+        }
+    }
+
     #[tokio::test]
     async fn read_file_on_a_sound_gives_the_model_the_words_and_no_audio() {
-        let (Some(models), Some(wav)) =
-            (std::env::var_os("AGENTBENCH_TEST_MODELS"), std::env::var_os("AGENTBENCH_TEST_WAV"))
-        else {
-            eprintln!("set AGENTBENCH_TEST_MODELS and AGENTBENCH_TEST_WAV to run this; skipping");
-            return;
-        };
         let dir = tempfile::tempdir().unwrap();
-        std::fs::copy(&wav, dir.path().join("said.wav")).unwrap();
+        std::fs::write(dir.path().join("said.wav"), crate::audio::wav(&[1000; 1600], 16_000)).unwrap();
         let (url, asked) = stub(vec![
             vec![call("c1", "read_file", json!({"path": "said.wav"}))],
             vec![say("it matches")],
         ]);
-        let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
-        native.speech = Some(crate::speech::Speech::new(models.into(), "whisper-base.en"));
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() })
+            .with_ears(Arc::new(FixedEars));
         let io = TestIo::new(Arc::new(FakeApi));
         run(&native, dir.path(), "check it", &io).await.unwrap();
         let _ = asked.recv().unwrap();
@@ -4512,7 +4437,7 @@ for line in sys.stdin:
         let text = tool["content"].as_str().unwrap().to_lowercase();
         assert!(text.contains("transcribed by whisper-base.en"), "{text}");
         assert!(text.contains("not the sound itself"), "{text}");
-        assert!(text.contains("agentbench") || text.contains("hello"), "the words: {text}");
+        assert!(text.contains("hello from agentbench"), "the words: {text}");
     }
 
     #[test]
@@ -4531,7 +4456,7 @@ for line in sys.stdin:
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
         let c = context();
-        let files = [crate::agent::Attached {
+        let files = [crate::Attached {
             name: "screen.png".into(),
             mime: "image/png".into(),
             path: shot,
@@ -4658,7 +4583,7 @@ for line in sys.stdin:
             .collect()
     }
 
-    fn history_turn<'a>(dir: &'a Path, c: &'a crate::agent::Context, prompt: &'a str, history: &'a [Entry]) -> Turn<'a> {
+    fn history_turn<'a>(dir: &'a Path, c: &'a crate::Context, prompt: &'a str, history: &'a [Entry]) -> Turn<'a> {
         Turn { prompt, files: &[], cwd: dir, model: None, effort: None, resume: None, history, context: c }
     }
 
@@ -4762,7 +4687,7 @@ for line in sys.stdin:
         let (url, asked) = stub(vec![vec![refusal], vec![say("seen")], vec![say("again")]]);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let c = context();
-        let files = [crate::agent::Attached {
+        let files = [crate::Attached {
             name: "screen.png".into(),
             mime: "image/png".into(),
             path: shot,
@@ -4923,7 +4848,7 @@ for line in sys.stdin:
                 ],
             });
         }
-        let stop = crate::agent::CancellationToken::new();
+        let stop = crate::CancellationToken::new();
         let folded = native.fold(&entries, None, &stop).await.unwrap().unwrap();
         assert_eq!((folded.covers, folded.topic.as_str()), (2, "login"));
         assert_eq!(folded.text, "We fixed login.");
@@ -5121,7 +5046,7 @@ for line in sys.stdin:
             ok.contains(&dir.path().canonicalize().unwrap().display().to_string())
                 || ok.contains(&dir.path().display().to_string())
         );
-        assert!(ok.contains(&format!("\n{}\n", crate::agent::test_session())));
+        assert!(ok.contains(&format!("\n{}\n", crate::test_session())));
         let bad = bash(dir.path(), "echo oops >&2; exit 3", None, Default::default(), &c, &io).await.unwrap_err();
         assert!(bad.contains("oops") && bad.contains("exit 3"), "{bad}");
         let slow = bash(dir.path(), "sleep 5", Some(1), Default::default(), &c, &io).await.unwrap_err();
@@ -5644,7 +5569,7 @@ for line in sys.stdin:
     #[tokio::test]
     async fn a_bad_gateway_page_is_a_short_retry_warning() {
         let page = "<html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center><hr><center>nginx</center></body></html>";
-        let (url, _) = crate::titles::fake::server(vec![
+        let (url, _) = crate::testing::titles::server(vec![
             (502, page.into()),
             (200, format!("data: {}\n\ndata: [DONE]\n\n", say("ok"))),
         ]);
@@ -5666,7 +5591,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn an_error_status_is_not_retried() {
-        let (url, seen) = crate::titles::fake::server(vec![(500, "{}".into())]);
+        let (url, seen) = crate::testing::titles::server(vec![(500, "{}".into())]);
         let dir = tempfile::tempdir().unwrap();
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
@@ -5985,7 +5910,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn cost_and_quota_come_from_the_stream() {
-        use crate::quota::fake::{ok, server};
+        use crate::testing::quota::{ok, server};
         let body = usage_events(json!({
             "cost_usd": 0.42,
             "quota": {"window": "5h", "used_pct": 62, "resets_at": 1_900_000_000}
@@ -6003,7 +5928,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn cost_and_quota_come_from_the_headers_when_the_body_has_none() {
-        use crate::quota::fake::{Reply, server};
+        use crate::testing::quota::{Reply, server};
         let reply = Reply {
             status: 200,
             headers: vec![
@@ -6025,7 +5950,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn the_price_table_fills_in_a_missing_cost_and_local_models_stay_free() {
-        use crate::quota::fake::{ok, server};
+        use crate::testing::quota::{ok, server};
         let (url, _) = server(vec![ok(usage_events(json!({})))], None);
         let native = Native::new(Model { url, model: "claude-sonnet-4-5".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
@@ -6041,7 +5966,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn a_rate_limit_with_a_known_reset_pauses_then_resumes_on_the_fake_clock() {
-        use crate::quota::fake::{Reply, ok, server};
+        use crate::testing::quota::{Reply, ok, server};
         let start = 1_900_000_000_000;
         let limited = Reply {
             status: 429,
@@ -6073,7 +5998,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn the_quota_endpoint_sets_the_resume_time_over_the_retry_after() {
-        use crate::quota::fake::{Reply, ok, server};
+        use crate::testing::quota::{Reply, ok, server};
         let start = 1_900_000_000_000;
         let limited = Reply { status: 429, headers: vec![], body: "slow down".into() };
         let quota = json!({"window": "5h", "used_pct": 100, "resets_at": 1_900_003_600,
@@ -6089,7 +6014,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn a_30_hour_retry_after_with_quota_at_77_percent_pauses_only_until_the_recheck() {
-        use crate::quota::fake::{Reply, ok, server};
+        use crate::testing::quota::{Reply, ok, server};
         let start = 1_900_000_000_000;
         let limited = Reply {
             status: 429,
@@ -6116,7 +6041,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn a_503_retries_and_never_pauses() {
-        use crate::quota::fake::{Reply, ok, server};
+        use crate::testing::quota::{Reply, ok, server};
         let start = 1_900_000_000_000;
         let down = Reply {
             status: 503,
@@ -6136,7 +6061,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn a_503_sent_inside_a_200_stream_retries() {
-        use crate::quota::fake::{ok, server};
+        use crate::testing::quota::{ok, server};
         for message in [
             "Provider error: Server error:  (status: Some(503))",
             "Server error: credential validation failed (status: Some(503))",
@@ -6153,7 +6078,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn client_errors_sent_inside_a_200_stream_stay_fatal() {
-        use crate::quota::fake::{ok, server};
+        use crate::testing::quota::{ok, server};
         for message in [
             "Provider error: insufficient credits (status: Some(402))",
             "reasoning.effort is not supported for this model (status: Some(400))",
@@ -6170,7 +6095,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn a_rate_limit_with_headroom_on_the_quota_endpoint_rechecks_within_minutes() {
-        use crate::quota::fake::{Reply, ok, server};
+        use crate::testing::quota::{Reply, ok, server};
         let start = 1_900_000_000_000;
         let limited = Reply { status: 429, headers: vec![], body: "Rate limit exceeded. Retry after: 7200000ms".into() };
         let quota = json!({"window": "7d", "used_pct": 56, "resets_at": 1_900_500_000}).to_string();
@@ -6184,7 +6109,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn a_rate_limit_with_no_known_reset_still_fails() {
-        use crate::quota::fake::{Reply, server};
+        use crate::testing::quota::{Reply, server};
         let limited = Reply { status: 429, headers: vec![], body: "too many".into() };
         let (url, _) = server(vec![limited], None);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });

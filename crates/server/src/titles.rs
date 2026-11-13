@@ -5,7 +5,9 @@
 //! the native agent's own model, so a bare install titles chats with the model
 //! it already has.
 
-use crate::agent::native::Shared;
+use agent_native::native::Shared;
+#[cfg(test)]
+pub(crate) use agent_native::testing::titles as fake;
 use agentbench_core::Entry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -96,7 +98,7 @@ impl TitleModel {
     /// Where requests go: this model, with the native agent's model filling in whatever
     /// was not set. The native agent's key is only borrowed when the server is borrowed
     /// too, so it never goes to a server it was not given for.
-    pub fn resolve(&self, main: &crate::agent::native::Model) -> Option<Target> {
+    pub fn resolve(&self, main: &agent_native::native::Model) -> Option<Target> {
         if !self.enabled {
             return None;
         }
@@ -111,8 +113,8 @@ impl TitleModel {
     }
 }
 
-#[egui_bench::agent::async_trait]
-impl egui_bench::agent::web::Reader for Titles {
+#[agent_core::async_trait]
+impl agent_core::web::Reader for Titles {
     async fn extract(&self, text: &str, prompt: &str) -> Result<String, String> {
         Titles::extract(self, text, prompt).await
     }
@@ -131,7 +133,7 @@ impl Titles {
         *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
     }
 
-    pub fn main(&self) -> crate::agent::native::Model {
+    pub fn main(&self) -> agent_native::native::Model {
         self.main.get()
     }
 
@@ -279,7 +281,7 @@ pub(crate) async fn ask(
         let resp = req
             .send()
             .await
-            .map_err(|e| format!("{}: {}", target.url, crate::agent::native::describe(&e)))?;
+            .map_err(|e| format!("{}: {}", target.url, agent_native::native::describe(&e)))?;
         let status = resp.status().as_u16();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         Ok((status, text))
@@ -336,75 +338,10 @@ pub fn clean(raw: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-pub(crate) mod fake {
-    use serde_json::{Value, json};
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
-
-    /// A server that answers each request from `replies` and records the bodies.
-    pub(crate) fn server(replies: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<Value>>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1", listener.local_addr().unwrap());
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let log = seen.clone();
-        std::thread::spawn(move || {
-            for (status, reply) in replies {
-                let Ok((mut stream, _)) = listener.accept() else { return };
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                let body = loop {
-                    let n = stream.read(&mut chunk).unwrap_or(0);
-                    buf.extend_from_slice(&chunk[..n]);
-                    let Some(split) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
-                        if n == 0 {
-                            return;
-                        }
-                        continue;
-                    };
-                    let head = String::from_utf8_lossy(&buf[..split]).to_lowercase();
-                    let len = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .and_then(|v| v.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if buf.len() >= split + 4 + len {
-                        break buf[split + 4..split + 4 + len].to_vec();
-                    }
-                    if n == 0 {
-                        return;
-                    }
-                };
-                log.lock().unwrap().push(serde_json::from_slice(&body).unwrap_or(Value::Null));
-                let kind = if reply.starts_with("data:") {
-                    "text/event-stream"
-                } else {
-                    "application/json"
-                };
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status} X\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
-                    reply.len()
-                );
-            }
-        });
-        (url, seen)
-    }
-
-    pub(crate) fn completion(text: &str) -> String {
-        json!({ "choices": [{ "message": { "role": "assistant", "content": text } }] }).to_string()
-    }
-
-    pub(crate) fn streamed(delta: Value) -> String {
-        format!("data: {}\n\ndata: [DONE]\n\n", json!({ "choices": [{ "delta": delta }] }))
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::fake::{completion, server as fake_server};
     use super::*;
-    use crate::agent::native::Model;
+    use agent_native::native::Model;
 
     #[test]
     fn answers_are_cleaned_into_titles() {

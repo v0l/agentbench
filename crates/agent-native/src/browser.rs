@@ -1,5 +1,5 @@
 use super::screenshot;
-use egui_bench::agent::grants::Access;
+use agent_core::grants::Access;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -296,7 +296,7 @@ pub fn parse_key(spec: &str) -> Result<Key, String> {
 }
 
 pub fn address(
-    ws: &egui_bench::agent::workspace::Workspace,
+    ws: &agent_core::workspace::Workspace,
     target: &str,
 ) -> Result<String, String> {
     let t = target.trim();
@@ -1033,7 +1033,7 @@ impl Live {
 }
 
 fn upload_files(
-    ws: &egui_bench::agent::workspace::Workspace,
+    ws: &agent_core::workspace::Workspace,
     args: &Value,
 ) -> Result<Vec<PathBuf>, String> {
     let names: Vec<&str> =
@@ -1069,7 +1069,7 @@ fn safe_name(name: &str) -> String {
 
 async fn download(
     live: &Live,
-    ws: &egui_bench::agent::workspace::Workspace,
+    ws: &agent_core::workspace::Workspace,
     args: &Value,
 ) -> Result<String, String> {
     let wait = Duration::from_millis(
@@ -1239,7 +1239,7 @@ impl Browsers {
     pub async fn act(
         &self,
         session: &str,
-        ws: &egui_bench::agent::workspace::Workspace,
+        ws: &agent_core::workspace::Workspace,
         args: &Value,
         stop: &CancellationToken,
     ) -> Result<String, String> {
@@ -1317,7 +1317,7 @@ impl Browsers {
 
 async fn run(
     live: &Live,
-    ws: &egui_bench::agent::workspace::Workspace,
+    ws: &agent_core::workspace::Workspace,
     action: &str,
     url: Option<&str>,
     args: &Value,
@@ -1373,7 +1373,7 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_bench::agent::workspace::Workspace;
+    use agent_core::workspace::Workspace;
 
     fn node(k: &str, t: &str, idx: Option<usize>, x: f64, y: f64) -> Node {
         Node {
@@ -1542,7 +1542,7 @@ mod tests {
     #[test]
     fn bare_domains_get_https_and_files_stay_files() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = egui_bench::agent::workspace::Workspace::open(dir.path()).unwrap();
+        let ws = agent_core::workspace::Workspace::open(dir.path()).unwrap();
         std::fs::write(dir.path().join("a.html"), "x").unwrap();
         assert_eq!(address(&ws, "example.com/x").unwrap(), "https://example.com/x");
         assert_eq!(address(&ws, "localhost:3000").unwrap(), "http://localhost:3000");
@@ -1554,7 +1554,7 @@ mod tests {
     #[tokio::test]
     async fn connecting_to_a_dead_address_says_so_and_keeps_the_tool_usable() {
         let dir = tempfile::tempdir().unwrap();
-        let ws = egui_bench::agent::workspace::Workspace::open(dir.path()).unwrap();
+        let ws = agent_core::workspace::Workspace::open(dir.path()).unwrap();
         let stop = CancellationToken::new();
         let browsers = Browsers::default();
         let args = json!({"action": "connect", "target": "127.0.0.1:1"});
@@ -1937,7 +1937,7 @@ function later() { setTimeout(() => { document.body.insertAdjacentHTML('beforeen
         }
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("form.html"), FORM).unwrap();
-        let ws = egui_bench::agent::workspace::Workspace::open(dir.path()).unwrap();
+        let ws = agent_core::workspace::Workspace::open(dir.path()).unwrap();
         let stop = CancellationToken::new();
         let browsers = Browsers::default();
         let act = |args: Value| {

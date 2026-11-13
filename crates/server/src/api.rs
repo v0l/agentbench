@@ -2480,7 +2480,7 @@ mod tests {
             &id,
             &f.repo,
             "echo serving; sleep 60",
-            &egui_bench::agent::spawn::Confine::Open { env: Vec::new() },
+            &agent_core::spawn::Confine::Open { env: Vec::new() },
         )
         .unwrap();
         let mut text = String::new();

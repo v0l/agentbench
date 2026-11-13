@@ -141,6 +141,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-native"
+version = "0.8.4"
+dependencies = [
+ "agent-core",
+ "agentbench-core",
+ "async-trait",
+ "base64 0.23.1",
+ "dirs",
+ "futures-util",
+ "ignore",
+ "regex",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml 0.9.12+spec-1.1.0",
+ "url",
+ "uuid",
+ "webpki-roots",
+]
+
+[[package]]
 name = "agentbench"
 version = "0.8.4"
 dependencies = [
@@ -195,6 +222,8 @@ dependencies = [
 name = "agentbench-server"
 version = "0.8.4"
 dependencies = [
+ "agent-core",
+ "agent-native",
  "agentbench-core",
  "async-trait",
  "axum",

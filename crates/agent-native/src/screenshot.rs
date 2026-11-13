@@ -4,8 +4,8 @@
 //! the UI it just built. No browser is bundled: Chrome, Chromium or Edge is found on the path.
 
 use super::media::{self, Media};
-use egui_bench::agent::grants::Access;
-use egui_bench::agent::workspace::Workspace;
+use agent_core::grants::Access;
+use agent_core::workspace::Workspace;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::Duration;

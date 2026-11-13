@@ -3924,7 +3924,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_workers_question_goes_to_the_supervisor_and_its_answer_returns() {
-        use crate::agent::Api;
         let r = rig(Box::new(Asker), true);
         r.runner.send(&r.worker, "pick").unwrap();
         assert!(until(|| !boss_was_told(&r).is_empty()).await, "the supervisor is told");
@@ -3953,7 +3952,6 @@ mod tests {
 
     #[tokio::test]
     async fn escalating_puts_the_question_to_the_user_with_a_recommendation() {
-        use crate::agent::Api;
         let r = rig(Box::new(Asker), true);
         r.runner.send(&r.worker, "pick").unwrap();
         assert!(until(|| !boss_was_told(&r).is_empty()).await);
@@ -4031,7 +4029,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_supervisor_stops_and_closes_another_projects_session() {
-        use crate::agent::Api;
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("r");
         crate::git::testing::repo(&main);
@@ -4144,7 +4141,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_supervisor_hears_back_from_a_session_it_started() {
-        use crate::agent::Api;
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("r");
         crate::git::testing::repo(&main);
@@ -4175,7 +4171,6 @@ mod tests {
 
     #[tokio::test]
     async fn one_session_can_start_another_and_wait_for_it() {
-        use crate::agent::Api;
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("r");
         crate::git::testing::repo(&main);

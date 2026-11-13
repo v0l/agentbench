@@ -44,22 +44,10 @@ const ALLOWED_PROJECTS: &str = "start_session_projects";
 /// Setting: "1" when any session may start sessions in any project.
 const ALLOWED_ANY: &str = "start_session_any_project";
 
-pub const PROPOSAL: &str = "proposal:";
+pub use agent_native::gate::{PROPOSAL, required};
 
 const SET_AUTOMATION: &str = "set_automation";
 const SET_VISION: &str = "set_vision";
-
-pub fn required(tool: &str) -> Option<Automation> {
-    Some(match tool {
-        "file_issue" | "update_issue" | "comment_on_issue" | "remember" | "rename_session" => {
-            Automation::Assist
-        }
-        "start_session" | "send_message" | "stop_session" | "close_session"
-        | "create_worktree" | "cleanup_worktree" => Automation::Delegate,
-        "merge_branch" => Automation::Ship,
-        _ => return None,
-    })
-}
 
 fn risky_key(action: Risky) -> String {
     format!("risky_action:{}", action.as_str())

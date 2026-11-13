@@ -108,3 +108,14 @@ impl Speech {
         .map_err(|e| e.to_string())?
     }
 }
+
+#[agent_core::async_trait]
+impl agent_native::native::Ears for Speech {
+    fn pick(&self, asked: &str) -> String {
+        Speech::pick(self, asked)
+    }
+
+    async fn read(&self, id: &str, pcm: Vec<f32>) -> Result<(String, &'static str), String> {
+        Speech::read(self, id, pcm).await
+    }
+}

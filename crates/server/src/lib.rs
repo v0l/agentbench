@@ -2,9 +2,7 @@ pub mod agent;
 pub mod api;
 pub mod autopilot;
 pub mod cli;
-pub mod fold;
 pub mod git;
-pub mod http;
 pub mod local;
 pub mod projects;
 pub mod quota;
@@ -19,10 +17,13 @@ pub mod triage;
 pub mod tui;
 pub mod voice;
 
+pub use agent_native::{fold, http};
+
 use agent::{Agent, JsonCommand};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
@@ -108,8 +109,8 @@ impl Config {
         speech: Option<speech::Speech>,
     ) -> Vec<Box<dyn Agent>> {
         let mut native = agent::Native::shared(model);
-        native.titles = titles;
-        native.speech = speech;
+        native.reader = titles.map(|t| Arc::new(t) as Arc<dyn agent_core::web::Reader>);
+        native.ears = speech.map(|s| Arc::new(s) as Arc<dyn agent::native::Ears>);
         native.pace.prices = self.prices.clone();
         native.browsers = agent::browser::Browsers::saved_in(home());
         native.code =
@@ -334,5 +335,22 @@ mod tests {
         let t = token(&s).unwrap();
         assert_eq!(t.len(), 48);
         assert_eq!(token(&s).unwrap(), t);
+    }
+
+    #[test]
+    fn the_config_reads_from_toml_and_runs_servers_as_the_user() {
+        let c: crate::Config = toml::from_str(
+            "[code]\nrole = \"developer\"\ndiagnostics = false\n\n[[code.lsp]]\nname = \"zig\"\ncommand = \"zls\"\nextensions = [\"zig\"]\nmarkers = [\"build.zig\"]\n[code.lsp.ids]\nzon = \"zon\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.code.role, "developer");
+        assert!(!c.code.diagnostics);
+        assert_eq!(c.code.lsp[0].extensions, ["zig"]);
+        assert_eq!(c.code.lsp[0].ids["zon"], "zon");
+        let d: crate::Config = toml::from_str("").unwrap();
+        assert!(d.code.diagnostics && d.code.role == "user" && d.code.lsp.is_empty());
+        let open = agent_native::code::unconfined(d.code);
+        assert!(!open.confine.sandboxed());
+        assert!(open.configured_in.contains("agentbench.toml"));
     }
 }
