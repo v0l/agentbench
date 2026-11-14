@@ -7,7 +7,8 @@ The agent is split into two library crates in this repo, plus the pieces that st
 | `crates/agent-core` | MIT | no egui, no agentbench types | the UI-free agent kit that used to live in `egui_bench::agent` |
 | `crates/agent-native` | GPL-3.0-only | `agent-core`, `agentbench-core` | the native agent loop, its tools, and the contract the runner drives agents through |
 | `crates/server` | GPL-3.0-only | both | runner, store, API, autopilot, and the external CLI agents |
-| `egui_bench` (branch `agent-core`) | MIT | `agent-core` | chat, pane, settings and `Agent<H>`/`Host`/`serve`, re-exporting `agent-core` under `egui_bench::agent` |
+| `crates/agent-ui` | MIT | `agent-core`, egui_bench (theme and markdown only) | chat, pane, settings and `Agent<H>`/`Host`/`serve` |
+| `crates/agent-voice` | MIT | none of ours | audio helpers, speech client, Whisper and Phonon through candle |
 
 `agent-core` is MIT so MIT and GPL apps can use it. `agent-native` is GPL like the rest of agentbench.
 
@@ -74,15 +75,21 @@ Boundary types that cross from UI to core: `Desk` (built from `Desk::new(ring)`,
 - Tests move with their code. Tests that need the store (`a_proposal_asks_the_user_and_runs_only_what_they_allowed`, `another_project_is_entered_only_after_the_user_says_so`, the runner-driven quota poll tests) stay in the server.
 - `agent-native` enables `testing` for its own tests. The server enables it as a dev-dependency so `Patience::default()` still skips the context probe against stub servers.
 
-## Wiring
+## Moved out of egui_bench
 
-- `egui_bench` (branch `agent-core`) depends on `agent-core` by git (`v0l/agentbench`, `master`).
-- super-radio pins `egui_bench` 0.5.4 on egui 0.35, so it cannot take the branch yet. The `egui_bench::agent` paths it uses are all still re-exported.
-- agentbench replaces `egui_bench` with the `agent-core` branch through `[patch.crates-io]` and patches `agent-core` back to `crates/agent-core`, so both sides build from this checkout:
+egui_bench no longer holds any agent code. Everything left egui_bench for this repo:
+
+| from egui_bench | to | licence |
+|---|---|---|
+| `src/agent/{chat,pane,settings}.rs`, `Agent`, `Host`, `serve`, `desk` | `crates/agent-ui` | MIT |
+| `src/speech/*` (Whisper, Phonon, Kokoro), `src/voice/*` (audio helpers, speech client, model list) and the speech examples | `crates/agent-voice` (feature `speech`, `speech-cuda`, `speech-metal`) | MIT |
+
+`agent-ui` uses egui_bench only for its theme, markdown and prelude. Apps outside this repo take the crates by git:
 
 ```toml
-[patch."https://github.com/v0l/agentbench"]
-agent-core = { path = "crates/agent-core" }
+agent-core = { git = "https://github.com/v0l/agentbench" }
+agent-ui = { git = "https://github.com/v0l/agentbench" }
+agent-voice = { git = "https://github.com/v0l/agentbench", features = ["speech"] }
 ```
 
-- Both git dependencies go away when the crates are published and the versions are bumped.
+The old `egui_bench::agent::*` paths become `agent_core::*` (tools, workspace, grants, sandbox, skillset, toolkit and the rest), `agent_ui::*` (`Agent`, `Host`, `Handled`, `serve`, `pane`) and `agent_voice::{speech, voice}`.

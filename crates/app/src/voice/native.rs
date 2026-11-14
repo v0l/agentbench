@@ -48,7 +48,7 @@ struct Take {
 }
 
 #[cfg(local_speech)]
-type Loaded = Arc<Mutex<Option<egui_bench::speech::Transcriber>>>;
+type Loaded = Arc<Mutex<Option<agent_voice::speech::Transcriber>>>;
 #[cfg(not(local_speech))]
 type Loaded = ();
 
@@ -288,7 +288,7 @@ impl Voice {
     pub fn installed(model: &str) -> bool {
         #[cfg(local_speech)]
         {
-            egui_bench::speech::Transcriber::new(models_dir()).installed(model)
+            agent_voice::speech::Transcriber::new(models_dir()).installed(model)
         }
         #[cfg(not(local_speech))]
         {
@@ -303,7 +303,7 @@ impl Voice {
 #[cfg(local_speech)]
 pub fn local_device() -> String {
     static DEVICE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    DEVICE.get_or_init(|| egui_bench::speech::best_device().1).to_string()
+    DEVICE.get_or_init(|| agent_voice::speech::best_device().1).to_string()
 }
 
 #[cfg(not(local_speech))]
@@ -415,7 +415,7 @@ fn read_locally(
     quiet: bool,
 ) -> Result<String, String> {
     let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
-    let t = slot.get_or_insert_with(|| egui_bench::speech::Transcriber::new(models_dir()));
+    let t = slot.get_or_insert_with(|| agent_voice::speech::Transcriber::new(models_dir()));
     let id = settings.local_model();
     if !t.installed(id) {
         t.download(id, &|p| {
@@ -604,9 +604,9 @@ mod tests {
             .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
             .collect();
         let pcm = super::super::to_whisper_rate(&pcm, rate);
-        let files = egui_bench::speech::Files::in_dir(std::path::Path::new(&dir)).unwrap();
-        let (device, on) = egui_bench::speech::best_device();
-        let mut w = egui_bench::speech::Whisper::load(&files, device).unwrap();
+        let files = agent_voice::speech::Files::in_dir(std::path::Path::new(&dir)).unwrap();
+        let (device, on) = agent_voice::speech::best_device();
+        let mut w = agent_voice::speech::Whisper::load(&files, device).unwrap();
         let t = std::time::Instant::now();
         let said = w.transcribe(&pcm).unwrap();
         println!(

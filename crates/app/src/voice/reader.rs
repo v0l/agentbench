@@ -66,7 +66,7 @@ impl Reader {
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), String> {
         self.stop();
-        let text = egui_bench::voice::audio::speakable(markdown);
+        let text = agent_voice::voice::audio::speakable(markdown);
         if text.is_empty() {
             return Err("there is nothing to read in that".into());
         }
@@ -177,8 +177,8 @@ async fn produce(
         let in_rate = streamed.and_then(|v| v.trim().parse::<u32>().ok());
         let Some(in_rate) = in_rate else {
             let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-            let (pcm, from_rate) = egui_bench::voice::audio::read_wav(&bytes)?;
-            let pcm = egui_bench::voice::audio::resample(&pcm, from_rate, rate);
+            let (pcm, from_rate) = agent_voice::voice::audio::read_wav(&bytes)?;
+            let pcm = agent_voice::voice::audio::resample(&pcm, from_rate, rate);
             shared.queue.lock().unwrap_or_else(|e| e.into_inner()).extend(pcm);
             return Ok(());
         };
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn a_server_that_sends_a_whole_wav_is_still_played() {
-        let wav = egui_bench::voice::audio::wav_bytes(&[0.0, 0.25, -0.25, 0.5], 24_000);
+        let wav = agent_voice::voice::audio::wav_bytes(&[0.0, 0.25, -0.25, 0.5], 24_000);
         let (url, _) = serve("200 OK", "content-type: audio/wav\r\n", vec![wav]);
         let s = shared();
         let errors = run(&Source { url, ..Default::default() }, &s, 24_000);
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn resampling_in_chunks_matches_resampling_whole() {
         let tone: Vec<f32> = (0..2400).map(|i| (i as f32 * 0.05).sin()).collect();
-        let whole = egui_bench::voice::audio::resample(&tone, 24_000, 48_000);
+        let whole = agent_voice::voice::audio::resample(&tone, 24_000, 48_000);
         let (mut r, mut out) = (Resample::new(24_000, 48_000), Vec::new());
         for c in tone.chunks(333) {
             r.push(c, &mut out);

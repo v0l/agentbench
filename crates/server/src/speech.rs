@@ -8,7 +8,7 @@
 //! first time it is asked for and stays loaded after, on the GPU when this build has CUDA and the
 //! machine has a card.
 
-use egui_bench::speech::{DEFAULT_MODEL, Transcriber, model};
+use agent_voice::speech::{DEFAULT_MODEL, Transcriber, model};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -55,7 +55,7 @@ impl Speech {
     pub fn list(&self) -> Vec<(String, String, u32, bool, bool)> {
         let default = self.default.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let t = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        egui_bench::speech::LOCAL_MODELS
+        agent_voice::speech::LOCAL_MODELS
             .iter()
             .map(|m| (m.0.to_string(), m.2.to_string(), m.3, t.installed(m.0), m.0 == default))
             .collect()

@@ -1,0 +1,27 @@
+[package]
+name = "agent-ui"
+description = "An egui window for a coding agent: chat, pane and settings built on agent-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+repository.workspace = true
+
+[features]
+default = ["mcp"]
+mcp = ["agent-core/mcp"]
+sandbox = ["agent-core/sandbox"]
+
+[dependencies]
+agent-core.workspace = true
+egui_bench = { version = "0.9.8", features = ["markdown"] }
+egui = "0.37"
+dirs = "6"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "fs"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream", "gzip"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

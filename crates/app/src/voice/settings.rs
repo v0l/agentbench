@@ -13,7 +13,7 @@ pub enum Mode {
     Agentbench,
 }
 
-pub use egui_bench::voice::models::{DEFAULT_MODEL, LOCAL_MODELS, model};
+pub use agent_voice::voice::models::{DEFAULT_MODEL, LOCAL_MODELS, model};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Settings {
@@ -44,7 +44,7 @@ impl Default for Settings {
             url: String::new(),
             key: String::new(),
             server_model: String::new(),
-            reply_voice: egui_bench::voice::DEFAULT_SPOKEN_VOICE.into(),
+            reply_voice: agent_voice::voice::DEFAULT_SPOKEN_VOICE.into(),
         }
     }
 }

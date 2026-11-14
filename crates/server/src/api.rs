@@ -158,8 +158,8 @@ async fn transcribe(
         }
     }
     let wav = wav.ok_or_else(|| bad("the form has no file"))?;
-    let (pcm, rate) = egui_bench::voice::audio::read_wav(&wav).map_err(bad)?;
-    let pcm = egui_bench::voice::audio::to_whisper_rate(&pcm, rate);
+    let (pcm, rate) = agent_voice::voice::audio::read_wav(&wav).map_err(bad)?;
+    let pcm = agent_voice::voice::audio::to_whisper_rate(&pcm, rate);
     let id = api.speech.pick(&asked);
     let started = std::time::Instant::now();
     let (text, on) = api
@@ -169,7 +169,7 @@ async fn transcribe(
         .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     tracing::info!(
         "read {:.1}s of speech with {id} on the {on} in {:.1}s",
-        pcm.len() as f32 / egui_bench::voice::audio::SPEECH_RATE as f32,
+        pcm.len() as f32 / agent_voice::voice::audio::SPEECH_RATE as f32,
         started.elapsed().as_secs_f32()
     );
     Ok(Json(json!({ "text": text })))
@@ -254,7 +254,7 @@ async fn speak(
         said.on,
         started.elapsed().as_secs_f32()
     );
-    let wav = egui_bench::voice::audio::wav_bytes(&said.samples, said.rate);
+    let wav = agent_voice::voice::audio::wav_bytes(&said.samples, said.rate);
     Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], wav).into_response())
 }
 

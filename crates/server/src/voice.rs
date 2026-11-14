@@ -9,8 +9,8 @@
 //! fetched from Hugging Face the first time they are asked for and stay loaded after, on the
 //! GPU when this build has CUDA or Metal and the machine has one.
 
-use egui_bench::speech::Voicer;
-use egui_bench::speech::phonon::voices::Voice as Spoken;
+use agent_voice::speech::Voicer;
+use agent_voice::speech::phonon::voices::Voice as Spoken;
 use std::sync::{Arc, Mutex};
 
 /// The most text spoken in one request.
@@ -59,7 +59,7 @@ impl Voice {
     /// What a model loaded now would run on.
     pub fn device() -> String {
         static DEVICE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-        DEVICE.get_or_init(|| egui_bench::speech::best_device().1).to_string()
+        DEVICE.get_or_init(|| agent_voice::speech::best_device().1).to_string()
     }
 
     /// The voice a request for `asked` is spoken in: that one if it is listed, else the default.
@@ -85,7 +85,7 @@ impl Voice {
         v.voices()
             .into_iter()
             .map(|s| {
-                let here = egui_bench::speech::phonon::voices::voice_path(&dir, &s).is_file();
+                let here = agent_voice::speech::phonon::voices::voice_path(&dir, &s).is_file();
                 (s.name.clone(), s.label(), here)
             })
             .collect()

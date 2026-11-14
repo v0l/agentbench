@@ -13,11 +13,11 @@ crate-type = ["lib", "cdylib"]
 [features]
 default = ["cuda"]
 # Whisper on this machine. Without it voice input can only use a server.
-local-speech = ["egui_bench/speech"]
+local-speech = ["agent-voice/speech"]
 # Run Whisper on an NVIDIA card when there is one. Needs the CUDA toolkit to build.
-cuda = ["local-speech", "egui_bench/speech-cuda"]
+cuda = ["local-speech", "agent-voice/speech-cuda"]
 # Run Whisper on the Apple GPU through Metal. Builds for macOS and iOS only.
-metal = ["local-speech", "egui_bench/speech-metal"]
+metal = ["local-speech", "agent-voice/speech-metal"]
 
 [[bin]]
 name = "agentbench"
@@ -49,7 +49,8 @@ agentbench-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
-egui_bench = { version = "0.9.4", features = ["markdown"] }
+egui_bench = { version = "0.9.8", features = ["markdown"] }
+agent-voice.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 web-time = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }

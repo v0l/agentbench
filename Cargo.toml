@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/agent-core", "crates/agent-native", "crates/server", "crates/app"]
+members = ["crates/core", "crates/agent-core", "crates/agent-native", "crates/agent-voice", "crates/agent-ui", "crates/server", "crates/app"]
 
 [workspace.package]
 version = "0.8.4"
@@ -13,6 +13,8 @@ repository = "https://github.com/v0l/agentbench"
 agentbench-core = { path = "crates/core" }
 agent-core = { path = "crates/agent-core" }
 agent-native = { path = "crates/agent-native" }
+agent-voice = { path = "crates/agent-voice" }
+agent-ui = { path = "crates/agent-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -34,7 +36,3 @@ candle-core = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9be
 candle-kernels = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
 candle-nn = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
 candle-transformers = { git = "https://github.com/v0l/candle", rev = "a3ebb4c8a5ba28e9bed8f2cda65621c467398d36" }
-egui_bench = { git = "https://github.com/v0l/egui_bench", branch = "agent-core" }
-
-[patch."https://github.com/v0l/agentbench"]
-agent-core = { path = "crates/agent-core" }
