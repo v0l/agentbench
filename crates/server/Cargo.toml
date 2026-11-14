@@ -18,7 +18,7 @@ metal = ["agent-voice/speech-metal"]
 
 [dependencies]
 agentbench-core = { workspace = true, features = ["rusqlite"] }
-agent-core.workspace = true
+agent-core = { workspace = true, features = ["mcp", "web"] }
 agent-native.workspace = true
 serde.workspace = true
 serde_json.workspace = true

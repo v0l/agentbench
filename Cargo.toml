@@ -11,7 +11,7 @@ repository = "https://github.com/v0l/agentbench"
 
 [workspace.dependencies]
 agentbench-core = { path = "crates/core" }
-agent-core = { path = "crates/agent-core" }
+agent-core = { path = "crates/agent-core", default-features = false }
 agent-native = { path = "crates/agent-native" }
 agent-voice = { path = "crates/agent-voice" }
 agent-ui = { path = "crates/agent-ui" }

@@ -255,6 +255,9 @@ pub fn builtin() -> Vec<Spec> {
             ),
         ),
     ];
+    if !cfg!(feature = "web") {
+        specs.retain(|s| !matches!(s.name.as_str(), "web_search" | "web_fetch"));
+    }
     specs.extend(super::code::specs());
     specs
 }

@@ -7,8 +7,10 @@ pub mod settings;
 pub use agent_core::{
     Ask, Backend, CancellationToken, Cx, Desk, Reply, Services, Welcome, async_trait, code,
     config, grants, http, jobs, local, lsp, runtime, sandbox, skills, skillset, spawn, todo,
-    toolkit, tools, web, workspace,
+    toolkit, tools, workspace,
 };
+#[cfg(feature = "web")]
+pub use agent_core::web;
 #[cfg(feature = "mcp")]
 pub use agent_core::mcp;
 

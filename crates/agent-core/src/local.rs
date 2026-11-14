@@ -94,7 +94,9 @@ impl Toolbox<'_> {
                 services.jobs.kill(&job_owner(cx), h).await
             }
             "todo_write" => super::todo::write(args),
+            #[cfg(feature = "web")]
             "web_search" => super::web::search(args, &cx.stop).await,
+            #[cfg(feature = "web")]
             "web_fetch" => {
                 super::web::fetch(args, &cx.workspace, services.reader.as_deref(), &cx.stop).await
             }

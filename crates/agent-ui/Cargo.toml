@@ -8,8 +8,9 @@ license = "MIT"
 repository.workspace = true
 
 [features]
-default = ["mcp"]
+default = ["mcp", "web"]
 mcp = ["agent-core/mcp"]
+web = ["agent-core/web"]
 sandbox = ["agent-core/sandbox"]
 
 [dependencies]

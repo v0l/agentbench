@@ -16,6 +16,7 @@ pub mod spawn;
 pub mod todo;
 pub mod toolkit;
 pub mod tools;
+#[cfg(feature = "web")]
 pub mod web;
 pub mod workspace;
 
@@ -92,6 +93,7 @@ impl Desk {
 pub struct Services {
     pub jobs: jobs::Jobs,
     pub code: Arc<code::Code>,
+    #[cfg(feature = "web")]
     pub reader: Option<Arc<dyn web::Reader>>,
 }
 
@@ -101,6 +103,7 @@ impl Services {
         self
     }
 
+    #[cfg(feature = "web")]
     pub fn with_reader(mut self, reader: Arc<dyn web::Reader>) -> Self {
         self.reader = Some(reader);
         self
