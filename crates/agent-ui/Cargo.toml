@@ -14,7 +14,7 @@ sandbox = ["agent-core/sandbox"]
 
 [dependencies]
 agent-core.workspace = true
-egui_bench = { version = "0.9.8", features = ["markdown"] }
+egui_bench = { version = "0.10.0", features = ["markdown"] }
 egui = "0.37"
 dirs = "6"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }

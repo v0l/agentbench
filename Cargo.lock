@@ -174,7 +174,7 @@ dependencies = [
  "agent-core",
  "dirs",
  "egui",
- "egui_bench",
+ "egui_bench 0.10.0",
  "futures-util",
  "reqwest",
  "serde_json",
@@ -216,7 +216,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-qr",
- "egui_bench",
+ "egui_bench 0.9.8",
  "egui_kittest",
  "fontdb",
  "image",
@@ -2241,6 +2241,18 @@ name = "egui_bench"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cad3efe50f2be0ee8bf7bf94da7581654b8ad67650052750627d5af6a8f7e93"
+dependencies = [
+ "egui",
+ "gix",
+ "pulldown-cmark",
+ "web-time",
+]
+
+[[package]]
+name = "egui_bench"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bee65fbe33c76d6d6397ae3dab30c5e1c733e1cbb8af267c0d1ece8a680088d8"
 dependencies = [
  "egui",
  "gix",
