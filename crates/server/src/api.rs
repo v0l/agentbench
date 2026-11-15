@@ -54,9 +54,9 @@ type Reply<T> = Result<Json<T>, Failure>;
 fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     // Fold the length difference in so the comparison time does not depend on
     // the token length either.
-    let mut acc = (a.len() ^ b.len()) as u8;
+    let mut acc = a.len() ^ b.len();
     for (x, y) in a.iter().zip(b) {
-        acc |= x ^ y;
+        acc |= (x ^ y) as usize;
     }
     acc == 0
 }
@@ -1222,6 +1222,7 @@ async fn delete_session(
     api.runner.interrupt(id);
     api.runner.end(id);
     api.runner.store().delete_session(id)?;
+    let _ = std::fs::remove_dir_all(crate::runner::attachment_dir(id));
     changed(&api);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1437,6 +1438,17 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    #[test]
+    fn constant_eq_rejects_prefixes_and_other_lengths() {
+        assert!(constant_eq(b"secret", b"secret"));
+        assert!(!constant_eq(b"secre", b"secret"));
+        assert!(!constant_eq(b"secret", b"secre"));
+        assert!(!constant_eq(b"", b"secret"));
+        assert!(!constant_eq(b"secret", b"secreT"));
+        let long = vec![b'a'; 256];
+        assert!(!constant_eq(&long, b""));
+    }
+
     struct Fixture {
         app: Router,
         api: Api,
@@ -1617,6 +1629,13 @@ mod tests {
             png,
             "the file is written where the agent is told"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(path.parent().unwrap()), 0o700);
+            assert_eq!(mode(&path), 0o600);
+        }
 
         let req = axum::http::Request::builder()
             .uri(format!("/api/sessions/{id}/attachments/{aid}"))
@@ -1645,6 +1664,10 @@ mod tests {
         )
         .await;
         assert_eq!(s, StatusCode::NOT_FOUND, "another chat cannot read it");
+
+        let (s, _) = call(&f.app, "DELETE", &format!("/api/sessions/{id}"), None, T).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+        assert!(!path.parent().unwrap().exists(), "deleting the session removes its files");
     }
 
     #[tokio::test]
