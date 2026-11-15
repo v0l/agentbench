@@ -90,6 +90,11 @@ pub async fn take(
     let settle = args.get("wait_ms").and_then(Value::as_u64).unwrap_or(SETTLE).min(SETTLE_MAX);
     let dir = std::env::temp_dir().join(format!("agentbench-shot-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
     let result = shoot(&browser, &url, &dir, w, h, settle, stop).await;
     let media = result.and_then(|png| {
         let shown = format!("screenshot of {target}");
