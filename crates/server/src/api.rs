@@ -61,6 +61,13 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     acc == 0
 }
 
+async fn nosniff(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut()
+        .insert(header::X_CONTENT_TYPE_OPTIONS, header::HeaderValue::from_static("nosniff"));
+    res
+}
+
 async fn auth(State(api): State<Api>, headers: HeaderMap, req: Request, next: Next) -> Response {
     let given = headers
         .get(header::AUTHORIZATION)
@@ -145,6 +152,7 @@ pub fn router(api: Api) -> Router {
     Router::new()
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
         .merge(protected)
+        .layer(middleware::from_fn(nosniff))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(api)
 }
@@ -1437,6 +1445,19 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn responses_carry_nosniff() {
+        let f = fixture();
+        for (uri, token) in [("/health", None), ("/api/projects", Some("secret")), ("/api/projects", Some("wrong"))] {
+            let mut req = axum::http::Request::builder().uri(uri);
+            if let Some(t) = token {
+                req = req.header("authorization", format!("Bearer {t}"));
+            }
+            let res = f.app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(res.headers()["x-content-type-options"], "nosniff", "{uri} {token:?}");
+        }
+    }
 
     #[test]
     fn constant_eq_rejects_prefixes_and_other_lengths() {
