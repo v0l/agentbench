@@ -969,6 +969,12 @@ impl Live {
         if !matches!(full.scheme(), "http" | "https") {
             return Err(format!("{full}: only http and https addresses can be downloaded"));
         }
+        let allow = std::env::var("AGENTBENCH_FETCH_ALLOW_PRIVATE").unwrap_or_default();
+        if let Some(why) = private_address(&full, &allow).await {
+            return Err(format!(
+                "{full}: {why}; set AGENTBENCH_FETCH_ALLOW_PRIVATE=true, or a comma separated list of hosts, to allow it"
+            ));
+        }
         let cookies = self.send("Network.getCookies", json!({ "urls": [full.as_str()] })).await?;
         let cookie = cookies["cookies"]
             .as_array()
@@ -1381,10 +1387,87 @@ async fn run(
     live.grid().await
 }
 
+fn private_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || v6.to_ipv4_mapped().is_some_and(|v4| private_ip(v4.into()))
+        }
+    }
+}
+
+fn fetch_allowed(host: &str, allow: &str) -> bool {
+    let allow = allow.trim();
+    allow.eq_ignore_ascii_case("true")
+        || allow.split(',').any(|h| !h.trim().is_empty() && h.trim().eq_ignore_ascii_case(host))
+}
+
+async fn private_address(url: &url::Url, allow: &str) -> Option<String> {
+    let host = url.host_str()?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if fetch_allowed(host, allow) {
+        return None;
+    }
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost"
+        || [".localhost", ".local", ".internal"].iter().any(|s| lower.ends_with(s))
+    {
+        return Some(format!("{host} is a private host"));
+    }
+    let port = url.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((host, port)).await.ok()?;
+    addrs
+        .map(|a| a.ip())
+        .find(|ip| private_ip(*ip))
+        .map(|ip| format!("{host} is the private address {ip}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use agent_core::workspace::Workspace;
+
+    async fn refused(url: &str, allow: &str) -> bool {
+        private_address(&url::Url::parse(url).unwrap(), allow).await.is_some()
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_private_targets() {
+        for url in [
+            "http://127.0.0.1:7420/api/issues",
+            "http://169.254.169.254/latest/meta-data",
+            "http://10.1.2.3/",
+            "http://192.168.1.5/",
+            "http://[fd00::1]/",
+            "http://[::1]/",
+            "http://localhost:8080/",
+            "http://printer.local/",
+            "http://db.internal/",
+        ] {
+            assert!(refused(url, "").await, "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_allows_private_targets_when_configured() {
+        assert!(!refused("http://127.0.0.1:7420/", "true").await);
+        assert!(!refused("http://127.0.0.1:7420/", "127.0.0.1").await);
+        assert!(!refused("http://[fd00::1]/", "fd00::1,other").await);
+        assert!(refused("http://10.0.0.1/", "127.0.0.1").await);
+        assert!(!refused("http://93.184.216.34/", "").await);
+    }
 
     fn node(k: &str, t: &str, idx: Option<usize>, x: f64, y: f64) -> Node {
         Node {
