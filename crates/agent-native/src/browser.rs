@@ -1908,6 +1908,7 @@ function later() { setTimeout(() => { document.body.insertAdjacentHTML('beforeen
         if screenshot::browser().is_none() {
             return;
         }
+        unsafe { std::env::set_var("AGENTBENCH_FETCH_ALLOW_PRIVATE", "127.0.0.1") };
         let base = serve(vec![("/", 0, FILES), ("/cert.cer", 0, "cert for {cookie}")]).await;
         let (dir, ws) = workspace_with(&[("shot.png", "12345"), ("two.png", "12")]);
         let b = Browsers::default();
