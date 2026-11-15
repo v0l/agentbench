@@ -469,6 +469,20 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
     })
 }
 
+#[cfg(unix)]
+fn restrict_database_files(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let name = path.as_os_str().to_owned();
+    for suffix in ["", "-wal", "-shm"] {
+        let mut file = name.clone();
+        file.push(suffix);
+        let file = std::path::PathBuf::from(file);
+        if file.is_file() {
+            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
 fn worktree_row(row: &Row) -> rusqlite::Result<Worktree> {
     Ok(Worktree {
         id: row.get("id")?,
@@ -557,21 +571,10 @@ impl Store {
                     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
             }
         }
-        let conn = Connection::open(path)?;
+        let store = Store::setup(Connection::open(path)?)?;
         #[cfg(unix)]
-        {
-            // Same for the database and its WAL/SHM siblings: 0600, independent
-            // of the process umask.
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::Permissions::from_mode(0o600);
-            for p in [path.to_path_buf(), path.with_extension("db-wal"), path.with_extension("db-shm")] {
-                if p.is_file() {
-                    let _ = std::fs::set_permissions(&p, mode.clone());
-                }
-            }
-            let _ = std::fs::set_permissions(path, mode);
-        }
-        Store::setup(conn)
+        restrict_database_files(path);
+        Ok(store)
     }
 
     pub fn memory() -> Result<Store> {
@@ -2022,6 +2025,26 @@ pub mod testing {
 mod tests {
     use super::testing::project;
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn open_keeps_database_and_directory_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("data");
+        let path = dir.join("agentbench.db");
+        let store = Store::open(&path).unwrap();
+        store.set_setting("probe", "1").unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        for sibling in ["agentbench.db-wal", "agentbench.db-shm"] {
+            let p = dir.join(sibling);
+            if p.exists() {
+                assert_eq!(mode(&p), 0o600, "{sibling}");
+            }
+        }
+    }
 
     fn tree(path: &str, branch: &str, main: bool) -> SeenTree {
         SeenTree { path: path.into(), branch: Some(branch.into()), head: Some("abc".into()), main }
