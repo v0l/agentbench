@@ -301,7 +301,7 @@ pub fn save_keyed(
 /// and viewed on Android.
 #[cfg(target_os = "android")]
 pub fn open_external(
-    client: &crate::client::Client,
+    client: &crate::hub::Hub,
     tx: Sender<Arrived>,
     ctx: egui::Context,
     session: SessionId,
@@ -329,7 +329,7 @@ pub use open_attachment as open_external;
 
 #[cfg(target_arch = "wasm32")]
 pub fn open_external(
-    _client: &crate::client::Client,
+    _client: &crate::hub::Hub,
     tx: Sender<Arrived>,
     ctx: egui::Context,
     _session: SessionId,
@@ -509,7 +509,7 @@ pub fn open_bytes(
 /// Open a file with the system's default app, downloading it first when needed.
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 pub fn open_attachment(
-    client: &crate::client::Client,
+    client: &crate::hub::Hub,
     tx: Sender<Arrived>,
     ctx: egui::Context,
     session: SessionId,

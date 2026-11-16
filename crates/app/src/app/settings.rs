@@ -21,6 +21,9 @@ impl App {
             place: if self.remote || self.local.is_none() { Where::Remote } else { Where::Local },
             url,
             token,
+            servers: self.servers.clone(),
+            server_name: self.server_name.clone(),
+            server_status: self.server_statuses(),
             external: self.external.clone(),
             thinking: self.thinking,
             alerts: self.alerts,
@@ -161,6 +164,8 @@ impl App {
                         ui.add_space(14.0);
                     }
                     server_section(ui, &mut st, has_local);
+                    ui.add_space(14.0);
+                    servers_section(ui, &mut st);
                     ui.add_space(14.0);
                     // A phone is what scans the code, so it has no use for showing one.
                     if !cfg!(target_os = "android") {
@@ -500,6 +505,13 @@ impl App {
         }
         if save {
             self.speech = st.speech.clone();
+            let named = st.server_name.trim();
+            let named = if named.is_empty() { "this server" } else { named };
+            if st.servers != self.servers || named != self.server_name {
+                self.servers = st.servers.clone();
+                self.server_name = named.to_string();
+                self.sync_servers();
+            }
             if st.face != self.face {
                 self.face = st.face.clone();
                 self.load_fonts(ctx);
@@ -593,6 +605,58 @@ pub(super) fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
                     secret(ui, &mut st.token);
                 });
             }
+        }
+    });
+}
+
+pub(super) fn servers_section(ui: &mut Ui, st: &mut Settings) {
+    section(ui, "servers", "other agentbench servers shown in this window", |ui| {
+        note(
+            ui,
+            "Each is an ordinary agentbench server with its own projects, chats and keys. Their items appear beside this one's, marked with the server's name.",
+            LEGEND,
+        );
+        let status = st.server_status.clone();
+        let line = |slot: u32| status.iter().find(|(s, _, _)| *s == slot).cloned();
+        row(ui, "this server", |ui| {
+            field(ui, &mut st.server_name, "name");
+        });
+        if let Some((_, up, text)) = line(0) {
+            crate::app::widgets::server_status(ui, up, &text);
+        }
+        let mut remove = None;
+        for r in st.servers.iter_mut() {
+            ui.add_space(6.0);
+            row(ui, "name", |ui| {
+                field(ui, &mut r.name, "workstation");
+            });
+            row(ui, "address", |ui| {
+                field(ui, &mut r.url, "https://agentbench.example.com");
+            });
+            row(ui, "token", |ui| {
+                secret(ui, &mut r.token);
+            });
+            if let Some((_, up, text)) = line(r.slot) {
+                crate::app::widgets::server_status(ui, up, &text);
+            }
+            let key = ui.add(Key::new("remove server").outline(FAULT).id_salt(("remove-server", r.slot)));
+            if key.clicked() {
+                remove = Some(r.slot);
+            }
+        }
+        if let Some(slot) = remove {
+            st.servers.retain(|r| r.slot != slot);
+        }
+        ui.add_space(6.0);
+        let add = ui.add(Key::new("add server").outline(VALUE));
+        if add.clicked() {
+            let slot = st.servers.iter().map(|r| r.slot).max().unwrap_or(0) + 1;
+            st.servers.push(Remote {
+                slot,
+                name: format!("server {slot}"),
+                url: String::new(),
+                token: String::new(),
+            });
         }
     });
 }

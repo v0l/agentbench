@@ -22,7 +22,7 @@ agent-core = { workspace = true, features = ["mcp", "web"] }
 agent-native.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system", "disk"] }
 axum = { version = "0.8", features = ["multipart"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "signal", "net", "fs"] }

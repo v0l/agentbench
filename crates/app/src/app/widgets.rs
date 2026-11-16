@@ -315,3 +315,16 @@ pub(super) fn speech_in_link(link: &str) -> Option<(String, bool)> {
     })
 }
 
+
+pub(super) fn server_status(ui: &mut Ui, up: bool, text: &str) {
+    status(ui, up, text);
+}
+
+pub(super) fn server_chip(ui: &mut Ui, name: &str, down: bool) {
+    let hue = name.bytes().fold(11u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 360;
+    let fill = egui::ecolor::Hsva::new(hue as f32 / 360.0, 0.5, 0.6, 1.0);
+    let tint = if down { LEGEND } else { egui::Color32::from(fill) };
+    let text = if down { format!("{name}  server offline") } else { name.to_string() };
+    let r = tab_chip(ui, &text, tint, false);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("server {text}")));
+}

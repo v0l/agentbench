@@ -1675,7 +1675,37 @@ pub struct Overview {
     pub visions: Vec<Vision>,
     #[serde(default)]
     pub usage: Option<UsageReport>,
+    #[serde(default)]
+    pub host: Option<Host>,
     pub cursor: Id,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Host {
+    pub mem_total: u64,
+    pub mem_used: u64,
+    pub disk_total: u64,
+    pub disk_free: u64,
+    pub load: f32,
+    pub cores: u32,
+}
+
+impl Host {
+    pub fn mem_percent(&self) -> u32 {
+        percent(self.mem_used, self.mem_total)
+    }
+
+    pub fn disk_percent(&self) -> u32 {
+        percent(self.disk_total.saturating_sub(self.disk_free), self.disk_total)
+    }
+
+    pub fn cpu_percent(&self) -> u32 {
+        ((self.load / self.cores.max(1) as f32) * 100.0).round().max(0.0) as u32
+    }
+}
+
+fn percent(part: u64, whole: u64) -> u32 {
+    if whole == 0 { 0 } else { (part as f64 / whole as f64 * 100.0).round() as u32 }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

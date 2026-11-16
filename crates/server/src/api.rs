@@ -347,6 +347,7 @@ async fn overview(State(api): State<Api>) -> Reply<Overview> {
         triage: Some(crate::triage::state(store)),
         visions: store.visions()?,
         usage: Some(usage_report(&api)?),
+        host: Some(crate::host::sample()),
         cursor,
     }))
 }

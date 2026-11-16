@@ -2,6 +2,7 @@ pub mod app;
 pub mod attach;
 pub mod client;
 pub mod fonts;
+pub mod hub;
 mod notify;
 mod picker;
 pub mod scan;

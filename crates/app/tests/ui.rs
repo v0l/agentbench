@@ -3977,3 +3977,174 @@ fn a_quota_paused_session_reads_paused_and_is_not_counted_as_needing_you() {
     assert_eq!(marker_count(&h), 0);
     assert_eq!(agentbench::window_title(0), "agentbench");
 }
+
+fn two_servers(first: &Rig, second: &Rig) -> Harness<'static, App> {
+    let _build = build_lock();
+    let (a, b) = (first.url.clone(), second.url.clone());
+    Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
+        let mut storage = Mem::default();
+        storage.0.insert("url".into(), a);
+        storage.0.insert("token".into(), TOKEN.into());
+        storage.0.insert("server_name".into(), "desktop".into());
+        let servers = serde_json::json!([
+            {"slot": 1, "name": "workstation", "url": b, "token": TOKEN}
+        ]);
+        storage.0.insert("servers".into(), servers.to_string());
+        App::new(&cc.egui_ctx, Some(&storage), None)
+    })
+}
+
+fn both_loaded(h: &Harness<'_, App>) -> bool {
+    h.state().overview().is_some_and(|o| o.projects.iter().filter(|p| p.name == "demo").count() == 2)
+}
+
+#[test]
+fn projects_from_both_servers_show_with_a_badge_for_the_remote() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    let o = h.state().overview().unwrap().clone();
+    let demos: Vec<_> = o.projects.iter().filter(|p| p.name == "demo").collect();
+    assert_ne!(demos[0].id, demos[1].id, "ids are keyed by server");
+    let labels: Vec<_> = demos.iter().map(|p| h.state().server_label(p.id)).collect();
+    assert!(labels.contains(&None), "the local server has no badge: {labels:?}");
+    assert!(labels.contains(&Some("workstation".into())), "{labels:?}");
+    let remote_chats = o
+        .sessions
+        .iter()
+        .filter(|s| h.state().server_label(s.project_id).is_some())
+        .count();
+    assert!(remote_chats >= 3, "the second server's chats are listed");
+    assert_eq!(o.issues.iter().filter(|i| i.title == "Write a README").count(), 2);
+    assert!(h.query_all_by_label_contains("workstation").count() >= 1);
+    shot(&mut h, "two-servers");
+}
+
+#[test]
+fn a_chat_on_the_second_server_sends_to_that_server_only() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    let remote = second
+        .store
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.title == "say hello")
+        .unwrap();
+    let project = h
+        .state()
+        .overview()
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|s| s.id == remote.id)
+        .map(|s| s.project_id)
+        .unwrap();
+    h.state_mut().open_session(remote.id, project);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(remote.id) == 3);
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Text("ping".into()));
+    h.run_steps(2);
+    click(&mut h, 1220.0, 784.0);
+    until(&mut h, "the reply", |h| h.state().transcript_len(remote.id) >= 5);
+    let msgs = second.store.messages(remote.id, 0).unwrap();
+    assert_eq!(msgs[3].entry, Entry::user("ping"));
+    let local_total: usize = first
+        .store
+        .sessions()
+        .unwrap()
+        .iter()
+        .map(|s| first.store.messages(s.id, 0).unwrap().len())
+        .sum();
+    assert_eq!(local_total, 3, "the first server never saw the message");
+}
+
+#[test]
+fn a_new_project_goes_to_the_server_picked() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fresh");
+    repo(&path);
+    h.state_mut().add_project_on_server(1, path.to_str().unwrap());
+    let start = Instant::now();
+    while second.store.projects().unwrap().iter().all(|p| p.name != "fresh") {
+        assert!(start.elapsed() < Duration::from_secs(30), "the project never reached the second server");
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(first.store.projects().unwrap().iter().all(|p| p.name != "fresh"));
+}
+
+#[test]
+fn one_server_going_offline_leaves_the_other_usable() {
+    let first = rig();
+    let second = rig();
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    let remote_project = h
+        .state()
+        .overview()
+        .unwrap()
+        .projects
+        .iter()
+        .find(|p| h.state().server_label(p.id).is_some() && p.name == "demo")
+        .map(|p| p.id)
+        .unwrap();
+    drop(second);
+    until(&mut h, "the second server offline", |h| h.state().server_down(remote_project));
+    assert!(both_loaded(&h), "its items stay, greyed out");
+    assert!(h.query_all_by_label_contains("server offline").count() >= 1);
+    shot(&mut h, "one-server-offline");
+    let local = first.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let project = h
+        .state()
+        .overview()
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|s| s.id == local.id)
+        .map(|s| s.project_id)
+        .unwrap();
+    assert!(!h.state().server_down(project));
+    h.state_mut().open_session(local.id, project);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(local.id) == 3);
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Text("ping".into()));
+    h.run_steps(2);
+    click(&mut h, 1220.0, 784.0);
+    until(&mut h, "the reply", |h| h.state().transcript_len(local.id) >= 5);
+}
+
+#[test]
+fn the_server_list_is_kept_and_the_old_single_server_setting_still_works() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    h.state_mut().rename_server(1, "build box");
+    let mut kept = Mem::default();
+    h.state().store(&mut kept);
+    let saved: serde_json::Value = serde_json::from_str(kept.get_string("servers").unwrap().as_str()).unwrap();
+    assert_eq!(saved[0]["name"], "build box");
+    assert_eq!(saved[0]["url"], second.url);
+    assert_eq!(kept.get_string("server_name").as_deref(), Some("desktop"));
+
+    let mut old = harness(first.url.clone());
+    until(&mut old, "the overview", |h| h.state().overview().is_some());
+    assert!(old.state().server_entries().is_empty());
+    assert_eq!(old.state().server_names().len(), 1);
+    let o = old.state().overview().unwrap();
+    assert!(o.projects.iter().all(|p| old.state().server_label(p.id).is_none()));
+}
+
+#[test]
+fn each_server_shows_its_memory_disk_and_cpu() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    let status = h.state().server_statuses();
+    assert_eq!(status.len(), 2);
+    assert!(status.iter().all(|(_, up, text)| *up && text.contains("RAM") && text.contains("disk")), "{status:?}");
+}

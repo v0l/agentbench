@@ -237,14 +237,35 @@ impl App {
     }
 
     pub(super) fn add_project_modal(&mut self, ctx: &egui::Context) {
+        if self.add_project.is_none() {
+            return;
+        }
+        let (mut go, mut close) = (false, false);
+        let servers: Vec<(u32, String)> =
+            self.client.as_ref().filter(|h| h.multi()).map(|_| self.server_names()).unwrap_or_default();
         let Some(a) = &mut self.add_project else {
             return;
         };
-        let (mut go, mut close) = (false, false);
         let m = egui::Modal::new(egui::Id::unique("add-project")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
             ui.set_width(modal_width(ctx, 500.0));
             modal_title(ui, "Add a project");
             section(ui, "repository", "a folder on the server", |ui| {
+                if !servers.is_empty() {
+                    row_help(ui, "server", "The machine the folder is on.", |ui| {
+                        let current = servers
+                            .iter()
+                            .find(|(s, _)| *s == a.slot)
+                            .map(|(_, n)| n.clone())
+                            .unwrap_or_default();
+                        egui::ComboBox::from_id_salt("add-project-server")
+                            .selected_text(current)
+                            .show_ui(ui, |ui| {
+                                for (slot, name) in &servers {
+                                    ui.selectable_value(&mut a.slot, *slot, name);
+                                }
+                            });
+                    });
+                }
                 row_help(ui, "path", "Any folder inside the repo works, even a worktree. The main checkout becomes the project.", |ui| {
                     field(ui, &mut a.path, "~/git/snort");
                 });
@@ -273,8 +294,9 @@ impl App {
                 name: Some(a.name.trim().to_string()).filter(|n| !n.is_empty()),
                 create: a.create,
             };
+            let slot = self.add_project.as_ref().map(|a| a.slot).unwrap_or(0);
             if let Some(c) = &mut self.client {
-                c.add_project(&new);
+                c.add_project_on(slot, &new);
             }
             self.add_project = None;
         } else if close {
@@ -382,7 +404,7 @@ impl App {
         let m = egui::Modal::new(egui::Id::unique("start")).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
             ui.set_width(modal_width(ctx, 520.0));
             modal_title(ui, &match &issue {
-                Some(i) => format!("Start an agent on #{}", i.id),
+                Some(i) => format!("Start an agent on #{}", crate::hub::untag(i.id)),
                 None => format!("Start an agent in {project}"),
             });
             if issue.is_none() {
@@ -424,7 +446,7 @@ impl App {
                 });
                 if s.place == PlaceChoice::New {
                     row_help(ui, "branch", "Made off the main checkout's branch, beside the repo in .worktrees.", |ui| {
-                        let hint_text = issue.as_ref().map(|i| format!("issue-{}-{}", i.id, agentbench_core::branch_slug(&i.title))).unwrap_or("fix-login".into());
+                        let hint_text = issue.as_ref().map(|i| format!("issue-{}-{}", crate::hub::untag(i.id), agentbench_core::branch_slug(&i.title))).unwrap_or("fix-login".into());
                         field(ui, &mut s.branch, &hint_text);
                     });
                 }

@@ -1,4 +1,5 @@
-use crate::client::{Client, Reply, Server};
+use crate::client::{Reply, Server};
+use crate::hub::{Hub, Remote};
 use crate::fonts::{self, Installed, Typeface};
 use agent_ui::form::{field, field_then, prose, secret};
 use crate::picker::ModelPicker;
@@ -196,7 +197,7 @@ pub fn issue_matches(
     }
     let hay = format!(
         "#{} {} {} {} {} {}",
-        issue.id,
+        crate::hub::untag(issue.id),
         project,
         issue.title,
         issue.body,
@@ -381,6 +382,7 @@ pub struct LocalServer {
 }
 
 struct AddProject {
+    slot: u32,
     path: String,
     name: String,
     create: bool,
@@ -428,6 +430,9 @@ struct Settings {
     place: Where,
     url: String,
     token: String,
+    servers: Vec<Remote>,
+    server_name: String,
+    server_status: Vec<(u32, bool, String)>,
     /// The address a phone reaches this server at, for the pairing code.
     external: String,
     /// Whether the model's thinking is shown in chats.
@@ -650,7 +655,9 @@ const FIRST_PAGE: usize = 150;
 const OLDER_PAGE: usize = 150;
 
 pub struct App {
-    client: Option<Client>,
+    client: Option<Hub>,
+    servers: Vec<Remote>,
+    server_name: String,
     face: Typeface,
     installed: std::sync::Arc<Installed>,
     font_scan: Option<std::sync::mpsc::Receiver<Installed>>,
@@ -835,6 +842,14 @@ impl App {
         let icon_channel = std::sync::mpsc::channel();
         let mut app = App {
             client: None,
+            servers: storage
+                .and_then(|s| s.get_string("servers"))
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default(),
+            server_name: storage
+                .and_then(|s| s.get_string("server_name"))
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| "this server".into()),
             face,
             installed,
             font_scan: scan_fonts(ctx),
@@ -972,6 +987,8 @@ impl App {
         self.face.save(storage);
         storage.set_string("remote", self.remote.to_string());
         storage.set_string("external", self.external.clone());
+        storage.set_string("servers", serde_json::to_string(&self.servers).unwrap_or_default());
+        storage.set_string("server_name", self.server_name.clone());
         storage.set_string("thinking", self.thinking.to_string());
         storage.set_string("alerts", self.alerts.to_string());
         storage.set_string("issues_first", self.issues_first.to_string());
@@ -1061,8 +1078,8 @@ impl App {
         crate::notify::watch(&server.url, &server.token, self.alerts);
         self.keep_pairing(&server);
         let ctx = ctx.clone();
-        let mut client = Client::new(server, move || ctx.request_repaint());
-        client.overview();
+        let client =
+            Hub::new(&self.server_name, server, &self.servers, move || ctx.request_repaint());
         self.client = Some(client);
         self.agent_models.clear();
         self.asking_models.clear();
@@ -1547,6 +1564,99 @@ impl App {
 
     pub fn triage_open(&self) -> bool {
         self.triage_open
+    }
+
+    pub fn server_label(&self, id: Id) -> Option<String> {
+        let slot = crate::hub::slot_of(id);
+        let hub = self.client.as_ref()?;
+        (slot != 0).then(|| hub.name(slot).to_string())
+    }
+
+    pub fn server_note(&self, id: Id) -> String {
+        match self.server_label(id) {
+            Some(name) if self.server_down(id) => format!("  [{name}] server offline"),
+            Some(name) => format!("  [{name}]"),
+            None if self.server_down(id) => "  server offline".to_string(),
+            None => String::new(),
+        }
+    }
+
+    pub fn server_down(&self, id: Id) -> bool {
+        self.client.as_ref().is_some_and(|h| h.offline(crate::hub::slot_of(id)).is_some())
+    }
+
+    pub fn server_statuses(&self) -> Vec<(u32, bool, String)> {
+        let Some(hub) = &self.client else {
+            return Vec::new();
+        };
+        hub.slots()
+            .into_iter()
+            .map(|slot| {
+                let up = hub.offline(slot).is_none();
+                let text = match (up, hub.host(slot)) {
+                    (false, _) => "server offline".to_string(),
+                    (true, Some(h)) => format!(
+                        "RAM {}%, disk {}%, CPU {}%",
+                        h.mem_percent(),
+                        h.disk_percent(),
+                        h.cpu_percent()
+                    ),
+                    (true, None) => "connected".to_string(),
+                };
+                (slot, up, text)
+            })
+            .collect()
+    }
+
+    pub fn server_names(&self) -> Vec<(u32, String)> {
+        self.client
+            .as_ref()
+            .map(|h| h.slots().into_iter().map(|s| (s, h.name(s).to_string())).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn add_server(&mut self, name: &str, url: &str, token: &str) -> u32 {
+        let slot = self.servers.iter().map(|r| r.slot).max().unwrap_or(0) + 1;
+        self.servers.push(Remote {
+            slot,
+            name: name.to_string(),
+            url: url.to_string(),
+            token: token.to_string(),
+        });
+        self.sync_servers();
+        slot
+    }
+
+    pub fn remove_server(&mut self, slot: u32) {
+        self.servers.retain(|r| r.slot != slot);
+        self.sync_servers();
+    }
+
+    pub fn rename_server(&mut self, slot: u32, name: &str) {
+        match self.servers.iter_mut().find(|r| r.slot == slot) {
+            Some(r) => r.name = name.to_string(),
+            None => self.server_name = name.to_string(),
+        }
+        self.sync_servers();
+    }
+
+    pub fn add_project_on_server(&mut self, slot: u32, path: &str) {
+        let new = NewProject { path: path.to_string(), name: None, create: false };
+        if let Some(c) = &mut self.client {
+            c.add_project_on(slot, &new);
+        }
+    }
+
+    pub fn server_entries(&self) -> &[Remote] {
+        &self.servers
+    }
+
+    fn sync_servers(&mut self) {
+        if let Some(c) = &mut self.client {
+            c.sync(&self.server_name, &self.servers);
+            c.overview();
+        }
+        self.session = self.session.filter(|s| self.session_by_id(*s).is_some());
     }
 
     pub fn overview(&self) -> Option<&Overview> {
@@ -2690,7 +2800,7 @@ impl App {
                     egui::DragAndDrop::set_payload(ui.ctx(), issue.id);
                 }
                 Line::new()
-                    .value(format!("#{}", issue.id))
+                    .value(format!("#{}", crate::hub::untag(issue.id)))
                     .tint(LEGEND)
                     .size(11.0)
                     .gap(8.0)
@@ -2699,8 +2809,11 @@ impl App {
                     .elided(ui);
             },
             |ui| {
+                let on_server = self.server_note(issue.project_id);
                 if let Some(name) = project {
-                    Line::new().note(name).size(10.5).elided(ui);
+                    Line::new().note(format!("{name}{on_server}")).size(10.5).elided(ui);
+                } else if !on_server.is_empty() {
+                    Line::new().note(on_server.trim()).size(10.5).elided(ui);
                 }
                 for s in &mine {
                     Self::session_data(ui, s);
@@ -2805,7 +2918,7 @@ impl App {
                 self.detail = None;
             }
             Line::new()
-                .value(format!("#{}", issue.id))
+                .value(format!("#{}", crate::hub::untag(issue.id)))
                 .tint(LEGEND)
                 .gap(8.0)
                 .value(&issue.title)

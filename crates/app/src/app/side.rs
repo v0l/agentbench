@@ -60,7 +60,12 @@ impl App {
         });
         if add.clicked() {
             self.add_project =
-                Some(AddProject { path: String::new(), name: String::new(), create: false });
+                Some(AddProject {
+                    slot: self.project.map(crate::hub::slot_of).unwrap_or(0),
+                    path: String::new(),
+                    name: String::new(),
+                    create: false,
+                });
         }
     }
 
@@ -116,12 +121,14 @@ impl App {
 
     pub(super) fn session_row(&mut self, ui: &mut Ui, s: &Session, project: &str, branch: &str) {
         let on = self.session == Some(s.id);
+        let down = self.server_down(s.project_id);
         let (tint, word) = status_look(s.status);
+        let tint = if down { LEGEND } else { tint };
         let (row, resp) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
         let released = if s.released { ", user controlled" } else { "" };
         resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("chat {}{released}", s.title))
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("chat {}{released}{}", s.title, self.server_note(s.project_id)))
         });
         let tiled =
             self.grid_now().slots() > 1 && self.tab == Tab::Chat && self.shown().contains(&s.id);
@@ -185,6 +192,7 @@ impl App {
             format!("{project} / {branch}")
         };
         let when = if s.status.busy() { word.to_string() } else { ago(s.updated_at) };
+        let on_server = self.server_note(s.project_id);
         let (parent, children) = self.family_of(s);
         let kin = match (parent, children) {
             _ if s.released => "  user controlled".to_string(),
@@ -193,7 +201,14 @@ impl App {
             (None, 0) => String::new(),
             (None, n) => format!("  {n} children"),
         };
-        Line::new().note(format!("{place}  {when}{kin}")).size(10.0).elided(&mut inner);
+        let down = self.server_down(s.project_id);
+        let line = Line::new().note(format!("{place}  {when}{kin}{on_server}")).size(10.0);
+        let r = line.elided(&mut inner);
+        if down {
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "server offline")
+            });
+        }
         if resp.clicked() {
             self.open_session(s.id, s.project_id);
         }

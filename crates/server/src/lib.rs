@@ -4,6 +4,7 @@ pub mod api;
 pub mod autopilot;
 pub mod cli;
 pub mod git;
+pub mod host;
 pub mod local;
 pub mod projects;
 pub mod quota;

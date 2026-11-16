@@ -5,7 +5,7 @@ use agent_ui::transcript::{self as shared, Action, Check, File, Item};
 
 struct Fetch<'a> {
     tray: &'a mut crate::attach::Tray,
-    client: Option<&'a crate::client::Client>,
+    client: Option<&'a crate::hub::Hub>,
     session: SessionId,
 }
 
