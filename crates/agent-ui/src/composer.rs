@@ -52,7 +52,11 @@ pub fn text_box(
     rows: usize,
 ) -> Response {
     let max = (ui.ctx().content_rect().height() * 0.3).clamp(60.0, 260.0);
-    prose_id(ui, ("composer", salt), draft, hint, rows, max)
+    let r = prose_id(ui, ("composer", salt), draft, hint, rows, max);
+    if hint.is_empty() {
+        ui.ctx().accesskit_node_builder(r.id, |node| node.set_label("message"));
+    }
+    r
 }
 
 pub fn recall(ui: &Ui, id: egui::Id, draft: &mut String, sent: &[&str]) {

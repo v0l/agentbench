@@ -9,7 +9,7 @@ repository.workspace = true
 
 [features]
 default = ["agent", "mcp", "web"]
-agent = ["dep:agent-core", "dep:dirs", "dep:futures-util", "dep:tokio", "dep:reqwest"]
+agent = ["dep:agent-core", "dep:dirs", "dep:futures-util", "dep:tokio", "dep:reqwest", "dep:base64"]
 mcp = ["agent", "agent-core?/mcp"]
 web = ["agent", "agent-core?/web"]
 sandbox = ["agent", "agent-core?/sandbox"]
@@ -21,6 +21,7 @@ serde_json.workspace = true
 agent-core = { workspace = true, optional = true }
 dirs = { version = "6", optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+base64 = { version = "0.23", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "fs"], optional = true }
@@ -29,5 +30,6 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }
-egui_kittest = "0.37"
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
+egui-wgpu = "0.37"
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }

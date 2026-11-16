@@ -1,14 +1,14 @@
-use super::chat::Turn;
+use super::chat::{Attached, Turn};
 use super::grants::{Decision, Grants, Request};
 use super::settings::{self, Done};
 use super::{Agent, Backend};
+use crate::transcript::{self as shared, Action, Item};
 use egui_bench::markdown;
 use egui_bench::prelude::*;
 use egui::{Margin, RichText, Ui};
 
 const COLUMN: f32 = 860.0;
 const ASK_H: f32 = 84.0;
-const SEND_W: f32 = 72.0;
 
 pub fn show<H>(ui: &mut Ui, agent: &mut Agent<H>) {
     show_with(ui, agent, &mut Extras::default());
@@ -55,11 +55,18 @@ pub fn show_with<H>(ui: &mut Ui, agent: &mut Agent<H>, extras: &mut Extras) {
             ui.add_space(6.0);
         }
         access(ui, &agent.chat.grants);
+        if let Some(plan) = latest_plan(&agent.chat.turns) {
+            shared::plan_panel(ui, "agent-pane", &plan, ui.available_width() > 500.0);
+        }
         let placeholder = agent.chat.backend.welcome().placeholder;
-        let asked = ask_box(ui, &mut agent.chat.draft, &placeholder, busy);
-        if let Some(text) = asked {
-            let desk = agent.desk.clone();
-            agent.chat.ask(&text, desk);
+        let asked = ask_box(ui, &mut agent.chat.draft, &mut agent.chat.files, &placeholder, busy);
+        match asked {
+            Some(Asked::Send(text, files)) => {
+                let desk = agent.desk.clone();
+                agent.chat.ask_with(&text, files, desk);
+            }
+            Some(Asked::Stop) => agent.chat.interrupt(),
+            None => {}
         }
         egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(
             ui,
@@ -71,9 +78,15 @@ pub fn show_with<H>(ui: &mut Ui, agent: &mut Agent<H>, extras: &mut Extras) {
                 let Agent { chat, markdown, .. } = agent;
                 let backend = chat.backend.clone();
                 let last = chat.turns.len().saturating_sub(1);
+                let mut answered = None;
                 for (n, turn) in chat.turns.iter().enumerate() {
-                    draw(ui, markdown, backend.as_ref(), turn, n, busy && n == last);
+                    if let Some(a) = draw(ui, markdown, backend.as_ref(), turn, n, busy && n == last) {
+                        answered = Some(a);
+                    }
                     ui.add_space(10.0);
+                }
+                if let Some((id, answers)) = answered {
+                    chat.answer(id, answers);
                 }
                 if let Some(below) = extras.below.as_mut() {
                     below(ui);
@@ -246,38 +259,66 @@ fn settings_view<H>(ui: &mut Ui, agent: &mut Agent<H>) {
     }
 }
 
-fn ask_box(ui: &mut Ui, draft: &mut String, placeholder: &str, busy: bool) -> Option<String> {
+enum Asked {
+    Send(String, Vec<Attached>),
+    Stop,
+}
+
+fn ask_box(
+    ui: &mut Ui,
+    draft: &mut String,
+    files: &mut Vec<Attached>,
+    placeholder: &str,
+    busy: bool,
+) -> Option<Asked> {
     let mut asked = None;
+    let height = ASK_H + if files.is_empty() { 0.0 } else { 36.0 };
     egui::Panel::bottom("ask")
-        .exact_size(ASK_H)
+        .exact_size(height)
         .resizable(false)
         .show_separator_line(false)
         .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin::symmetric(0, 8)))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let box_w = (ui.available_width() - SEND_W - 8.0).max(80.0);
-                let entry = ui.add_sized(
-                    egui::vec2(box_w, ASK_H - 16.0),
-                    egui::TextEdit::multiline(draft).hint_text(placeholder).desired_rows(3),
-                );
-                let send = ui
-                    .add_enabled(
-                        !busy,
-                        egui::Button::new("Send").min_size(egui::vec2(SEND_W, 30.0)),
-                    )
-                    .clicked();
-                let entered = entry.has_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                if !busy && (send || entered) {
-                    let text = draft.trim().to_string();
-                    draft.clear();
-                    if !text.is_empty() {
-                        asked = Some(text);
-                    }
+            if !files.is_empty() {
+                let pending: Vec<crate::composer::Pending> = files
+                    .iter()
+                    .map(|f| crate::composer::Pending {
+                        name: &f.name,
+                        size: f.data.len() as u64,
+                        preview: None,
+                    })
+                    .collect();
+                if let Some(i) = crate::composer::pending_row(ui, &pending) {
+                    files.remove(i);
                 }
+                ui.add_space(4.0);
+            }
+            let edit = crate::composer::text_box(ui, "agent-pane", draft, placeholder, 2);
+            let enter = crate::composer::entered(ui, &edit, draft);
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let can = !busy && (!draft.trim().is_empty() || !files.is_empty());
+                    if (crate::composer::send_key(ui, "send", can, 100.0) || enter) && can {
+                        let text = draft.trim().to_string();
+                        draft.clear();
+                        asked = Some(Asked::Send(text, std::mem::take(files)));
+                    }
+                    if busy && crate::composer::stop_key(ui) {
+                        asked = Some(Asked::Stop);
+                    }
+                });
             });
         });
     asked
+}
+
+fn latest_plan(turns: &[Turn]) -> Option<Vec<(shared::Check, String)>> {
+    turns.iter().rev().find_map(|t| match t {
+        Turn::Did { name, args, .. } => {
+            shared::checklist(name, &serde_json::from_str(args).unwrap_or_default())
+        }
+        _ => None,
+    })
 }
 
 fn draw(
@@ -287,140 +328,78 @@ fn draw(
     turn: &Turn,
     n: usize,
     live: bool,
-) {
+) -> Option<(u64, Vec<String>)> {
+    let mut show = shared::Show {
+        markdown: md,
+        files: &mut shared::NoFiles,
+        now: 0,
+        thinking: true,
+        reading: None,
+        read_aloud: false,
+        save: false,
+    };
+    let id = n as i64;
     match turn {
-        Turn::You(text) => {
-            egui::Frame::NONE
-                .fill(PANEL)
-                .stroke(egui::Stroke::new(1.0, ETCH))
-                .corner_radius(2)
-                .inner_margin(Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    Line::new().legend("you").size(10.5).show(ui);
-                    ui.add_space(2.0);
-                    ui.add(egui::Label::new(RichText::new(text).size(13.0).color(VALUE)).wrap());
-                });
+        Turn::You { text, files } => {
+            let shown: Vec<shared::File> = files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| shared::File {
+                    id: i as i64,
+                    name: &f.name,
+                    mime: &f.mime,
+                    size: f.data.len() as u64,
+                })
+                .collect();
+            shared::entry(ui, &mut show, id, &Item::You { text, files: &shown, from: &[], at: None, queued: false });
         }
         Turn::Said(text) => {
-            Line::new().legend("agent").size(10.5).show(ui);
-            ui.add_space(2.0);
-            markdown::show(ui, md, text, n);
-            if live {
-                ui.ctx().request_repaint();
+            shared::entry(ui, &mut show, id, &Item::Said { text });
+        }
+        Turn::Thinking(text) => {
+            shared::entry(ui, &mut show, id, &Item::Thinking { text });
+        }
+        Turn::Did { name, args, answer } => {
+            let input: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+            let (output, error) = match answer {
+                None => (None, false),
+                Some(Ok(t)) => (Some(shared::pretty(t)), false),
+                Some(Err(t)) => (Some(t.clone()), true),
+            };
+            let summary = summary(backend, name, args);
+            let item = Item::Tool {
+                name,
+                input: &input,
+                output: output.as_deref(),
+                error,
+                summary: Some(&summary),
+            };
+            shared::entry(ui, &mut show, id, &item);
+        }
+        Turn::Asked { id: qid, questions, answers } => {
+            let key = qid.to_string();
+            let qs: Vec<shared::Question> = questions
+                .iter()
+                .map(|q| shared::Question {
+                    text: &q.text,
+                    options: &q.options,
+                    multiple: q.multiple,
+                    secret: false,
+                })
+                .collect();
+            let item = Item::Questions { id: &key, questions: &qs, answers: answers.as_deref() };
+            if let Some(Action::Answer(a)) = shared::entry(ui, &mut show, id, &item) {
+                return Some((*qid, a));
             }
         }
-        Turn::Did { name, args, answer } => call(ui, backend, name, args, answer, n),
         Turn::Fault(e) => {
-            egui::Frame::NONE
-                .stroke(egui::Stroke::new(1.0, FAULT))
-                .corner_radius(2)
-                .inner_margin(Margin::symmetric(10, 6))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    Line::new().value(e.clone()).tint(FAULT).wrapped(ui);
-                });
+            shared::entry(ui, &mut show, id, &Item::Error { text: e });
         }
     }
-}
-
-fn call(
-    ui: &mut Ui,
-    backend: &dyn Backend,
-    name: &str,
-    args: &str,
-    answer: &Option<Result<String, String>>,
-    n: usize,
-) {
-    let tint = match answer {
-        Some(Err(_)) => FAULT,
-        None => READOUT,
-        Some(Ok(_)) => LEGEND,
-    };
-    let mark = match answer {
-        None => "running",
-        Some(Ok(_)) => "done",
-        Some(Err(_)) => "failed",
-    };
-    let summary = summary(backend, name, args);
-    let body = match answer {
-        Some(Ok(t)) | Some(Err(t)) => Some(t.as_str()),
-        None => None,
-    };
-    let failed = matches!(answer, Some(Err(_)));
-    egui::Frame::NONE
-        .fill(WELL)
-        .stroke(egui::Stroke::new(1.0, if failed { FAULT } else { ETCH }))
-        .corner_radius(2)
-        .inner_margin(Margin::symmetric(10, 5))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let id = ui.make_persistent_id(("call", n));
-            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
-                ui.ctx(),
-                id,
-                false,
-            );
-            let row = ui.horizontal(|ui| {
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(14.0, 18.0), egui::Sense::click());
-                let open = state.is_open();
-                let c = rect.center();
-                let points = match open {
-                    true => vec![
-                        c + egui::vec2(-4.0, -2.0),
-                        c + egui::vec2(4.0, -2.0),
-                        c + egui::vec2(0.0, 3.0),
-                    ],
-                    false => vec![
-                        c + egui::vec2(-2.0, -4.0),
-                        c + egui::vec2(3.0, 0.0),
-                        c + egui::vec2(-2.0, 4.0),
-                    ],
-                };
-                ui.painter().add(egui::Shape::convex_polygon(points, LEGEND, egui::Stroke::NONE));
-                if resp.clicked() && body.is_some() {
-                    state.toggle(ui);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    Line::new().legend(mark).size(9.5).tint(tint).show(ui);
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        Line::new()
-                            .legend(name)
-                            .size(10.5)
-                            .tint(tint)
-                            .gap(8.0)
-                            .note(summary.clone())
-                            .size(11.5)
-                            .tint(LEGEND)
-                            .elided(ui);
-                    });
-                });
-            });
-            if row.response.interact(egui::Sense::click()).clicked() && body.is_some() {
-                state.toggle(ui);
-            }
-            if let (Some(text), true) = (body, state.is_open()) {
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical()
-                    .id_salt(("callbody", n))
-                    .max_height(280.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(pretty(text)).font(mono(11.5)).color(if failed {
-                                    FAULT
-                                } else {
-                                    VALUE
-                                }),
-                            )
-                            .wrap(),
-                        );
-                    });
-            }
-            state.store(ui.ctx());
-        });
+    if live {
+        ui.ctx().request_repaint();
+    }
+    None
 }
 
 pub fn summary(backend: &dyn Backend, name: &str, args: &str) -> String {
@@ -443,15 +422,6 @@ pub fn summary(backend: &dyn Backend, name: &str, args: &str) -> String {
         "code_outline" | "code_diagnostics" => short(&field("path").unwrap_or_default()),
         "code_find" => short(&field("name").unwrap_or_default()),
         _ => short(args),
-    }
-}
-
-fn pretty(text: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(v) if v.is_object() || v.is_array() => {
-            serde_json::to_string_pretty(&v).unwrap_or_else(|_| text.to_string())
-        }
-        _ => text.to_string(),
     }
 }
 
@@ -536,9 +506,142 @@ mod tests {
         assert_eq!(narrow.left(), 16.0);
     }
 
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    use serde_json::json;
+
+    fn agent() -> Agent<()> {
+        let ctx = egui::Context::default();
+        let mut a = Agent::new(&ctx, std::sync::Arc::new(Quiet), true);
+        a.chat.config.model = "qwen3".into();
+        a
+    }
+
+    fn transcript(a: &mut Agent<()>) {
+        let t = &mut a.chat.turns;
+        t.push(Turn::You {
+            text: "The current credit system isnt very good. Look at how credits are applied.".into(),
+            files: vec![Attached {
+                name: "billing.csv".into(),
+                mime: "text/csv".into(),
+                data: std::sync::Arc::new(vec![0; 2048]),
+            }],
+        });
+        t.push(Turn::Thinking("I should find where credits are deducted first.".into()));
+        t.push(Turn::Did {
+            name: "todo_write".into(),
+            args: json!({"items": [
+                {"text": "find the credit code", "status": "done"},
+                {"text": "add a ledger row", "status": "in_progress"},
+                {"text": "show it on the billing page"},
+            ]})
+            .to_string(),
+            answer: Some(Ok("saved".into())),
+        });
+        t.push(Turn::Did {
+            name: "search_files".into(),
+            args: json!({"pattern": "apply_credit"}).to_string(),
+            answer: Some(Ok("src/billing.rs:88: fn apply_credit(\nsrc/api.rs:210: apply_credit(".into())),
+        });
+        t.push(Turn::Did {
+            name: "bash".into(),
+            args: json!({"command": "cargo test -p billing"}).to_string(),
+            answer: Some(Err("error[E0425]: cannot find value `ledger`\n[exit 101 in 4.2s]".into())),
+        });
+        t.push(Turn::Said(
+            "Credits are added to the balance with no **ledger row**, which is why users cannot see them.".into(),
+        ));
+        t.push(Turn::Asked {
+            id: 1,
+            questions: vec![super::super::chat::Asking {
+                text: "Show the ledger on the billing page?".into(),
+                options: vec!["yes".into(), "no".into()],
+                multiple: false,
+            }],
+            answers: None,
+        });
+        t.push(Turn::Fault("the model server went away".into()));
+    }
+
+    fn pane(a: Agent<()>) -> Harness<'static, Agent<()>> {
+        let mut setup = egui_kittest::wgpu::default_wgpu_setup();
+        if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
+            new.instance_descriptor.flags = egui_wgpu::wgpu::InstanceFlags::empty();
+        }
+        let mut h = Harness::builder().with_size([900.0, 1100.0]).wgpu_setup(setup).build_ui_state(
+            |ui, a: &mut Agent<()>| {
+                egui_bench::theme::install(ui.ctx());
+                show(ui, a);
+            },
+            a,
+        );
+        h.run_steps(4);
+        h
+    }
+
+    fn painted(h: &Harness<'_, Agent<()>>) -> String {
+        fn walk(s: &egui::Shape, out: &mut String) {
+            match s {
+                egui::Shape::Text(t) => {
+                    out.push_str(t.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        for c in &h.output().shapes {
+            walk(&c.shape, &mut out);
+        }
+        out.to_lowercase()
+    }
+
     #[test]
-    fn a_json_answer_is_laid_out_and_text_is_left_alone() {
-        assert!(pretty("{\"a\":1}").contains("\n"));
-        assert_eq!(pretty("$ gcad check\nok"), "$ gcad check\nok");
+    fn the_pane_draws_every_turn_kind_with_the_shared_widgets() {
+        let mut a = agent();
+        transcript(&mut a);
+        let mut h = pane(a);
+        let text = painted(&h);
+        for words in [
+            "the current credit system",
+            "billing.csv 2 kb",
+            "i should find where credits are deducted",
+            "plan",
+            "1 of 3 done",
+            "apply_credit",
+            "$ cargo test -p billing",
+            "failed",
+            "ledger row",
+            "show the ledger on the billing page?",
+            "the model server went away",
+        ] {
+            assert!(text.contains(words), "{words} is drawn");
+        }
+        if let Ok(dir) = std::env::var("AGENT_UI_SHOTS") {
+            let img = h.render().expect("rendered");
+            img.save(std::path::Path::new(&dir).join("agent-ui-pane.png")).unwrap();
+        }
+        h.get_by_label("yes").click();
+        h.run_steps(3);
+        assert!(
+            matches!(h.state().chat.turns.get(6), Some(Turn::Asked { answers: Some(a), .. }) if a == &["yes".to_string()]),
+            "a click answers the question"
+        );
+    }
+
+    #[test]
+    fn the_send_key_asks_and_takes_the_files_with_it() {
+        let mut a = agent();
+        a.chat.config.model.clear();
+        a.chat.draft = "hello".into();
+        a.chat.files.push(Attached { name: "a.txt".into(), mime: "text/plain".into(), data: std::sync::Arc::new(b"hi".to_vec()) });
+        let mut h = pane(a);
+        assert!(painted(&h).contains("a.txt 2 b"));
+        h.get_by_label("send").click();
+        h.run_steps(3);
+        let a = h.state();
+        assert!(a.chat.files.is_empty());
+        assert!(matches!(&a.chat.turns[0], Turn::You { text, files } if text == "hello" && files.len() == 1));
     }
 }
