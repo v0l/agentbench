@@ -7,7 +7,7 @@ The agent is split into two library crates in this repo, plus the pieces that st
 | `crates/agent-core` | MIT | no egui, no agentbench types | the UI-free agent kit that used to live in `egui_bench::agent` |
 | `crates/agent-native` | GPL-3.0-only | `agent-core`, `agentbench-core` | the native agent loop, its tools, and the contract the runner drives agents through |
 | `crates/server` | GPL-3.0-only | both | runner, store, API, autopilot, and the external CLI agents |
-| `crates/agent-ui` | MIT | `agent-core`, egui_bench (theme and markdown only) | chat, pane, settings and `Agent<H>`/`Host`/`serve` |
+| `crates/agent-ui` | MIT | `agent-core` (feature `agent`), egui_bench (theme, key, markdown) | the chat display widgets both apps draw with, and with `agent`: chat, pane, settings and `Agent<H>`/`Host`/`serve` |
 | `crates/agent-voice` | MIT | none of ours | audio helpers, speech client, Whisper and Phonon through candle |
 
 `agent-core` is MIT so MIT and GPL apps can use it. `agent-native` is GPL like the rest of agentbench.
@@ -84,7 +84,7 @@ egui_bench no longer holds any agent code. Everything left egui_bench for this r
 | `src/agent/{chat,pane,settings}.rs`, `Agent`, `Host`, `serve`, `desk` | `crates/agent-ui` | MIT |
 | `src/speech/*` (Whisper, Phonon, Kokoro), `src/voice/*` (audio helpers, speech client, model list) and the speech examples | `crates/agent-voice` (feature `speech`, `speech-cuda`, `speech-metal`) | MIT |
 
-`agent-ui` uses egui_bench only for its theme, markdown and prelude. Apps outside this repo take the crates by git:
+`agent-ui` uses egui_bench only for its theme, keys, markdown and prelude. Apps outside this repo take the crates by git:
 
 ```toml
 agent-core = { git = "https://github.com/v0l/agentbench" }
@@ -93,3 +93,30 @@ agent-voice = { git = "https://github.com/v0l/agentbench", features = ["speech"]
 ```
 
 The old `egui_bench::agent::*` paths become `agent_core::*` (tools, workspace, grants, sandbox, skillset, toolkit and the rest), `agent_ui::*` (`Agent`, `Host`, `Handled`, `serve`, `pane`) and `agent_voice::{speech, voice}`.
+
+## Chat display widgets
+
+agentbench's window and `agent_ui::pane` draw a chat with the same widgets, so a chat looks the same in both. These modules build without the `agent` feature, on wasm and Android too; agentbench's app takes `agent-ui` with `default-features = false`.
+
+| module | holds | agentbench keeps |
+|---|---|---|
+| `transcript` | `Item` (you, said, thinking, tool, questions, error, notice, warning, file, summary) and `entry` to draw one; `tool_row`, `tool_body`, `tool_summary`, `shell_command`, `checklist`, `plan_panel`, `questions`, `attached`, `excerpt`, `pretty`; `Files` for thumbnails and text previews | mapping `Message` onto `Item`, fetching attachments, answering, reading aloud, saving |
+| `composer` | the text box, Enter to send, up for the last message sent, the waiting-files row, the send and stop keys | slash menu, speech key, status line, drag and paste |
+| `viewer` | the file modal: picture zoom and pan, text with line numbers and search, markdown, the footer keys | downloading, image decoding, save, open, reveal |
+| `form` | the text fields, with `set_hooks` for an app's IME and clipboard | |
+| `widgets` | `rail_block`, `code_block`, `spinner`, `option_row`, `read_link`, `press`, `size`, `ago` | |
+
+A user message with a non-empty `from` (judge, watch, autopilot, another session) is folded to one line, its source, time and first line, until clicked. Messages the user typed are never folded.
+
+The pane's chat (`agent_ui::chat`) shows the model's reasoning (`reasoning_content` or `reasoning` deltas) as thinking turns, offers an `ask_user` tool drawn as a question card unless the backend has its own, and sends files from the composer as image or text parts.
+
+![agent_ui::pane](agent-ui-pane.png)
+
+agentbench's chat before and after the move (the UI suite's 88 screenshots are pixel-identical):
+
+![before](agentbench-chat-before.png)
+![after](agentbench-chat-after.png)
+
+A judge request folded in the supervisor chat:
+
+![judge folded](agentbench-judge-folded.png)

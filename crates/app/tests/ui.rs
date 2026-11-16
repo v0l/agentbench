@@ -982,6 +982,35 @@ fn a_busy_transcript_reads_cleanly() {
 }
 
 #[test]
+fn a_judge_message_is_folded_until_clicked() {
+    let rig = rig();
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let s = rig.store.add_session(main.id, "native", "supervise", None, None).unwrap();
+    rig.store
+        .add_message(
+            s.id,
+            &Entry::User {
+                text: "#680 Server tab per-request table\n\nJUDGE BODY the worker says it is done".into(),
+                attachments: vec![],
+                from: vec!["judge".into()],
+            },
+        )
+        .unwrap();
+    rig.store.add_message(s.id, &Entry::user("please merge it\n\nTYPED BODY")).unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(s.id, s.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(s.id) == 2);
+    h.run_steps(3);
+    shot(&mut h, "judge-folded");
+    assert!(h.query_by_label_contains("JUDGE BODY").is_none(), "folded by default");
+    assert!(h.query_by_label_contains("TYPED BODY").is_some(), "typed messages stay open");
+    h.get_by_label("from judge").click();
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("JUDGE BODY").is_some(), "a click opens it");
+}
+
+#[test]
 fn a_checklist_shows_its_items_in_the_transcript() {
     let rig = rig();
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
