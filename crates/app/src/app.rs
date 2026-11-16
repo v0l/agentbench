@@ -30,7 +30,7 @@ mod widgets;
 use self::settings::{model_input, pairing_of};
 pub use self::widgets::{status_counts, usage_labels};
 use self::widgets::*;
-use agent_ui::widgets::{code_block, option_row, press, rail_block, read_link, spinner};
+use agent_ui::widgets::{code_block, spinner};
 
 const SIDE_W: f32 = 320.0;
 const RETRY: Duration = Duration::from_secs(3);
@@ -392,25 +392,6 @@ struct FileIssue {
     body: String,
 }
 
-/// What has been picked and typed so far for one question.
-#[derive(Clone, Default)]
-struct Slot {
-    picked: Vec<usize>,
-    typed: String,
-}
-
-impl Slot {
-    fn reply(&self, q: &Question) -> String {
-        let mut parts: Vec<&str> =
-            self.picked.iter().filter_map(|&i| q.options.get(i)).map(String::as_str).collect();
-        let typed = self.typed.trim();
-        if !typed.is_empty() {
-            parts.push(typed);
-        }
-        parts.join(", ")
-    }
-}
-
 #[derive(Clone, PartialEq)]
 enum PlaceChoice {
     Main,
@@ -686,7 +667,6 @@ pub struct App {
     notice: Option<(bool, String)>,
     tab: Tab,
     fresh: Option<Fresh>,
-    drafts: HashMap<String, Vec<Slot>>,
     filter: Filter,
     query: String,
     label: String,
@@ -874,7 +854,6 @@ impl App {
                 Tab::Chat
             },
             fresh: None,
-            drafts: HashMap::new(),
             filter: Filter::Open,
             query: String::new(),
             label: String::new(),
@@ -1443,11 +1422,6 @@ impl App {
                 self.notice = Some((false, e));
             }
         }
-    }
-
-    /// Whether the reply with this message id is being read aloud.
-    pub(super) fn is_reading(&self, id: Id) -> bool {
-        self.reading == Some(id) && self.reader.busy()
     }
 
     /// The hotkey: start listening in the tile in use, or finish the take now.
@@ -3062,7 +3036,7 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
-    use super::transcript::{tool_body, tool_summary};
+    use agent_ui::transcript::{tool_body, tool_summary};
     use super::*;
 
     fn issue(id: Id, title: &str, labels: &[&str], priority: i64) -> Issue {

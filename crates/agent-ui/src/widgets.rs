@@ -81,9 +81,9 @@ pub fn option_row(
     let galley = ui.painter().layout(label.to_string(), font, tint, width - pad * 2.0 - mark);
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(width, galley.size().y + 10.0), Sense::hover());
-    let resp = ui.interact(rect, ui.id().with(salt), Sense::click());
+    let resp = ui.interact(rect, ui.scope_id().with(salt), Sense::click());
     resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, label.to_string())
+        egui::WidgetInfo::selected(egui::Role::Button, true, on, label.to_string())
     });
     if ui.is_rect_visible(rect) {
         let lit = on || resp.hovered();
@@ -144,7 +144,7 @@ pub fn read_link(ui: &mut Ui, reading: bool) -> egui::Response {
 
 pub fn press(ui: &mut Ui, label: &str, enabled: bool, key: Key) -> bool {
     let r = ui.add(key.enabled(enabled));
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     r.clicked()
 }
 

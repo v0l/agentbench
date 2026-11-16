@@ -1,4 +1,6 @@
 pub mod form;
+pub mod transcript;
+pub mod viewer;
 pub mod widgets;
 
 #[cfg(all(feature = "agent", not(target_arch = "wasm32")))]

@@ -1,6 +1,7 @@
 //! A chat: the tiles, a tile's header, and the session view that holds the transcript above the composer.
 
-use super::transcript::{latest_plan, plan_panel};
+use super::transcript::latest_plan;
+use agent_ui::transcript::plan_panel;
 use super::*;
 
 const PANEL_MAX_H: f32 = 120.0;
@@ -742,7 +743,7 @@ impl App {
                 ui.add_space(6.0);
             }
             for (i, text) in s.queued.iter().enumerate() {
-                self.you(ui, -1 - i as Id, 0, text, &[], &[], s.id, true);
+                self.queued(ui, s.id, -1 - i as Id, text);
             }
             if s.deferred > 0 {
                 ui.add_space(4.0);
