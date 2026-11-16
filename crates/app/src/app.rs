@@ -1,6 +1,6 @@
 use crate::client::{Client, Reply, Server};
 use crate::fonts::{self, Installed, Typeface};
-use agent_ui::form::{field, field_then, prose, prose_id, secret};
+use agent_ui::form::{field, field_then, prose, secret};
 use crate::picker::ModelPicker;
 use crate::scan::Scan;
 use agentbench_core::{

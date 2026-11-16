@@ -1,3 +1,4 @@
+pub mod composer;
 pub mod form;
 pub mod transcript;
 pub mod viewer;
