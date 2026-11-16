@@ -6,18 +6,20 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
-- A quota pause no longer shows as needs you: the session stays running, reads "paused for quota until HH:MM" and sends no needs-you notice. A far Retry-After is capped by the quota endpoint's own reading, and a 503 retries instead of pausing.
-- A provider 5xx or overloaded error sent inside a 200 stream (yalr "Server error ... 503") now retries like an HTTP 5xx instead of failing the turn. 4xx refusals stay fatal.
-### Fixed
-
-- Quota notices go only to sessions on the quota's model, are sent once per window (5 minute drift tolerance), and are limited to one per session per model per 30 minutes, with an immediate notice when the quota becomes exhausted.
-- A session paused on a quota error now wakes as soon as a quota poll or a queued message finds the model has headroom, instead of sleeping until the 7d reset. The pause time is the earliest moment the model is free.
-
-### Changed
-- A child session can `send_message` to and read its own parent even when the parent is the supervisor in another project. Every child's first message now starts with `PARENT=<parent id>`, so workers know who to report to. The autopilot already sets the supervisor as parent.
-- Every session started by another session (the supervisor, the autopilot or any agent) records its parent, and the parent is told each time the child's turn ends, with no `watch_session` call. `list_sessions` shows `parent` and `children`. A child waiting on a question also tells a non-supervisor parent. The app shows a "child of" chip in the chat header that opens the parent, a children count on the parent, and the parent's name on the session row.
+## [0.9.0] - 2026-11-17
 
 ### Added
+- Workspaces: the app connects to several agentbench servers at once, with a workspace bar to switch between them. Each server keeps its own projects, sessions, supervisor and autopilot.
+- The supervisor can ask you to add a project (`add_project`): a confirm card in the app creates, imports or clones it only when you accept.
+- Shared chat widgets (transcript entries, viewer, composer box, form fields) live in the new `agent-ui` crate, alongside `agent-core`, `agent-native` and `agent-voice`, so other Bench Suite apps draw chats the same way.
+
+### Changed
+- A quota pause no longer shows as needs you: the session stays running, reads "paused for quota until HH:MM" and sends no needs-you notice. A far Retry-After is capped by the quota endpoint's own reading, and a 503 retries instead of pausing.
+- A provider 5xx or overloaded error sent inside a 200 stream (yalr "Server error ... 503") now retries like an HTTP 5xx instead of failing the turn. 4xx refusals stay fatal.
+- Quota notices go only to sessions on the quota's model, are sent once per window (5 minute drift tolerance), and are limited to one per session per model per 30 minutes, with an immediate notice when the quota becomes exhausted.
+- A session paused on a quota error now wakes as soon as a quota poll or a queued message finds the model has headroom, instead of sleeping until the 7d reset. The pause time is the earliest moment the model is free.
+- A child session can `send_message` to and read its own parent even when the parent is the supervisor in another project. Every child's first message now starts with `PARENT=<parent id>`, so workers know who to report to. The autopilot already sets the supervisor as parent.
+- Every session started by another session (the supervisor, the autopilot or any agent) records its parent, and the parent is told each time the child's turn ends, with no `watch_session` call. `list_sessions` shows `parent` and `children`. A child waiting on a question also tells a non-supervisor parent. The app shows a "child of" chip in the chat header that opens the parent, a children count on the parent, and the parent's name on the session row.
 - Release and adopt: **take control** in a session's menu (and `POST /api/sessions/{id}/release`, or the supervisor's `unwatch_session`) clears its parent and watches and drops it from the autopilot, so nothing messages, judges, nudges or merges it, and the list shows it as user controlled. **hand back to supervisor** (`POST /api/sessions/{id}/adopt`, or `watch_session` with `adopt: true`) puts it back under the supervisor and the autopilot.
 - A native chat that sits idle (4 minutes by default, under the provider's prompt cache lifetime) with its context past 50% has its oldest part folded into a section summary in the background, keeping the newest 40% word for word. Section summaries stack and are never summarised again, so the start of the prompt stays byte-stable, and a fold never cuts a tool call from its result. A message arriving during a fold waits for it, and stopping drops it. A fold also runs before the full compaction at 80%, which is now the last resort. The three settings are under agent settings; the chat shows a notice and the section summary. Claude and Codex manage their own context, so they keep their own behaviour.
 - Each project has a vision: a summary, ordered goals and non-goals, with every version kept. Issues link to a goal or are marked off vision. The supervisor judges work against the vision and its `set_vision` is a proposal you confirm, workers read it in their brief, and the autopilot only starts todo issues linked to an active goal, idling in projects with no vision. The projects page has a Vision panel, issue cards show a goal chip, and the board can group by goal.
