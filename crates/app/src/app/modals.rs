@@ -5,6 +5,7 @@ use super::*;
 impl App {
     pub(super) fn modals(&mut self, ctx: &egui::Context) {
         self.add_project_modal(ctx);
+        self.add_workspace_modal(ctx);
         self.file_issue_modal(ctx);
         self.start_modal(ctx);
         self.worktree_modal(ctx);
@@ -305,9 +306,12 @@ impl App {
     }
 
     pub(super) fn file_issue_modal(&mut self, ctx: &egui::Context) {
-        let Some(f) = &mut self.file_issue else {
+        let spaces = self.workspace_choices();
+        let Some(mut form) = self.file_issue.take() else {
             return;
         };
+        let f = &mut form;
+        let mut slot = crate::hub::slot_of(f.project);
         let name = self
             .overview
             .as_ref()
@@ -321,6 +325,11 @@ impl App {
                 ui.set_width(modal_width(ctx, 520.0));
                 modal_title(ui, &format!("File an issue in {name}"));
                 section(ui, "issue", "what needs doing", |ui| {
+                    if !spaces.is_empty() {
+                        row(ui, "workspace", |ui| {
+                            choice(ui, "issue-workspace", &mut slot, spaces.iter().cloned());
+                        });
+                    }
                     row(ui, "title", |ui| {
                         field(ui, &mut f.title, "fix the login loop");
                     });
@@ -346,6 +355,12 @@ impl App {
         if m.should_close() {
             close = true;
         }
+        if slot != crate::hub::slot_of(form.project)
+            && let Some(p) = self.first_project_of(slot)
+        {
+            form.project = p;
+        }
+        let f = &form;
         if go {
             let new = NewIssue {
                 project_id: f.project,
@@ -356,13 +371,18 @@ impl App {
             if let Some(c) = &mut self.client {
                 c.add_issue(&new);
             }
-            self.file_issue = None;
-        } else if close {
-            self.file_issue = None;
+        } else if !close {
+            self.file_issue = Some(form);
         }
     }
 
     pub(super) fn start_modal(&mut self, ctx: &egui::Context) {
+        let badges: HashMap<Id, String> = self
+            .overview
+            .iter()
+            .flat_map(|o| &o.projects)
+            .filter_map(|p| Some((p.id, self.server_label(p.id)?)))
+            .collect();
         let Some(o) = &self.overview else {
             return;
         };
@@ -388,7 +408,7 @@ impl App {
                     } else if p.home {
                         "~ (no repo)".to_string()
                     } else {
-                        p.name.clone()
+                        format!("{}{}", p.name, badges.get(&p.id).map(|n| format!(" [{n}]")).unwrap_or_default())
                     },
                 )
             })

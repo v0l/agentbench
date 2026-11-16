@@ -16,6 +16,7 @@ use egui_bench::prelude::*;
 use std::collections::{HashMap, HashSet};
 use web_time::{Duration, Instant};
 
+mod bar;
 mod chat;
 mod composer;
 mod header;
@@ -656,6 +657,10 @@ const OLDER_PAGE: usize = 150;
 
 pub struct App {
     client: Option<Hub>,
+    view: Option<u32>,
+    home_supervisor: u32,
+    server_icons: HashMap<u32, (String, Option<egui::TextureHandle>)>,
+    add_workspace: Option<Remote>,
     servers: Vec<Remote>,
     server_name: String,
     face: Typeface,
@@ -846,6 +851,13 @@ impl App {
                 .and_then(|s| s.get_string("servers"))
                 .and_then(|t| serde_json::from_str(&t).ok())
                 .unwrap_or_default(),
+            view: storage.and_then(|s| s.get_string("view")).and_then(|v| v.parse().ok()),
+            home_supervisor: storage
+                .and_then(|s| s.get_string("home_supervisor"))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            server_icons: HashMap::new(),
+            add_workspace: None,
             server_name: storage
                 .and_then(|s| s.get_string("server_name"))
                 .filter(|n| !n.trim().is_empty())
@@ -989,6 +1001,8 @@ impl App {
         storage.set_string("external", self.external.clone());
         storage.set_string("servers", serde_json::to_string(&self.servers).unwrap_or_default());
         storage.set_string("server_name", self.server_name.clone());
+        storage.set_string("view", self.view.map(|v| v.to_string()).unwrap_or_default());
+        storage.set_string("home_supervisor", self.home_supervisor.to_string());
         storage.set_string("thinking", self.thinking.to_string());
         storage.set_string("alerts", self.alerts.to_string());
         storage.set_string("issues_first", self.issues_first.to_string());
@@ -1081,6 +1095,7 @@ impl App {
         let client =
             Hub::new(&self.server_name, server, &self.servers, move || ctx.request_repaint());
         self.client = Some(client);
+        self.apply_view();
         self.agent_models.clear();
         self.asking_models.clear();
         self.overview = None;
@@ -1622,6 +1637,7 @@ impl App {
             name: name.to_string(),
             url: url.to_string(),
             token: token.to_string(),
+            icon: String::new(),
         });
         self.sync_servers();
         slot
@@ -1651,11 +1667,91 @@ impl App {
         &self.servers
     }
 
+    fn apply_view(&mut self) {
+        if self.view.is_some_and(|v| v != 0 && !self.servers.iter().any(|r| r.slot == v)) {
+            self.view = None;
+        }
+        if self.home_supervisor != 0 && !self.servers.iter().any(|r| r.slot == self.home_supervisor) {
+            self.home_supervisor = 0;
+        }
+        if let Some(c) = &mut self.client {
+            c.set_focus(self.view);
+            c.set_supervisor(self.home_supervisor);
+        }
+    }
+
+    pub fn set_view(&mut self, view: Option<u32>) {
+        self.view = view;
+        self.apply_view();
+        self.fresh = None;
+        self.session = None;
+        self.detail = None;
+    }
+
+    pub fn file_issue_on(&mut self, project: Id, title: &str, body: &str) {
+        let new = NewIssue { project_id: project, title: title.into(), body: body.into(), ..Default::default() };
+        if let Some(c) = &mut self.client {
+            c.add_issue(&new);
+        }
+    }
+
+    pub fn refresh(&mut self) {
+        if let Some(c) = &mut self.client {
+            c.overview();
+        }
+    }
+
+    pub fn first_project_of(&self, slot: u32) -> Option<Id> {
+        let o = self.overview.as_ref()?;
+        let mine = || o.projects.iter().filter(|p| crate::hub::slot_of(p.id) == slot);
+        mine().find(|p| !p.builtin()).or(mine().next()).map(|p| p.id)
+    }
+
+    fn workspace_choices(&self) -> Vec<(u32, String)> {
+        match &self.client {
+            Some(c) if c.multi() && self.view.is_none() => self.server_names(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn view(&self) -> Option<u32> {
+        self.view
+    }
+
+    pub fn pick_supervisor(&mut self, slot: u32) {
+        self.home_supervisor = slot;
+        self.apply_view();
+    }
+
+    pub fn home_supervisor(&self) -> u32 {
+        self.home_supervisor
+    }
+
+    pub fn open_waiting(&mut self, slot: u32, sid: SessionId, supervisor: bool) {
+        if supervisor && self.view.is_none() {
+            self.pick_supervisor(slot);
+        } else if self.view.is_some_and(|v| v != slot) {
+            self.set_view(Some(slot));
+        }
+        self.open_pending = Some(sid);
+    }
+
+    pub fn open_proposals_of(&mut self, slot: u32) {
+        if self.view.is_none() {
+            self.pick_supervisor(slot);
+        } else if self.view != Some(slot) {
+            self.set_view(Some(slot));
+        }
+        self.triage_open = true;
+        self.open_supervisor();
+    }
+
     fn sync_servers(&mut self) {
         if let Some(c) = &mut self.client {
             c.sync(&self.server_name, &self.servers);
             c.overview();
         }
+        self.apply_view();
         self.session = self.session.filter(|s| self.session_by_id(*s).is_some());
     }
 
@@ -2113,7 +2209,10 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         self.poll_starting(ctx);
-        let title = window_title(self.overview.as_ref().map_or(0, |o| waiting_on_you(&o.sessions)));
+        let title = window_title(match &self.client {
+            Some(c) if c.multi() => c.waiting_total(),
+            _ => self.overview.as_ref().map_or(0, |o| waiting_on_you(&o.sessions)),
+        });
         if title != self.title_sent {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title_sent = title;
@@ -3067,6 +3166,7 @@ impl App {
                 self.notice = None;
             }
         }
+        self.workspace_bar(ui);
         if narrow {
             self.drawer_panel(&ctx);
         } else {

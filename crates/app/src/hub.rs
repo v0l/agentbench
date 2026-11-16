@@ -29,6 +29,8 @@ pub struct Remote {
     pub name: String,
     pub url: String,
     pub token: String,
+    #[serde(default)]
+    pub icon: String,
 }
 
 struct Link {
@@ -61,40 +63,73 @@ pub struct Hub {
     links: Vec<Link>,
     sessions: HashMap<SessionId, u32>,
     dirty: bool,
+    focus: Option<u32>,
+    supervisor: u32,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl std::ops::Deref for Hub {
     type Target = Client;
     fn deref(&self) -> &Client {
-        &self.links[0].client
+        let slot = self.focus.unwrap_or(0);
+        &self.links.iter().find(|l| l.slot == slot).unwrap_or(&self.links[0]).client
     }
 }
 
 impl std::ops::DerefMut for Hub {
     fn deref_mut(&mut self) -> &mut Client {
-        &mut self.links[0].client
+        let at = self.focus.and_then(|f| self.links.iter().position(|l| l.slot == f)).unwrap_or(0);
+        &mut self.links[at].client
     }
 }
 
-fn merge(links: &[Link]) -> Option<Overview> {
-    let primary = links.iter().find(|l| l.slot == 0).and_then(|l| l.overview.as_ref());
-    let first = links.iter().find_map(|l| l.overview.as_ref())?;
-    let mut out = primary.unwrap_or(first).clone();
-    if primary.is_none() {
-        out.autopilot = None;
-        out.triage = None;
-        out.usage = None;
-        out.supervisor = None;
-        out.visions.clear();
-        out.projects.clear();
-        out.worktrees.clear();
-        out.issues.clear();
-        out.sessions.clear();
-        out.host = None;
+fn tag_proposal(p: &mut agentbench_core::Proposal, slot: u32) {
+    use agentbench_core::Change;
+    p.id = tag(slot, p.id);
+    p.issues.iter_mut().for_each(|i| *i = tag(slot, *i));
+    p.projects.iter_mut().for_each(|i| *i = tag(slot, *i));
+    for c in &mut p.changes {
+        match c {
+            Change::Update { issue_id, .. } | Change::Comment { issue_id, .. } => {
+                *issue_id = tag(slot, *issue_id)
+            }
+            Change::Create { issue } => issue.project_id = tag(slot, issue.project_id),
+            Change::AddProject { .. } => {}
+        }
     }
+}
+
+fn merge(links: &[Link], focus: Option<u32>, supervisor: u32) -> Option<Overview> {
+    let wanted = focus.unwrap_or(supervisor);
+    let base = links
+        .iter()
+        .find(|l| l.slot == wanted && l.overview.is_some())
+        .or_else(|| links.iter().find(|l| l.overview.is_some()))?;
+    let bs = base.slot;
+    let mut out = base.overview.clone()?;
+    out.projects.clear();
+    out.worktrees.clear();
+    out.issues.clear();
+    out.sessions.clear();
+    out.visions.clear();
+    out.host = None;
     out.cursor = links.iter().filter_map(|l| l.cursor).sum();
-    for l in links.iter().filter(|l| l.slot != 0) {
+    if let Some(t) = &mut out.triage {
+        t.proposals.iter_mut().for_each(|p| tag_proposal(p, bs));
+        t.notes.iter_mut().for_each(|(id, _)| *id = tag(bs, *id));
+    }
+    if let Some(u) = &mut out.usage {
+        u.spend.projects.iter_mut().for_each(|p| p.project_id = tag(bs, p.project_id));
+    }
+    if let Some(a) = &mut out.autopilot {
+        for x in &mut a.activity {
+            x.project_id = x.project_id.map(|i| tag(bs, i));
+            x.issue_id = x.issue_id.map(|i| tag(bs, i));
+        }
+    }
+    out.host = base.overview.as_ref().and_then(|o| o.host.clone());
+    let mut first = true;
+    for l in links.iter().filter(|l| focus.is_none_or(|f| f == l.slot)) {
         let Some(o) = &l.overview else {
             continue;
         };
@@ -114,20 +149,26 @@ fn merge(links: &[Link]) -> Option<Overview> {
             i
         }));
         out.sessions.extend(
-            o.sessions.iter().filter(|x| Some(x.id) != o.supervisor).cloned().map(|mut x| {
-                retag_session(&mut x, s);
-                x
-            }),
+            o.sessions
+                .iter()
+                .filter(|x| Some(x.id) != o.supervisor || s == bs)
+                .cloned()
+                .map(|mut x| {
+                    retag_session(&mut x, s);
+                    x
+                }),
         );
         out.visions.extend(o.visions.iter().cloned().map(|mut v| {
             v.id = tag(s, v.id);
             v.project_id = tag(s, v.project_id);
             v
         }));
-        for a in &o.agents {
-            match out.agents.iter_mut().find(|x| x.name == a.name) {
-                Some(x) => x.available |= a.available,
-                None => out.agents.push(a.clone()),
+        if !std::mem::take(&mut first) {
+            for a in &o.agents {
+                match out.agents.iter_mut().find(|x| x.name == a.name) {
+                    Some(x) => x.available |= a.available,
+                    None => out.agents.push(a.clone()),
+                }
             }
         }
     }
@@ -157,7 +198,7 @@ impl Hub {
                 &wake,
             )
         }));
-        Hub { links, sessions: HashMap::new(), dirty: false, wake }
+        Hub { links, sessions: HashMap::new(), dirty: false, focus: None, supervisor: 0, wake }
     }
 
     pub fn sync(&mut self, primary_name: &str, extras: &[Remote]) {
@@ -173,6 +214,76 @@ impl Hub {
         }
         self.sessions.retain(|_, slot| self.links.iter().any(|l| l.slot == *slot));
         self.dirty = true;
+    }
+
+    pub fn set_focus(&mut self, focus: Option<u32>) {
+        let focus = focus.filter(|f| self.links.iter().any(|l| l.slot == *f));
+        if focus != self.focus {
+            self.focus = focus;
+            self.dirty = true;
+        }
+    }
+
+    pub fn focus(&self) -> Option<u32> {
+        self.focus
+    }
+
+    pub fn set_supervisor(&mut self, slot: u32) {
+        if self.links.iter().any(|l| l.slot == slot) && slot != self.supervisor {
+            self.supervisor = slot;
+            self.dirty = true;
+        }
+    }
+
+    pub fn supervisor_slot(&self) -> u32 {
+        self.focus.unwrap_or(self.supervisor)
+    }
+
+    pub fn url(&self, slot: u32) -> String {
+        self.links.iter().find(|l| l.slot == slot).map(|l| l.client.server.url.clone()).unwrap_or_default()
+    }
+
+    pub fn activity(&self, slot: u32) -> (usize, usize, usize) {
+        let Some(o) = self.links.iter().find(|l| l.slot == slot).and_then(|l| l.overview.as_ref())
+        else {
+            return (0, 0, 0);
+        };
+        let running = o.sessions.iter().filter(|s| s.status == agentbench_core::SessionStatus::Running).count();
+        let waiting = o.sessions.iter().filter(|s| s.status == agentbench_core::SessionStatus::Waiting).count();
+        let pending = o.triage.as_ref().map_or(0, |t| t.proposals.len());
+        (running, waiting, pending)
+    }
+
+    pub fn waiting(&self) -> Vec<(u32, SessionId, String, bool)> {
+        let mut out = Vec::new();
+        for l in &self.links {
+            let Some(o) = &l.overview else {
+                continue;
+            };
+            for s in o.sessions.iter().filter(|s| s.status == agentbench_core::SessionStatus::Waiting) {
+                out.push((l.slot, s.id, s.title.clone(), Some(s.id) == o.supervisor));
+            }
+        }
+        out
+    }
+
+    pub fn waiting_total(&self) -> usize {
+        self.links.iter().map(|l| self.activity(l.slot).1).sum()
+    }
+
+    pub fn proposals(&self) -> Vec<(u32, agentbench_core::Proposal)> {
+        let mut out = Vec::new();
+        for l in &self.links {
+            let Some(t) = l.overview.as_ref().and_then(|o| o.triage.as_ref()) else {
+                continue;
+            };
+            for p in &t.proposals {
+                let mut p = p.clone();
+                tag_proposal(&mut p, l.slot);
+                out.push((l.slot, p));
+            }
+        }
+        out
     }
 
     pub fn multi(&self) -> bool {
@@ -302,7 +413,7 @@ impl Hub {
         }
         if std::mem::take(&mut self.dirty)
             && !everyone_down
-            && let Some(o) = merge(&self.links)
+            && let Some(o) = merge(&self.links, self.focus, self.supervisor)
         {
             out.push(Reply::Overview(o));
         }
@@ -327,6 +438,33 @@ impl Hub {
 
     pub fn older_messages(&mut self, session: SessionId, before: Id, limit: usize) {
         self.by_session(session).older_messages(session, before, limit);
+    }
+
+    pub fn autopilot(&mut self, patch: &agentbench_core::AutopilotPatch) {
+        let slot = self.supervisor_slot();
+        self.link(slot).client.autopilot(patch);
+    }
+
+    pub fn triage_run(&mut self) {
+        let slot = self.supervisor_slot();
+        self.link(slot).client.triage_run();
+    }
+
+    pub fn triage_patch(&mut self, patch: &agentbench_core::TriagePatch) {
+        let slot = self.supervisor_slot();
+        let mut patch = patch.clone();
+        patch.note_project = patch.note_project.map(untag);
+        self.link(slot).client.triage_patch(&patch);
+    }
+
+    pub fn triage_decide(&mut self, id: Id, accept: bool) {
+        let (c, id) = self.by_id(id);
+        c.triage_decide(id, accept);
+    }
+
+    pub fn open_supervisor(&mut self, agent: &str) {
+        let slot = self.supervisor_slot();
+        self.link(slot).client.open_supervisor(agent);
     }
 
     pub fn comments(&mut self, issue: Id) {
@@ -502,6 +640,11 @@ impl Hub {
     pub fn delete_session(&mut self, session: SessionId) {
         self.by_session(session).delete_session(session);
     }
+}
+
+pub fn host_name(url: &str) -> String {
+    let host = agentbench_core::host_of(url);
+    if host.is_empty() { "workspace".to_string() } else { host }
 }
 
 #[cfg(test)]

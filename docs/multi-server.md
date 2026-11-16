@@ -1,15 +1,34 @@
-# Several servers in one window
+# Workspaces: several servers in one window
 
-Every machine runs an ordinary agentbench server with its own projects, chats, issues, keys and model providers. Nothing is shared or proxied between servers. The app connects to several at once and shows them as one workspace.
+Every machine runs an ordinary agentbench server with its own projects, chats, issues, keys, model providers, supervisor and autopilot. Nothing is shared or proxied between servers. The app connects to several at once and calls each one a workspace.
 
-Add servers in Settings, under servers: a name, the address and the token printed by `agentbench token` on that machine. The first server (the one the window already used) keeps its plain ids, so existing installs work unchanged. The saved list lives in the app's settings under `servers`.
+## Adding workspaces
 
-- Items from a remote server carry its name in brackets. An unreachable server shows "server offline" on its items and never blocks the others.
-- Ids are per server. The app tags each remote id with the server's slot (`crates/app/src/hub.rs`) and strips it again before a request goes to the owning server, so every action reaches the right machine.
-- Add project asks which server to use, defaulting to the selected project's server.
-- Each server's RAM, disk and CPU load show under its entry in Settings, from the `host` block of `GET /api/overview`.
+Click the "+" at the bottom of the workspace bar, or use Settings, workspaces (the full editor). A workspace is a name, the address, the token printed by `agentbench token` on that machine, and an optional icon (a path to a small image file, stored in the app's settings). The first server keeps plain ids, so existing installs work unchanged. With one server there is no bar.
 
-Out of scope: the supervisor and the autopilot panel stay per server and show the first server's. The web and Android clients share this code, so they get the list too.
+## The bar
 
-![two servers](multi-server-two.png)
-![one offline](multi-server-offline.png)
+A narrow bar on the far left, one round icon per workspace:
+
+- **ALL** at the top shows every workspace together. Items from a non-local workspace carry its name in brackets.
+- Clicking a workspace narrows projects, chats, issues, worktrees and the grid to it. The choice is saved.
+- An icon shows the workspace's image, or its initials on a colour taken from the name. A red dot means a chat is waiting for you or a proposal is pending, a green dot means agents are working, and a greyed icon means the server is offline (its items stay, marked "server offline", and never block the others).
+- Hovering shows the name, URL and RAM, disk and CPU from `Overview.host`.
+
+![the bar](workspace-bar.png)
+![one workspace](workspace-narrowed.png)
+![offline](workspace-bar-offline.png)
+
+## Supervisors
+
+Each server runs its own supervisor, autopilot and triage. The app shows the selected workspace's. In the ALL view a "supervisor of" switcher picks which workspace's supervisor the supervisor key opens (the first by default). A "needs you" panel lists every workspace's waiting chats and pending proposals; clicking one opens it on its own workspace. Proposal cards (including add project) are answered on the server that raised them, and the window title counts waiting chats across all workspaces.
+
+![needs you](workspace-needs-you.png)
+
+## Creating things
+
+In a workspace's own view, new chats, issues and projects go to that workspace. In ALL, new chat, file issue and add project offer a workspace picker; the start-an-agent dialog lists projects from every workspace with their badge. Terminal, file viewer, attachments and chat actions follow the session's workspace.
+
+## How it works
+
+Ids are per server, so the app tags each non-first id with the workspace slot (`crates/app/src/hub.rs`) and strips it before a request goes out. Web and Android share this code and get the bar too.

@@ -168,6 +168,21 @@ impl App {
                     "Ask anything. The agent works in this worktree and can read and file issues."
                 },
             );
+            let spaces = self.workspace_choices();
+            if !spaces.is_empty() {
+                ui.add_space(8.0);
+                let mut slot = crate::hub::slot_of(project);
+                ui.allocate_ui(Vec2::new(260.0, KEY_H), |ui| {
+                    choice(ui, "fresh-workspace", &mut slot, spaces.iter().cloned());
+                });
+                if slot != crate::hub::slot_of(project)
+                    && let Some(p) = self.first_project_of(slot)
+                {
+                    self.project = Some(p);
+                    self.fresh = None;
+                    return;
+                }
+            }
             ui.add_space(14.0);
             let fresh = self.fresh.as_mut().expect("fresh chat");
             let mut row = |ui: &mut Ui| {
@@ -638,13 +653,15 @@ impl App {
 
     fn add_project_cards(&mut self, ui: &mut Ui, session: agentbench_core::SessionId) {
         let supervisor = self.supervisor_chat() == Some(session);
+        let here = self.client.as_ref().map_or(0, |c| c.session_slot(session));
         let cards: Vec<(agentbench_core::Id, agentbench_core::AddProject)> = self
-            .overview
+            .client
             .as_ref()
-            .and_then(|o| o.triage.as_ref())
+            .map(|c| c.proposals())
+            .unwrap_or_default()
             .into_iter()
-            .flat_map(|t| &t.proposals)
-            .filter_map(|p| {
+            .filter(|(slot, _)| *slot == here)
+            .filter_map(|(_, p)| {
                 p.changes.iter().find_map(|c| match c {
                     agentbench_core::Change::AddProject { request } => Some((p.id, request.clone())),
                     _ => None,

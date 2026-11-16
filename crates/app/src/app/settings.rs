@@ -507,6 +507,7 @@ impl App {
             self.speech = st.speech.clone();
             let named = st.server_name.trim();
             let named = if named.is_empty() { "this server" } else { named };
+            st.servers.iter_mut().for_each(|r| crate::app::bar::keep_icon(&mut r.icon));
             if st.servers != self.servers || named != self.server_name {
                 self.servers = st.servers.clone();
                 self.server_name = named.to_string();
@@ -610,15 +611,15 @@ pub(super) fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {
 }
 
 pub(super) fn servers_section(ui: &mut Ui, st: &mut Settings) {
-    section(ui, "servers", "other agentbench servers shown in this window", |ui| {
+    section(ui, "workspaces", "other agentbench servers shown in this window", |ui| {
         note(
             ui,
-            "Each is an ordinary agentbench server with its own projects, chats and keys. Their items appear beside this one's, marked with the server's name.",
+            "Each workspace is an ordinary agentbench server with its own projects, chats, supervisor and keys. Pick one in the bar on the left, or see them all together.",
             LEGEND,
         );
         let status = st.server_status.clone();
         let line = |slot: u32| status.iter().find(|(s, _, _)| *s == slot).cloned();
-        row(ui, "this server", |ui| {
+        row(ui, "this workspace", |ui| {
             field(ui, &mut st.server_name, "name");
         });
         if let Some((_, up, text)) = line(0) {
@@ -636,10 +637,13 @@ pub(super) fn servers_section(ui: &mut Ui, st: &mut Settings) {
             row(ui, "token", |ui| {
                 secret(ui, &mut r.token);
             });
+            row_help(ui, "icon", "Optional. Path to a small image file.", |ui| {
+                field(ui, &mut r.icon, "/path/to/icon.png");
+            });
             if let Some((_, up, text)) = line(r.slot) {
                 crate::app::widgets::server_status(ui, up, &text);
             }
-            let key = ui.add(Key::new("remove server").outline(FAULT).id_salt(("remove-server", r.slot)));
+            let key = ui.add(Key::new("remove workspace").outline(FAULT).id_salt(("remove-server", r.slot)));
             if key.clicked() {
                 remove = Some(r.slot);
             }
@@ -648,7 +652,7 @@ pub(super) fn servers_section(ui: &mut Ui, st: &mut Settings) {
             st.servers.retain(|r| r.slot != slot);
         }
         ui.add_space(6.0);
-        let add = ui.add(Key::new("add server").outline(VALUE));
+        let add = ui.add(Key::new("add workspace").outline(VALUE));
         if add.clicked() {
             let slot = st.servers.iter().map(|r| r.slot).max().unwrap_or(0) + 1;
             st.servers.push(Remote {
@@ -656,6 +660,7 @@ pub(super) fn servers_section(ui: &mut Ui, st: &mut Settings) {
                 name: format!("server {slot}"),
                 url: String::new(),
                 token: String::new(),
+                icon: String::new(),
             });
         }
     });

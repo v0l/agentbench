@@ -4148,3 +4148,191 @@ fn each_server_shows_its_memory_disk_and_cpu() {
     assert_eq!(status.len(), 2);
     assert!(status.iter().all(|(_, up, text)| *up && text.contains("RAM") && text.contains("disk")), "{status:?}");
 }
+
+fn wait_for_slot(h: &mut Harness<'_, App>, slot: u32) {
+    until(h, "that workspace's overview", |h| {
+        h.state().overview().is_some_and(|o| {
+            o.projects.iter().any(|p| agentbench::hub::slot_of(p.id) == slot && p.name == "demo")
+        })
+    });
+}
+
+#[test]
+fn the_bar_shows_home_and_one_icon_per_workspace() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    h.get_by_label("all workspaces");
+    h.get_by_label("workspace desktop");
+    h.get_by_label("workspace workstation");
+    h.get_by_label("add workspace");
+    shot(&mut h, "workspace-bar");
+    let single = harness(first.url.clone());
+    assert!(!single.state().workspace_bar_shown(), "one server keeps the old look");
+}
+
+#[test]
+fn clicking_a_workspace_narrows_the_view_and_all_shows_both() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    h.get_by_label("workspace workstation").click();
+    until(&mut h, "only the workstation", |h| {
+        h.state().overview().is_some_and(|o| {
+            !o.projects.is_empty() && o.projects.iter().all(|p| agentbench::hub::slot_of(p.id) == 1)
+        })
+    });
+    assert_eq!(h.state().view(), Some(1));
+    let o = h.state().overview().unwrap();
+    assert!(o.sessions.iter().all(|s| agentbench::hub::slot_of(s.project_id) == 1));
+    assert!(o.issues.iter().all(|i| agentbench::hub::slot_of(i.id) == 1));
+    shot(&mut h, "workspace-narrowed");
+    h.get_by_label("all workspaces").click();
+    until(&mut h, "both again", both_loaded);
+    assert_eq!(h.state().view(), None);
+}
+
+#[test]
+fn an_offline_workspace_is_greyed_out_in_the_bar() {
+    let first = rig();
+    let second = rig();
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    drop(second);
+    until(&mut h, "the bar says offline", |h| {
+        h.query_by_label("workspace workstation, offline").is_some()
+    });
+    assert!(h.query_by_label("workspace desktop").is_some(), "the other stays normal");
+    shot(&mut h, "workspace-bar-offline");
+}
+
+#[test]
+fn a_workspace_with_a_waiting_chat_shows_an_activity_dot_and_the_needs_you_panel() {
+    let (first, second) = (rig(), rig());
+    let chat = second.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    second.store.set_status(chat.id, agentbench_core::SessionStatus::Waiting).unwrap();
+    h.state_mut().refresh();
+    until(&mut h, "the dot", |h| h.query_by_label("workspace workstation, needs you").is_some());
+    assert!(h.query_by_label("workspace desktop").is_some());
+    h.get_by_label_contains("needs you [workstation]");
+    shot(&mut h, "needs-you");
+}
+
+#[test]
+fn each_workspaces_supervisor_is_reached_from_its_own_view() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    h.get_by_label("workspace workstation").click();
+    wait_for_slot(&mut h, 1);
+    h.get_by_label("supervisor").click();
+    until(&mut h, "its supervisor", |h| h.state().supervisor_chat().is_some());
+    let sid = h.state().supervisor_chat().unwrap();
+    assert!(second.store.session(sid).is_ok(), "the session lives on the second server");
+    assert!(first.store.session(sid).is_err(), "and not on the first");
+    until(&mut h, "the supervisor chat open", |h| h.state().open() == Some(sid));
+    click(&mut h, 800.0, 735.0);
+    h.event(egui::Event::Text("status?".into()));
+    h.run_steps(2);
+    click(&mut h, 1220.0, 784.0);
+    let start = Instant::now();
+    while !second.store.messages(sid, 0).unwrap().iter().any(|m| m.entry == Entry::user("status?")) {
+        assert!(start.elapsed() < Duration::from_secs(30), "the message never reached its supervisor");
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    h.get_by_label("workspace desktop").click();
+    h.run_steps(3);
+    h.get_by_label("workspace desktop");
+    until(&mut h, "the first view", |h| h.state().view() == Some(0));
+    h.get_by_label("supervisor").click();
+    until(&mut h, "the first supervisor", |h| {
+        h.state().supervisor_chat().is_some_and(|s| first.store.session(s).is_ok())
+    });
+}
+
+#[test]
+fn the_home_view_has_a_supervisor_switcher_that_defaults_to_the_first_workspace() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    assert_eq!(h.state().home_supervisor(), 0);
+    h.state_mut().pick_supervisor(1);
+    h.run_steps(3);
+    h.get_by_label("supervisor").click();
+    until(&mut h, "the second supervisor", |h| {
+        h.state().supervisor_chat().is_some_and(|s| second.store.session(s).is_ok())
+    });
+}
+
+#[test]
+fn a_proposal_card_from_the_second_workspace_is_answered_there() {
+    let (first, second) = (rig(), rig());
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let tmp = tempfile::tempdir_in(&home).unwrap();
+    let dir = tmp.path().join("newcomer");
+    repo(&dir);
+    let raw = add_project_request(&second, &dir);
+    let (before_first, before_second) = (first.store.projects().unwrap().len(), second.store.projects().unwrap().len());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    h.get_by_label_contains("needs you [workstation] proposal");
+    h.state_mut().open_proposals_of(1);
+    let id = agentbench::hub::tag(1, raw);
+    until(&mut h, "the card", |h| h.query_by_label(&format!("accept add project {id}")).is_some());
+    h.get_by_label(&format!("accept add project {id}")).click();
+    until(&mut h, "the project on the second server", |_| {
+        second.store.projects().unwrap().len() == before_second + 1
+    });
+    assert_eq!(first.store.projects().unwrap().len(), before_first);
+}
+
+#[test]
+fn the_selected_workspace_and_supervisor_persist() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    h.state_mut().pick_supervisor(1);
+    h.state_mut().set_view(Some(1));
+    let mut kept = Mem::default();
+    h.state().store(&mut kept);
+    assert_eq!(kept.get_string("view").as_deref(), Some("1"));
+    let servers = kept.get_string("servers").unwrap();
+    let mut again = {
+        let _build = build_lock();
+        let (a, b) = (first.url.clone(), second.url.clone());
+        let _ = b;
+        Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
+            let mut storage = Mem::default();
+            storage.0.insert("url".into(), a);
+            storage.0.insert("token".into(), TOKEN.into());
+            storage.0.insert("servers".into(), servers.clone());
+            storage.0.insert("view".into(), "1".into());
+            App::new(&cc.egui_ctx, Some(&storage), None)
+        })
+    };
+    until(&mut again, "the second workspace", |h| {
+        h.state().overview().is_some_and(|o| {
+            !o.projects.is_empty() && o.projects.iter().all(|p| agentbench::hub::slot_of(p.id) == 1)
+        })
+    });
+    assert_eq!(again.state().view(), Some(1));
+}
+
+#[test]
+fn a_new_issue_in_the_home_view_goes_to_the_workspace_picked() {
+    let (first, second) = (rig(), rig());
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    let project = h.state().first_project_of(1).unwrap();
+    h.state_mut().file_issue_on(project, "Remote only", "body");
+    let start = Instant::now();
+    while second.store.issues().unwrap().iter().all(|i| i.title != "Remote only") {
+        assert!(start.elapsed() < Duration::from_secs(30), "the issue never reached the second server");
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(first.store.issues().unwrap().iter().all(|i| i.title != "Remote only"));
+}

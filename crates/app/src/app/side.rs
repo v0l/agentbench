@@ -20,6 +20,11 @@ impl App {
             return;
         };
         let no_projects = o.projects.iter().all(|p| p.builtin());
+        self.supervisor_switcher(ui);
+        self.needs_you_panel(ui);
+        let Some(o) = &self.overview else {
+            return;
+        };
         let existing = o.supervisor.and_then(|id| o.sessions.iter().find(|s| s.id == id).cloned());
         match existing {
             Some(s) => self.session_row(ui, &s, "supervisor", ""),
@@ -66,6 +71,70 @@ impl App {
                     name: String::new(),
                     create: false,
                 });
+        }
+    }
+
+    fn supervisor_switcher(&mut self, ui: &mut Ui) {
+        let names = self.workspace_choices();
+        if names.is_empty() {
+            return;
+        }
+        let mut slot = self.home_supervisor;
+        ui.horizontal(|ui| {
+            Line::new().legend("supervisor of").size(10.0).tint(LEGEND).elided(ui);
+            ui.allocate_ui(Vec2::new(ui.available_width(), KEY_H), |ui| {
+                choice(ui, "supervisor-workspace", &mut slot, names.iter().cloned());
+            });
+        });
+        if slot != self.home_supervisor {
+            self.pick_supervisor(slot);
+        }
+    }
+
+    fn needs_you_panel(&mut self, ui: &mut Ui) {
+        let Some(c) = self.client.as_ref().filter(|c| c.multi() && self.view.is_none()) else {
+            return;
+        };
+        let waiting = c.waiting();
+        let proposals = c.proposals();
+        if waiting.is_empty() && proposals.is_empty() {
+            return;
+        }
+        let rows: Vec<(u32, String, SessionId, String, bool)> = waiting
+            .into_iter()
+            .map(|(slot, id, title, sup)| (slot, c.name(slot).to_string(), id, title, sup))
+            .collect();
+        let cards: Vec<(u32, String, String)> = proposals
+            .into_iter()
+            .map(|(slot, p)| (slot, c.name(slot).to_string(), p.summary))
+            .collect();
+        let mut open: Option<(u32, SessionId, bool)> = None;
+        let mut review: Option<u32> = None;
+        section_panel(ui, |ui| {
+            Line::new().legend("needs you").size(10.0).tint(READOUT).elided(ui);
+            for (slot, name, id, title, sup) in &rows {
+                let label = format!("[{name}] {}", if *sup { format!("supervisor: {title}") } else { title.clone() });
+                let r = ui.add(egui::Label::new(egui::RichText::new(&label).size(11.0).color(VALUE)).sense(Sense::click()));
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("needs you {label}")));
+                if r.clicked() {
+                    open = Some((*slot, *id, *sup));
+                }
+            }
+            for (slot, name, summary) in &cards {
+                let label = format!("[{name}] proposal: {summary}");
+                let r = ui.add(egui::Label::new(egui::RichText::new(&label).size(11.0).color(VALUE)).sense(Sense::click()));
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("needs you {label}")));
+                if r.clicked() {
+                    review = Some(*slot);
+                }
+            }
+        });
+        ui.add_space(4.0);
+        if let Some((slot, id, sup)) = open {
+            self.open_waiting(slot, id, sup);
+        }
+        if let Some(slot) = review {
+            self.open_proposals_of(slot);
         }
     }
 
