@@ -172,9 +172,12 @@ name = "agent-ui"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "base64 0.23.1",
  "dirs",
  "egui",
- "egui_bench 0.10.0",
+ "egui-wgpu",
+ "egui_bench",
+ "egui_kittest",
  "futures-util",
  "reqwest",
  "serde_json",
@@ -204,6 +207,7 @@ dependencies = [
 name = "agentbench"
 version = "0.8.4"
 dependencies = [
+ "agent-ui",
  "agent-voice",
  "agentbench-core",
  "agentbench-server",
@@ -216,7 +220,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui-qr",
- "egui_bench 0.9.8",
+ "egui_bench",
  "egui_kittest",
  "fontdb",
  "image",
@@ -2234,18 +2238,6 @@ dependencies = [
  "webbrowser",
  "windows-sys 0.61.2",
  "winit",
-]
-
-[[package]]
-name = "egui_bench"
-version = "0.9.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cad3efe50f2be0ee8bf7bf94da7581654b8ad67650052750627d5af6a8f7e93"
-dependencies = [
- "egui",
- "gix",
- "pulldown-cmark",
- "web-time",
 ]
 
 [[package]]

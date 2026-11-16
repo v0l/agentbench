@@ -9,19 +9,114 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 const PATIENCE: Duration = Duration::from_secs(600);
+pub const ASK_USER: &str = "ask_user";
+
+fn ask_spec() -> tools::Spec {
+    let one = json!({
+        "question": tools::string("The question, one or two sentences"),
+        "options": { "type": "array", "items": { "type": "string" }, "description": "Choices to pick from" },
+        "multiple": tools::boolean("The user may pick more than one option"),
+    });
+    let mut all = one.clone();
+    all["questions"] = json!({
+        "type": "array",
+        "description": "Several questions to ask together instead of question",
+        "items": { "type": "object", "properties": one, "required": ["question"] },
+    });
+    tools::Spec::new(
+        ASK_USER,
+        "Ask the user a question and wait for the answer. Give options when the answer is one of a few choices, \
+         and set multiple when they may pick more than one. To ask several things at once, pass questions. \
+         Use it when you cannot go on without a decision, not for things you can find out yourself.",
+        tools::object(all, &[]),
+    )
+}
+
+fn offered(backend: &dyn Backend) -> Value {
+    let mut list = tools::list(backend);
+    let have = |l: &Value| {
+        l.as_array().is_some_and(|a| a.iter().any(|t| t["function"]["name"] == ASK_USER))
+    };
+    if !have(&list)
+        && !backend.leave_out().contains(&ASK_USER)
+        && let Some(a) = list.as_array_mut()
+    {
+        let s = ask_spec();
+        a.push(json!({
+            "type": "function",
+            "function": { "name": s.name, "description": s.about, "parameters": s.schema },
+        }));
+    }
+    list
+}
+
+pub fn questions_of(args: &Value) -> Vec<Asking> {
+    let one = |q: &Value| {
+        let text = q.get("question").or_else(|| q.get("text"))?.as_str()?.trim();
+        (!text.is_empty()).then(|| Asking {
+            text: text.to_string(),
+            options: q
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|o| o.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
+            multiple: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
+        })
+    };
+    match args.get("questions").and_then(Value::as_array) {
+        Some(qs) if !qs.is_empty() => qs.iter().filter_map(one).collect(),
+        _ => one(args).into_iter().collect(),
+    }
+}
+
+pub struct Attached {
+    pub name: String,
+    pub mime: String,
+    pub data: Arc<Vec<u8>>,
+}
+
+impl Attached {
+    pub fn is_image(&self) -> bool {
+        self.mime.starts_with("image/")
+    }
+
+    fn part(&self) -> Value {
+        use base64::Engine;
+        if self.is_image() {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(self.data.as_slice());
+            return json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{};base64,{b64}", self.mime) },
+            });
+        }
+        let text = String::from_utf8_lossy(&self.data);
+        json!({ "type": "text", "text": format!("{}:\n```\n{}\n```", self.name, text.trim_end()) })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asking {
+    pub text: String,
+    pub options: Vec<String>,
+    pub multiple: bool,
+}
 
 pub enum Turn {
-    You(String),
+    You { text: String, files: Vec<Attached> },
     Said(String),
+    Thinking(String),
     Did { name: String, args: String, answer: Option<Result<String, String>> },
+    Asked { id: u64, questions: Vec<Asking>, answers: Option<Vec<String>> },
     Fault(String),
 }
 
 enum Update {
     Delta(String),
+    Thinking(String),
     Said,
     Calling { name: String, args: String },
     Answered(Result<String, String>),
+    Asking { questions: Vec<Asking>, reply: tokio::sync::oneshot::Sender<Vec<String>> },
     Fault(String),
     Done,
 }
@@ -32,12 +127,16 @@ pub struct Chat {
     pub config: Config,
     pub turns: Vec<Turn>,
     pub draft: String,
+    pub files: Vec<Attached>,
     pub services: Arc<Services>,
     history: Vec<Value>,
     remembered: usize,
     updates: Option<Receiver<Update>>,
     stop: CancellationToken,
     speaking: bool,
+    thinking: bool,
+    asking: Vec<(u64, tokio::sync::oneshot::Sender<Vec<String>>)>,
+    asked: u64,
 }
 
 impl Chat {
@@ -48,12 +147,16 @@ impl Chat {
             backend,
             turns: Vec::new(),
             draft: String::new(),
+            files: Vec::new(),
             services: Arc::new(Services::default()),
             history: Vec::new(),
             remembered: 0,
             updates: None,
             stop: CancellationToken::new(),
             speaking: false,
+            thinking: false,
+            asking: Vec::new(),
+            asked: 0,
         }
     }
 
@@ -87,17 +190,42 @@ impl Chat {
     }
 
     pub fn ask(&mut self, text: &str, desk: Desk) {
+        self.ask_with(text, Vec::new(), desk);
+    }
+
+    pub fn answer(&mut self, id: u64, answers: Vec<String>) {
+        if let Some(at) = self.asking.iter().position(|(i, _)| *i == id) {
+            let (_, reply) = self.asking.remove(at);
+            let _ = reply.send(answers.clone());
+        }
+        for t in &mut self.turns {
+            if let Turn::Asked { id: i, answers: a, .. } = t
+                && *i == id
+            {
+                *a = Some(answers.clone());
+            }
+        }
+    }
+
+    pub fn ask_with(&mut self, text: &str, files: Vec<Attached>, desk: Desk) {
         let text = text.trim();
-        if text.is_empty() || self.busy() {
+        if (text.is_empty() && files.is_empty()) || self.busy() {
             return;
         }
-        self.turns.push(Turn::You(text.to_string()));
+        let content = if files.is_empty() {
+            json!(text)
+        } else {
+            let mut parts = vec![json!({ "type": "text", "text": text })];
+            parts.extend(files.iter().map(Attached::part));
+            Value::Array(parts)
+        };
+        self.turns.push(Turn::You { text: text.to_string(), files });
         if let Some(fault) = self.config.fault() {
             self.turns.push(Turn::Fault(format!("{fault}: set one under Model")));
             self.remembered = self.turns.len();
             return;
         }
-        self.history.push(json!({ "role": "user", "content": text }));
+        self.history.push(json!({ "role": "user", "content": content }));
         let opened = Workspace::open(&self.workspace_path()).and_then(|w| {
             grants::vet(
                 &w.root().display().to_string(),
@@ -119,6 +247,7 @@ impl Chat {
         let (out, updates) = channel();
         self.updates = Some(updates);
         self.speaking = false;
+        self.thinking = false;
         self.stop = CancellationToken::new();
         let worker = Worker {
             backend: self.backend.clone(),
@@ -136,6 +265,7 @@ impl Chat {
         for u in rx.try_iter().collect::<Vec<_>>() {
             match u {
                 Update::Delta(text) => {
+                    self.thinking = false;
                     if self.speaking
                         && let Some(Turn::Said(s)) = self.turns.last_mut()
                     {
@@ -149,14 +279,38 @@ impl Chat {
                     self.turns.push(Turn::Said(text.to_string()));
                     self.speaking = true;
                 }
+                Update::Thinking(text) => {
+                    if self.thinking
+                        && let Some(Turn::Thinking(s)) = self.turns.last_mut()
+                    {
+                        s.push_str(&text);
+                        continue;
+                    }
+                    let text = text.trim_start();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    self.speaking = false;
+                    self.thinking = true;
+                    self.turns.push(Turn::Thinking(text.to_string()));
+                }
+                Update::Asking { questions, reply } => {
+                    self.speaking = false;
+                    self.thinking = false;
+                    self.asked += 1;
+                    self.asking.push((self.asked, reply));
+                    self.turns.push(Turn::Asked { id: self.asked, questions, answers: None });
+                }
                 Update::Said => {
                     self.speaking = false;
+                    self.thinking = false;
                     if let Some(Turn::Said(s)) = self.turns.last_mut() {
                         s.truncate(s.trim_end().len());
                     }
                 }
                 Update::Calling { name, args } => {
                     self.speaking = false;
+                    self.thinking = false;
                     self.turns.push(Turn::Did { name, args, answer: None });
                 }
                 Update::Answered(r) => {
@@ -179,6 +333,8 @@ impl Chat {
         if done {
             self.updates = None;
             self.speaking = false;
+            self.thinking = false;
+            self.asking.clear();
             self.remember();
         }
     }
@@ -236,7 +392,7 @@ impl Worker {
     }
 
     async fn exchange(&mut self) -> Result<(), String> {
-        let tools = tools::list(self.backend.as_ref());
+        let tools = offered(self.backend.as_ref());
         let steps = self.config.steps.max(1);
         for _ in 0..steps {
             if self.cx.stop.is_cancelled() {
@@ -291,9 +447,31 @@ impl Worker {
         } else {
             serde_json::from_str(&call.args).map_err(|e| format!("bad arguments: {e}"))?
         };
+        if call.name == ASK_USER && !self.backend.specs().iter().any(|s| s.name == ASK_USER) {
+            return self.ask_user(&args).await;
+        }
         local::run(self.backend.as_ref(), &self.cx, &call.name, &args)
             .await
             .unwrap_or_else(|| Err(format!("no tool called {}", call.name)))
+    }
+
+    async fn ask_user(&self, args: &Value) -> Result<String, String> {
+        let questions = questions_of(args);
+        if questions.is_empty() {
+            return Err("missing `question`".into());
+        }
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.say(Update::Asking { questions: questions.clone(), reply });
+        let got = tokio::select! {
+            a = answer => a.map_err(|_| "the question was dropped".to_string())?,
+            _ = self.cx.stop.cancelled() => return Err("stopped".into()),
+        };
+        Ok(questions
+            .iter()
+            .zip(&got)
+            .map(|(q, a)| format!("{}\n{a}", q.text))
+            .collect::<Vec<_>>()
+            .join("\n\n"))
     }
 
     async fn complete(&self, tools: &Value) -> Result<Completion, String> {
@@ -350,6 +528,11 @@ impl Worker {
 
     fn take_delta(&self, v: &Value, reply: &mut Completion) {
         let Some(delta) = v.pointer("/choices/0/delta") else { return };
+        for key in ["reasoning_content", "reasoning"] {
+            if let Some(t) = delta.get(key).and_then(Value::as_str).filter(|t| !t.is_empty()) {
+                self.say(Update::Thinking(t.to_string()));
+            }
+        }
         if let Some(text) = delta.get("content").and_then(Value::as_str)
             && !text.is_empty()
         {
@@ -555,7 +738,7 @@ mod tests {
         let (tx, rx) = channel();
         let mut chat = Chat { updates: Some(rx), ..chat() };
         chat.history.push(json!({ "role": "user", "content": "one" }));
-        chat.turns.push(Turn::You("one".into()));
+        chat.turns.push(Turn::You { text: "one".into(), files: Vec::new() });
         let _ = tx.send(Update::Delta("first".into()));
         let _ = tx.send(Update::Said);
         let _ = tx.send(Update::Done);
@@ -563,7 +746,7 @@ mod tests {
         let (tx, rx) = channel();
         chat.updates = Some(rx);
         chat.history.push(json!({ "role": "user", "content": "two" }));
-        chat.turns.push(Turn::You("two".into()));
+        chat.turns.push(Turn::You { text: "two".into(), files: Vec::new() });
         let _ = tx.send(Update::Delta("second".into()));
         let _ = tx.send(Update::Said);
         let _ = tx.send(Update::Done);
@@ -613,7 +796,7 @@ mod tests {
         let builtins = super::super::local::NAMES.len() - sandboxed;
         assert_eq!(
             first["tools"].as_array().map(Vec::len),
-            Some(builtins + 1 + if super::super::sandbox::supported() { sandboxed } else { 0 })
+            Some(builtins + 2 + if super::super::sandbox::supported() { sandboxed } else { 0 })
         );
         assert_eq!(first["messages"][0]["role"], "system");
         let second = asked.recv().expect("a second request");
@@ -701,6 +884,66 @@ mod tests {
             .collect();
         assert_eq!(faults, ["stopped"]);
         let _ = hold.join();
+    }
+
+    #[test]
+    fn reasoning_streams_into_a_thinking_turn_before_the_reply() {
+        let (tx, rx) = channel();
+        let mut chat = Chat { updates: Some(rx), ..chat() };
+        for t in ["The user wants ", "a list."] {
+            let _ = tx.send(Update::Thinking(t.into()));
+        }
+        let _ = tx.send(Update::Delta("Here it is.".into()));
+        let _ = tx.send(Update::Said);
+        chat.poll();
+        assert!(matches!(&chat.turns[0], Turn::Thinking(t) if t == "The user wants a list."));
+        assert!(matches!(&chat.turns[1], Turn::Said(t) if t == "Here it is."));
+    }
+
+    #[test]
+    fn a_reasoning_delta_becomes_a_thinking_update() {
+        let (w, updates, _asks) = worker(String::new());
+        let mut reply = Completion::default();
+        w.take_delta(&json!({"choices":[{"delta":{"reasoning_content":"hmm"}}]}), &mut reply);
+        assert!(reply.text.is_empty());
+        assert!(updates.try_iter().any(|u| matches!(u, Update::Thinking(t) if t == "hmm")));
+    }
+
+    #[test]
+    fn questions_are_read_one_or_several() {
+        let one = questions_of(&json!({"question": "Which?", "options": ["a", "b"]}));
+        assert_eq!(one, vec![Asking { text: "Which?".into(), options: vec!["a".into(), "b".into()], multiple: false }]);
+        let many = questions_of(&json!({"questions": [{"question": "x", "multiple": true}, {"question": "y"}]}));
+        assert_eq!(many.len(), 2);
+        assert!(many[0].multiple);
+        assert!(questions_of(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn an_answer_goes_back_to_the_waiting_question() {
+        let (tx, rx) = channel();
+        let mut chat = Chat { updates: Some(rx), ..chat() };
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let _ = tx.send(Update::Asking { questions: questions_of(&json!({"question": "Go?"})), reply });
+        chat.poll();
+        let Some(Turn::Asked { id, answers: None, .. }) = chat.turns.last() else { panic!("no question") };
+        let id = *id;
+        chat.answer(id, vec!["yes".into()]);
+        assert_eq!(answer.blocking_recv().unwrap(), vec!["yes".to_string()]);
+        assert!(matches!(chat.turns.last(), Some(Turn::Asked { answers: Some(a), .. }) if a == &["yes".to_string()]));
+    }
+
+    #[test]
+    fn a_picture_goes_to_the_model_as_an_image_part() {
+        let mut chat = chat();
+        chat.config.model.clear();
+        let png = Attached { name: "a.png".into(), mime: "image/png".into(), data: Arc::new(vec![1, 2, 3]) };
+        let part = png.part();
+        assert_eq!(part["type"], "image_url");
+        assert!(part["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,AQID"));
+        let (desk, _asks) = crate::desk(&egui::Context::default());
+        chat.ask_with("", vec![png], desk);
+        assert!(matches!(&chat.turns[0], Turn::You { files, .. } if files.len() == 1));
     }
 
     #[test]

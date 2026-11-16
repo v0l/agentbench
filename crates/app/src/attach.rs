@@ -38,12 +38,7 @@ pub enum Arrived {
     SavedTo { key: (SessionId, agentbench_core::Id), path: std::path::PathBuf, told: String },
 }
 
-/// A picture from the transcript, fetched and decoded in the background.
-pub enum Thumb {
-    Loading,
-    Ready(egui::TextureHandle),
-    Failed,
-}
+pub use agent_ui::transcript::{Thumb, excerpt};
 
 pub struct Tray {
     pub files: Vec<Pending>,
@@ -60,31 +55,7 @@ pub struct Tray {
 
 type Key = (SessionId, agentbench_core::Id);
 
-pub enum Body {
-    Loading,
-    Ready(std::sync::Arc<str>),
-    Failed,
-}
-
-const PREVIEW_LINES: usize = 40;
-const PREVIEW_CHARS: usize = 6000;
-
-pub fn excerpt(text: &str) -> (String, usize) {
-    let mut out = String::new();
-    let mut lines = text.lines();
-    let mut shown = 0;
-    for line in lines.by_ref().take(PREVIEW_LINES) {
-        if out.len() + line.len() > PREVIEW_CHARS {
-            let room = PREVIEW_CHARS.saturating_sub(out.len());
-            out.push_str(&line[..line.floor_char_boundary(room)]);
-            return (out, text.lines().count().saturating_sub(shown + 1));
-        }
-        out.push_str(line);
-        out.push('\n');
-        shown += 1;
-    }
-    (out.trim_end().to_string(), lines.count())
-}
+pub use agent_ui::transcript::Body;
 
 impl Default for Tray {
     fn default() -> Self {
@@ -643,13 +614,7 @@ pub fn can_pick() -> bool {
     cfg!(not(target_arch = "wasm32"))
 }
 
-pub fn size(bytes: u64) -> String {
-    match bytes {
-        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
-        b if b >= 1 << 10 => format!("{:.0} KB", b as f64 / 1024.0),
-        b => format!("{b} B"),
-    }
-}
+pub use agent_ui::widgets::size;
 
 #[cfg(test)]
 mod tests {

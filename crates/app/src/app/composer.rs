@@ -1,6 +1,7 @@
 //! The composer under a chat: its text box, slash menu, attachments, speech key and status line.
 
 use super::*;
+use agent_ui::composer::{copy_pressed, nothing_selected};
 
 impl App {
     pub(super) fn slash_menu(&mut self, ui: &mut Ui, field: egui::Rect) {
@@ -94,45 +95,19 @@ impl App {
     }
 
     pub(super) fn attachments_row(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
-        let mut drop_at = None;
-        ui.horizontal_wrapped(|ui| {
-            for (i, f) in self.tray.files.iter().enumerate() {
-                let chip = ui.horizontal(|ui| {
-                    if let Some(tex) = &f.preview {
-                        let s = tex.size_vec2();
-                        let h = 28.0;
-                        ui.add(egui::Image::new((tex.id(), Vec2::new(s.x * h / s.y.max(1.0), h))));
-                    }
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} {}",
-                            f.name,
-                            crate::attach::size(f.size as u64)
-                        ))
-                        .font(mono(11.0))
-                        .color(VALUE),
-                    );
-                    let x = ui.small_button("x");
-                    x.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            format!("remove {}", f.name),
-                        )
-                    });
-                    x.clicked()
-                });
-                if chip.inner {
-                    drop_at = Some(i);
-                }
-                ui.add_space(8.0);
-            }
-        });
-        if let Some(i) = drop_at {
+        let pending: Vec<agent_ui::composer::Pending> = self
+            .tray
+            .files
+            .iter()
+            .map(|f| agent_ui::composer::Pending {
+                name: &f.name,
+                size: f.size as u64,
+                preview: f.preview.as_ref(),
+            })
+            .collect();
+        if let Some(i) = agent_ui::composer::pending_row(ui, &pending) {
             self.tray.files.remove(i);
         }
-        let _ = ctx;
     }
 
     /// Ctrl+V with a picture on the clipboard: egui only passes text pastes on, so the key is
@@ -154,11 +129,10 @@ impl App {
     }
 
     fn recall_sent(&mut self, ui: &Ui, session: SessionId) {
-        let id = egui::Id::unique(("composer", self.drawing));
+        let id = agent_ui::composer::field_id(self.drawing);
         if !ui.memory(|m| m.has_focus(id)) {
             return;
         }
-        let typed = self.draft.trim_end();
         let sent: Vec<&str> = self
             .transcripts
             .get(&session)
@@ -173,30 +147,7 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        let at = if typed.is_empty() { None } else { sent.iter().position(|t| *t == typed) };
-        let up = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::ArrowUp);
-        let down = egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::ArrowDown);
-        let next = if !typed.is_empty() && at.is_none() {
-            return;
-        } else if ui.input_mut(|i| i.consume_shortcut(&up)) {
-            at.map_or(0, |n| n + 1)
-        } else if at.is_some() && ui.input_mut(|i| i.consume_shortcut(&down)) {
-            match at {
-                Some(0) | None => {
-                    self.draft.clear();
-                    return;
-                }
-                Some(n) => n - 1,
-            }
-        } else {
-            return;
-        };
-        let Some(text) = sent.get(next) else { return };
-        self.draft = text.to_string();
-        let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-        let end = egui::text::CCursor::new(self.draft.chars().count());
-        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
-        state.store(ui.ctx(), id);
+        agent_ui::composer::recall(ui, id, &mut self.draft, &sent);
     }
 
     pub(super) fn composer(
@@ -226,14 +177,12 @@ impl App {
         }
         let edit = ui
             .add_enabled_ui(!speaking, |ui| {
-                prose_id(
+                agent_ui::composer::text_box(
                     ui,
-                    ("composer", self.drawing),
+                    self.drawing,
                     &mut self.draft,
                     hint_text,
                     if compact { 2 } else { 3 },
-                    // Long text scrolls in the box; the send key never leaves the window.
-                    (ui.ctx().content_rect().height() * 0.3).clamp(60.0, 260.0),
                 )
             })
             .inner;
@@ -245,14 +194,7 @@ impl App {
             self.draft.clear();
         }
         self.slash_menu(ui, edit.rect);
-        let enter = edit.has_focus()
-            && ui.input(|i| {
-                i.key_pressed(egui::Key::Enter) && (i.modifiers.command || !i.modifiers.shift)
-            });
-        if enter && self.draft.ends_with('\n') && !ui.input(|i| i.modifiers.command) {
-            let trimmed = self.draft.trim_end_matches('\n').to_string();
-            self.draft = trimmed;
-        }
+        let enter = agent_ui::composer::entered(ui, &edit, &mut self.draft);
         let mut out = None;
         // A phone has no room beside the keys, so the status line gets a row of its own.
         if narrow && let Some(session) = session {
@@ -265,9 +207,7 @@ impl App {
                 let can = ready && !speaking && (!self.draft.trim().is_empty() || sending);
                 let label = if busy { "steer" } else { "send" };
                 let width = if compact { 64.0 } else { 100.0 };
-                let key = ui.add(Key::new(label).solid(READOUT).enabled(can).min_width(width));
-                key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can, label));
-                if (key.clicked() || (enter && can)) && can {
+                if (agent_ui::composer::send_key(ui, label, can, width) || (enter && can)) && can {
                     let files = if self.focused { self.tray.take() } else { Vec::new() };
                     out = Some((self.draft.trim().to_string(), files));
                     self.draft.clear();
@@ -540,22 +480,4 @@ pub(super) fn lsp_look(h: LspHealth) -> (egui::Color32, &'static str) {
         LspHealth::Missing => (LEGEND, "missing"),
         LspHealth::Failed => (FAULT, "failed"),
     }
-}
-
-fn copy_pressed(ui: &Ui) -> bool {
-    ui.input(|i| {
-        i.events.iter().any(|e| match e {
-            egui::Event::Copy => true,
-            egui::Event::Key { key: egui::Key::C, pressed: true, modifiers, .. } => {
-                modifiers.command && !modifiers.shift
-            }
-            _ => false,
-        })
-    })
-}
-
-fn nothing_selected(ui: &Ui, id: egui::Id) -> bool {
-    egui::TextEdit::load_state(ui.ctx(), id)
-        .and_then(|state| state.cursor.char_range())
-        .is_none_or(|range| range.primary == range.secondary)
 }

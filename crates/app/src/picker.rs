@@ -2,7 +2,7 @@
 //! dialog with a filter box and a long, scrolling, sorted list. The list is drawn by row so a
 //! server with thousands of models costs the same as one with ten.
 
-use crate::form::field;
+use agent_ui::form::field;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use egui_bench::key::Key;
 use egui_bench::prelude::*;
