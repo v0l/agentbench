@@ -46,10 +46,11 @@ winresource = "0.1"
 
 [dependencies]
 agentbench-core.workspace = true
+agent-ui = { workspace = true, default-features = false }
 serde.workspace = true
 serde_json.workspace = true
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
-egui_bench = { version = "0.9.8", features = ["markdown"] }
+egui_bench = { version = "0.10.0", features = ["markdown"] }
 agent-voice.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 web-time = "1"

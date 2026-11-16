@@ -1,6 +1,6 @@
 use crate::client::{Client, Reply, Server};
 use crate::fonts::{self, Installed, Typeface};
-use crate::form::{field, field_then, prose, prose_id, secret};
+use agent_ui::form::{field, field_then, prose, prose_id, secret};
 use crate::picker::ModelPicker;
 use crate::scan::Scan;
 use agentbench_core::{
@@ -30,6 +30,7 @@ mod widgets;
 use self::settings::{model_input, pairing_of};
 pub use self::widgets::{status_counts, usage_labels};
 use self::widgets::*;
+use agent_ui::widgets::{code_block, option_row, press, rail_block, read_link, spinner};
 
 const SIDE_W: f32 = 320.0;
 const RETRY: Duration = Duration::from_secs(3);
@@ -830,6 +831,11 @@ impl App {
         pairing_file: Option<std::path::PathBuf>,
     ) -> App {
         install(ctx);
+        agent_ui::form::set_hooks(agent_ui::form::Hooks {
+            drawn: crate::system::ime_field,
+            owns_clipboard: crate::system::owns_clipboard,
+            paste: crate::system::queue_paste,
+        });
         let paired = pairing_file.as_deref().and_then(pairing::read);
         let url = paired
             .as_ref()

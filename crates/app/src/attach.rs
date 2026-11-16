@@ -643,13 +643,7 @@ pub fn can_pick() -> bool {
     cfg!(not(target_arch = "wasm32"))
 }
 
-pub fn size(bytes: u64) -> String {
-    match bytes {
-        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
-        b if b >= 1 << 10 => format!("{:.0} KB", b as f64 / 1024.0),
-        b => format!("{b} B"),
-    }
-}
+pub use agent_ui::widgets::size;
 
 #[cfg(test)]
 mod tests {

@@ -5,9 +5,22 @@
 
 use egui::{Response, Stroke, Ui};
 use egui_bench::prelude::*;
+use std::sync::OnceLock;
 
-/// The size of the text inside an input, relative to [`crate::fonts::BASE`].
 const SIZE: f32 = 13.0;
+
+#[derive(Clone, Copy)]
+pub struct Hooks {
+    pub drawn: fn(&Response, &str),
+    pub owns_clipboard: fn() -> bool,
+    pub paste: fn(&egui::Context),
+}
+
+static HOOKS: OnceLock<Hooks> = OnceLock::new();
+
+pub fn set_hooks(hooks: Hooks) {
+    let _ = HOOKS.set(hooks);
+}
 
 pub fn field(ui: &mut Ui, text: &mut String, hint: &str) -> Response {
     field_of(ui, text, hint, false, 1, f32::INFINITY, None, f32::INFINITY)
@@ -102,7 +115,9 @@ fn field_of(
             }
         })
         .inner;
-    crate::system::ime_field(&response, text);
+    if let Some(h) = HOOKS.get() {
+        (h.drawn)(&response, text);
+    }
     response
 }
 
@@ -123,10 +138,9 @@ fn own_clipboard_menu(response: Response) -> Response {
         }
         if ui.button(legend("PASTE")).clicked() {
             response.request_focus();
-            if crate::system::owns_clipboard() {
-                crate::system::queue_paste(ui.ctx());
-            } else {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            match HOOKS.get().filter(|h| (h.owns_clipboard)()) {
+                Some(h) => (h.paste)(ui.ctx()),
+                None => ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste),
             }
             ui.close();
         }
