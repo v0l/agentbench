@@ -991,6 +991,9 @@ async fn accept_proposal(
     if proposal.state != agentbench_core::ProposalState::Pending {
         return Err(bad("that proposal was already decided"));
     }
+    if crate::add_project::request_of(&proposal).is_some() {
+        return Ok(Json(decide_add_project(&api, id, true).await?));
+    }
     for change in &proposal.changes {
         match change {
             agentbench_core::Change::Update { issue_id, patch } => {
@@ -1010,6 +1013,7 @@ async fn accept_proposal(
             agentbench_core::Change::Create { issue } => {
                 store.add_issue(issue)?;
             }
+            agentbench_core::Change::AddProject { .. } => {}
         }
     }
     let decided = store.decide_proposal(id, agentbench_core::ProposalState::Accepted)?;
@@ -1021,10 +1025,36 @@ async fn reject_proposal(
     State(api): State<Api>,
     Path(id): Path<Id>,
 ) -> Reply<agentbench_core::Proposal> {
+    if crate::add_project::request_of(&api.runner.store().proposal(id)?).is_some() {
+        return Ok(Json(decide_add_project(&api, id, false).await?));
+    }
     let decided =
         api.runner.store().decide_proposal(id, agentbench_core::ProposalState::Rejected)?;
     changed(&api);
     Ok(Json(decided))
+}
+
+async fn decide_add_project(
+    api: &Api,
+    id: Id,
+    accept: bool,
+) -> Result<agentbench_core::Proposal, Failure> {
+    let store = api.runner.store();
+    let request = crate::add_project::request_of(&store.proposal(id)?).cloned();
+    let home = dirs::home_dir().unwrap_or_default();
+    let outcome = {
+        let (store, home) = (store.clone(), home.clone());
+        tokio::task::spawn_blocking(move || crate::add_project::decide(&store, &home, id, accept))
+            .await
+            .map_err(|e| bad(e.to_string()))?
+    }
+    .map_err(bad)?;
+    if let Some(session) = request.and_then(|r| r.requester).and_then(|s| store.session(s).ok()) {
+        let note = crate::add_project::requester_message(&outcome);
+        let _ = api.runner.tell(&session, &note, crate::runner::Origin::new("add_project", None));
+    }
+    changed(api);
+    Ok(store.proposal(id)?)
 }
 
 const AUTORUN_AGENT: &str = "native";

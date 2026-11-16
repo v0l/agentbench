@@ -1,3 +1,4 @@
+pub mod add_project;
 pub mod agent;
 pub mod api;
 pub mod autopilot;

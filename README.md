@@ -113,6 +113,12 @@ Beyond that it can:
   finished one with `cleanup_worktree`: the checkout, its chats, and its branch
   when that is merged. It will not remove the main worktree, its own, one with a
   session still working, or one with uncommitted changes unless told to force it;
+- ask for a new project with `add_project`: import a local checkout, create an
+  empty repo, or clone an https or ssh remote (default `~/git/<name>`). Paths must
+  be under the home folder. It never adds anything itself: it files a request the
+  user confirms on a card (mode, path, name, remote, branch and HEAD, free disk
+  for a clone) in the supervisor chat, and the asking session is told the new
+  project id or the refusal;
 - keep a checklist for the user to follow with `todo_write`;
 - remember things about a project with `remember` and `recall`; the notes open
   every later session of that project;

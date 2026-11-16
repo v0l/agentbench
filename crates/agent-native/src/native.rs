@@ -320,7 +320,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 33] = [
+pub const AGENTBENCH_TOOLS: [&str; 34] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -341,6 +341,7 @@ pub const AGENTBENCH_TOOLS: [&str; 33] = [
     "list_worktrees",
     "create_worktree",
     "cleanup_worktree",
+    "add_project",
     "remember",
     "recall",
     "notify_user",
@@ -580,6 +581,19 @@ fn agentbench_specs() -> Vec<Spec> {
                     "branch": string("Or the worktree's branch"),
                     "force": boolean("Remove it even with uncommitted changes, which are lost"),
                     "keep_branch": boolean("Keep the branch even if it is merged"),
+                }),
+                &[],
+            ),
+        ),
+        Spec::new(
+            "add_project",
+            "Ask the user to add a project: import an existing local git checkout (`path`), create a new empty repo (`path` and `create: true`), or clone one (`clone`: github.com/owner/repo, an https or ssh git URL, with an optional `path`, default ~/git/<name>). It never adds anything itself: it files a request the user confirms on a card in the app, and you are told here when they accept or decline. Paths must be under the home folder. A path that is already a project returns that project.",
+            object(
+                json!({
+                    "path": string("Absolute or ~ path of the checkout, the new repo, or the clone destination"),
+                    "create": boolean("Make a new empty repo at `path`"),
+                    "clone": string("A remote to clone: github.com/owner/repo, an https URL or an ssh URL"),
+                    "name": string("Project name; defaults to the repo name"),
                 }),
                 &[],
             ),

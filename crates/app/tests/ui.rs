@@ -2805,6 +2805,77 @@ fn the_autopilot_panel_is_collapsed_by_default_and_hides_an_empty_triage() {
     assert!(h.query_by_label("triage run").is_none());
 }
 
+fn add_project_request(rig: &Rig, dir: &std::path::Path) -> agentbench_core::Id {
+    let request = agentbench_core::AddProject {
+        mode: agentbench_core::AddMode::Import,
+        path: dir.to_string_lossy().into_owned(),
+        name: "newcomer".into(),
+        remote: Some("https://github.com/v0l/newcomer".into()),
+        branch: Some("main".into()),
+        head: Some("abcdef1234".into()),
+        free_bytes: None,
+        requester: None,
+    };
+    let proposal = agentbench_core::Proposal {
+        id: 0,
+        kind: agentbench_core::ProposalKind::AddProject,
+        summary: "add newcomer".into(),
+        issues: vec![],
+        sessions: vec![],
+        projects: vec![],
+        changes: vec![agentbench_core::Change::AddProject { request }],
+        state: agentbench_core::ProposalState::Pending,
+        created_at: 0,
+    };
+    rig.store.add_proposal("add_project:test", &proposal).unwrap()
+}
+
+#[test]
+fn the_add_project_card_shows_its_details_and_accept_adds_the_project() {
+    let rig = rig();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let tmp = tempfile::tempdir_in(&home).unwrap();
+    let dir = tmp.path().join("newcomer");
+    repo(&dir);
+    let id = add_project_request(&rig, &dir);
+    let before = rig.store.projects().unwrap().len();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("supervisor").click();
+    until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+    until(&mut h, "the card", |h| {
+        h.query_by_label(&format!("accept add project {id}")).is_some()
+    });
+    assert!(h.query_by_label_contains("add project: import newcomer").is_some());
+    assert!(h.query_by_label_contains("https://github.com/v0l/newcomer").is_some());
+    assert!(h.query_by_label_contains("on main at abcdef12").is_some());
+    h.get_by_label(&format!("accept add project {id}")).click();
+    until(&mut h, "the project", |_| rig.store.projects().unwrap().len() == before + 1);
+}
+
+#[test]
+fn rejecting_the_add_project_card_adds_nothing() {
+    let rig = rig();
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let tmp = tempfile::tempdir_in(&home).unwrap();
+    let dir = tmp.path().join("newcomer");
+    repo(&dir);
+    let id = add_project_request(&rig, &dir);
+    let before = rig.store.projects().unwrap().len();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.get_by_label("supervisor").click();
+    until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+    until(&mut h, "the card", |h| {
+        h.query_by_label(&format!("reject add project {id}")).is_some()
+    });
+    h.get_by_label(&format!("reject add project {id}")).click();
+    until(&mut h, "the card goes", |h| {
+        h.query_by_label(&format!("reject add project {id}")).is_none()
+    });
+    assert_eq!(rig.store.projects().unwrap().len(), before);
+}
+
 fn crowd_the_supervisor(rig: &Rig) {
     for i in 0..23 {
         let dir = rig._dir.path().join(format!("crowd-{i}"));

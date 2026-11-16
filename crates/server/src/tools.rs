@@ -1227,6 +1227,23 @@ impl Api for StoreApi {
             "set_vision" => self.set_vision(args, project, session)?,
             "risky_action" => self.risky_action(args, session)?,
             "approve_action" => self.approve(args, session)?,
+            "add_project" => {
+                let home = dirs::home_dir().ok_or("no home folder")?;
+                match crate::add_project::file(s, &home, args, session)? {
+                    crate::add_project::Filed::Existing(p) => json!({
+                        "added": false, "existing": true, "id": p.id, "name": p.name, "path": p.path,
+                    }),
+                    crate::add_project::Filed::Pending { proposal, request } => json!({
+                        "added": false,
+                        "pending": true,
+                        "request": proposal,
+                        "status": format!(
+                            "waiting for the user to confirm adding {} at {}. Nothing was added. You are told here when they accept or decline.",
+                            request.name, request.path
+                        ),
+                    }),
+                }
+            }
             "set_model" => {
                 let model = text(args, "model").filter(|m| !m.trim().is_empty());
                 s.set_model(session, model.as_deref().map(str::trim)).map_err(|e| e.0)?;
@@ -1243,6 +1260,7 @@ impl Api for StoreApi {
                 | "judge_session"
                 | "set_automation"
                 | "approve_action"
+                | "add_project"
                 | "update_issue"
                 | "comment_on_issue"
                 | "create_worktree"
@@ -1962,6 +1980,25 @@ mod tests {
         assert_eq!(bytes, b"# hi");
         assert!(api.call("send_file", &json!({"path": "nope.txt"}), me.id).is_err());
         assert!(api.call("send_file", &json!({}), me.id).is_err());
+    }
+
+    #[test]
+    fn add_project_files_a_request_for_a_worker_and_adds_nothing() {
+        let home = dirs::home_dir().unwrap();
+        let dir = tempfile::tempdir_in(&home).unwrap();
+        let repo = dir.path().join("fresh");
+        crate::git::testing::repo(&repo);
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/a");
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let before = s.projects().unwrap().len();
+        let out = api.call("add_project", &json!({"path": repo}), me.id).unwrap();
+        assert_eq!(out["pending"], true);
+        assert!(out["status"].as_str().unwrap().contains("waiting for the user"));
+        assert_eq!(s.projects().unwrap().len(), before);
+        let outside = tempfile::tempdir().unwrap();
+        assert!(api.call("add_project", &json!({"path": outside.path()}), me.id).is_err());
     }
 
     #[test]

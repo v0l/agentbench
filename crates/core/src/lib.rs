@@ -1727,6 +1727,7 @@ pub enum ProposalKind {
     Stale,
     Labels,
     CrossCutting,
+    AddProject,
 }
 
 impl ProposalKind {
@@ -1736,6 +1737,7 @@ impl ProposalKind {
             ProposalKind::Stale => "stale",
             ProposalKind::Labels => "labels",
             ProposalKind::CrossCutting => "cross_cutting",
+            ProposalKind::AddProject => "add_project",
         }
     }
 
@@ -1756,6 +1758,42 @@ pub enum Change {
     Update { issue_id: Id, patch: IssuePatch },
     Comment { issue_id: Id, body: String },
     Create { issue: NewIssue },
+    AddProject { request: AddProject },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddMode {
+    Import,
+    Create,
+    Clone,
+}
+
+impl AddMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AddMode::Import => "import",
+            AddMode::Create => "create",
+            AddMode::Clone => "clone",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AddProject {
+    pub mode: AddMode,
+    pub path: String,
+    pub name: String,
+    #[serde(default)]
+    pub remote: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub head: Option<String>,
+    #[serde(default)]
+    pub free_bytes: Option<u64>,
+    #[serde(default)]
+    pub requester: Option<SessionId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

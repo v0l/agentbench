@@ -515,7 +515,8 @@ impl App {
     }
 
     fn triage_panel(&mut self, ui: &mut Ui) {
-        let Some(t) = self.overview.as_ref().and_then(|o| o.triage.clone()) else { return };
+        let Some(mut t) = self.overview.as_ref().and_then(|o| o.triage.clone()) else { return };
+        t.proposals.retain(|p| p.kind != agentbench_core::ProposalKind::AddProject);
         let autopilot_open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("autopilot_open"))).unwrap_or(false);
         if t.proposals.is_empty() && !t.running && !autopilot_open {
             return;
@@ -634,6 +635,57 @@ impl App {
         }
     }
 
+    fn add_project_cards(&mut self, ui: &mut Ui, session: agentbench_core::SessionId) {
+        let supervisor = self.supervisor_chat() == Some(session);
+        let cards: Vec<(agentbench_core::Id, agentbench_core::AddProject)> = self
+            .overview
+            .as_ref()
+            .and_then(|o| o.triage.as_ref())
+            .into_iter()
+            .flat_map(|t| &t.proposals)
+            .filter_map(|p| {
+                p.changes.iter().find_map(|c| match c {
+                    agentbench_core::Change::AddProject { request } => Some((p.id, request.clone())),
+                    _ => None,
+                })
+            })
+            .filter(|(_, r)| supervisor || r.requester == Some(session))
+            .collect();
+        let mut decide: Option<(agentbench_core::Id, bool)> = None;
+        for (id, r) in &cards {
+            ui.add_space(4.0);
+            section_panel(ui, |ui| {
+                ui.label(egui::RichText::new(format!("add project: {} {}", r.mode.as_str(), r.name)).size(11.5).color(READOUT));
+                ui.label(egui::RichText::new(&format!("path {}", r.path)).size(10.0).color(LEGEND));
+                if let Some(remote) = &r.remote {
+                    ui.label(egui::RichText::new(&format!("remote {remote}")).size(10.0).color(LEGEND));
+                }
+                if let Some(branch) = &r.branch {
+                    let head = r.head.as_deref().map(|h| &h[..h.len().min(8)]).unwrap_or("");
+                    ui.label(egui::RichText::new(&format!("on {branch} at {head}")).size(10.0).color(LEGEND));
+                }
+                if let Some(free) = r.free_bytes {
+                    ui.label(egui::RichText::new(&format!("{:.1} GB free on that disk", free as f64 / 1e9)).size(10.0).color(LEGEND));
+                }
+                ui.horizontal(|ui| {
+                    let accept = ui.add(Key::new("accept").outline(READOUT));
+                    accept.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("accept add project {id}")));
+                    if accept.clicked() {
+                        decide = Some((*id, true));
+                    }
+                    let reject = ui.add(Key::new("reject").outline(FAULT));
+                    reject.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("reject add project {id}")));
+                    if reject.clicked() {
+                        decide = Some((*id, false));
+                    }
+                });
+            });
+        }
+        if let (Some((id, accept)), Some(c)) = (decide, &mut self.client) {
+            c.triage_decide(id, accept);
+        }
+    }
+
     pub(super) fn session_view(&mut self, ui: &mut Ui, s: Session) {
         let tree = self.worktree(s.worktree_id).cloned();
         self.chat_header(ui, &s, tree.as_ref());
@@ -641,6 +693,7 @@ impl App {
             self.autopilot_panel(ui);
             self.triage_panel(ui);
         }
+        self.add_project_cards(ui, s.id);
         self.session_body(ui, s, tree);
     }
 

@@ -181,6 +181,33 @@ pub fn head(dir: &Path) -> Option<String> {
     git(dir, &["rev-parse", "HEAD"]).ok()
 }
 
+pub fn clone(remote: &str, dest: &Path) -> Result<(), String> {
+    let parent = dest.parent().ok_or_else(|| format!("{} has no parent folder", dest.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let out = Command::new("git")
+        .arg("clone")
+        .arg("-q")
+        .arg("--")
+        .arg(remote)
+        .arg(dest)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+pub fn free_bytes(dir: &Path) -> Option<u64> {
+    let out = Command::new("df").args(["-Pk"]).arg(dir).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let kb: u64 = text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
 pub fn diff_stat(dir: &Path, base: &str) -> Result<String, String> {
     git(dir, &["diff", "--stat", &format!("{base}...HEAD")])
 }
