@@ -10,4 +10,6 @@ The app and the server are installed separately, so an old app talks to a new se
 - A new endpoint may be missing on an older server. The app treats a 404 on a read as "not supported", not as an error.
 - Record the new shape: run `RECORD_API_FIXTURES=1 cargo test -p agentbench-server --lib the_recorded_api_fixtures` after bumping `API_VERSION`, which writes `crates/core/tests/fixtures/api/v<N>/`. Keep every older version's fixtures.
 - `crates/core/tests/compat.rs` decodes every recorded fixture with today's types and fails on any removed, renamed or retyped field. The failure message points back here.
+- `fixtures/api/v<N>/schema.json` records the field and type shape of every response; today's serialised types must keep it. `RECORD_API_FIXTURES=1 cargo test -p agentbench-core --test compat` rewrites it.
+- A new endpoint or feature gets a capability constant (like `API_ISSUE_DEPS`) in core, `API_VERSION` rises to it, and the app hides the feature when the server's `api_version` is lower.
 - A break that cannot be avoided bumps `API_VERSION` and `MIN_CLIENT_API` in `crates/core/src/lib.rs` on purpose, and the PR says so. The app then shows an out-of-date banner for that workspace.

@@ -463,9 +463,10 @@ fn worker_prompt(issue: &Issue, comments: &[agentbench_core::Comment]) -> String
          Finish the work: do every test, verification and follow-up you can do yourself before you reply. Your last reply must be a conclusion: \
          either rigid (verified, tests pass, nothing left) or needs more work, listing only what you genuinely could not do \
          (a user decision, credentials, hardware or a real-world action, or out of scope). Never end with a todo list of things you could have done. \
-         Never deploy, send messages, spend money or touch secrets: say what is needed instead. \
+         Never deploy, send messages, spend money or touch secrets: say what is needed instead. {} \
          End with one line: `DONE #{} tests:<pass|fail> <one-line result>`, or `BLOCKED #{} <reason>` if you cannot go on.",
         issue_prompt(issue, comments),
+        agentbench_core::API_RULE,
         issue.id,
         issue.id,
     )
@@ -1272,6 +1273,12 @@ pub fn spawn(runner: Runner) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_worker_brief_carries_the_api_rule() {
+        let i = Issue { id: 7, ..issue(7, 1, 0, 0, IssueState::Todo) };
+        assert!(super::worker_prompt(&i, &[]).contains(agentbench_core::API_RULE));
+    }
+
     use super::*;
     use crate::agent::JsonCommand;
     use crate::store::testing;

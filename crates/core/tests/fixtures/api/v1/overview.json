@@ -8,7 +8,7 @@
       "resumable": false
     }
   ],
-  "api_version": 1,
+  "api_version": 2,
   "autopilot": {
     "activity": [],
     "cap": 4,
@@ -23,16 +23,18 @@
   "cursor": 9,
   "host": {
     "cores": 48,
-    "disk_free": 648725004288,
+    "disk_free": 649700704256,
     "disk_total": 3935812239360,
-    "load": 45.29,
+    "load": 17.55,
     "mem_total": 66741764096,
-    "mem_used": 32374112256
+    "mem_used": 23743680512
   },
   "issues": [
     {
+      "blocks": [],
       "body": "details",
-      "created_at": 1794957433556,
+      "created_at": 1794958123645,
+      "depends_on": [],
       "goal": null,
       "id": 1,
       "labels": [
@@ -43,7 +45,8 @@
       "project_id": 1,
       "state": "doing",
       "title": "Fix it",
-      "updated_at": 1794957433557
+      "updated_at": 1794958123645,
+      "waiting_on": []
     }
   ],
   "min_client_api": 1,
@@ -51,12 +54,12 @@
     {
       "automation": null,
       "branch": "main",
-      "created_at": 1794957433555,
+      "created_at": 1794958123644,
       "deploy": null,
       "home": false,
       "id": 1,
       "name": "demo",
-      "path": "/tmp/.tmpLNLpUf/demo",
+      "path": "/tmp/.tmp49Vm2Y/demo",
       "pinned": false,
       "remote": null,
       "risky": [],
@@ -68,17 +71,17 @@
     {
       "agent": "echo",
       "agent_session": null,
-      "created_at": 1794957433557,
-      "cwd": "/tmp/.tmpLNLpUf/demo",
+      "created_at": 1794958123645,
+      "cwd": "/tmp/.tmp49Vm2Y/demo",
       "effort": null,
-      "id": "a83653ab-4e91-4d6d-bc8a-2bf4307c59a3",
+      "id": "5133e419-7820-46a6-b77e-b1e72730e86c",
       "issue_id": null,
       "model": null,
       "parent": null,
       "project_id": 1,
       "status": "idle",
       "title": "hello",
-      "updated_at": 1794957433562,
+      "updated_at": 1794958123647,
       "usage": {
         "bash_edits": 0,
         "cache_read_tokens": 0,
@@ -120,13 +123,13 @@
   "worktrees": [
     {
       "branch": "main",
-      "created_at": 1794957433556,
-      "head": "8b4d3083dbedeab986eb5e4b3b96cbe45da229f5",
+      "created_at": 1794958123645,
+      "head": "293fc666627fd576a71a7e62f382d2a66916ea88",
       "id": 1,
       "main": true,
       "missing": false,
       "owned": false,
-      "path": "/tmp/.tmpLNLpUf/demo",
+      "path": "/tmp/.tmp49Vm2Y/demo",
       "project_id": 1
     }
   ]

@@ -42,6 +42,7 @@ struct Link {
     watching: bool,
     offline: Option<(String, Instant)>,
     compat: agentbench_core::Compat,
+    api: u32,
 }
 
 impl Link {
@@ -49,7 +50,7 @@ impl Link {
         let wake = wake.clone();
         let mut client = Client::new(server, move || wake());
         client.overview();
-        Link { slot, name, client, overview: None, cursor: None, watching: false, offline: None, compat: agentbench_core::Compat::Ok }
+        Link { slot, name, client, overview: None, cursor: None, watching: false, offline: None, compat: agentbench_core::Compat::Ok, api: 0 }
     }
 
     fn watch(&mut self) {
@@ -60,7 +61,7 @@ impl Link {
     }
 }
 
-pub const MIN_SERVER_API: u32 = 1;
+pub const MIN_SERVER_API: u32 = agentbench_core::API_ISSUE_DEPS;
 
 pub struct Hub {
     links: Vec<Link>,
@@ -310,13 +311,12 @@ impl Hub {
         self.links.iter().find(|l| l.slot == slot).map_or(agentbench_core::Compat::Ok, |l| l.compat)
     }
 
-    pub fn compat_notices(&self) -> Vec<(u32, String)> {
-        self.links.iter().filter_map(|l| Some((l.slot, l.compat.notice()?))).collect()
+    pub fn server_has(&self, slot: u32, needs: u32) -> bool {
+        self.links.iter().find(|l| l.slot == slot).is_none_or(|l| l.overview.is_none() || agentbench_core::server_has(l.api, needs))
     }
 
-    pub fn require_server_api(&mut self, api: u32) {
-        self.min_server_api = api;
-        self.overview();
+    pub fn compat_notices(&self) -> Vec<(u32, String)> {
+        self.links.iter().filter_map(|l| Some((l.slot, l.compat.notice()?))).collect()
     }
 
     pub fn slots(&self) -> Vec<u32> {
@@ -364,6 +364,7 @@ impl Hub {
                         let l = &mut self.links[i];
                         l.cursor = Some(o.cursor);
                         l.offline = None;
+                        l.api = o.api_version;
                         l.compat = agentbench_core::compat(
                             agentbench_core::API_VERSION,
                             self.min_server_api,

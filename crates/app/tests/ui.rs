@@ -4447,21 +4447,43 @@ fn a_server_that_needs_a_newer_app_shows_the_update_the_app_banner() {
     until(&mut h, "the banner", |h| {
         h.query_by_label_contains("This app is older than the server").is_some()
     });
-    assert!(h.query_by_label_contains("app v1, server v9").is_some());
+    assert!(h.query_by_label_contains("app v2, server v9").is_some());
     assert!(h.query_by_label_contains("Update the app").is_some());
+    assert!(h.query_by_label_contains("cargo install --git https://github.com/v0l/agentbench agentbench").is_some());
+}
+
+fn open_first_issue(h: &mut Harness<'_, App>) {
+    let id = h.state().overview().unwrap().issues[0].id;
+    h.state_mut().open_issue(id);
+    h.run_steps(5);
 }
 
 #[test]
-fn a_server_older_than_the_app_needs_shows_the_update_the_server_banner() {
-    let o = recorded_overview();
+fn a_v1_server_hides_the_dependency_ui_and_asks_for_a_server_update() {
+    let mut o = recorded_overview();
+    o["api_version"] = 1.into();
+    o["issues"][0]["waiting_on"] = serde_json::json!([2]);
+    let mut h = harness(canned_server(o.to_string()));
+    until(&mut h, "the banner", |h| h.query_by_label_contains("Update the server").is_some());
+    assert!(h.query_by_label_contains("Server v1 is older than this app").is_some());
+    click(&mut h, 283.0, 20.0);
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("waiting on").is_none());
+    open_first_issue(&mut h);
+    assert!(h.query_by_label("add dependency").is_none());
+    assert!(h.query_by_label_contains("unexpected reply").is_none());
+}
+
+#[test]
+fn a_current_server_shows_the_dependency_ui() {
+    let mut o = recorded_overview();
+    o["issues"][0]["waiting_on"] = serde_json::json!([2]);
     let mut h = harness(canned_server(o.to_string()));
     until(&mut h, "the overview", |h| h.state().overview().is_some());
-    assert!(h.query_by_label_contains("Update the").is_none());
-    h.state_mut().require_server_api(2);
-    until(&mut h, "the banner", |h| {
-        h.query_by_label_contains("Server v1 is older than this app").is_some()
-    });
-    assert!(h.query_by_label_contains("Update the server").is_some());
+    click(&mut h, 283.0, 20.0);
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Update the server").is_none());
+    assert!(h.query_by_label_contains("waiting on #2").is_some());
 }
 
 #[test]

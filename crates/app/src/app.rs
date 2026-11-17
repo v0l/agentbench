@@ -152,6 +152,9 @@ fn list_key(s: &Session) -> (bool, std::cmp::Reverse<(i64, String)>) {
     (s.status != SessionStatus::Waiting, chat_key(s))
 }
 
+pub const INSTALL_COMMAND: &str = "cargo install --git https://github.com/v0l/agentbench agentbench";
+pub const RELEASES_URL: &str = "https://github.com/v0l/agentbench/releases/latest";
+
 pub fn waiting_on_you(sessions: &[Session]) -> usize {
     sessions.iter().filter(|s| s.status == SessionStatus::Waiting).count()
 }
@@ -1606,10 +1609,8 @@ impl App {
             .collect()
     }
 
-    pub fn require_server_api(&mut self, api: u32) {
-        if let Some(hub) = &mut self.client {
-            hub.require_server_api(api);
-        }
+    pub fn server_has(&self, id: Id, needs: u32) -> bool {
+        self.client.as_ref().is_none_or(|h| h.server_has(crate::hub::slot_of(id), needs))
     }
 
     fn compat_banner(&self, ui: &mut Ui) {
@@ -1620,8 +1621,19 @@ impl App {
         egui::Panel::top("compat")
             .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin::symmetric(12, 4)))
             .show(ui, |ui| {
+                let app_old = notices.iter().any(|t| t.contains("Update the app"));
                 for text in notices {
                     ui.label(egui::RichText::new(text).color(WARN).size(12.0));
+                }
+                if app_old {
+                    if cfg!(target_os = "android") {
+                        ui.hyperlink_to(RELEASES_URL, RELEASES_URL);
+                    } else {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new(INSTALL_COMMAND).monospace().size(11.5).color(VALUE));
+                            ui.hyperlink_to("or download a release", RELEASES_URL);
+                        });
+                    }
                 }
             });
     }
@@ -2919,6 +2931,7 @@ impl App {
             _ => None,
         };
         let open = self.issue == Some(issue.id);
+        let deps_known = self.server_has(issue.id, agentbench_core::API_ISSUE_DEPS);
         let r = card(
             ui,
             rail,
@@ -2940,7 +2953,7 @@ impl App {
                     .value(&issue.title)
                     .size(12.5)
                     .elided(ui);
-                if !issue.waiting_on.is_empty() {
+                if !issue.waiting_on.is_empty() && deps_known {
                     let text = format!(
                         "waiting on {}",
                         issue.waiting_on.iter().map(|d| format!("#{}", crate::hub::untag(*d))).collect::<Vec<_>>().join(", ")
@@ -3143,6 +3156,9 @@ impl App {
     }
 
     fn dependency_list(&mut self, ui: &mut Ui, issue: &Issue) {
+        if !self.server_has(issue.id, agentbench_core::API_ISSUE_DEPS) {
+            return;
+        }
         let states: HashMap<Id, IssueState> = self
             .overview
             .as_ref()

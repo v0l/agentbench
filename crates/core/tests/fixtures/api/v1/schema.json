@@ -1,0 +1,212 @@
+{
+  "changes": {
+    "changes": [
+      {
+        "id": "number",
+        "kind": "string",
+        "ref": "string"
+      }
+    ],
+    "cursor": "number"
+  },
+  "issues": [
+    {
+      "blocks": [],
+      "body": "string",
+      "created_at": "number",
+      "depends_on": [],
+      "goal": "null",
+      "id": "number",
+      "labels": [
+        "string"
+      ],
+      "off_vision": "bool",
+      "priority": "number",
+      "project_id": "number",
+      "state": "string",
+      "title": "string",
+      "updated_at": "number",
+      "waiting_on": []
+    }
+  ],
+  "messages": [
+    {
+      "created_at": "number",
+      "entry": {
+        "kind": "string",
+        "text": "string"
+      },
+      "id": "number",
+      "session_id": "string"
+    }
+  ],
+  "overview": {
+    "agents": [
+      {
+        "about": "string",
+        "available": "bool",
+        "label": "string",
+        "name": "string",
+        "resumable": "bool"
+      }
+    ],
+    "api_version": "number",
+    "autopilot": {
+      "activity": [],
+      "cap": "number",
+      "default_level": "string",
+      "enabled": "bool",
+      "idle": "bool",
+      "max_nudges": "number",
+      "project_cap": "number",
+      "stuck_minutes": "number",
+      "workers": "number"
+    },
+    "cursor": "number",
+    "host": {
+      "cores": "number",
+      "disk_free": "number",
+      "disk_total": "number",
+      "load": "number",
+      "mem_total": "number",
+      "mem_used": "number"
+    },
+    "issues": [
+      {
+        "blocks": [],
+        "body": "string",
+        "created_at": "number",
+        "depends_on": [],
+        "goal": "null",
+        "id": "number",
+        "labels": [
+          "string"
+        ],
+        "off_vision": "bool",
+        "priority": "number",
+        "project_id": "number",
+        "state": "string",
+        "title": "string",
+        "updated_at": "number",
+        "waiting_on": []
+      }
+    ],
+    "min_client_api": "number",
+    "projects": [
+      {
+        "automation": "null",
+        "branch": "string",
+        "created_at": "number",
+        "deploy": "null",
+        "home": "bool",
+        "id": "number",
+        "name": "string",
+        "path": "string",
+        "pinned": "bool",
+        "remote": "null",
+        "risky": [],
+        "supervisor": "bool",
+        "tags": []
+      }
+    ],
+    "sessions": [
+      {
+        "agent": "string",
+        "agent_session": "null",
+        "created_at": "number",
+        "cwd": "string",
+        "effort": "null",
+        "id": "string",
+        "issue_id": "null",
+        "model": "null",
+        "parent": "null",
+        "project_id": "number",
+        "status": "string",
+        "title": "string",
+        "updated_at": "number",
+        "usage": {
+          "bash_edits": "number",
+          "cache_read_tokens": "number",
+          "context": "number",
+          "cost_usd": "number",
+          "effort": "string",
+          "file_edits": "number",
+          "host": "string",
+          "input_tokens": "number",
+          "lsp": [],
+          "model": "string",
+          "output_tokens": "number",
+          "turns": "number",
+          "window": "number"
+        },
+        "worktree_id": "number"
+      }
+    ],
+    "supervisor": "null",
+    "triage": {
+      "budget_tokens": "number",
+      "every_hours": "number",
+      "last_run": "null",
+      "last_status": "string",
+      "notes": [],
+      "proposals": [],
+      "running": "bool"
+    },
+    "usage": {
+      "quotas": [],
+      "spend": {
+        "projects": [],
+        "today_usd": "number",
+        "total_usd": "number"
+      }
+    },
+    "version": "string",
+    "visions": [],
+    "worktrees": [
+      {
+        "branch": "string",
+        "created_at": "number",
+        "head": "string",
+        "id": "number",
+        "main": "bool",
+        "missing": "bool",
+        "owned": "bool",
+        "path": "string",
+        "project_id": "number"
+      }
+    ]
+  },
+  "sessions": [
+    {
+      "agent": "string",
+      "agent_session": "null",
+      "created_at": "number",
+      "cwd": "string",
+      "effort": "null",
+      "id": "string",
+      "issue_id": "null",
+      "model": "null",
+      "parent": "null",
+      "project_id": "number",
+      "status": "string",
+      "title": "string",
+      "updated_at": "number",
+      "usage": {
+        "bash_edits": "number",
+        "cache_read_tokens": "number",
+        "context": "number",
+        "cost_usd": "number",
+        "effort": "string",
+        "file_edits": "number",
+        "host": "string",
+        "input_tokens": "number",
+        "lsp": [],
+        "model": "string",
+        "output_tokens": "number",
+        "turns": "number",
+        "window": "number"
+      },
+      "worktree_id": "number"
+    }
+  ]
+}

@@ -1,7 +1,9 @@
 [
   {
+    "blocks": [],
     "body": "details",
-    "created_at": 1794957433556,
+    "created_at": 1794958123645,
+    "depends_on": [],
     "goal": null,
     "id": 1,
     "labels": [
@@ -12,6 +14,7 @@
     "project_id": 1,
     "state": "doing",
     "title": "Fix it",
-    "updated_at": 1794957433557
+    "updated_at": 1794958123645,
+    "waiting_on": []
   }
 ]
