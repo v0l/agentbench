@@ -197,19 +197,17 @@ fn head<H>(ui: &mut Ui, agent: &mut Agent<H>, busy: bool, mut on_model: Option<&
     let model = if model.is_empty() { "none".to_string() } else { model };
     let workspace = tidy(&agent.chat.workspace_path());
     let mut buttons = |ui: &mut Ui| {
-        if ui.small_button("Model").clicked() {
+        if ui.add(Key::new("model").outline(VALUE)).clicked() {
             match on_model.as_mut() {
                 Some(open) => open(),
                 None => agent.settings = Some(agent.chat.config.clone()),
             }
         }
-        if ui
-            .add_enabled(!agent.chat.turns.is_empty() && !busy, egui::Button::new("Clear").small())
-            .clicked()
-        {
+        let can_clear = !agent.chat.turns.is_empty() && !busy;
+        if ui.add(Key::new("clear").outline(VALUE).enabled(can_clear)).clicked() {
             agent.chat.clear();
         }
-        if busy && ui.small_button("Stop").clicked() {
+        if busy && ui.add(Key::new("stop").outline(FAULT)).clicked() {
             agent.chat.interrupt();
         }
     };
@@ -628,6 +626,43 @@ mod tests {
             matches!(h.state().chat.turns.get(6), Some(Turn::Asked { answers: Some(a), .. }) if a == &["yes".to_string()]),
             "a click answers the question"
         );
+    }
+
+    #[test]
+    fn model_and_clear_are_keys_and_clear_empties_the_chat() {
+        let mut a = agent();
+        transcript(&mut a);
+        let mut h = pane(a);
+        h.get_by_label("model");
+        h.get_by_label("clear").click();
+        h.run_steps(3);
+        assert!(h.state().chat.turns.is_empty());
+        h.get_by_label("model").click();
+        h.run_steps(3);
+        assert!(h.state().settings.is_some());
+    }
+
+    #[test]
+    fn the_head_renders_at_narrow_and_wide_widths() {
+        let Ok(dir) = std::env::var("AGENT_UI_SHOTS") else { return };
+        for width in [900.0, 420.0] {
+            let mut a = agent();
+            transcript(&mut a);
+            let mut setup = egui_kittest::wgpu::default_wgpu_setup();
+            if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
+                new.instance_descriptor.flags = egui_wgpu::wgpu::InstanceFlags::empty();
+            }
+            let mut h = Harness::builder().with_size([width, 500.0]).wgpu_setup(setup).build_ui_state(
+                |ui, a: &mut Agent<()>| {
+                    egui_bench::theme::install(ui.ctx());
+                    show(ui, a);
+                },
+                a,
+            );
+            h.run_steps(4);
+            let img = h.render().expect("rendered");
+            img.save(std::path::Path::new(&dir).join(format!("agent-ui-head-{width}.png"))).unwrap();
+        }
     }
 
     #[test]
