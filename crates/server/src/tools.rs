@@ -1887,6 +1887,19 @@ mod tests {
     }
 
     #[test]
+    fn the_update_issue_tool_marking_done_releases_a_dependent() {
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/rel");
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let a = api.call("file_issue", &json!({"title": "A"}), me.id).unwrap()["filed"].as_i64().unwrap();
+        let b = api.call("file_issue", &json!({"title": "B", "state": "backlog", "depends_on": [a]}), me.id).unwrap()["filed"].as_i64().unwrap();
+        api.call("update_issue", &json!({"id": a, "state": "done"}), me.id).unwrap();
+        assert!(s.comments(b).unwrap().iter().any(|c| c.body.starts_with(&format!("unblocked by #{a}"))));
+        assert!(s.autopilot_log(10).unwrap().iter().any(|l| l.text == format!("unblocked #{b} (all dependencies done)")));
+    }
+
+    #[test]
     fn notes_are_kept_per_project_and_replaced_by_topic() {
         let s = Store::memory().unwrap();
         let (_, main) = crate::store::testing::project(&s, "/a");

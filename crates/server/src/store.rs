@@ -277,7 +277,6 @@ CREATE TABLE spend (
 CREATE TABLE issue_deps (
     issue_id INTEGER NOT NULL,
     depends_on INTEGER NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'blocks',
     PRIMARY KEY (issue_id, depends_on)
 );
 CREATE INDEX issue_deps_on ON issue_deps(depends_on);
@@ -1044,7 +1043,7 @@ impl Store {
         tx.execute("DELETE FROM issue_deps WHERE issue_id = ?1", [id])?;
         for d in &wanted {
             tx.execute(
-                "INSERT INTO issue_deps (issue_id, depends_on, kind) VALUES (?1, ?2, 'blocks')",
+                "INSERT INTO issue_deps (issue_id, depends_on) VALUES (?1, ?2)",
                 params![id, d],
             )?;
         }

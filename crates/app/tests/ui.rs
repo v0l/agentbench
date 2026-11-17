@@ -3933,6 +3933,43 @@ fn an_issue_card_says_what_it_is_waiting_on() {
     h.get_by_label(&format!("waiting on #{}", first.id));
 }
 
+#[test]
+fn the_issue_detail_lists_dependencies_and_edits_them() {
+    let rig = rig();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    let add = |title: &str, state, depends_on: Vec<i64>| {
+        rig.store
+            .add_issue(&NewIssue { project_id: project.id, title: title.into(), state: Some(state), depends_on, ..Default::default() })
+            .unwrap()
+            .id
+    };
+    let base = add("Zeta base", agentbench_core::IssueState::Doing, vec![]);
+    let spare = add("Zeta spare", agentbench_core::IssueState::Backlog, vec![]);
+    let mid = add("Zeta middle", agentbench_core::IssueState::Backlog, vec![base]);
+    let top = add("Zeta top", agentbench_core::IssueState::Backlog, vec![mid]);
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some_and(|o| o.issues.iter().any(|i| i.id == top)));
+    click(&mut h, 283.0, 20.0);
+    h.run_steps(3);
+    h.state_mut().open_issue(mid);
+    h.run_steps(3);
+    h.get_by_label_contains(&format!("#{base} (doing)"));
+    h.get_by_label_contains(&format!("#{top} (backlog)"));
+    h.get_by_label_contains("add dependency").click();
+    h.run_steps(3);
+    click_label(&mut h, &format!("#{spare} Zeta spare"));
+    until(&mut h, "the dependency to be added", |h| {
+        h.state().overview().is_some_and(|o| o.issues.iter().any(|i| i.id == mid && i.depends_on.contains(&spare)))
+    });
+    h.run_steps(3);
+    h.get_by_label_contains(&format!("#{spare} (backlog)"));
+    click_label(&mut h, &format!("x #{base}"));
+    until(&mut h, "the dependency to be removed", |h| {
+        h.state().overview().is_some_and(|o| o.issues.iter().any(|i| i.id == mid && i.depends_on == [spare]))
+    });
+    assert_eq!(rig.store.issue(mid).unwrap().depends_on, [spare]);
+}
+
 struct QuotaPauser;
 
 #[agentbench_server::agent::async_trait]

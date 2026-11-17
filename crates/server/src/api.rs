@@ -948,18 +948,22 @@ async fn update_issue(
     Ok(Json(issue))
 }
 
-async fn issue_deps(State(api): State<Api>, Path(id): Path<Id>) -> Reply<Vec<Id>> {
-    Ok(Json(api.runner.store().issue(id)?.depends_on))
+async fn issue_deps(State(api): State<Api>, Path(id): Path<Id>) -> Reply<serde_json::Value> {
+    Ok(Json(deps_json(&api.runner.store().issue(id)?)))
+}
+
+fn deps_json(i: &agentbench_core::Issue) -> serde_json::Value {
+    json!({ "depends_on": i.depends_on, "waiting_on": i.waiting_on, "blocks": i.blocks })
 }
 
 async fn set_issue_deps(
     State(api): State<Api>,
     Path(id): Path<Id>,
     Json(deps): Json<Vec<Id>>,
-) -> Reply<agentbench_core::Issue> {
+) -> Reply<serde_json::Value> {
     api.runner.store().set_deps(id, &deps)?;
     changed(&api);
-    Ok(Json(api.runner.store().issue(id)?))
+    Ok(Json(deps_json(&api.runner.store().issue(id)?)))
 }
 
 async fn get_autopilot(State(api): State<Api>) -> Reply<agentbench_core::AutopilotState> {
@@ -2248,11 +2252,31 @@ mod tests {
         let (code, put) = call(&f.app, "PUT", &url, Some(json!([ids[0]])), T).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(put["waiting_on"], json!([ids[0]]));
-        assert_eq!(call(&f.app, "GET", &url, None, T).await.1, json!([ids[0]]));
+        assert_eq!(put["depends_on"], json!([ids[0]]));
+        assert_eq!(put["blocks"], json!([]));
+        let got = call(&f.app, "GET", &url, None, T).await.1;
+        assert_eq!(got["depends_on"], json!([ids[0]]));
+        let first = call(&f.app, "GET", &format!("/api/issues/{}/deps", ids[0]), None, T).await.1;
+        assert_eq!(first["blocks"], json!([ids[1]]));
         let back = format!("/api/issues/{}/deps", ids[0]);
         assert!(!call(&f.app, "PUT", &back, Some(json!([ids[1]])), T).await.0.is_success());
         call(&f.app, "PUT", &url, Some(json!([])), T).await;
-        assert_eq!(call(&f.app, "GET", &url, None, T).await.1, json!([]));
+        assert_eq!(call(&f.app, "GET", &url, None, T).await.1["depends_on"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn finishing_a_dependency_over_rest_releases_its_dependent() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, a) = call(&f.app, "POST", "/api/issues", Some(json!({"project_id": pid, "title": "a"})), T).await;
+        let a = a["id"].as_i64().unwrap();
+        let (_, b) = call(&f.app, "POST", "/api/issues", Some(json!({"project_id": pid, "title": "b", "state": "backlog", "depends_on": [a]})), T).await;
+        let b = b["id"].as_i64().unwrap();
+        call(&f.app, "PATCH", &format!("/api/issues/{a}"), Some(json!({"state": "done"})), T).await;
+        let (_, comments) = call(&f.app, "GET", &format!("/api/issues/{b}/comments"), None, T).await;
+        assert!(comments[0]["body"].as_str().unwrap().starts_with(&format!("unblocked by #{a}")));
+        let (_, got) = call(&f.app, "GET", &format!("/api/issues/{b}"), None, T).await;
+        assert_eq!(got["waiting_on"], json!([]));
     }
 
     #[tokio::test]

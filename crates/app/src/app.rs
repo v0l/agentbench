@@ -2543,6 +2543,10 @@ impl App {
         self.scope = Scope::Everything;
     }
 
+    pub fn open_issue(&mut self, id: Id) {
+        self.issue = Some(id);
+    }
+
     pub fn group_by_goal(&mut self) {
         self.group = Group::Goal;
     }
@@ -3119,13 +3123,13 @@ impl App {
             None => format!("#{} (done)", crate::hub::untag(*id)),
         };
         if !issue.depends_on.is_empty() {
-            let text = issue.depends_on.iter().map(word).collect::<Vec<_>>().join(", ");
+            let text = format!("depends on {}", issue.depends_on.iter().map(word).collect::<Vec<_>>().join(", "));
             ui.add_space(4.0);
-            Line::new().legend("depends on").gap(8.0).note(text).size(10.5).show(ui);
+            ui.label(egui::RichText::new(text).font(mono(10.5)).color(LEGEND));
         }
         if !issue.blocks.is_empty() {
-            let text = issue.blocks.iter().map(word).collect::<Vec<_>>().join(", ");
-            Line::new().legend("blocks").gap(8.0).note(text).size(10.5).show(ui);
+            let text = format!("blocks {}", issue.blocks.iter().map(word).collect::<Vec<_>>().join(", "));
+            ui.label(egui::RichText::new(text).font(mono(10.5)).color(LEGEND));
         }
         let mut changed = None;
         let mut deps = issue.depends_on.clone();
@@ -3138,7 +3142,7 @@ impl App {
             let mut picked: Option<Id> = None;
             let mut shown: Vec<Id> = others;
             shown.sort_unstable();
-            egui::ComboBox::from_id_salt(("dep-add", issue.id))
+            let combo = egui::ComboBox::from_id_salt(("dep-add", issue.id))
                 .selected_text("add dependency")
                 .show_ui(ui, |ui| {
                     for id in shown.iter().take(200) {
@@ -3154,6 +3158,9 @@ impl App {
                         }
                     }
                 });
+            combo.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add dependency")
+            });
             if let Some(id) = picked {
                 deps.push(id);
                 changed = Some(deps.clone());

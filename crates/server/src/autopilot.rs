@@ -1936,6 +1936,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shipping_a_branch_releases_the_backlog_issue_waiting_on_it() {
+        let r = rig(DONE);
+        let (a, sid) = worked_on(&r).await;
+        let waiting = r
+            .store
+            .add_issue(&agentbench_core::NewIssue {
+                project_id: r.project,
+                title: "next".into(),
+                state: Some(IssueState::Backlog),
+                goal: Some("g1".into()),
+                depends_on: vec![a],
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        passed(&r, sid).await;
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert_ne!(r.store.issue(waiting).unwrap().state, IssueState::Backlog, "released, and the loop may already have started it");
+        assert!(r.store.comments(waiting).unwrap().iter().any(|c| c.body.starts_with(&format!("unblocked by #{a}"))));
+        assert!(feed(&r).iter().any(|l| l == &format!("unblocked #{waiting} (all dependencies done)")));
+    }
+
+    #[tokio::test]
     async fn a_failed_push_keeps_the_issue_in_review() {
         let r = rig(DONE);
         let missing = r._dir.path().join("gone.git");

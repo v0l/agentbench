@@ -2132,6 +2132,17 @@ mod tests {
     }
 
     #[test]
+    fn an_issue_from_before_dependencies_still_decodes() {
+        let old = r#"{"id":1,"project_id":2,"title":"t","body":"","state":"todo","priority":0,"labels":[],"created_at":0,"updated_at":0}"#;
+        let i: Issue = serde_json::from_str(old).unwrap();
+        assert!(i.depends_on.is_empty() && i.waiting_on.is_empty() && i.blocks.is_empty());
+        let patch: IssuePatch = serde_json::from_str("{}").unwrap();
+        assert_eq!(patch.depends_on, None);
+        let new: NewIssue = serde_json::from_str(r#"{"project_id":1,"title":"t"}"#).unwrap();
+        assert!(new.depends_on.is_empty());
+    }
+
+    #[test]
     fn the_issue_prompt_carries_title_body_and_discussion() {
         let issue = Issue {
             id: 7,
