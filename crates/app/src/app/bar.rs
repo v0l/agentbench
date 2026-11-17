@@ -207,6 +207,7 @@ impl App {
             return vec!["All workspaces".to_string(), "projects and chats from every workspace together".to_string()];
         };
         let mut out = vec![name.to_string(), c.url(slot)];
+        out.extend(c.compat(slot).notice());
         match (down, c.host(slot)) {
             (true, _) => out.push("server offline".to_string()),
             (false, Some(h)) => out.push(format!(

@@ -652,6 +652,12 @@ impl App {
                         note(ui, line, LEGEND);
                     }
                 });
+                ui.add_space(8.0);
+                note(
+                    ui,
+                    &format!("agentbench {} (api {})", env!("CARGO_PKG_VERSION"), agentbench_core::API_VERSION),
+                    LEGEND,
+                );
                 footer(ui, |ui| {
                     close = ui.add(Key::new("close").outline(VALUE).min_width(100.0)).clicked();
                 });

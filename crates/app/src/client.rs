@@ -192,6 +192,7 @@ impl Client {
             .http
             .request(method, url)
             .header("Accept", "application/json")
+            .header(agentbench_core::API_HEADER, agentbench_core::API_VERSION.to_string())
             .bearer_auth(self.server.token.trim())
             .timeout(self.patience);
         if let Some(body) = body {
@@ -226,10 +227,10 @@ impl Client {
     ) {
         let tx = self.tx.clone();
         let wake = self.wake.clone();
-        let ordered = req
-            .try_clone()
-            .and_then(|r| r.build().ok())
-            .is_some_and(|r| matches!(*r.method(), Method::PUT | Method::PATCH | Method::DELETE));
+        let method = req.try_clone().and_then(|r| r.build().ok()).map(|r| r.method().clone());
+        let ordered =
+            method.as_ref().is_some_and(|m| matches!(*m, Method::PUT | Method::PATCH | Method::DELETE));
+        let reading = method == Some(Method::GET);
         self.pending += 1;
         let task = async move {
             let res = match req.send().await {
@@ -237,6 +238,7 @@ impl Client {
                 Ok(r) if r.status() == 401 => {
                     Err(Reply::Offline("the server refused the token".into()))
                 }
+                Ok(r) if reading && r.status() == 404 => Err(Reply::Done(String::new())),
                 Ok(r) if !r.status().is_success() => Err(Reply::Failed(describe(r).await)),
                 Ok(r) => match r.bytes().await {
                     Ok(b) => Ok(b.to_vec()),

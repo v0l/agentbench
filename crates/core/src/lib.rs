@@ -146,6 +146,8 @@ pub enum IssueState {
     Doing,
     Review,
     Done,
+    #[serde(other)]
+    Unknown,
 }
 
 impl IssueState {
@@ -164,6 +166,7 @@ impl IssueState {
             IssueState::Doing => "doing",
             IssueState::Review => "review",
             IssueState::Done => "done",
+            IssueState::Unknown => "unknown",
         }
     }
 
@@ -401,6 +404,8 @@ pub enum SessionStatus {
     Waiting,
     Failed,
     Stopped,
+    #[serde(other)]
+    Unknown,
 }
 
 impl SessionStatus {
@@ -411,6 +416,7 @@ impl SessionStatus {
             SessionStatus::Waiting => "waiting",
             SessionStatus::Failed => "failed",
             SessionStatus::Stopped => "stopped",
+            SessionStatus::Unknown => "unknown",
         }
     }
 
@@ -1669,6 +1675,10 @@ pub struct UsageReport {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Overview {
     pub version: String,
+    #[serde(default)]
+    pub api_version: u32,
+    #[serde(default)]
+    pub min_client_api: u32,
     pub agents: Vec<AgentInfo>,
     pub projects: Vec<Project>,
     pub worktrees: Vec<Worktree>,
@@ -1891,6 +1901,49 @@ pub struct TriagePatch {
     pub note_project: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+pub const API_VERSION: u32 = 1;
+pub const MIN_CLIENT_API: u32 = 1;
+pub const API_HEADER: &str = "x-agentbench-api";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compat {
+    Ok,
+    AppOlder { app: u32, server: u32 },
+    ServerOlder { app: u32, server: u32 },
+}
+
+impl Compat {
+    pub fn notice(self) -> Option<String> {
+        match self {
+            Compat::Ok => None,
+            Compat::AppOlder { app, server } => Some(format!(
+                "This app is older than the server (app v{app}, server v{server}). Update the app."
+            )),
+            Compat::ServerOlder { app, server } => Some(format!(
+                "Server v{server} is older than this app (app v{app}). Update the server."
+            )),
+        }
+    }
+}
+
+pub fn compat(app_api: u32, app_min_server: u32, server_api: u32, server_min_client: u32) -> Compat {
+    let server = server_api.max(1);
+    if server_min_client > app_api {
+        Compat::AppOlder { app: app_api, server }
+    } else if server < app_min_server {
+        Compat::ServerOlder { app: app_api, server }
+    } else {
+        Compat::Ok
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ChangesFeed {
+    pub cursor: Id,
+    #[serde(default)]
+    pub changes: Vec<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

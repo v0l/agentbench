@@ -88,6 +88,7 @@ pub(super) fn status_look(status: SessionStatus) -> (egui::Color32, &'static str
         SessionStatus::Failed => (FAULT, "failed"),
         SessionStatus::Stopped => (LEGEND, "stopped"),
         SessionStatus::Idle => (OK, "idle"),
+        SessionStatus::Unknown => (LEGEND, "unknown"),
     }
 }
 
@@ -100,6 +101,7 @@ pub fn status_counts(sessions: &[Session]) -> Vec<(SessionStatus, usize)> {
         SessionStatus::Running,
         SessionStatus::Idle,
         SessionStatus::Stopped,
+        SessionStatus::Unknown,
     ]
     .into_iter()
     .map(|st| (st, sessions.iter().filter(|s| s.status == st).count()))

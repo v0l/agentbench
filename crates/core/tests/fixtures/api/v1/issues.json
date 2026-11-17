@@ -1,0 +1,17 @@
+[
+  {
+    "body": "details",
+    "created_at": 1794957433556,
+    "goal": null,
+    "id": 1,
+    "labels": [
+      "bug"
+    ],
+    "off_vision": false,
+    "priority": 3,
+    "project_id": 1,
+    "state": "doing",
+    "title": "Fix it",
+    "updated_at": 1794957433557
+  }
+]

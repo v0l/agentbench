@@ -41,6 +41,7 @@ struct Link {
     cursor: Option<Id>,
     watching: bool,
     offline: Option<(String, Instant)>,
+    compat: agentbench_core::Compat,
 }
 
 impl Link {
@@ -48,7 +49,7 @@ impl Link {
         let wake = wake.clone();
         let mut client = Client::new(server, move || wake());
         client.overview();
-        Link { slot, name, client, overview: None, cursor: None, watching: false, offline: None }
+        Link { slot, name, client, overview: None, cursor: None, watching: false, offline: None, compat: agentbench_core::Compat::Ok }
     }
 
     fn watch(&mut self) {
@@ -59,6 +60,8 @@ impl Link {
     }
 }
 
+pub const MIN_SERVER_API: u32 = 1;
+
 pub struct Hub {
     links: Vec<Link>,
     sessions: HashMap<SessionId, u32>,
@@ -66,6 +69,7 @@ pub struct Hub {
     focus: Option<u32>,
     supervisor: u32,
     wake: Arc<dyn Fn() + Send + Sync>,
+    min_server_api: u32,
 }
 
 impl std::ops::Deref for Hub {
@@ -201,7 +205,7 @@ impl Hub {
                 &wake,
             )
         }));
-        Hub { links, sessions: HashMap::new(), dirty: false, focus: None, supervisor: 0, wake }
+        Hub { links, sessions: HashMap::new(), dirty: false, focus: None, supervisor: 0, wake, min_server_api: MIN_SERVER_API }
     }
 
     pub fn sync(&mut self, primary_name: &str, extras: &[Remote]) {
@@ -302,6 +306,19 @@ impl Hub {
         l.offline.as_ref().map(|(e, _)| e.as_str())
     }
 
+    pub fn compat(&self, slot: u32) -> agentbench_core::Compat {
+        self.links.iter().find(|l| l.slot == slot).map_or(agentbench_core::Compat::Ok, |l| l.compat)
+    }
+
+    pub fn compat_notices(&self) -> Vec<(u32, String)> {
+        self.links.iter().filter_map(|l| Some((l.slot, l.compat.notice()?))).collect()
+    }
+
+    pub fn require_server_api(&mut self, api: u32) {
+        self.min_server_api = api;
+        self.overview();
+    }
+
     pub fn slots(&self) -> Vec<u32> {
         self.links.iter().map(|l| l.slot).collect()
     }
@@ -347,6 +364,12 @@ impl Hub {
                         let l = &mut self.links[i];
                         l.cursor = Some(o.cursor);
                         l.offline = None;
+                        l.compat = agentbench_core::compat(
+                            agentbench_core::API_VERSION,
+                            self.min_server_api,
+                            o.api_version,
+                            o.min_client_api,
+                        );
                         for s in &o.sessions {
                             self.sessions.insert(s.id, slot);
                         }

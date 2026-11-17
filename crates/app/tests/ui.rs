@@ -4391,3 +4391,94 @@ fn a_new_issue_in_the_home_view_goes_to_the_workspace_picked() {
     }
     assert!(first.store.issues().unwrap().iter().all(|i| i.title != "Remote only"));
 }
+
+fn canned_server(overview: String) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for mut s in listener.incoming().flatten() {
+            let overview = overview.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (code, body) = if head.starts_with("GET /api/overview") {
+                    ("200 OK", overview)
+                } else if head.starts_with("GET /api/changes") {
+                    std::thread::sleep(Duration::from_secs(5));
+                    ("200 OK", r#"{"cursor":1,"changes":[]}"#.to_string())
+                } else {
+                    ("404 Not Found", r#"{"error":"no such route"}"#.to_string())
+                };
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {code}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+        }
+    });
+    addr
+}
+
+fn recorded_overview() -> serde_json::Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/api/v1/overview.json");
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn an_unknown_session_state_shows_as_unknown() {
+    let mut o = recorded_overview();
+    o["sessions"][0]["status"] = "hibernating".into();
+    let mut h = harness(canned_server(o.to_string()));
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    assert!(
+        h.state().overview().as_ref().unwrap().sessions[0].status == agentbench_core::SessionStatus::Unknown
+    );
+}
+
+#[test]
+fn a_server_that_needs_a_newer_app_shows_the_update_the_app_banner() {
+    let mut o = recorded_overview();
+    o["api_version"] = 9.into();
+    o["min_client_api"] = 9.into();
+    let mut h = harness(canned_server(o.to_string()));
+    until(&mut h, "the banner", |h| {
+        h.query_by_label_contains("This app is older than the server").is_some()
+    });
+    assert!(h.query_by_label_contains("app v1, server v9").is_some());
+    assert!(h.query_by_label_contains("Update the app").is_some());
+}
+
+#[test]
+fn a_server_older_than_the_app_needs_shows_the_update_the_server_banner() {
+    let o = recorded_overview();
+    let mut h = harness(canned_server(o.to_string()));
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    assert!(h.query_by_label_contains("Update the").is_none());
+    h.state_mut().require_server_api(2);
+    until(&mut h, "the banner", |h| {
+        h.query_by_label_contains("Server v1 is older than this app").is_some()
+    });
+    assert!(h.query_by_label_contains("Update the server").is_some());
+}
+
+#[test]
+fn a_missing_endpoint_is_not_an_error() {
+    let addr = canned_server(recorded_overview().to_string());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: addr, token: TOKEN.into() },
+        move || {
+            let _ = tx.send(());
+        },
+    );
+    c.comments(1);
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    match c.poll().pop() {
+        Some(agentbench::client::Reply::Done(_)) => {}
+        Some(agentbench::client::Reply::Failed(e)) => panic!("a 404 became an error: {e}"),
+        _ => panic!("odd reply"),
+    }
+}

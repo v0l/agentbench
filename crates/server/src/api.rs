@@ -77,7 +77,38 @@ async fn auth(State(api): State<Api>, headers: HeaderMap, req: Request, next: Ne
     if !constant_eq(given.trim().as_bytes(), api.token.as_bytes()) {
         return Failure(StatusCode::UNAUTHORIZED, "missing or wrong token".into()).into_response();
     }
+    note_client(&headers);
     next.run(req).await
+}
+
+fn note_client(headers: &HeaderMap) {
+    static WARNED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+    let Some(v) = headers
+        .get(agentbench_core::API_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u32>().ok())
+    else {
+        return;
+    };
+    if v < agentbench_core::MIN_CLIENT_API {
+        let mut seen = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.contains(&v) {
+            seen.push(v);
+            tracing::warn!(
+                "a client speaking api v{v} connected; this server needs v{} or newer, so that app must be updated",
+                agentbench_core::MIN_CLIENT_API
+            );
+        }
+    }
+}
+
+async fn api_header(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut().insert(
+        agentbench_core::API_HEADER,
+        header::HeaderValue::from(agentbench_core::API_VERSION),
+    );
+    res
 }
 
 /// Room for a message with every attachment it may carry, base64 encoded.
@@ -154,6 +185,7 @@ pub fn router(api: Api) -> Router {
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
         .merge(protected)
         .layer(middleware::from_fn(nosniff))
+        .layer(middleware::from_fn(api_header))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(api)
 }
@@ -334,6 +366,8 @@ async fn overview(State(api): State<Api>) -> Reply<Overview> {
     let hidden = store.supervisor_project()?.map(|p| p.id);
     Ok(Json(Overview {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        api_version: agentbench_core::API_VERSION,
+        min_client_api: agentbench_core::MIN_CLIENT_API,
         agents: api.runner.agents().iter().map(|a| a.info()).collect(),
         projects: store.projects()?.into_iter().filter(|p| !p.supervisor).collect(),
         worktrees: store
@@ -2698,5 +2732,75 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(3), waiter).await.unwrap().unwrap();
         assert!(woke["cursor"].as_i64().unwrap() > cursor);
         assert_eq!(woke["changes"][0]["kind"], "issue");
+    }
+
+    #[tokio::test]
+    async fn every_response_names_the_api_version_and_the_overview_says_what_it_needs() {
+        let f = fixture();
+        for (uri, token) in [("/health", None), ("/api/overview", Some("secret")), ("/api/overview", Some("wrong"))] {
+            let mut req = axum::http::Request::builder().uri(uri);
+            if let Some(t) = token {
+                req = req.header("authorization", format!("Bearer {t}"));
+            }
+            let res = f.app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(
+                res.headers()["x-agentbench-api"],
+                agentbench_core::API_VERSION.to_string().as_str(),
+                "{uri} {token:?}"
+            );
+        }
+        let (_, o) = call(&f.app, "GET", "/api/overview", None, T).await;
+        assert_eq!(o["api_version"], agentbench_core::API_VERSION);
+        assert_eq!(o["min_client_api"], agentbench_core::MIN_CLIENT_API);
+    }
+
+    #[tokio::test]
+    async fn the_recorded_api_fixtures_match_this_server() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let record = std::env::var("RECORD_API_FIXTURES").is_ok();
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../core/tests/fixtures/api")
+            .join(format!("v{}", agentbench_core::API_VERSION));
+        let mut keep = |name: &str, v: &serde_json::Value| {
+            if record {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join(format!("{name}.json")), serde_json::to_string_pretty(v).unwrap() + "\n")
+                    .unwrap();
+            }
+        };
+        let new_issue = json!({"project_id": pid, "title": "Fix the thing", "body": "details", "state": "todo", "priority": 3, "labels": ["bug"]});
+        keep("request_new_issue", &new_issue);
+        let (s, issue) = call(&f.app, "POST", "/api/issues", Some(new_issue), T).await;
+        assert_eq!(s, StatusCode::OK, "{issue}");
+        let patch = json!({"state": "doing", "title": "Fix it"});
+        keep("request_issue_patch", &patch);
+        call(&f.app, "PATCH", &format!("/api/issues/{}", issue["id"]), Some(patch), T).await;
+        keep("request_new_project", &json!({"path": f.repo.to_str().unwrap(), "name": "demo"}));
+        let new_session = json!({
+            "project_id": pid, "agent": "echo", "place": {"kind": "main"}, "prompt": "hello",
+        });
+        keep("request_new_session", &new_session);
+        let (s, session) = call(&f.app, "POST", "/api/sessions", Some(new_session), T).await;
+        assert_eq!(s, StatusCode::OK, "{session}");
+        let id = sid(&session);
+        settle(&f.api, id).await;
+        let send = json!({"text": "again"});
+        keep("request_send_message", &send);
+        let (_, overview) = call(&f.app, "GET", "/api/overview", None, T).await;
+        keep("overview", &overview);
+        let (_, sessions) = call(&f.app, "GET", "/api/sessions", None, T).await;
+        keep("sessions", &sessions);
+        let (_, issues) = call(&f.app, "GET", "/api/issues", None, T).await;
+        keep("issues", &issues);
+        let (_, messages) = call(&f.app, "GET", &format!("/api/sessions/{id}/messages"), None, T).await;
+        keep("messages", &messages);
+        let (_, changes) = call(&f.app, "GET", "/api/changes", None, T).await;
+        keep("changes", &changes);
+        let overview: agentbench_core::Overview = serde_json::from_value(overview).unwrap();
+        assert_eq!(overview.api_version, agentbench_core::API_VERSION);
+        let _: agentbench_core::ChangesFeed = serde_json::from_value(changes).unwrap();
+        let _: Vec<agentbench_core::Message> = serde_json::from_value(messages).unwrap();
+        let _: agentbench_core::SendMessage = serde_json::from_value(send).unwrap();
     }
 }

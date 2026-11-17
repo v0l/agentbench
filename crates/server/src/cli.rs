@@ -4,8 +4,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+pub fn version_text() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| format!("{} (api {})", env!("CARGO_PKG_VERSION"), agentbench_core::API_VERSION))
+}
+
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version = version_text(), about)]
 pub struct Cli {
     #[arg(long)]
     pub home: Option<PathBuf>,

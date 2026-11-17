@@ -1596,6 +1596,36 @@ impl App {
         }
     }
 
+    pub fn compat_notices(&self) -> Vec<String> {
+        let Some(hub) = &self.client else {
+            return Vec::new();
+        };
+        hub.compat_notices()
+            .into_iter()
+            .map(|(slot, text)| if hub.multi() { format!("{}: {text}", hub.name(slot)) } else { text })
+            .collect()
+    }
+
+    pub fn require_server_api(&mut self, api: u32) {
+        if let Some(hub) = &mut self.client {
+            hub.require_server_api(api);
+        }
+    }
+
+    fn compat_banner(&self, ui: &mut Ui) {
+        let notices = self.compat_notices();
+        if notices.is_empty() {
+            return;
+        }
+        egui::Panel::top("compat")
+            .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(Margin::symmetric(12, 4)))
+            .show(ui, |ui| {
+                for text in notices {
+                    ui.label(egui::RichText::new(text).color(WARN).size(12.0));
+                }
+            });
+    }
+
     pub fn server_down(&self, id: Id) -> bool {
         self.client.as_ref().is_some_and(|h| h.offline(crate::hub::slot_of(id)).is_some())
     }
@@ -3247,6 +3277,7 @@ impl App {
                 self.notice = None;
             }
         }
+        self.compat_banner(ui);
         self.workspace_bar(ui);
         if narrow {
             self.drawer_panel(&ctx);
