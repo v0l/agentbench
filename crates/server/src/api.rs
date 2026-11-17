@@ -125,6 +125,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/issues", get(issues).post(add_issue))
         .route("/api/issues/{id}", get(issue).patch(update_issue).delete(delete_issue))
         .route("/api/issues/{id}/comments", get(comments).post(add_comment))
+        .route("/api/issues/{id}/deps", get(issue_deps).put(set_issue_deps))
         .route("/api/issues/{id}/start", post(start_issue))
         .route("/api/sessions", get(sessions).post(add_session))
         .route("/api/supervisor", post(open_supervisor))
@@ -945,6 +946,20 @@ async fn update_issue(
     }
     changed(&api);
     Ok(Json(issue))
+}
+
+async fn issue_deps(State(api): State<Api>, Path(id): Path<Id>) -> Reply<Vec<Id>> {
+    Ok(Json(api.runner.store().issue(id)?.depends_on))
+}
+
+async fn set_issue_deps(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+    Json(deps): Json<Vec<Id>>,
+) -> Reply<agentbench_core::Issue> {
+    api.runner.store().set_deps(id, &deps)?;
+    changed(&api);
+    Ok(Json(api.runner.store().issue(id)?))
 }
 
 async fn get_autopilot(State(api): State<Api>) -> Reply<agentbench_core::AutopilotState> {
@@ -2218,6 +2233,26 @@ mod tests {
             call(&f.app, "GET", &format!("/api/issues/{id}/comments"), None, T).await;
         assert_eq!(comments[0]["body"], "looks good");
         assert_eq!(call(&f.app, "GET", "/api/issues/999", None, T).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn issue_dependencies_are_read_and_replaced_over_rest() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let mut ids = Vec::new();
+        for t in ["a", "b"] {
+            let (_, i) = call(&f.app, "POST", "/api/issues", Some(json!({"project_id": pid, "title": t})), T).await;
+            ids.push(i["id"].as_i64().unwrap());
+        }
+        let url = format!("/api/issues/{}/deps", ids[1]);
+        let (code, put) = call(&f.app, "PUT", &url, Some(json!([ids[0]])), T).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(put["waiting_on"], json!([ids[0]]));
+        assert_eq!(call(&f.app, "GET", &url, None, T).await.1, json!([ids[0]]));
+        let back = format!("/api/issues/{}/deps", ids[0]);
+        assert!(!call(&f.app, "PUT", &back, Some(json!([ids[1]])), T).await.0.is_success());
+        call(&f.app, "PUT", &url, Some(json!([])), T).await;
+        assert_eq!(call(&f.app, "GET", &url, None, T).await.1, json!([]));
     }
 
     #[tokio::test]

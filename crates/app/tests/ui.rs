@@ -3915,6 +3915,24 @@ fn an_issue_card_shows_its_goal_and_the_board_groups_by_goal() {
     shot(&mut h, "goal-board");
 }
 
+#[test]
+fn an_issue_card_says_what_it_is_waiting_on() {
+    let rig = rig();
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    let first = rig
+        .store
+        .add_issue(&NewIssue { project_id: project.id, title: "Build the base".into(), ..Default::default() })
+        .unwrap();
+    rig.store
+        .add_issue(&NewIssue { project_id: project.id, title: "Build the roof".into(), depends_on: vec![first.id], ..Default::default() })
+        .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some_and(|o| o.issues.iter().any(|i| !i.waiting_on.is_empty())));
+    click(&mut h, 283.0, 20.0);
+    h.run_steps(3);
+    h.get_by_label(&format!("waiting on #{}", first.id));
+}
+
 struct QuotaPauser;
 
 #[agentbench_server::agent::async_trait]

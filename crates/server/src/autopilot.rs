@@ -269,6 +269,7 @@ pub struct Picked {
     pub issues: Vec<Issue>,
     pub skipped: Vec<(Id, &'static str)>,
     pub no_vision: Vec<Id>,
+    pub waiting: Vec<(Id, Vec<Id>)>,
 }
 
 pub struct Room<'a> {
@@ -282,6 +283,10 @@ pub struct Room<'a> {
     pub project_cap: u32,
 }
 
+fn waiting_reason(on: &[Id]) -> String {
+    format!("waiting on {}", on.iter().map(|i| format!("#{i}")).collect::<Vec<_>>().join(", "))
+}
+
 pub fn pick(issues: &[Issue], room: &Room) -> Picked {
     let mut todo: Vec<&Issue> = issues
         .iter()
@@ -292,7 +297,7 @@ pub fn pick(issues: &[Issue], room: &Room) -> Picked {
     });
     let mut by_project = room.running_by_project.clone();
     let mut running = room.running;
-    let mut out = Picked { issues: Vec::new(), skipped: Vec::new(), no_vision: Vec::new() };
+    let mut out = Picked { issues: Vec::new(), skipped: Vec::new(), no_vision: Vec::new(), waiting: Vec::new() };
     for i in todo {
         let has = |l: &str| i.labels.iter().any(|x| x.eq_ignore_ascii_case(l));
         let vision = (room.vision)(i.project_id);
@@ -311,6 +316,8 @@ pub fn pick(issues: &[Issue], room: &Room) -> Picked {
             out.skipped.push((i.id, "its goal is not active"));
         } else if has(NEEDS_USER) {
             out.skipped.push((i.id, "labelled needs-user"));
+        } else if !i.waiting_on.is_empty() {
+            out.waiting.push((i.id, i.waiting_on.clone()));
         } else if has(BLOCKED) {
             out.skipped.push((i.id, "labelled blocked"));
         } else if room.live.contains(&i.id) {
@@ -1066,6 +1073,10 @@ impl Autopilot {
             let project = issues.iter().find(|i| i.id == *id).map(|i| i.project_id);
             self.log_once(project, Some(*id), &format!("skipped #{id}: {why}"));
         }
+        for (id, on) in &picked.waiting {
+            let project = issues.iter().find(|i| i.id == *id).map(|i| i.project_id);
+            self.log_once(project, Some(*id), &format!("skipped #{id}: {}", waiting_reason(on)));
+        }
         let agent = store
             .setting(AGENT)
             .ok()
@@ -1276,6 +1287,9 @@ mod tests {
             labels: vec![],
             goal: Some("g1".into()),
             off_vision: false,
+            depends_on: vec![],
+            waiting_on: vec![],
+            blocks: vec![],
             created_at: created,
             updated_at: created,
         }
@@ -1329,6 +1343,19 @@ mod tests {
 
     fn ids(p: &Picked) -> Vec<Id> {
         p.issues.iter().map(|i| i.id).collect()
+    }
+
+    #[test]
+    fn the_picker_waits_on_unfinished_dependencies() {
+        let mut waiting = issue(1, 1, 9, 1, IssueState::Todo);
+        waiting.depends_on = vec![7, 8];
+        waiting.waiting_on = vec![7, 8];
+        let mut ready = issue(2, 1, 8, 2, IssueState::Todo);
+        ready.depends_on = vec![7];
+        let p = Fixture::new().pick(&[waiting, ready], 0, 10, 10);
+        assert_eq!(ids(&p), [2]);
+        assert_eq!(p.waiting, [(1, vec![7, 8])]);
+        assert_eq!(waiting_reason(&[7, 8]), "waiting on #7, #8");
     }
 
     #[test]

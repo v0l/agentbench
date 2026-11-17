@@ -133,7 +133,20 @@ fn issue_json(i: &agentbench_core::Issue) -> Value {
     json!({
         "id": i.id, "title": i.title, "state": i.state, "body": i.body,
         "labels": i.labels, "priority": i.priority, "goal": i.goal, "off_vision": i.off_vision,
+        "depends_on": i.depends_on, "waiting_on": i.waiting_on, "blocks": i.blocks,
     })
+}
+
+fn depends_on(args: &Value) -> Result<Option<Vec<Id>>, String> {
+    match args.get("depends_on") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| v.as_i64().ok_or_else(|| "`depends_on` is a list of issue numbers".to_string()))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err("`depends_on` is a list of issue numbers".into()),
+    }
 }
 
 fn flag(args: &Value, key: &str) -> Option<bool> {
@@ -619,6 +632,7 @@ impl Api for StoreApi {
                         labels: labels(args)?.unwrap_or_default(),
                         goal: text(args, "goal"),
                         off_vision: flag(args, "off_vision").unwrap_or(false),
+                        depends_on: depends_on(args)?.unwrap_or_default(),
                     })
                     .map_err(|e| e.0)?;
                 json!({ "filed": i.id, "title": i.title })
@@ -634,9 +648,10 @@ impl Api for StoreApi {
                     labels: labels(args)?,
                     goal: text(args, "goal"),
                     off_vision: flag(args, "off_vision"),
+                    depends_on: depends_on(args)?,
                 };
                 let i = s.update_issue(issue, &patch).map_err(|e| e.0)?;
-                json!({ "id": i.id, "title": i.title, "state": i.state, "labels": i.labels, "goal": i.goal, "off_vision": i.off_vision })
+                json!({ "id": i.id, "title": i.title, "state": i.state, "labels": i.labels, "goal": i.goal, "off_vision": i.off_vision, "depends_on": i.depends_on, "waiting_on": i.waiting_on })
             }
             "get_issue" => {
                 let issue = id(args)?;
@@ -1850,6 +1865,25 @@ mod tests {
         api.call("update_issue", &json!({"id": fid, "labels": ["done-ish"]}), me.id).unwrap();
         assert_eq!(s.issue(fid).unwrap().labels, ["done-ish"]);
         assert!(api.call("file_issue", &json!({"title": "x", "labels": "bug"}), me.id).is_err());
+    }
+
+    #[test]
+    fn depends_on_round_trips_through_the_tools() {
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/dep");
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let a = api.call("file_issue", &json!({"title": "A"}), me.id).unwrap()["filed"].as_i64().unwrap();
+        let b = api.call("file_issue", &json!({"title": "B", "depends_on": [a]}), me.id).unwrap()["filed"].as_i64().unwrap();
+        let got = api.call("get_issue", &json!({"id": b}), me.id).unwrap();
+        assert_eq!((got["depends_on"].clone(), got["waiting_on"].clone()), (json!([a]), json!([a])));
+        assert_eq!(api.call("get_issue", &json!({"id": a}), me.id).unwrap()["blocks"], json!([b]));
+        let listed = api.call("list_issues", &json!({}), me.id).unwrap();
+        assert!(listed.as_array().unwrap().iter().any(|i| i["id"] == b && i["waiting_on"] == json!([a])));
+        assert!(api.call("update_issue", &json!({"id": a, "depends_on": [b]}), me.id).is_err());
+        api.call("update_issue", &json!({"id": b, "depends_on": []}), me.id).unwrap();
+        assert!(s.issue(b).unwrap().depends_on.is_empty());
+        assert!(api.call("update_issue", &json!({"id": b, "depends_on": "x"}), me.id).is_err());
     }
 
     #[test]

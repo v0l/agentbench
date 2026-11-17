@@ -2906,6 +2906,14 @@ impl App {
                     .value(&issue.title)
                     .size(12.5)
                     .elided(ui);
+                if !issue.waiting_on.is_empty() {
+                    let text = format!(
+                        "waiting on {}",
+                        issue.waiting_on.iter().map(|d| format!("#{}", crate::hub::untag(*d))).collect::<Vec<_>>().join(", ")
+                    );
+                    let c = chip(ui, &text, FAULT, false);
+                    c.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
+                }
             },
             |ui| {
                 let on_server = self.server_note(issue.project_id);
@@ -3100,6 +3108,71 @@ impl App {
         });
     }
 
+    fn dependency_list(&mut self, ui: &mut Ui, issue: &Issue) {
+        let states: HashMap<Id, IssueState> = self
+            .overview
+            .as_ref()
+            .map(|o| o.issues.iter().map(|i| (i.id, i.state)).collect())
+            .unwrap_or_default();
+        let word = |id: &Id| match states.get(id) {
+            Some(s) => format!("#{} ({})", crate::hub::untag(*id), s.as_str()),
+            None => format!("#{} (done)", crate::hub::untag(*id)),
+        };
+        if !issue.depends_on.is_empty() {
+            let text = issue.depends_on.iter().map(word).collect::<Vec<_>>().join(", ");
+            ui.add_space(4.0);
+            Line::new().legend("depends on").gap(8.0).note(text).size(10.5).show(ui);
+        }
+        if !issue.blocks.is_empty() {
+            let text = issue.blocks.iter().map(word).collect::<Vec<_>>().join(", ");
+            Line::new().legend("blocks").gap(8.0).note(text).size(10.5).show(ui);
+        }
+        let mut changed = None;
+        let mut deps = issue.depends_on.clone();
+        ui.horizontal_wrapped(|ui| {
+            let others: Vec<Id> = states
+                .keys()
+                .copied()
+                .filter(|i| *i != issue.id && !issue.depends_on.contains(i))
+                .collect();
+            let mut picked: Option<Id> = None;
+            let mut shown: Vec<Id> = others;
+            shown.sort_unstable();
+            egui::ComboBox::from_id_salt(("dep-add", issue.id))
+                .selected_text("add dependency")
+                .show_ui(ui, |ui| {
+                    for id in shown.iter().take(200) {
+                        let title = self
+                            .overview
+                            .as_ref()
+                            .and_then(|o| o.issues.iter().find(|i| i.id == *id))
+                            .map(|i| i.title.clone())
+                            .unwrap_or_default();
+                        let label = format!("#{} {}", crate::hub::untag(*id), title);
+                        if ui.selectable_label(false, label).clicked() {
+                            picked = Some(*id);
+                        }
+                    }
+                });
+            if let Some(id) = picked {
+                deps.push(id);
+                changed = Some(deps.clone());
+            }
+            for d in issue.depends_on.clone() {
+                let label = format!("remove dependency #{}", crate::hub::untag(d));
+                if ui.small_button(format!("x #{}", crate::hub::untag(d))).on_hover_text(&label).clicked() {
+                    deps.retain(|x| *x != d);
+                    changed = Some(deps.clone());
+                }
+            }
+        });
+        if let Some(list) = changed
+            && let Some(c) = &mut self.client
+        {
+            c.update_issue(issue.id, &IssuePatch { depends_on: Some(list), ..Default::default() });
+        }
+    }
+
     fn issue_detail(&mut self, ui: &mut Ui, issue: &Issue) {
         ui.add_space(4.0);
         if issue.body.trim().is_empty() {
@@ -3108,6 +3181,7 @@ impl App {
             markdown::show(ui, &mut self.markdown, &issue.body, issue.id as usize);
         }
         let comments = self.comments.get(&issue.id).cloned().unwrap_or_default();
+        self.dependency_list(ui, issue);
         for c in &comments {
             ui.add_space(4.0);
             Line::new().legend(&c.author).gap(8.0).note(ago(c.created_at)).size(10.5).show(ui);
@@ -3263,6 +3337,9 @@ mod tests {
             labels: labels.iter().map(|l| l.to_string()).collect(),
             goal: None,
             off_vision: false,
+            depends_on: vec![],
+            waiting_on: vec![],
+            blocks: vec![],
             created_at: 0,
             updated_at: id,
         }

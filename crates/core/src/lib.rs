@@ -374,6 +374,12 @@ pub struct Issue {
     pub goal: Option<String>,
     #[serde(default)]
     pub off_vision: bool,
+    #[serde(default)]
+    pub depends_on: Vec<Id>,
+    #[serde(default)]
+    pub waiting_on: Vec<Id>,
+    #[serde(default)]
+    pub blocks: Vec<Id>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1418,6 +1424,8 @@ pub struct NewIssue {
     pub goal: Option<String>,
     #[serde(default)]
     pub off_vision: bool,
+    #[serde(default)]
+    pub depends_on: Vec<Id>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1436,6 +1444,8 @@ pub struct IssuePatch {
     pub goal: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub off_vision: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<Id>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2133,6 +2143,9 @@ mod tests {
             labels: vec![],
             goal: None,
             off_vision: false,
+            depends_on: vec![],
+            waiting_on: vec![],
+            blocks: vec![],
             created_at: 0,
             updated_at: 0,
         };

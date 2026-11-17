@@ -358,6 +358,7 @@ fn supervisor_brief(c: &Context) -> String {
          - Nudge: `send_message` to a stalled or drifting session. `notify_user` only for what needs the user: a decision, a failure you cannot route around, or a finished piece of work.\n\
          - Remember: `remember` keeps the user's standing preferences and decisions.\n\
          - Vision: each project has a vision, the user's summary and ordered goals for it. Judge and start work against it: an issue serves a goal (`goal` on `file_issue` and `update_issue`) or is off_vision. File follow-ups with a goal, or leave them in backlog, and never start an off-vision or goalless issue without the user. `get_vision` reads it; `set_vision` is a proposal the user confirms, unless they typed the text themselves. Many issues come from agent reviews and follow-ups, not from the user: do not treat every todo as worth doing.\n\
+         - Order: for ordered work set `depends_on` (issue numbers, any project) on `file_issue` or `update_issue` instead of parking issues with no goal. A dependent waits until every dependency is done, then moves to todo if it has a goal, or gets an \"unblocked\" comment.\n\
          </role>\n\n\
          <vision>\n{vision}</vision>\n\n\
          <answering>\n\

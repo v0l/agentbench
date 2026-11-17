@@ -146,6 +146,9 @@ fn merge(links: &[Link], focus: Option<u32>, supervisor: u32) -> Option<Overview
         out.issues.extend(o.issues.iter().cloned().map(|mut i| {
             i.id = tag(s, i.id);
             i.project_id = tag(s, i.project_id);
+            i.depends_on.iter_mut().for_each(|d| *d = tag(s, *d));
+            i.waiting_on.iter_mut().for_each(|d| *d = tag(s, *d));
+            i.blocks.iter_mut().for_each(|d| *d = tag(s, *d));
             i
         }));
         out.sessions.extend(
@@ -533,7 +536,11 @@ impl Hub {
 
     pub fn update_issue(&mut self, id: Id, patch: &IssuePatch) {
         let (c, id) = self.by_id(id);
-        c.update_issue(id, patch);
+        let mut patch = patch.clone();
+        if let Some(d) = &mut patch.depends_on {
+            d.iter_mut().for_each(|i| *i = untag(*i));
+        }
+        c.update_issue(id, &patch);
     }
 
     pub fn delete_issue(&mut self, id: Id) {

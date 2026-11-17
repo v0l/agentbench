@@ -365,6 +365,7 @@ const OUTPUT_WAIT: u64 = 0;
 const OUTPUT_WAIT_MAX: u64 = 60;
 
 fn agentbench_specs() -> Vec<Spec> {
+    let depends_on_schema = |about: &str| json!({ "type": "array", "items": { "type": "integer" }, "description": about });
     let id = |about: &str| json!({ "type": "integer", "description": about });
     vec![
         Spec::new(
@@ -377,7 +378,7 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "get_issue",
-            "Read one issue in full: its description, labels and every comment. Read it before working on an issue you were given.",
+            "Read one issue in full: its description, labels, dependencies (depends_on, waiting_on, blocks) and every comment. Read it before working on an issue you were given.",
             object(json!({ "id": id("The issue number") }), &["id"]),
         ),
         Spec::new(
@@ -393,6 +394,7 @@ fn agentbench_specs() -> Vec<Spec> {
                     "priority": id("Higher is more urgent"),
                     "goal": string("The id of one active goal of the project's vision this serves"),
                     "off_vision": json!({ "type": "boolean", "description": "Mark the issue as outside the vision" }),
+                    "depends_on": depends_on_schema("Issue numbers this one waits on (any project). It is not started until all are done, then it is released automatically; use this for ordered work instead of parking issues with no goal"),
                 }),
                 &["title"],
             ),
@@ -410,6 +412,7 @@ fn agentbench_specs() -> Vec<Spec> {
                     "priority": id("Higher is more urgent"),
                     "goal": string("A goal id of the project's vision to link it to; empty clears it"),
                     "off_vision": json!({ "type": "boolean", "description": "Mark the issue as outside the vision" }),
+                    "depends_on": depends_on_schema("Replaces the issues this one waits on; an empty list clears them. Rejected if it makes a cycle"),
                 }),
                 &["id"],
             ),

@@ -273,6 +273,15 @@ CREATE TABLE spend (
     PRIMARY KEY (day, project_id)
 );
 "#,
+    r#"
+CREATE TABLE issue_deps (
+    issue_id INTEGER NOT NULL,
+    depends_on INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'blocks',
+    PRIMARY KEY (issue_id, depends_on)
+);
+CREATE INDEX issue_deps_on ON issue_deps(depends_on);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -433,6 +442,9 @@ fn issue_row(row: &Row) -> rusqlite::Result<Issue> {
         labels: serde_json::from_str(&labels).unwrap_or_default(),
         goal: row.get("goal")?,
         off_vision: row.get::<_, i64>("off_vision")? != 0,
+        depends_on: Vec::new(),
+        waiting_on: Vec::new(),
+        blocks: Vec::new(),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -530,6 +542,55 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
         risky: serde_json::from_str(&row.get::<_, String>("risky")?).unwrap_or_default(),
         deploy: row.get("deploy")?,
     })
+}
+
+fn deps_of(conn: &Connection, id: Id) -> rusqlite::Result<Vec<Id>> {
+    let mut stmt = conn.prepare("SELECT depends_on FROM issue_deps WHERE issue_id = ?1 ORDER BY depends_on")?;
+    let rows = stmt.query_map([id], |r| r.get(0))?;
+    rows.collect()
+}
+
+fn dep_path(conn: &Connection, from: Id, to: Id) -> rusqlite::Result<Option<Vec<Id>>> {
+    let mut seen = vec![from];
+    let mut stack = vec![vec![from]];
+    while let Some(path) = stack.pop() {
+        let last = *path.last().unwrap();
+        if last == to {
+            return Ok(Some(path));
+        }
+        for next in deps_of(conn, last)? {
+            if !seen.contains(&next) {
+                seen.push(next);
+                let mut p = path.clone();
+                p.push(next);
+                stack.push(p);
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn fill_deps(conn: &Connection, issues: &mut [Issue]) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT d.issue_id, d.depends_on, COALESCE(i.state, 'done') FROM issue_deps d LEFT JOIN issues i ON i.id = d.depends_on ORDER BY d.depends_on",
+    )?;
+    let edges: Vec<(Id, Id, String)> =
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+    for issue in issues.iter_mut() {
+        for (from, on, state) in &edges {
+            if *from == issue.id {
+                issue.depends_on.push(*on);
+                if state != "done" {
+                    issue.waiting_on.push(*on);
+                }
+            }
+            if *on == issue.id {
+                issue.blocks.push(*from);
+            }
+        }
+        issue.blocks.sort_unstable();
+    }
+    Ok(())
 }
 
 fn comment_row(row: &Row) -> rusqlite::Result<Comment> {
@@ -942,14 +1003,95 @@ impl Store {
         let mut stmt =
             db.prepare("SELECT * FROM issues ORDER BY priority DESC, updated_at DESC")?;
         let rows = stmt.query_map([], issue_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut issues: Vec<Issue> = rows.collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        fill_deps(&db, &mut issues)?;
+        Ok(issues)
     }
 
     pub fn issue(&self, id: Id) -> Result<Issue> {
-        self.db()
+        let db = self.db();
+        let issue = db
             .query_row("SELECT * FROM issues WHERE id = ?1", [id], issue_row)
             .optional()?
-            .ok_or_else(|| not_found("issue", id))
+            .ok_or_else(|| not_found("issue", id))?;
+        let mut issues = [issue];
+        fill_deps(&db, &mut issues)?;
+        let [issue] = issues;
+        Ok(issue)
+    }
+
+    pub fn set_deps(&self, id: Id, deps: &[Id]) -> Result<()> {
+        let mut wanted: Vec<Id> = Vec::new();
+        for d in deps {
+            if !wanted.contains(d) {
+                wanted.push(*d);
+            }
+        }
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let exists = |i: Id| -> rusqlite::Result<bool> {
+            tx.query_row("SELECT 1 FROM issues WHERE id = ?1", [i], |_| Ok(())).optional().map(|r| r.is_some())
+        };
+        if !exists(id)? {
+            return Err(not_found("issue", id));
+        }
+        for d in &wanted {
+            if !exists(*d)? {
+                return Err(not_found("issue", d));
+            }
+        }
+        tx.execute("DELETE FROM issue_deps WHERE issue_id = ?1", [id])?;
+        for d in &wanted {
+            tx.execute(
+                "INSERT INTO issue_deps (issue_id, depends_on, kind) VALUES (?1, ?2, 'blocks')",
+                params![id, d],
+            )?;
+        }
+        for d in &wanted {
+            if let Some(path) = dep_path(&tx, *d, id)? {
+                let mut chain = vec![id];
+                chain.extend(path);
+                let chain: Vec<String> = chain.iter().map(|i| format!("#{i}")).collect();
+                return Err(StoreError(format!(
+                    "a dependency cycle: {} depends on itself ({})",
+                    chain[0],
+                    chain.join(" -> ")
+                )));
+            }
+        }
+        tx.commit()?;
+        Store::changed(&db, "issue", id)
+    }
+
+    fn unblock_dependents(&self, done: Id) -> Result<()> {
+        let dependents: Vec<Id> = {
+            let db = self.db();
+            let mut stmt = db.prepare("SELECT issue_id FROM issue_deps WHERE depends_on = ?1 ORDER BY issue_id")?;
+            let rows = stmt.query_map([done], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for d in dependents {
+            let issue = self.issue(d)?;
+            if issue.state == IssueState::Done || !issue.waiting_on.is_empty() {
+                continue;
+            }
+            let mut note = format!("unblocked by #{done}");
+            if issue.state == IssueState::Backlog && issue.goal.is_some() {
+                self.update_issue(
+                    d,
+                    &IssuePatch { state: Some(IssueState::Todo), ..Default::default() },
+                )?;
+                note.push_str("; moved to todo");
+            }
+            self.add_comment(d, &NewComment { author: Some("agentbench".into()), body: note })?;
+            self.log_autopilot(
+                Some(issue.project_id),
+                Some(d),
+                &format!("unblocked #{d} (all dependencies done)"),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn add_issue(&self, new: &NewIssue) -> Result<Issue> {
@@ -981,11 +1123,21 @@ impl Store {
             Store::changed(&db, "issue", id)?;
             id
         };
+        if !new.depends_on.is_empty()
+            && let Err(e) = self.set_deps(id, &new.depends_on)
+        {
+            let _ = self.delete_issue(id);
+            return Err(e);
+        }
         self.issue(id)
     }
 
     pub fn update_issue(&self, id: Id, patch: &IssuePatch) -> Result<Issue> {
         let mut issue = self.issue(id)?;
+        let was_done = issue.state == IssueState::Done;
+        if let Some(deps) = &patch.depends_on {
+            self.set_deps(id, deps)?;
+        }
         if let Some(title) = &patch.title {
             if title.trim().is_empty() {
                 return Err(StoreError("an issue needs a title".into()));
@@ -1035,6 +1187,9 @@ impl Store {
             )?;
             Store::changed(&db, "issue", id)?;
         }
+        if issue.state == IssueState::Done && !was_done {
+            self.unblock_dependents(id)?;
+        }
         self.issue(id)
     }
 
@@ -1043,6 +1198,7 @@ impl Store {
         if db.execute("DELETE FROM issues WHERE id = ?1", [id])? == 0 {
             return Err(not_found("issue", id));
         }
+        db.execute("DELETE FROM issue_deps WHERE issue_id = ?1 OR depends_on = ?1", [id])?;
         Store::changed(&db, "issue", id)
     }
 
@@ -2089,6 +2245,84 @@ mod tests {
         assert_eq!(versions[1], a);
         assert!(s.set_vision(p.id, vision_body(&[("a", "1"), ("a", "2")]), "user").is_err());
         assert_eq!(s.vision_versions(p.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_issue_waits_on_unfinished_dependencies_across_projects() {
+        let s = Store::memory().unwrap();
+        let (p, _) = project(&s, "/d1");
+        let (q, _) = project(&s, "/d2");
+        let a = issue(&s, p.id, "a");
+        let b = s
+            .add_issue(&NewIssue { project_id: q.id, title: "b".into(), depends_on: vec![a.id], ..Default::default() })
+            .unwrap();
+        assert_eq!((b.depends_on.clone(), b.waiting_on.clone()), (vec![a.id], vec![a.id]));
+        assert_eq!(s.issue(a.id).unwrap().blocks, [b.id]);
+        s.update_issue(a.id, &IssuePatch { state: Some(IssueState::Done), ..Default::default() }).unwrap();
+        let b = s.issue(b.id).unwrap();
+        assert_eq!((b.depends_on, b.waiting_on), (vec![a.id], vec![]));
+        assert!(s.add_issue(&NewIssue { project_id: p.id, title: "x".into(), depends_on: vec![999], ..Default::default() }).is_err());
+        assert_eq!(s.issues().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_dependency_cycle_is_rejected_with_the_chain() {
+        let s = Store::memory().unwrap();
+        let (p, _) = project(&s, "/c");
+        let a = issue(&s, p.id, "a");
+        let b = issue(&s, p.id, "b");
+        let c = issue(&s, p.id, "c");
+        s.set_deps(b.id, &[a.id]).unwrap();
+        s.set_deps(c.id, &[b.id]).unwrap();
+        let e = s.set_deps(a.id, &[c.id]).unwrap_err().0;
+        assert!(e.contains(&format!("#{} -> #{} -> #{} -> #{}", a.id, c.id, b.id, a.id)), "{e}");
+        assert!(s.issue(a.id).unwrap().depends_on.is_empty());
+        assert!(s.set_deps(a.id, &[a.id]).is_err());
+        let e = s.update_issue(a.id, &IssuePatch { depends_on: Some(vec![c.id]), ..Default::default() });
+        assert!(e.is_err());
+    }
+
+    #[test]
+    fn finishing_the_last_dependency_releases_a_backlog_dependent_with_a_goal() {
+        let s = Store::memory().unwrap();
+        let (p, _) = project(&s, "/u");
+        s.set_vision(p.id, vision_body(&[("g1", "one")]), "user").unwrap();
+        let a = issue(&s, p.id, "a");
+        let b = issue(&s, p.id, "b");
+        let goal = |state, goal: &str| NewIssue {
+            project_id: p.id,
+            title: "w".into(),
+            state: Some(state),
+            goal: Some(goal.into()).filter(|g: &String| !g.is_empty()),
+            depends_on: vec![a.id, b.id],
+            ..Default::default()
+        };
+        let with = s.add_issue(&goal(IssueState::Backlog, "g1")).unwrap();
+        let without = s.add_issue(&goal(IssueState::Backlog, "")).unwrap();
+        let done = IssuePatch { state: Some(IssueState::Done), ..Default::default() };
+        s.update_issue(a.id, &done).unwrap();
+        assert_eq!(s.issue(with.id).unwrap().state, IssueState::Backlog);
+        assert!(s.comments(with.id).unwrap().is_empty());
+        s.update_issue(b.id, &done).unwrap();
+        assert_eq!(s.issue(with.id).unwrap().state, IssueState::Todo);
+        assert_eq!(s.issue(without.id).unwrap().state, IssueState::Backlog);
+        for id in [with.id, without.id] {
+            let comments = s.comments(id).unwrap();
+            assert!(comments.iter().any(|c| c.body.starts_with(&format!("unblocked by #{}", b.id))));
+        }
+        let log = s.autopilot_log(20).unwrap();
+        assert!(log.iter().any(|l| l.text == format!("unblocked #{} (all dependencies done)", with.id)), "{log:?}");
+    }
+
+    #[test]
+    fn a_deleted_dependency_does_not_block() {
+        let s = Store::memory().unwrap();
+        let (p, _) = project(&s, "/x");
+        let a = issue(&s, p.id, "a");
+        let b = issue(&s, p.id, "b");
+        s.set_deps(b.id, &[a.id]).unwrap();
+        s.delete_issue(a.id).unwrap();
+        assert!(s.issue(b.id).unwrap().waiting_on.is_empty());
     }
 
     #[test]
