@@ -23,7 +23,7 @@ ignore = "0.4.33"
 regex = "1.13.1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+libc = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "sync", "time", "net", "fs"] }
 tokio-tungstenite = "0.29"
 tokio-util = "0.7"
