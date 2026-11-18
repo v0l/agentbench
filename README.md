@@ -109,10 +109,13 @@ Beyond that it can:
   *Always allow in that project*, *Always allow, any project* or *Deny*. The
   agent cannot grant this itself. `GET`/`DELETE /api/settings/cross-project`
   shows and clears the standing permissions;
-- manage worktrees with `list_worktrees` and `create_worktree`, and remove a
-  finished one with `cleanup_worktree`: the checkout, its chats, and its branch
-  when that is merged. It will not remove the main worktree, its own, one with a
-  session still working, or one with uncommitted changes unless told to force it;
+- manage worktrees with `list_worktrees` and `create_worktree`. `close_session`
+  stops a session, deletes its chat and, when it was the last one in its
+  worktree, removes a clean worktree and deletes its branch if merged. A dirty
+  tree (unless `force`) or an unmerged branch is kept and the result says why.
+  It never removes the main worktree or the caller's own. For a worktree with no
+  session left, pass `worktree` (id) or `branch` instead of `id`. Closing a chat
+  in the app follows the same rule;
 - ask for a new project with `add_project`: import a local checkout, create an
   empty repo, or clone an https or ssh remote (default `~/git/<name>`). Paths must
   be under the home folder. It never adds anything itself: it files a request the

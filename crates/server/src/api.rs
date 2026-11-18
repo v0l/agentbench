@@ -1313,7 +1313,11 @@ async fn delete_session(
 ) -> Result<StatusCode, Failure> {
     api.runner.interrupt(id);
     api.runner.end(id);
+    let tree = api.runner.store().session(id).map(|s| s.worktree_id);
     api.runner.store().delete_session(id)?;
+    if let Ok(tree) = tree {
+        let _ = crate::projects::tidy_worktree(api.runner.store(), tree, false, None);
+    }
     let _ = std::fs::remove_dir_all(crate::runner::attachment_dir(id));
     changed(&api);
     Ok(StatusCode::NO_CONTENT)
@@ -2589,6 +2593,27 @@ mod tests {
             call(&app, "DELETE", &format!("/api/worktrees/{wid}?force=true"), None, T).await.0,
             StatusCode::NO_CONTENT
         );
+    }
+
+    #[tokio::test]
+    async fn deleting_the_last_chat_of_a_clean_merged_worktree_removes_it_and_its_branch() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, sess) = call(
+            &f.app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "echo", "place": {"kind": "new", "branch": "gone"}})),
+            T,
+        )
+        .await;
+        let path = std::path::PathBuf::from(sess["cwd"].as_str().unwrap());
+        settle(&f.api, sid(&sess)).await;
+        assert!(path.exists());
+        let (s, _) = call(&f.app, "DELETE", &format!("/api/sessions/{}", sid(&sess)), None, T).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+        assert!(!path.exists());
+        assert!(!crate::git::branch_exists(&f.repo, "gone"));
     }
 
     #[cfg(unix)]

@@ -8,7 +8,7 @@ pub fn required(tool: &str) -> Option<Automation> {
             Automation::Assist
         }
         "start_session" | "send_message" | "stop_session" | "close_session"
-        | "create_worktree" | "cleanup_worktree" => Automation::Delegate,
+        | "create_worktree" => Automation::Delegate,
         "merge_branch" => Automation::Ship,
         _ => return None,
     })

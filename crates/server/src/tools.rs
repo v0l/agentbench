@@ -270,22 +270,22 @@ impl StoreApi {
         let s = &self.store;
         let pid = match tool {
             "update_issue" | "comment_on_issue" => s.issue(id(args).ok()?).ok()?.project_id,
-            "send_message" | "stop_session" | "close_session" | "rename_session"
-            | "merge_branch" => s.session(session_id(args).ok()?).ok()?.project_id,
-            "start_session" => match args.get("project").filter(|v| !v.is_null()) {
-                Some(v) => self.find_project(v).ok()?.id,
-                None => project,
-            },
-            "cleanup_worktree" => {
+            "close_session" if args.get("id").is_none() => {
                 let scoped = args.get("project").is_some_and(|v| !v.is_null());
                 let trees = s.worktrees(scoped.then_some(project)).ok()?;
-                let found = match (args.get("id").and_then(Value::as_i64), text(args, "branch")) {
+                let found = match (args.get("worktree").and_then(Value::as_i64), text(args, "branch")) {
                     (Some(i), _) => trees.into_iter().find(|w| w.id == i),
                     (None, Some(b)) => trees.into_iter().find(|w| w.label() == b.trim()),
                     _ => None,
                 };
                 found.map_or(project, |w| w.project_id)
             }
+            "send_message" | "stop_session" | "close_session" | "rename_session"
+            | "merge_branch" => s.session(session_id(args).ok()?).ok()?.project_id,
+            "start_session" => match args.get("project").filter(|v| !v.is_null()) {
+                Some(v) => self.find_project(v).ok()?.id,
+                None => project,
+            },
             _ => project,
         };
         s.project(pid).ok()
@@ -497,7 +497,6 @@ fn describe(tool: &str, args: &Value) -> String {
         "stop_session" => "stop a session",
         "close_session" => "close a session",
         "create_worktree" => "make a worktree",
-        "cleanup_worktree" => "remove a worktree",
         "merge_branch" => "merge a branch and push it",
         other => other,
     };
@@ -510,66 +509,56 @@ fn describe(tool: &str, args: &Value) -> String {
 }
 
 impl StoreApi {
-    fn cleanup_worktree(
+    fn tidy_json(&self, tree: Id, force: bool, own: Option<Id>) -> Result<Value, String> {
+        let t = crate::projects::tidy_worktree(&self.store, tree, force, own).map_err(|e| e.0)?;
+        let mut out = json!({
+            "worktree_removed": t.removed,
+            "branch_deleted": t.branch_deleted,
+            "worktree_kept": t.kept,
+        });
+        if let Some(k) = t.branch_kept {
+            out["branch_kept"] = json!(k);
+        }
+        Ok(out)
+    }
+
+    fn orphan_worktree(&self, args: &Value, scope: Option<Id>) -> Result<agentbench_core::Worktree, String> {
+        let trees = self.store.worktrees(scope).map_err(|e| e.0)?;
+        let found = match (args.get("worktree").and_then(Value::as_i64), text(args, "branch")) {
+            (Some(id), _) => trees.into_iter().find(|w| w.id == id),
+            (None, Some(b)) => trees.into_iter().find(|w| w.label() == b.trim()),
+            (None, None) => return Err("give the session `id`, or a `worktree` id or `branch`".into()),
+        };
+        found.ok_or_else(|| "no such worktree in this project; list_worktrees gives them".to_string())
+    }
+
+    fn close_session(
         &self,
         args: &Value,
         me: &agentbench_core::Session,
         scope: Option<Id>,
     ) -> Result<Value, String> {
-        let s = &self.store;
-        let trees = s.worktrees(scope).map_err(|e| e.0)?;
-        let tree = match (args.get("id").and_then(Value::as_i64), text(args, "branch")) {
-            (Some(id), _) => trees.into_iter().find(|w| w.id == id),
-            (None, Some(b)) => trees.into_iter().find(|w| w.label() == b.trim()),
-            (None, None) => return Err("give the worktree's `id` or `branch`".into()),
-        };
-        let tree = tree.ok_or("no such worktree in this project; list_worktrees gives them")?;
-        if tree.main {
-            return Err(
-                "that is the main worktree, the project itself; it cannot be removed".into()
-            );
-        }
-        if tree.id == me.worktree_id {
-            return Err("this session works in it; clean it up from another worktree".into());
-        }
-        let sessions: Vec<_> = s
-            .sessions()
-            .map_err(|e| e.0)?
-            .into_iter()
-            .filter(|x| x.worktree_id == tree.id)
-            .collect();
-        let runner = self.runner.get().ok();
-        if let Some(r) = &runner
-            && let Some(busy) = sessions.iter().find(|x| r.is_running(x.id))
-        {
-            return Err(format!("session {} is still working in it; stop it first", busy.id));
-        }
         let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
-        let branch = tree.branch.clone();
-        let project = s.project(tree.project_id).map_err(|e| e.0)?;
-        crate::projects::remove_worktree(s, tree.id, force).map_err(|e| e.0)?;
-        if let Some(r) = &runner {
-            for x in &sessions {
-                r.end(x.id);
-            }
+        if args.get("id").is_none() {
+            let tree = self.orphan_worktree(args, scope)?;
+            let mut out = self.tidy_json(tree.id, force, Some(me.worktree_id))?;
+            out["worktree"] = json!(tree.id);
+            return Ok(out);
         }
-        let mut out = json!({
-            "removed": tree.path,
-            "sessions_deleted": sessions.iter().map(|x| x.id.to_string()).collect::<Vec<_>>(),
-        });
-        if let Some(b) = branch {
-            let keep = args.get("keep_branch").and_then(Value::as_bool).unwrap_or(false);
-            match keep {
-                true => out["branch_deleted"] = json!(false),
-                false => match crate::git::delete_branch(std::path::Path::new(&project.path), &b) {
-                    Ok(()) => out["branch_deleted"] = json!(true),
-                    Err(e) => {
-                        out["branch_deleted"] = json!(false);
-                        out["branch_kept"] = json!(format!("{b}: {e}"));
-                    }
-                },
-            }
+        let other = self.managed(me, args)?;
+        if let Ok(runner) = self.runner.get() {
+            runner.interrupt(other.id);
+            runner.end(other.id);
         }
+        self.store.delete_session(other.id).map_err(|e| e.0)?;
+        let tree = self.store.worktree(other.worktree_id).map_err(|e| e.0)?;
+        let mut out = if tree.main || tree.id == me.worktree_id {
+            json!({ "worktree_removed": null, "branch_deleted": false, "worktree_kept": null })
+        } else {
+            self.tidy_json(tree.id, force, Some(me.worktree_id))?
+        };
+        out["closed"] = json!(other.id);
+        out["title"] = json!(other.title);
         Ok(out)
     }
 }
@@ -1004,9 +993,6 @@ impl Api for StoreApi {
                 .map_err(|e| e.0)?;
                 json!({ "id": w.id, "branch": w.label(), "path": w.path })
             }
-            "cleanup_worktree" => {
-                self.cleanup_worktree(args, &me, (!everywhere).then_some(project))?
-            }
             "answer_session" | "escalate_question" => {
                 if !sup {
                     return Err(format!("only the supervisor chat can use {tool}"));
@@ -1103,14 +1089,7 @@ impl Api for StoreApi {
                 let was_running = runner.interrupt(other.id);
                 json!({ "stopped": other.id, "was_running": was_running })
             }
-            "close_session" => {
-                let other = self.managed(&me, args)?;
-                let runner = self.runner.get()?;
-                runner.interrupt(other.id);
-                runner.end(other.id);
-                s.delete_session(other.id).map_err(|e| e.0)?;
-                json!({ "closed": other.id, "title": other.title })
-            }
+            "close_session" => self.close_session(args, &me, (!everywhere).then_some(project))?,
             "rename_session" => {
                 let other = s.session(session_id(args)?).map_err(|e| e.0)?;
                 self.reaches(&me, &other)?;
@@ -1279,7 +1258,6 @@ impl Api for StoreApi {
                 | "update_issue"
                 | "comment_on_issue"
                 | "create_worktree"
-                | "cleanup_worktree"
                 | "start_session"
                 | "send_message"
                 | "stop_session"
@@ -1392,10 +1370,9 @@ mod tests {
             ("start_session", json!({"project": b.project, "prompt": "go"}), Automation::Delegate),
             ("send_message", json!({"id": w, "text": "hi"}), Automation::Delegate),
             ("stop_session", json!({"id": w}), Automation::Delegate),
-            ("close_session", json!({"id": w}), Automation::Delegate),
             ("create_worktree", json!({"project": b.project, "branch": "x"}), Automation::Delegate),
-            ("cleanup_worktree", json!({"project": b.project, "branch": "x"}), Automation::Delegate),
             ("merge_branch", json!({"id": w}), Automation::Ship),
+            ("close_session", json!({"id": b.s.add_session(b.s.session(b.worker).unwrap().worktree_id, "native", "extra", None, None).unwrap().id.to_string()}), Automation::Delegate),
         ]
     }
 
@@ -1755,8 +1732,8 @@ mod tests {
                 .is_err(),
             "a normal session cannot rename another project's chat"
         );
-        let e = api.call("close_session", &id(&b), boss.id).unwrap_err();
-        assert!(e.contains("cannot be started"), "{e}");
+        api.call("close_session", &id(&b), boss.id).unwrap();
+        assert!(s.session(b.id).is_err());
     }
 
     #[test]
@@ -2065,63 +2042,162 @@ mod tests {
         assert!(api.call("create_worktree", &json!({"branch": "bad name"}), me.id).is_err());
     }
 
-    #[test]
-    fn cleaning_up_a_worktree_removes_its_checkout_chats_and_merged_branch() {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("r");
-        crate::git::testing::repo(&main);
-        let s = Store::memory().unwrap();
-        let p = crate::projects::add(&s, &main, None, false).unwrap();
-        let home = s.main_worktree(p.id).unwrap();
-        let me = s.add_session(home.id, "native", "me", None, None).unwrap();
-        let api = StoreApi::new(s.clone());
-        let made = api.call("create_worktree", &json!({"branch": "done-work"}), me.id).unwrap();
-        let tree = made["id"].as_i64().unwrap();
-        let path = std::path::PathBuf::from(made["path"].as_str().unwrap());
-        let chat = s.add_session(tree, "native", "worker", None, None).unwrap();
+    struct Closing {
+        _dir: tempfile::TempDir,
+        s: Store,
+        api: StoreApi,
+        boss: agentbench_core::Session,
+        project: Project,
+        main: std::path::PathBuf,
+    }
 
-        let e = api.call("cleanup_worktree", &json!({"id": home.id}), me.id).unwrap_err();
-        assert!(e.contains("main worktree"), "{e}");
-        let mine = s.add_session(tree, "native", "inside", None, None).unwrap();
-        let e = api.call("cleanup_worktree", &json!({"id": tree}), mine.id).unwrap_err();
-        assert!(e.contains("this session works in it"), "{e}");
-        s.delete_session(mine.id).unwrap();
-        std::fs::write(path.join("draft.txt"), "unsaved").unwrap();
-        let e = api.call("cleanup_worktree", &json!({"branch": "done-work"}), me.id).unwrap_err();
-        assert!(e.contains("uncommitted changes"), "{e}");
-        std::fs::remove_file(path.join("draft.txt")).unwrap();
+    impl Closing {
+        fn new() -> Closing {
+            let dir = tempfile::tempdir().unwrap();
+            let main = dir.path().join("r");
+            crate::git::testing::repo(&main);
+            let s = Store::memory().unwrap();
+            let project = crate::projects::add(&s, &main, None, false).unwrap();
+            let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
+            let boss = s
+                .add_session(s.main_worktree(sup.id).unwrap().id, "native", "boss", None, None)
+                .unwrap();
+            let api = StoreApi::new(s.clone());
+            Closing { _dir: dir, s, api, boss, project, main }
+        }
 
-        let out = api.call("cleanup_worktree", &json!({"branch": "done-work"}), me.id).unwrap();
-        assert_eq!(out["removed"], made["path"]);
-        assert_eq!(out["sessions_deleted"], json!([chat.id.to_string()]));
-        assert_eq!(out["branch_deleted"], true);
-        assert!(!path.exists());
-        assert!(s.session(chat.id).is_err());
-        assert!(!crate::git::branch_exists(&main, "done-work"));
-        assert_eq!(s.worktrees(Some(p.id)).unwrap().len(), 1);
+        fn tree(&self, branch: &str) -> (i64, std::path::PathBuf) {
+            let made = crate::projects::add_worktree(&self.s, self.project.id, branch, None).unwrap();
+            (made.id, made.path.into())
+        }
+
+        fn chat(&self, tree: i64) -> agentbench_core::Session {
+            self.s.add_session(tree, "native", "worker", None, None).unwrap()
+        }
+
+        fn close(&self, args: Value) -> Result<Value, String> {
+            self.api.call("close_session", &args, self.boss.id)
+        }
+
+        fn commit(&self, path: &std::path::Path) {
+            let commit = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(["commit", "-q", "--allow-empty", "-m", "wip"])
+                .status()
+                .unwrap();
+            assert!(commit.success());
+        }
     }
 
     #[test]
-    fn an_unmerged_branch_is_kept_when_its_worktree_is_cleaned_up() {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("r");
-        crate::git::testing::repo(&main);
-        let s = Store::memory().unwrap();
-        let p = crate::projects::add(&s, &main, None, false).unwrap();
-        let me =
-            s.add_session(s.main_worktree(p.id).unwrap().id, "native", "me", None, None).unwrap();
-        let api = StoreApi::new(s.clone());
-        let made = api.call("create_worktree", &json!({"branch": "wip"}), me.id).unwrap();
-        let path = made["path"].as_str().unwrap();
-        let commit = std::process::Command::new("git")
-            .args(["-C", path, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-            .args(["commit", "-q", "--allow-empty", "-m", "wip"])
-            .status()
-            .unwrap();
-        assert!(commit.success());
-        let out = api.call("cleanup_worktree", &json!({"id": made["id"]}), me.id).unwrap();
+    fn closing_the_last_session_of_a_clean_merged_worktree_removes_the_tree_and_branch() {
+        let f = Closing::new();
+        let (tree, path) = f.tree("done-work");
+        let chat = f.chat(tree);
+        let out = f.close(json!({"id": chat.id.to_string()})).unwrap();
+        assert_eq!(out["closed"], chat.id.to_string());
+        assert_eq!(out["worktree_removed"], path.to_string_lossy().as_ref());
+        assert_eq!(out["branch_deleted"], true);
+        assert!(out["worktree_kept"].is_null(), "{out}");
+        assert!(!path.exists());
+        assert!(f.s.session(chat.id).is_err());
+        assert!(!crate::git::branch_exists(&f.main, "done-work"));
+        assert_eq!(f.s.worktrees(Some(f.project.id)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn closing_a_session_keeps_an_unmerged_branch_but_removes_the_tree() {
+        let f = Closing::new();
+        let (tree, path) = f.tree("wip");
+        f.commit(&path);
+        let chat = f.chat(tree);
+        let out = f.close(json!({"id": chat.id.to_string()})).unwrap();
+        assert_eq!(out["worktree_removed"], path.to_string_lossy().as_ref());
         assert_eq!(out["branch_deleted"], false);
-        assert!(out["branch_kept"].as_str().unwrap().contains("not fully merged"), "{out}");
-        assert!(crate::git::branch_exists(&main, "wip"));
+        assert!(out["branch_kept"].as_str().unwrap().contains("not merged"), "{out}");
+        assert!(!path.exists());
+        assert!(crate::git::branch_exists(&f.main, "wip"));
+    }
+
+    #[test]
+    fn a_dirty_worktree_is_kept_unless_forced() {
+        let f = Closing::new();
+        let (tree, path) = f.tree("dirty");
+        std::fs::write(path.join("draft.txt"), "unsaved").unwrap();
+        let chat = f.chat(tree);
+        let out = f.close(json!({"id": chat.id.to_string()})).unwrap();
+        assert!(out["worktree_removed"].is_null(), "{out}");
+        assert_eq!(
+            out["worktree_kept"],
+            format!("uncommitted changes in {}", path.display()).as_str()
+        );
+        assert!(path.exists());
+        assert!(f.s.session(chat.id).is_err(), "the chat is closed either way");
+
+        let out = f.close(json!({"worktree": tree, "force": true})).unwrap();
+        assert_eq!(out["worktree_removed"], path.to_string_lossy().as_ref());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_worktree_with_another_session_left_is_kept() {
+        let f = Closing::new();
+        let (tree, path) = f.tree("shared");
+        let first = f.chat(tree);
+        let second = f.chat(tree);
+        let out = f.close(json!({"id": first.id.to_string()})).unwrap();
+        assert!(out["worktree_removed"].is_null(), "{out}");
+        assert!(out["worktree_kept"].as_str().unwrap().contains("other session"), "{out}");
+        assert!(path.exists());
+        let out = f.close(json!({"id": second.id.to_string()})).unwrap();
+        assert_eq!(out["worktree_removed"], path.to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn the_main_checkout_is_never_removed_by_closing() {
+        let f = Closing::new();
+        let home = f.s.main_worktree(f.project.id).unwrap();
+        let chat = f.chat(home.id);
+        let out = f.close(json!({"id": chat.id.to_string()})).unwrap();
+        assert!(out["worktree_removed"].is_null(), "{out}");
+        assert!(f.main.exists());
+        let e = f.close(json!({"worktree": home.id})).unwrap_err();
+        assert!(e.contains("main worktree"), "{e}");
+        assert!(f.main.exists());
+    }
+
+    #[test]
+    fn the_callers_own_worktree_is_never_removed_by_closing() {
+        let f = Closing::new();
+        let own = f.s.main_worktree(f.boss.project_id).unwrap();
+        let e = f.close(json!({"worktree": own.id})).unwrap_err();
+        assert!(e.contains("main worktree") || e.contains("this session works in it"), "{e}");
+    }
+
+    #[test]
+    fn closing_an_orphan_worktree_by_id_or_branch_removes_it() {
+        let f = Closing::new();
+        let (tree, path) = f.tree("orphan-a");
+        let out = f.close(json!({"worktree": tree})).unwrap();
+        assert_eq!(out["worktree_removed"], path.to_string_lossy().as_ref());
+        assert_eq!(out["branch_deleted"], true);
+        assert!(!path.exists());
+
+        let (_, other) = f.tree("orphan-b");
+        let out = f.close(json!({"branch": "orphan-b", "project": f.project.id})).unwrap();
+        assert_eq!(out["worktree_removed"], other.to_string_lossy().as_ref());
+        assert!(!crate::git::branch_exists(&f.main, "orphan-b"));
+        assert!(f.close(json!({"branch": "orphan-b"})).is_err());
+    }
+
+    #[test]
+    fn cleanup_worktree_is_no_longer_a_tool() {
+        let f = Closing::new();
+        assert!(!agent_native::native::AGENTBENCH_TOOLS.contains(&"cleanup_worktree"));
+        assert!(agent_native::native::specs().iter().all(|s| s.name != "cleanup_worktree"));
+        assert!(agent_native::gate::required("cleanup_worktree").is_none());
+        assert!(f.close(json!({})).is_err(), "needs an id, a worktree or a branch");
     }
 }

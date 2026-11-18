@@ -6,6 +6,12 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- `close_session` now tidies up: when the closed session was the last one in its worktree, a clean worktree is removed and its branch deleted if merged. A dirty tree or unmerged branch is kept and the result says why. `close_session {worktree}` or `{branch}` closes a worktree with no session left. Closing a chat in the app follows the same rule.
+
+### Removed
+- The `cleanup_worktree` tool, replaced by `close_session`.
+
 ## [0.9.0] - 2026-11-17
 
 ### Added

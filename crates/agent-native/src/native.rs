@@ -320,7 +320,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 34] = [
+pub const AGENTBENCH_TOOLS: [&str; 33] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -340,7 +340,6 @@ pub const AGENTBENCH_TOOLS: [&str; 34] = [
     "list_projects",
     "list_worktrees",
     "create_worktree",
-    "cleanup_worktree",
     "add_project",
     "remember",
     "recall",
@@ -483,8 +482,17 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "close_session",
-            "Stop a session and delete its chat (supervisor chat only). Its worktree and changes stay. Ask the user first unless they told you to.",
-            object(json!({ "id": string("The session id, as list_sessions gives it") }), &["id"]),
+            "Stop a session, delete its chat, and tidy up its worktree (supervisor chat only). When no other session is left in the worktree it is removed if it has no uncommitted changes (`force` removes it anyway), and its branch is deleted if merged; an unmerged branch or a dirty tree is kept and the result says why. The main worktree and your own are never removed. For a worktree with no session left, give `worktree` (id) or `branch` instead of `id`. Ask the user first unless they told you to.",
+            object(
+                json!({
+                    "id": string("The session id, as list_sessions gives it"),
+                    "worktree": id("Instead of a session: a worktree with no session left, as list_worktrees gives its id"),
+                    "branch": string("Or that worktree's branch"),
+                    "project": string("Supervisor chat only: the project by name or id"),
+                    "force": boolean("Remove the worktree even with uncommitted changes, which are lost"),
+                }),
+                &[],
+            ),
         ),
         Spec::new(
             "rename_session",
@@ -572,20 +580,6 @@ fn agentbench_specs() -> Vec<Spec> {
                     "base": string("What to branch from; defaults to the current HEAD"),
                 }),
                 &["branch"],
-            ),
-        ),
-        Spec::new(
-            "cleanup_worktree",
-            "Remove a worktree of this project when its work is merged or abandoned: deletes the checkout, every chat session in it, and its branch if that is merged. Refuses the main worktree, the one this session is in, one with a session still working, and one with uncommitted changes unless force is set. Ask the user before forcing or before throwing away unmerged work.",
-            object(
-                json!({
-                    "project": string("Supervisor chat only: the project by name or id"),
-                    "id": id("The worktree, as list_worktrees gives its id"),
-                    "branch": string("Or the worktree's branch"),
-                    "force": boolean("Remove it even with uncommitted changes, which are lost"),
-                    "keep_branch": boolean("Keep the branch even if it is merged"),
-                }),
-                &[],
             ),
         ),
         Spec::new(

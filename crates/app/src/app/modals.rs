@@ -888,7 +888,7 @@ impl App {
             ),
             Confirm::Session(_, name) => (
                 format!("Close {name}?"),
-                "The agent is stopped if it is working and the conversation is deleted. The worktree and its changes stay.",
+                "The agent is stopped if it is working and the conversation is deleted. When it is the last chat in its worktree and nothing is uncommitted, the worktree is removed too, and its branch if merged.",
                 "close and delete",
             ),
             Confirm::Issue(_, name) => (

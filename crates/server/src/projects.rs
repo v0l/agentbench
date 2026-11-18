@@ -227,6 +227,58 @@ pub fn add_worktree(
         .ok_or_else(|| StoreError(format!("git made {} but does not list it", path.display())))
 }
 
+#[derive(Default)]
+pub struct Tidied {
+    pub removed: Option<String>,
+    pub branch_deleted: bool,
+    pub branch_kept: Option<String>,
+    pub kept: Option<String>,
+}
+
+pub fn tidy_worktree(
+    store: &Store,
+    worktree_id: Id,
+    force: bool,
+    own: Option<Id>,
+) -> Result<Tidied, StoreError> {
+    let w = store.worktree(worktree_id)?;
+    if w.main {
+        return Err(StoreError(
+            "that is the main worktree, the project itself; it cannot be removed".into(),
+        ));
+    }
+    if own == Some(w.id) {
+        return Err(StoreError(
+            "this session works in it; close it from another worktree".into(),
+        ));
+    }
+    let others = store.sessions()?.into_iter().filter(|s| s.worktree_id == w.id).count();
+    if others > 0 {
+        let kept = format!("{others} other session(s) remain in {}", w.path);
+        return Ok(Tidied { kept: Some(kept), ..Default::default() });
+    }
+    let path = Path::new(&w.path);
+    if !force && path.exists() && git::is_dirty(path).unwrap_or(false) {
+        let kept = format!("uncommitted changes in {}", w.path);
+        return Ok(Tidied { kept: Some(kept), ..Default::default() });
+    }
+    let project = store.project(w.project_id)?;
+    remove_worktree(store, w.id, force)?;
+    let mut out = Tidied { removed: Some(w.path.clone()), ..Default::default() };
+    if let Some(b) = w.branch {
+        let main = Path::new(&project.path);
+        if !git::is_merged(main, &b) {
+            out.branch_kept = Some(format!("{b}: not merged into the default branch"));
+        } else {
+            match git::delete_branch(main, &b) {
+                Ok(()) => out.branch_deleted = true,
+                Err(e) => out.branch_kept = Some(format!("{b}: {e}")),
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub fn remove_worktree(store: &Store, worktree_id: Id, force: bool) -> Result<(), StoreError> {
     let w = store.worktree(worktree_id)?;
     if w.main {
