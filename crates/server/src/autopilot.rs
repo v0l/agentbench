@@ -325,6 +325,8 @@ pub fn pick(issues: &[Issue], room: &Room) -> Picked {
             out.skipped.push((i.id, "its goal is not active"));
         } else if has(NEEDS_USER) {
             out.skipped.push((i.id, "labelled needs-user"));
+        } else if has("parked") {
+            out.skipped.push((i.id, "labelled parked"));
         } else if !i.waiting_on.is_empty() {
             out.waiting.push((i.id, i.waiting_on.clone()));
         } else if has(BLOCKED) {
@@ -1465,6 +1467,17 @@ mod tests {
         assert_eq!(ids(&p), [5]);
         let reasons: Vec<_> = p.skipped.iter().map(|s| s.0).collect();
         assert_eq!(reasons, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn the_picker_skips_a_parked_issue_even_when_it_has_a_goal() {
+        let mut parked = issue(1, 1, 5, 1, IssueState::Todo);
+        parked.labels = vec!["Parked".into()];
+        let fine = issue(2, 1, 0, 2, IssueState::Todo);
+        let f = Fixture::new();
+        let p = f.pick(&[parked, fine], 0, 10, 10);
+        assert_eq!(ids(&p), [2]);
+        assert_eq!(p.skipped, [(1, "labelled parked")]);
     }
 
     fn set_level(s: &Store, id: Id, level: Option<Automation>) {
