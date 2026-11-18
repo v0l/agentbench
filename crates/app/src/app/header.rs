@@ -58,7 +58,8 @@ impl App {
                 ui.set_height(screen.height() - top - 16.0);
                 // The fleet's status, which has no room in a phone's header.
                 let row = Vec2::new(ui.available_width(), 22.0);
-                ui.allocate_ui_with_layout(row, Layout::right_to_left(Align::Center), |ui| {
+                ui.allocate_ui_with_layout(row, Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
+                    ui.set_max_width(row.x);
                     self.header_badges(ui);
                 });
                 ui.add_space(4.0);

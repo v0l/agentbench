@@ -1220,6 +1220,51 @@ fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
 }
 
 #[test]
+fn on_a_phone_the_open_drawer_is_fully_on_screen() {
+    let rig = rig_on(&quota_server(83, 7800), Vec::new());
+    let size = [393.0, 852.0];
+    let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
+    let first = rig.store.sessions().unwrap()[0].clone();
+    rig.store
+        .add_usage(first.id, &agentbench_core::Usage { cost_usd: 6.57, turns: 1, ..Default::default() })
+        .unwrap();
+    for title in [
+        "Preempt by swapping KV caches between the two Spark nodes during decode",
+        "SON mode for the structured output path with a very long unbroken-title-word-that-keeps-going",
+        "issue-402-something-extremely-long-without-any-break-at-all-so-it-cannot-wrap",
+    ] {
+        rig.store.add_session(main.id, "native", title, None, None).unwrap();
+    }
+    let mut h = harness_at(rig.url.clone(), size);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    until(&mut h, "the quota", |h| {
+        h.state().overview().and_then(|o| o.usage.as_ref()).is_some_and(|u| !u.quotas.is_empty())
+    });
+    h.run_steps(3);
+    h.get_by_label("projects").click();
+    h.run_steps(5);
+    assert!(h.state().drawer_open());
+    shot(&mut h, "phone-drawer-fit");
+    let add = h.get_by_label("add project").rect();
+    assert!(add.left() >= 0.0 && add.right() <= size[0], "add project at {add:?}");
+    let off = off_screen(&h, size);
+    assert!(off.is_empty(), "widgets outside the screen: {off:?}");
+}
+
+fn off_screen(h: &Harness<'_, App>, size: [f32; 2]) -> Vec<String> {
+    use egui_kittest::kittest::NodeT as _;
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size[0], size[1]));
+    h.root()
+        .children_recursive()
+        .filter(|n| n.accesskit_node().bounding_box().is_some())
+        .filter(|n| !screen.expand(0.5).contains_rect(n.rect()))
+        .map(|n| {
+            format!("{:?} {:?} {:?}", n.accesskit_node().role(), n.accesskit_node().label(), n.rect())
+        })
+        .collect()
+}
+
+#[test]
 fn a_bash_command_is_always_shown_whole_and_wrapped() {
     let rig = rig();
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
