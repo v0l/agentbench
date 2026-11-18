@@ -126,8 +126,31 @@ pub fn branch_exists(dir: &Path, branch: &str) -> bool {
 pub fn add_worktree(main: &Path, branch: &str, base: Option<&str>) -> Result<PathBuf, String> {
     let path = sibling_path(main, branch);
     if path.exists() {
+        reuse_or_clear(main, branch, &path)?;
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    create_worktree(main, branch, base, &path)?;
+    Ok(path)
+}
+
+fn reuse_or_clear(main: &Path, branch: &str, path: &Path) -> Result<(), String> {
+    let registered = worktrees(main)?.iter().any(|t| t.path == path && t.branch.as_deref() == Some(branch));
+    if !registered {
         return Err(format!("{} already exists", path.display()));
     }
+    if is_dirty(path)? {
+        return Err(format!("{} has uncommitted changes", path.display()));
+    }
+    if is_merged(main, branch) {
+        remove_worktree(main, path, false)?;
+        delete_branch(main, branch)?;
+    }
+    Ok(())
+}
+
+fn create_worktree(main: &Path, branch: &str, base: Option<&str>, path: &Path) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -141,7 +164,7 @@ pub fn add_worktree(main: &Path, branch: &str, base: Option<&str>) -> Result<Pat
         }
         git(main, &args)?;
     }
-    Ok(path)
+    Ok(())
 }
 
 pub fn remove_worktree(main: &Path, path: &Path, force: bool) -> Result<(), String> {
@@ -315,6 +338,30 @@ mod tests {
     }
 
     #[test]
+    fn a_leftover_worktree_is_recreated_when_clean_and_merged_reused_with_commits_and_refused_when_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        testing::repo(&main);
+        let wt = add_worktree(&main, "issue-1", None).unwrap();
+        let again = add_worktree(&main, "issue-1", None).unwrap();
+        assert_eq!(again, wt, "clean and empty: recreated");
+        assert!(again.is_dir());
+
+        std::fs::write(wt.join("work.txt"), "x").unwrap();
+        for args in [vec!["add", "."], vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "work"]] {
+            assert!(Command::new("git").arg("-C").arg(&wt).args(&args).status().unwrap().success());
+        }
+        let reused = add_worktree(&main, "issue-1", None).unwrap();
+        assert_eq!(reused, wt);
+        assert!(wt.join("work.txt").exists(), "real commits are kept");
+
+        std::fs::write(wt.join("scratch"), "x").unwrap();
+        let e = add_worktree(&main, "issue-1", None).unwrap_err();
+        assert!(e.contains("uncommitted"), "{e}");
+        assert!(wt.join("scratch").exists());
+    }
+
+    #[test]
     fn worktree_lifecycle_against_a_real_repo() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("r");
@@ -325,6 +372,7 @@ mod tests {
 
         let wt = add_worktree(&main, "fix-login", None).unwrap();
         assert!(wt.is_dir());
+        std::fs::write(wt.join("wip"), "x").unwrap();
         assert!(add_worktree(&main, "fix-login", None).is_err(), "the folder is taken");
         let trees = worktrees(&main).unwrap();
         assert_eq!(trees.len(), 2);
