@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=${OUT:-/tmp/abshots}
 INSET=${INSET:-28}
-BOTTOM=${BOTTOM:-20}
+BOTTOM=${BOTTOM:-0}
 SCALE=${SCALE:-1}
 NAMES=${NAMES:-"393x852 360x800 412x915 320x640"}
 COLS=${COLS:-7}

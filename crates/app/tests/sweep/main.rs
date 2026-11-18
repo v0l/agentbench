@@ -62,7 +62,11 @@ fn texts(shape: &egui::epaint::Shape, clip: egui::Rect, out: &mut Vec<Text>) {
 fn problems(h: &Harness<'static, App>, s: Size) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     let [w, hgt] = s.size;
-    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, hgt));
+    let [il, it, ir, ib] = s.insets;
+    let screen = egui::Rect::from_min_max(egui::pos2(il, it), egui::pos2(w - ir, hgt - ib));
+    if std::env::var("AB_AREAS").is_ok() {
+        eprintln!("screen {:?} ctx {:?}", h.ctx.viewport_rect(), h.ctx.content_rect());
+    }
     if std::env::var("AB_AREAS").is_ok() {
         h.ctx.memory(|m| {
             for l in m.areas().visible_layer_ids() {
