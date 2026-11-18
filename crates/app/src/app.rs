@@ -1226,6 +1226,40 @@ impl App {
         }
     }
 
+    pub fn open_add_workspace_form(&mut self) {
+        let slot = self.servers.iter().map(|r| r.slot).max().unwrap_or(0) + 1;
+        self.add_workspace = Some(Remote {
+            slot,
+            name: String::new(),
+            url: String::new(),
+            token: String::new(),
+            icon: String::new(),
+        });
+    }
+
+    pub fn ask_to_close_chat(&mut self, sid: SessionId) {
+        if let Some(title) = self.session_by_id(sid).map(|s| s.title.clone()) {
+            self.confirm = Some(Confirm::Session(sid, title));
+        }
+    }
+
+    pub fn open_file_issue_form(&mut self, project: Id) {
+        self.file_issue = Some(FileIssue { project, title: String::new(), body: String::new() });
+    }
+
+    pub fn open_new_chat_form(&mut self) {
+        self.open_start(None);
+    }
+
+    pub fn open_settings_page(&mut self, page: &str) {
+        self.open_settings();
+        self.settings_page(page);
+    }
+
+    pub fn open_help(&mut self) {
+        self.help = true;
+    }
+
     /// Whether the project list is open over a narrow window.
     pub fn drawer_open(&self) -> bool {
         self.drawer
