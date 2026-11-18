@@ -393,6 +393,13 @@ pub fn current_verdict(store: &Store, session: &Session) -> Option<Judged> {
     (v.head == head_of(store, session)).then_some(v)
 }
 
+pub fn already_judged(store: &Store, session: &Session) -> bool {
+    let Some(v) = current_verdict(store, session) else { return false };
+    !store.messages(session.id, 0).unwrap_or_default().iter().any(|m| {
+        m.created_at > v.created_at && matches!(m.entry, Entry::User { .. })
+    })
+}
+
 fn verdict_line(v: &Judged) -> String {
     format!("supervisor {} judged {}: {}", v.judge, v.verdict, clip(&v.reason, 300))
 }

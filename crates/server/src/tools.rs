@@ -957,6 +957,9 @@ impl Api for StoreApi {
                 if !std::path::Path::new(&other.cwd).is_dir() {
                     return Err(format!("{} no longer exists", other.cwd));
                 }
+                if me.parent == Some(other.id) && body.trim_start().starts_with("DONE") {
+                    return Ok(json!({ "sent": null, "note": "not delivered: your parent is told when your turn ends, with your reply, the diff and your test runs, so a DONE line is the end of your reply" }));
+                }
                 // The prefix also keeps a message that starts with a slash from running as a command.
                 let line =
                     format!("Message from session {session} ({}): {}", me.agent, body.trim());

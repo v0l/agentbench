@@ -1050,6 +1050,9 @@ impl Runner {
                 let judges = done.parent == Some(id)
                     && done.status == SessionStatus::Idle
                     && self.store.project(watcher.project_id).is_ok_and(|p| p.supervisor);
+                if judges && crate::autopilot::already_judged(&self.store, &done) {
+                    continue;
+                }
                 let (text, source) = if judges {
                     (crate::autopilot::judge_request(&self.store, &done), "judge")
                 } else if done.parent == Some(id) {
@@ -4619,6 +4622,32 @@ mod deferred_tests {
         let from = said_to(&r, r.boss.id).pop().unwrap().1;
         assert_eq!(from, [format!("watch {}", r.worker.id)]);
     }
+    #[tokio::test]
+    async fn a_judged_head_is_not_sent_for_judging_again_until_the_worker_hears_something_new() {
+        let r = rig();
+        let head = crate::autopilot::head_of(&r.store, &r.worker);
+        r.store.add_verdict(r.worker.id, None, head.as_deref(), "concluded_pass", "ok", None, "done", r.boss.id).unwrap();
+        r.store.set_status(r.worker.id, SessionStatus::Idle).unwrap();
+        r.runner.tell_watchers(r.worker.id);
+        idle(&r.runner, r.boss.id).await;
+        assert!(said_to(&r, r.boss.id).is_empty(), "{:?}", said_to(&r, r.boss.id));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        r.store.add_message(r.worker.id, &Entry::user("one more thing")).unwrap();
+        r.runner.tell_watchers(r.worker.id);
+        idle(&r.runner, r.boss.id).await;
+        assert_eq!(said_to(&r, r.boss.id).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_done_line_to_the_parent_is_not_delivered_on_top_of_the_turn_end_report() {
+        let r = rig();
+        let args = serde_json::json!({"id": r.boss.id.to_string(), "text": "DONE #1 branch tests:pass ok"});
+        let out = r.runner.api.call("send_message", &args, r.worker.id).unwrap();
+        assert!(out["sent"].is_null(), "{out}");
+        assert!(said_to(&r, r.boss.id).is_empty());
+        assert_eq!(r.store.deferred_count(r.boss.id).unwrap(), 0);
+    }
+
     #[tokio::test]
     async fn a_child_reports_every_turn_end_to_its_parent_without_a_watch_call() {
         let r = rig();
