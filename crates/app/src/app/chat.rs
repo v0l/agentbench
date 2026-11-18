@@ -423,6 +423,7 @@ impl App {
         };
         let mut flip = false;
         let mut new_default = None;
+        let mut new_close = None;
         let projects: Vec<Project> = self
             .overview
             .iter()
@@ -482,6 +483,13 @@ impl App {
             if open || levels_open {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
+                let mut close = a.auto_close;
+                if ui.checkbox(&mut close, "close merged sessions").changed() {
+                    new_close = Some(close);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
                 ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().legend("default").size(10.0).tint(LEGEND).elided(ui); });
                 new_default = level_slider(ui, "default automation", a.default_level, false, 150.0f32.min((ui.available_width() - 100.0).max(60.0)));
                 Line::new().set(a.default_level.label()).size(11.0).show(ui);
@@ -515,6 +523,9 @@ impl App {
         }
         if toggle_levels {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("levels_open"), !levels_open));
+        }
+        if let Some(on) = new_close {
+            self.set_auto_close(on);
         }
         if let Some(l) = new_default {
             self.set_default_level(l);

@@ -40,6 +40,10 @@ fn flag(store: &Store, key: &str) -> bool {
     store.setting(key).ok().flatten().as_deref() == Some("1")
 }
 
+fn auto_close_on(store: &Store) -> bool {
+    store.setting(AUTO_CLOSE).ok().flatten().as_deref() != Some("0")
+}
+
 fn number<T: std::str::FromStr>(store: &Store, key: &str, default: T) -> T {
     store.setting(key).ok().flatten().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
 }
@@ -168,6 +172,7 @@ pub fn state(store: &Store) -> AutopilotState {
         max_nudges: number(store, MAX_NUDGES, DEFAULT_MAX_NUDGES),
         default_level: default_level(store),
         idle: flag(store, IDLE),
+        auto_close: auto_close_on(store),
         workers: workers.iter().filter(|w| is_active(&w.state)).count() as u32,
         activity: store.autopilot_log(30).unwrap_or_default(),
     }
@@ -190,6 +195,10 @@ pub fn apply(store: &Store, patch: &AutopilotPatch) -> Result<AutopilotState, St
     }
     if let Some(n) = patch.max_nudges {
         store.set_setting(MAX_NUDGES, &n.to_string())?;
+    }
+    if let Some(on) = patch.auto_close {
+        store.set_setting(AUTO_CLOSE, if on { "1" } else { "0" })?;
+        store.log_autopilot(None, None, if on { "closing merged sessions is on" } else { "closing merged sessions is off" })?;
     }
     if let Some(l) = patch.default_level {
         store.set_setting(DEFAULT_LEVEL, l.as_str())?;
@@ -627,7 +636,7 @@ impl Autopilot {
 
     fn sweep(&self, now: i64) {
         let store = self.store();
-        if !flag(store, ENABLED) || !flag(store, AUTO_CLOSE) {
+        if !flag(store, ENABLED) || !auto_close_on(store) {
             return;
         }
         let supervisor = store.supervisor_project().ok().flatten().map(|p| p.id);
@@ -982,7 +991,7 @@ impl Autopilot {
                 self.notify(&format!("#{} merged but not pushed", w.issue));
             }
             Ok(shipped) => {
-                let closed = flag(store, AUTO_CLOSE);
+                let closed = auto_close_on(store);
                 if closed {
                     self.runner.interrupt(w.session);
                     self.runner.end(w.session);
@@ -1743,10 +1752,13 @@ mod tests {
         set_level(&r.store, r.project, Some(Automation::Ship));
         crate::git::merge_branch(&r.repo, tree.branch.as_deref().unwrap()).unwrap();
         r.ap.set_state(a, IssueState::Done);
+        apply(&r.store, &AutopilotPatch { auto_close: Some(false), ..Default::default() }).unwrap();
         r.ap.tick();
-        assert!(r.store.session(sid).is_ok(), "session stays open by default");
-        assert!(std::path::Path::new(&tree.path).exists(), "worktree stays by default");
-        auto_close(&r);
+        assert!(r.store.session(sid).is_ok(), "session stays open when auto close is off");
+        assert!(std::path::Path::new(&tree.path).exists(), "worktree stays when auto close is off");
+        assert!(!state(&r.store).auto_close);
+        apply(&r.store, &AutopilotPatch { auto_close: Some(true), ..Default::default() }).unwrap();
+        assert!(state(&r.store).auto_close);
         r.ap.tick();
         assert!(r.store.session(sid).is_err(), "session closed");
         assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
@@ -1938,7 +1950,8 @@ mod tests {
         assert!(r.repo.join("feature.txt").exists(), "merged into the main checkout");
         assert!(remote_has(&bare, "feature.txt"), "pushed");
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
-        assert!(r.store.session(sid).is_ok(), "session stays open by default");
+        assert!(state(&r.store).auto_close, "closing is on by default");
+        assert!(r.store.session(sid).is_err(), "session closed by default once merged");
         assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("merged") && c.body.contains("judged concluded_pass")));
     }
 

@@ -622,6 +622,7 @@ fn agentbench_specs() -> Vec<Spec> {
                     "project_cap": id("Most workers at once in one project"),
                     "stuck_minutes": id("Minutes without output before a nudge"),
                     "max_nudges": id("Nudges before a stuck session is stopped"),
+                    "auto_close": json!({ "type": "boolean", "description": "Close a session and remove its worktree once its branch is merged and its issue done (default on)" }),
                 }),
                 &[],
             ),

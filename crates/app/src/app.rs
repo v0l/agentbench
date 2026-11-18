@@ -2558,6 +2558,15 @@ impl App {
         }
     }
 
+    pub fn set_auto_close(&mut self, on: bool) {
+        if let Some(a) = self.overview.as_mut().and_then(|o| o.autopilot.as_mut()) {
+            a.auto_close = on;
+        }
+        if let Some(c) = &mut self.client {
+            c.autopilot(&agentbench_core::AutopilotPatch { auto_close: Some(on), ..Default::default() });
+        }
+    }
+
     pub fn toggle_autopilot(&mut self) {
         let Some(on) = self.autopilot().map(|a| a.enabled) else { return };
         if let Some(c) = &mut self.client {

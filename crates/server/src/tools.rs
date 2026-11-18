@@ -1186,6 +1186,7 @@ impl Api for StoreApi {
                     stuck_minutes: args.get("stuck_minutes").and_then(Value::as_u64),
                     max_nudges: num("max_nudges"),
                     default_level: None,
+                    auto_close: flag("auto_close"),
                 };
                 let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
                 json!(state)
