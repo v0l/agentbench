@@ -25,7 +25,7 @@ pub fn pending_row(ui: &mut Ui, files: &[Pending]) -> Option<usize> {
                         .font(mono(11.0))
                         .color(VALUE),
                 );
-                let x = ui.small_button("x");
+                let x = ui.add(crate::key::Key::new("x").outline(VALUE).min_width(30.0));
                 x.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::Role::Button, true, format!("remove {}", f.name))
                 });

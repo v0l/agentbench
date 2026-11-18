@@ -74,6 +74,7 @@ impl App {
             return;
         }
         let ctx = ui.ctx().clone();
+        let icon = if agent_ui::key::phone(&ctx) { agent_ui::key::TAP } else { 40.0 };
         let mut pick: Option<Option<u32>> = None;
         let mut add = false;
         let entries: Vec<(Option<u32>, String)> = std::iter::once((None, "all workspaces".to_string()))
@@ -102,7 +103,7 @@ impl App {
                             (sum(|a| a.0), sum(|a| a.1), sum(|a| a.2), false)
                         }
                     };
-                    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(icon), Sense::click());
                     let label = match slot {
                         Some(_) => format!("workspace {name}"),
                         None => "all workspaces".to_string(),
@@ -171,7 +172,7 @@ impl App {
                         ui.separator();
                     }
                 }
-                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(icon), Sense::click());
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add workspace"));
                 ui.painter().rect_stroke(rect, 20.0, Stroke::new(1.0, LEGEND), egui::StrokeKind::Inside);
                 ui.painter().text(

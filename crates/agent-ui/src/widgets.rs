@@ -79,8 +79,9 @@ pub fn option_row(
     let width = ui.available_width();
     let font = egui::TextStyle::Body.resolve(ui.style());
     let galley = ui.painter().layout(label.to_string(), font, tint, width - pad * 2.0 - mark);
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(width, galley.size().y + 10.0), Sense::hover());
+    let tall = if crate::key::phone(ui.ctx()) { crate::key::TAP } else { 0.0 };
+    let (rect, _) = ui
+        .allocate_exact_size(Vec2::new(width, (galley.size().y + 10.0).max(tall)), Sense::hover());
     let resp = ui.interact(rect, ui.scope_id().with(salt), Sense::click());
     resp.widget_info(|| {
         egui::WidgetInfo::selected(egui::Role::Button, true, on, label.to_string())

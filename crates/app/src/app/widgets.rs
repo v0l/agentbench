@@ -173,7 +173,7 @@ pub(super) fn level_slider(
 ) -> Option<agentbench_core::Automation> {
     use agentbench_core::Automation;
     let stops = Automation::ALL.len();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 18.0), Sense::click_and_drag());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, if agent_ui::key::phone(ui.ctx()) { agent_ui::key::TAP } else { 18.0 }), Sense::click_and_drag());
     let pad = 7.0;
     let x_of = |i: usize| rect.left() + pad + (rect.width() - 2.0 * pad) * i as f32 / (stops - 1) as f32;
     let mut picked = None;
@@ -243,7 +243,11 @@ pub(super) fn level_slider(
 pub(super) fn tab_chip(ui: &mut Ui, text: &str, tint: egui::Color32, on: bool) -> egui::Response {
     let font = egui::FontId::proportional(11.5);
     let galley = ui.painter().layout_no_wrap(text.to_string(), font, tint);
-    let (rect, _) = ui.allocate_exact_size(galley.size() + Vec2::new(16.0, 8.0), Sense::hover());
+    let tall = if agent_ui::key::phone(ui.ctx()) { agent_ui::key::TAP } else { 0.0 };
+    let (rect, _) = ui.allocate_exact_size(
+        (galley.size() + Vec2::new(16.0, 8.0)).max(Vec2::new(0.0, tall)),
+        Sense::hover(),
+    );
     let resp = ui.interact(rect, ui.id().with(("tab", text)), Sense::click());
     resp.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, text.to_string())
@@ -329,4 +333,35 @@ pub(super) fn server_chip(ui: &mut Ui, name: &str, down: bool) {
     let text = if down { format!("{name}  server offline") } else { name.to_string() };
     let r = tab_chip(ui, &text, tint, false);
     r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("server {text}")));
+}
+
+pub(super) fn tap_toggle(ui: &mut Ui, text: &str, on: bool) -> egui::Response {
+    if !agent_ui::key::phone(ui.ctx()) {
+        return toggle(ui, text, on);
+    }
+    let tint = if on { READOUT } else { LEGEND };
+    let galley = egui_bench::text::lay(
+        ui,
+        egui_bench::text::caps(text, egui_bench::theme::legend_font(11.5), tint, 0.0),
+        egui_bench::text::room(ui) - 26.0,
+    );
+    let size = (galley.size() + Vec2::new(26.0, 7.0)).max(Vec2::new(0.0, agent_ui::key::TAP));
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let lit = on || resp.hovered();
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let fill = if on { tint.gamma_multiply(0.18) } else { WELL };
+        p.rect_filled(rect, 2.0, fill);
+        p.rect_stroke(rect, 2.0, Stroke::new(1.0, if lit { tint } else { ETCH }), egui::StrokeKind::Inside);
+        let tick = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 11.0, rect.center().y),
+            Vec2::splat(8.0),
+        );
+        p.rect_stroke(tick, 1.0, Stroke::new(1.0, if lit { tint } else { LEGEND }), egui::StrokeKind::Inside);
+        if on {
+            p.rect_filled(tick.shrink(2.0), 0.0, tint);
+        }
+        p.galley(egui::pos2(tick.right() + 6.0, rect.center().y - galley.size().y / 2.0), galley, tint);
+    }
+    resp
 }

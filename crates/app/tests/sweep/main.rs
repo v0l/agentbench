@@ -14,6 +14,7 @@ const PHONES: [[f32; 2]; 4] = [[360.0, 800.0], [393.0, 852.0], [412.0, 915.0], [
 
 const TAP: f32 = 44.0;
 const TAP_SHORT: f32 = 30.0;
+const TAP_ALLOWED: &[&str] = &["copy"];
 
 #[derive(Clone, Copy, Debug)]
 struct Size {
@@ -64,16 +65,6 @@ fn problems(h: &Harness<'static, App>, s: Size) -> Vec<(&'static str, String)> {
     let [w, hgt] = s.size;
     let [il, it, ir, ib] = s.insets;
     let screen = egui::Rect::from_min_max(egui::pos2(il, it), egui::pos2(w - ir, hgt - ib));
-    if std::env::var("AB_AREAS").is_ok() {
-        eprintln!("screen {:?} ctx {:?}", h.ctx.viewport_rect(), h.ctx.content_rect());
-    }
-    if std::env::var("AB_AREAS").is_ok() {
-        h.ctx.memory(|m| {
-            for l in m.areas().visible_layer_ids() {
-                eprintln!("area {:?} {:?}", l, m.area_rect(l.id));
-            }
-        });
-    }
     let mut shapes = Vec::new();
     for c in &h.output().shapes {
         texts(&c.shape, c.clip_rect, &mut shapes);
@@ -105,10 +96,36 @@ fn problems(h: &Harness<'static, App>, s: Size) -> Vec<(&'static str, String)> {
         .filter(|r| r.width().min(r.height()) > 12.0)
         .filter(|r| screen.expand(0.5).contains_rect(*r))
         .collect();
-    for r in &keys {
-        let big = r.width() >= TAP && r.height() >= TAP_SHORT || r.height() >= TAP && r.width() >= TAP_SHORT;
-        if !big {
-            out.push(("tap-target", format!("{:.0}x{:.0} at {r:?}", r.width(), r.height())));
+    use egui::accesskit::Role;
+    for n in h.root().children_recursive() {
+        let role = n.accesskit_node().role();
+        let tappable = matches!(
+            role,
+            Role::Button
+                | Role::CheckBox
+                | Role::RadioButton
+                | Role::ComboBox
+                | Role::Link
+                | Role::Switch
+                | Role::Tab
+                | Role::MenuItem
+                | Role::Slider
+                | Role::TextInput
+                | Role::MultilineTextInput
+                | Role::PasswordInput
+        );
+        if !tappable || n.accesskit_node().bounding_box().is_none() {
+            continue;
+        }
+        let r = n.rect();
+        if !screen.expand(0.5).contains_rect(r) || r.width() >= w - 1.0 && r.height() >= hgt - 1.0 {
+            continue;
+        }
+        let label = n.accesskit_node().label().unwrap_or_default();
+        let ok = r.height() >= TAP - 0.5 && r.width() >= TAP_SHORT
+            || r.width() >= TAP - 0.5 && r.height() >= TAP_SHORT;
+        if !ok && !TAP_ALLOWED.iter().any(|a| label.contains(a)) {
+            out.push(("tap-target", format!("{:?} {label:?} {:.0}x{:.0} at {r:?}", role, r.width(), r.height())));
         }
     }
     let popups: Vec<egui::Rect> = h.ctx.memory(|m| {

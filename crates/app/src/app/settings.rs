@@ -188,14 +188,14 @@ impl App {
                                 "alerts",
                                 "Tell me when an agent needs an answer, a chat fails or an agent finishes, even with the app closed. Keeps a quiet notification up while watching.",
                                 |ui| {
-                                    if toggle(ui, if st.alerts { "on" } else { "off" }, st.alerts).clicked() {
+                                    if tap_toggle(ui, if st.alerts { "on" } else { "off" }, st.alerts).clicked() {
                                         st.alerts = !st.alerts;
                                     }
                                 },
                             );
                         }
                         row_help(ui, "show thinking", "Show the model's reasoning in the transcript.", |ui| {
-                            if toggle(ui, if st.thinking { "on" } else { "off" }, st.thinking).clicked() {
+                            if tap_toggle(ui, if st.thinking { "on" } else { "off" }, st.thinking).clicked() {
                                 st.thinking = !st.thinking;
                             }
                         });
@@ -1069,7 +1069,7 @@ fn automation_rows(
             ui.horizontal_wrapped(|ui| {
                 for r in Risky::ALL {
                     let on = p.risky.contains(&r);
-                    let t = toggle(ui, r.label(), on);
+                    let t = tap_toggle(ui, r.label(), on);
                     t.widget_info(|| {
                         egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, format!("{} {}", p.name, r.label()))
                     });
