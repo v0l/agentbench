@@ -3300,7 +3300,12 @@ impl App {
             }
             for d in issue.depends_on.clone() {
                 let label = format!("remove dependency #{}", crate::hub::untag(d));
-                if ui.add(Key::new(format!("x #{}", crate::hub::untag(d))).outline(VALUE)).on_hover_text(&label).clicked() {
+                let remove = if self.narrow {
+                    ui.add(Key::new(format!("x #{}", crate::hub::untag(d))).outline(VALUE))
+                } else {
+                    ui.small_button(format!("x #{}", crate::hub::untag(d)))
+                };
+                if remove.on_hover_text(&label).clicked() {
                     deps.retain(|x| *x != d);
                     changed = Some(deps.clone());
                 }
