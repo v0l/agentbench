@@ -10,7 +10,7 @@ use agentbench_core::{
     Question, Session, SessionId, SessionStatus, Worktree,
 };
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
-use egui_bench::key::Key;
+use agent_ui::key::Key;
 use egui_bench::markdown;
 use egui_bench::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -3352,6 +3352,10 @@ impl App {
         self.tick(&ctx);
         let narrow = ctx.content_rect().width() < 720.0 || ctx.content_rect().height() < 480.0;
         self.narrow = narrow;
+        let want = if narrow { agent_ui::key::TAP } else { 18.0 };
+        if (ctx.global_style().spacing.interact_size.y - want).abs() > 0.1 {
+            ctx.all_styles_mut(|st| st.spacing.interact_size.y = want);
+        }
 
         // The root panels cover the whole screen, so they keep clear of the system's bars and the
         // keyboard themselves; dialogs already stay inside `content_rect`.

@@ -1,7 +1,7 @@
 use crate::form::{field, field_then, secret};
 use crate::widgets::{code_block, option_row, press, rail_block, read_link, size, spinner};
 use egui::{Margin, Sense, Ui, Vec2};
-use egui_bench::key::Key;
+use crate::key::Key;
 use egui_bench::markdown;
 use egui_bench::prelude::*;
 use serde_json::Value;

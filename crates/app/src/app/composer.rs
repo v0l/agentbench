@@ -235,7 +235,7 @@ impl App {
                 }
             });
         });
-        let height = ui.cursor().min.y - top;
+        let height = ui.cursor().min.y.max(ui.min_rect().bottom()) - top;
         let before = self.composer_h.insert(self.drawing, height);
         if before.is_none_or(|b| (b - height).abs() > 0.5) {
             // The transcript above gives up room by what this measured, so lay out again.

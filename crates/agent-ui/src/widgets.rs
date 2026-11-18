@@ -1,5 +1,5 @@
 use egui::{Margin, Sense, Stroke, Ui, Vec2};
-use egui_bench::key::Key;
+use crate::key::Key;
 use egui_bench::prelude::*;
 use std::time::Duration;
 

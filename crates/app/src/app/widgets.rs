@@ -4,7 +4,7 @@ use super::*;
 
 /// The three bars that open the project list on a narrow window.
 pub(super) fn hamburger(ui: &mut Ui, open: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(34.0, 26.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(44.0, 44.0), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "projects"));
     let tint = if open {
         READOUT

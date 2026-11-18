@@ -4,7 +4,7 @@
 
 use agent_ui::form::field;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
-use egui_bench::key::Key;
+use agent_ui::key::Key;
 use egui_bench::prelude::*;
 
 const ROW_H: f32 = 30.0;

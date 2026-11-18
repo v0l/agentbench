@@ -4,6 +4,7 @@ use super::settings::{self, Done};
 use super::{Agent, Backend};
 use crate::transcript::{self as shared, Action, Item};
 use egui_bench::markdown;
+use crate::key::Key;
 use egui_bench::prelude::*;
 use egui::{Margin, RichText, Ui};
 

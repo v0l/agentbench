@@ -1,7 +1,7 @@
 use crate::form::prose_id;
 use crate::widgets::size;
 use egui::{Response, Ui, Vec2};
-use egui_bench::key::Key;
+use crate::key::Key;
 use egui_bench::prelude::*;
 
 pub struct Pending<'a> {

@@ -1,4 +1,5 @@
 use super::config::Config;
+use crate::key::Key;
 use egui_bench::prelude::*;
 use egui::Ui;
 use std::path::Path;
