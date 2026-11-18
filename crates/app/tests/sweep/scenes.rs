@@ -399,7 +399,7 @@ fn s_composer_draft(r: &Rich, cfg: Cfg) -> Built {
 
 fn s_chat_menu(r: &Rich, cfg: Cfg) -> Built {
     let mut h = chat_of(r, cfg, r.chat, 10);
-    if let Some(n) = h.query_by_label("chat menu") {
+    if let Some(n) = h.query_by_label("more") {
         n.click();
         h.run_steps(4);
     }

@@ -123,9 +123,26 @@ impl App {
             ui.set_min_width(190.0);
             ui.spacing_mut().item_spacing.y = 6.0;
             if let Some(o) = &self.overview {
-                ui.horizontal(|ui| status_badge(ui, &o.sessions));
+                ui.set_max_width(ui.ctx().content_rect().width() - 40.0);
+                ui.horizontal_wrapped(|ui| status_badge(ui, &o.sessions));
                 if !self.remote {
                     chip(ui, "this machine", OK, true);
+                }
+            }
+            if let Some(sid) = self.session.filter(|_| self.tab == Tab::Chat)
+                && let Some(title) = self.session_by_id(sid).map(|s| s.title.clone())
+            {
+                if ui.add(Key::new("terminal").outline(VALUE).min_width(190.0)).clicked() {
+                    self.terminal = Some(TerminalView::new(sid));
+                    ui.close();
+                }
+                if ui.add(Key::new("rename chat").outline(VALUE).min_width(190.0)).clicked() {
+                    self.rename_chat = Some((sid, title.clone()));
+                    ui.close();
+                }
+                if ui.add(Key::new("close chat").outline(FAULT).min_width(190.0)).clicked() {
+                    self.confirm = Some(Confirm::Session(sid, title));
+                    ui.close();
                 }
             }
             if ui.add(Key::new("settings").outline(VALUE).min_width(190.0)).clicked() {

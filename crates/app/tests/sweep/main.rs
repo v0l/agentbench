@@ -111,8 +111,20 @@ fn problems(h: &Harness<'static, App>, s: Size) -> Vec<(&'static str, String)> {
             out.push(("tap-target", format!("{:.0}x{:.0} at {r:?}", r.width(), r.height())));
         }
     }
+    let popups: Vec<egui::Rect> = h.ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|l| l.order == egui::Order::Foreground || l.order == egui::Order::Tooltip)
+            .filter_map(|l| m.area_rect(l.id))
+            .collect()
+    });
     for (i, a) in keys.iter().enumerate() {
         for b in &keys[i + 1..] {
+
+            if popups.iter().any(|p| p.intersects(*a) || p.intersects(*b)) {
+                continue;
+            }
             let x = a.intersect(*b);
             if x.width() > 2.0 && x.height() > 2.0 && !a.contains_rect(*b) && !b.contains_rect(*a) {
                 out.push(("overlap", format!("{a:?} and {b:?}")));

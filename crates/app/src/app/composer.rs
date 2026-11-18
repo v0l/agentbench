@@ -217,7 +217,7 @@ impl App {
                 if !compact || self.focused {
                     self.speak_key(ui);
                 }
-                if crate::attach::can_pick() && !compact {
+                if crate::attach::can_pick() && !compact && ui.available_width() >= 80.0 {
                     let key = ui.add(Key::new("attach").outline(VALUE).min_width(76.0));
                     key.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "attach")
