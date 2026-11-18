@@ -642,7 +642,7 @@ impl App {
                                     );
                                 },
                             );
-                            ui.label(egui::RichText::new(what).size(11.5).color(VALUE));
+                            ui.add(egui::Label::new(egui::RichText::new(what).size(11.5).color(VALUE)).wrap());
                         });
                     }
                 });

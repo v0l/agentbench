@@ -63,6 +63,13 @@ fn problems(h: &Harness<'static, App>, s: Size) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     let [w, hgt] = s.size;
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, hgt));
+    if std::env::var("AB_AREAS").is_ok() {
+        h.ctx.memory(|m| {
+            for l in m.areas().visible_layer_ids() {
+                eprintln!("area {:?} {:?}", l, m.area_rect(l.id));
+            }
+        });
+    }
     let mut shapes = Vec::new();
     for c in &h.output().shapes {
         texts(&c.shape, c.clip_rect, &mut shapes);

@@ -1027,9 +1027,11 @@ fn automation_rows(
 ) {
     let level = p.level(default);
     let inherited = p.automation.is_none();
-    row_help(ui, "automation", "What the supervisor may do here without asking. Above this it proposes instead.", |ui| {
+    let narrow = ui.ctx().content_rect().width() < 720.0;
+    let body = |ui: &mut Ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        if let Some(l) = level_slider(ui, &format!("{} automation", p.name), level, inherited, 170.0) {
+        let width = if narrow { (ui.available_width() - 90.0).clamp(100.0, 170.0) } else { 170.0 };
+        if let Some(l) = level_slider(ui, &format!("{} automation", p.name), level, inherited, width) {
             *action = Some(ProjectAction::Level(p.id, Some(l)));
         }
         let word = if inherited { format!("{} (default)", level.label()) } else { level.label().to_string() };
@@ -1041,7 +1043,13 @@ fn automation_rows(
                 *action = Some(ProjectAction::Level(p.id, None));
             }
         }
-    });
+    };
+    if narrow {
+        ui.add(egui::Label::new(egui_bench::text::legend("automation")).wrap());
+        ui.horizontal_wrapped(body);
+    } else {
+        row_help(ui, "automation", "What the supervisor may do here without asking. Above this it proposes instead.", body);
+    }
     hint(ui, level.about());
     row_help(
         ui,
@@ -1114,7 +1122,8 @@ fn projects_section(
     section(ui, "automation", "for projects with no level of their own", |ui| {
         row_help(ui, "default", "The level every project follows until it is given its own.", |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if let Some(l) = level_slider(ui, "default automation", default, false, 170.0) {
+            let width = if ui.ctx().content_rect().width() < 720.0 { 110.0 } else { 170.0 };
+            if let Some(l) = level_slider(ui, "default automation", default, false, width) {
                 action = Some(ProjectAction::DefaultLevel(l));
             }
             Line::new().set(default.label()).size(11.0).show(ui);
@@ -1185,7 +1194,7 @@ fn projects_section(
                     *renaming = None;
                 }
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let rename = ui.add(Key::new("rename").outline(VALUE));
                 rename.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "rename project")
