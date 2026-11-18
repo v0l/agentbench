@@ -304,6 +304,15 @@ with spend as `$1.20 today, $0.80 project`. `GET /api/usage` returns the same.
 - While any model server is exhausted the autopilot starts no workers, logs
   `paused for quota until HH:MM UTC`, and goes on after the reset.
 
+Every issue session takes one path, whether the autopilot picked the issue or
+the supervisor started it with `start_session {issue}`: the worker finishes,
+the supervisor gets one judge request and answers with `judge_session`, and at
+ship or above a concluded_pass is merged and pushed, the issue goes to done,
+and the session, its worktree and the merged branch are closed. `auto_close`
+(on by default, in the autopilot panel and the `autopilot` tool) turns the
+closing off. Label an issue `parked` to keep the picker off it. `merge_branch`
+is for a branch with no issue.
+
 When a server sends no cost, it is worked out from a price table, in USD per
 million tokens. Claude models have defaults; a model with no entry, such as a
 local one, costs 0. Entries match the start of the model name, the longest wins,

@@ -6,6 +6,20 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `auto_close` in the `autopilot` tool, `AutopilotState`/`AutopilotPatch` and the app's autopilot panel ("close merged sessions").
+- A `parked` label keeps a goal-linked todo issue from being started by the autopilot.
+- `update_issue {project}` moves an issue to another project.
+- A 400 that lists the accepted `reasoning_effort` values is retried with the nearest accepted one.
+
+### Fixed
+- Done and merged sessions are closed by default at ship and above, with their worktree and merged branch.
+- Sessions started with `start_session {issue}` join the autopilot, so one path runs judge, review, merge, done and close. `merge_branch` marks the issue done and closes the session too, and says "already merged" instead of a push error when the branch is already in origin.
+- A worker no longer sends the supervisor two judge requests for one head, and a DONE message to the parent is folded into the turn-end report.
+- A leftover clean worktree is recreated instead of blocking the issue forever; one with commits is reused; a dirty one is refused.
+- `file_issue {project}` from a normal session files in that project when the user has allowed it for `start_session`, and fails otherwise instead of silently filing in the chat's own project.
+- The supervisor role text describes the single pipeline.
+
 ### Changed
 - `close_session` now tidies up: when the closed session was the last one in its worktree, a clean worktree is removed and its branch deleted if merged. A dirty tree or unmerged branch is kept and the result says why. `close_session {worktree}` or `{branch}` closes a worktree with no session left. Closing a chat in the app follows the same rule.
 
