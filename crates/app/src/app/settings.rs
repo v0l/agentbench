@@ -1030,9 +1030,12 @@ fn automation_rows(
     let narrow = ui.ctx().content_rect().width() < 720.0;
     let body = |ui: &mut Ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
-        let width = if narrow { (ui.available_width() - 90.0).clamp(100.0, 170.0) } else { 170.0 };
+        let width = if narrow { ui.available_width().clamp(100.0, 170.0) } else { 170.0 };
         if let Some(l) = level_slider(ui, &format!("{} automation", p.name), level, inherited, width) {
             *action = Some(ProjectAction::Level(p.id, Some(l)));
+        }
+        if narrow {
+            ui.end_row();
         }
         let word = if inherited { format!("{} (default)", level.label()) } else { level.label().to_string() };
         Line::new().set(word).size(11.0).tint(if inherited { READOUT_DIM } else { READOUT }).show(ui);
@@ -1119,10 +1122,11 @@ fn projects_section(
     default: Automation,
 ) -> Option<ProjectAction> {
     let mut action = None;
+    let phone = ui.ctx().content_rect().width() < 720.0;
     section(ui, "automation", "for projects with no level of their own", |ui| {
         row_help(ui, "default", "The level every project follows until it is given its own.", |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            let width = if ui.ctx().content_rect().width() < 720.0 { 110.0 } else { 170.0 };
+            let width = if phone { (ui.available_width() - 110.0).clamp(60.0, 170.0) } else { 170.0 };
             if let Some(l) = level_slider(ui, "default automation", default, false, width) {
                 action = Some(ProjectAction::DefaultLevel(l));
             }
@@ -1154,7 +1158,7 @@ fn projects_section(
                     if w.missing {
                         chip(ui, "gone", FAULT, true);
                     }
-                    if !w.main {
+                    if !w.main && !phone {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let label = if w.missing { "forget" } else { "remove" };
                             if ui.add(Key::new(label).outline(FAULT)).clicked() {
@@ -1163,6 +1167,12 @@ fn projects_section(
                         });
                     }
                 });
+                if !w.main && phone {
+                    let label = if w.missing { "forget" } else { "remove" };
+                    if ui.add(Key::new(label).outline(FAULT)).clicked() {
+                        action = Some(ProjectAction::RemoveWorktree(w.clone()));
+                    }
+                }
             }
             if let Some((id, text)) = renaming.as_mut().filter(|(id, _)| *id == p.id) {
                 let id = *id;

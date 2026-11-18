@@ -2548,6 +2548,7 @@ impl App {
         let mut picked = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
+            let width = width.min((ui.available_width() - 100.0).max(60.0));
             picked = level_slider(ui, &label, level, inherited, width);
             let word = if inherited { format!("{} (default)", level.label()) } else { level.label().to_string() };
             Line::new().set(word).size(11.0).tint(if inherited { READOUT_DIM } else { READOUT }).show(ui);
@@ -3349,7 +3350,7 @@ impl App {
         crate::system::ime_before_frame(&ctx);
         crate::system::deliver_paste(&ctx);
         self.tick(&ctx);
-        let narrow = ctx.content_rect().width() < 720.0;
+        let narrow = ctx.content_rect().width() < 720.0 || ctx.content_rect().height() < 480.0;
         self.narrow = narrow;
 
         // The root panels cover the whole screen, so they keep clear of the system's bars and the
@@ -3358,6 +3359,24 @@ impl App {
             ctx.content_rect().top() - ctx.viewport_rect().top(),
             ctx.viewport_rect().bottom() - ctx.content_rect().bottom(),
         );
+        let (beside_left, beside_right) = (
+            ctx.content_rect().left() - ctx.viewport_rect().left(),
+            ctx.viewport_rect().right() - ctx.content_rect().right(),
+        );
+        if beside_left > 0.0 {
+            egui::Panel::left("system-left")
+                .exact_size(beside_left)
+                .resizable(false)
+                .frame(egui::Frame::NONE.fill(CHASSIS))
+                .show(ui, |_| {});
+        }
+        if beside_right > 0.0 {
+            egui::Panel::right("system-right")
+                .exact_size(beside_right)
+                .resizable(false)
+                .frame(egui::Frame::NONE.fill(CHASSIS))
+                .show(ui, |_| {});
+        }
         if below > 0.0 {
             egui::Panel::bottom("system-bottom")
                 .exact_size(below)
