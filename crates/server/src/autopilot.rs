@@ -2381,6 +2381,63 @@ mod tests {
         assert_eq!(r.store.workers().unwrap()[0].state, "merge_failed");
     }
 
+    async fn started_by_boss(r: &Rig, issue: Id) -> agentbench_core::SessionId {
+        on(r);
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        let args = serde_json::json!({"project": r.project, "issue": issue, "agent": "echo"});
+        let out = r.ap.runner.tools().call("start_session", &args, r.boss.unwrap()).unwrap();
+        serde_json::from_value(out["session"].clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_session_the_supervisor_starts_on_an_issue_is_an_autopilot_worker() {
+        let r = rig(DONE);
+        let a = todo(&r, "a", 0, &[]);
+        let sid = started_by_boss(&r, a).await;
+        let workers = r.store.workers().unwrap();
+        assert_eq!(workers.len(), 1, "{workers:?}");
+        assert_eq!((workers[0].session, workers[0].issue), (sid, a));
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing);
+    }
+
+    #[tokio::test]
+    async fn merge_branch_marks_the_issue_done_and_closes_the_session_and_worktree() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let a = todo(&r, "a", 0, &[]);
+        let sid = started_by_boss(&r, a).await;
+        settle(&r).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        r.ap.runner.tools().call("merge_branch", &serde_json::json!({"id": sid.to_string()}), r.boss.unwrap()).unwrap();
+        assert!(remote_has(&bare, "feature.txt"));
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.store.session(sid).is_err(), "session closed");
+        assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
+        assert!(!crate::git::branch_exists(&r.repo, tree.branch.as_deref().unwrap()), "branch deleted");
+        assert!(r.store.workers().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn merge_branch_says_already_merged_when_the_branch_is_in_origin() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let a = todo(&r, "a", 0, &[]);
+        let sid = started_by_boss(&r, a).await;
+        settle(&r).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        let branch = tree.branch.clone().unwrap();
+        crate::git::merge_branch(&r.repo, &branch).unwrap();
+        crate::git::push(&r.repo, "origin", "main").unwrap();
+        assert!(remote_has(&bare, "feature.txt"));
+        let e = r.ap.runner.tools().call("merge_branch", &serde_json::json!({"id": sid.to_string()}), r.boss.unwrap()).unwrap_err();
+        assert!(e.contains("already merged"), "{e}");
+        assert!(!e.contains("push failed"), "{e}");
+    }
+
     #[tokio::test]
     async fn it_goes_idle_once_when_nothing_is_left() {
         let r = rig(DONE);

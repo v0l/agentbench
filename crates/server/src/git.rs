@@ -222,6 +222,13 @@ pub fn push(main: &Path, remote: &str, branch: &str) -> Result<(), String> {
     git(main, &["push", remote, branch]).map(|_| ())
 }
 
+pub fn in_remote(main: &Path) -> bool {
+    let Some(remote) = push_remote(main) else { return false };
+    let Some(branch) = current_branch(main) else { return false };
+    let _ = git(main, &["fetch", "-q", &remote]);
+    git(main, &["merge-base", "--is-ancestor", "HEAD", &format!("{remote}/{branch}")]).is_ok()
+}
+
 pub fn is_dirty(path: &Path) -> Result<bool, String> {
     Ok(!git(path, &["status", "--porcelain"])?.is_empty())
 }

@@ -924,6 +924,9 @@ impl Api for StoreApi {
                     attachments: Vec::new(),
                 };
                 let started = runner.start_session(new).map_err(|e| e.0)?;
+                if let Some(i) = issue {
+                    s.add_worker(started.id, i, project).map_err(|e| e.0)?;
+                }
                 if let Some(i) = issue
                     && own(i)?.state != IssueState::Doing
                 {
@@ -1201,13 +1204,46 @@ impl Api for StoreApi {
                 {
                     return Err("that branch has no concluded_pass verdict for its current head; judge it with judge_session first".into());
                 }
+                let main_dir = s.project(other.project_id).map(|p| p.path).map_err(|e| e.0)?;
+                let tree = s.worktree(other.worktree_id).map_err(|e| e.0)?;
+                if let Some(b) = tree.branch.as_deref().filter(|_| !tree.main)
+                    && crate::git::is_merged(std::path::Path::new(&main_dir), b)
+                    && crate::git::in_remote(std::path::Path::new(&main_dir))
+                {
+                    return Err(format!("{b} is already merged and pushed to origin; the autopilot marks the issue done and closes the session"));
+                }
                 match crate::autopilot::ship(s, &other) {
-                    Ok(done) => json!({
-                        "branch": done.branch,
-                        "pushed": done.pushed.as_ref().map(|r| r.is_ok()),
-                        "deployed": done.deployed.as_ref().map(|r| r.is_ok()),
-                        "summary": done.describe(),
-                    }),
+                    Ok(done) => {
+                        let mut out = json!({
+                            "branch": done.branch,
+                            "pushed": done.pushed.as_ref().map(|r| r.is_ok()),
+                            "deployed": done.deployed.as_ref().map(|r| r.is_ok()),
+                            "summary": done.describe(),
+                        });
+                        if !matches!(done.pushed, Some(Err(_))) {
+                            if let Some(i) = other.issue_id {
+                                s.update_issue(i, &IssuePatch { state: Some(IssueState::Done), ..Default::default() })
+                                    .map_err(|e| e.0)?;
+                                let _ = s.add_comment(
+                                    i,
+                                    &NewComment { author: Some("supervisor".into()), body: format!("merge_branch: {}", done.describe()) },
+                                );
+                            }
+                            let _ = s.remove_worker(other.id);
+                            if let Ok(runner) = self.runner.get() {
+                                runner.interrupt(other.id);
+                                runner.end(other.id);
+                            }
+                            s.delete_session(other.id).map_err(|e| e.0)?;
+                            if !tree.main && tree.id != me.worktree_id {
+                                let tidy = self.tidy_json(tree.id, false, Some(me.worktree_id))?;
+                                out["closed"] = json!(other.id);
+                                out["worktree_removed"] = tidy["worktree_removed"].clone();
+                                out["branch_deleted"] = tidy["branch_deleted"].clone();
+                            }
+                        }
+                        out
+                    }
                     Err(crate::autopilot::Unshipped::NoBranch) => {
                         return Err("that session works in the main checkout; there is no branch to merge".into());
                     }
