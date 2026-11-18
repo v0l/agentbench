@@ -29,6 +29,7 @@ sizes=${sizes#;}
 export AB_OUT=$OUT AB_SIZES=$sizes AB_ONLY=${ONLY:-}
 rm -rf "$OUT"
 mkdir -p "$OUT"
+ulimit -n 65536 2>/dev/null || true
 cargo test -p agentbench --test sweep render_the_sheets -- --nocapture
 
 python3 - "$OUT" "$COLS" <<'EOF'

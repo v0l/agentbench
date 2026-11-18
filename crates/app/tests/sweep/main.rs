@@ -14,7 +14,7 @@ const PHONES: [[f32; 2]; 4] = [[360.0, 800.0], [393.0, 852.0], [412.0, 915.0], [
 
 const TAP: f32 = 44.0;
 const TAP_SHORT: f32 = 30.0;
-const TAP_ALLOWED: &[&str] = &["copy"];
+const TAP_ALLOWED: &[&str] = &["copy", "or download a release"];
 
 #[derive(Clone, Copy, Debug)]
 struct Size {
