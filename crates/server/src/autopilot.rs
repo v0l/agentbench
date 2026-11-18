@@ -1001,12 +1001,12 @@ impl Autopilot {
             }
             Ok(shipped) => {
                 let closed = auto_close_on(store);
+                let line = verdict_line(v);
                 if closed {
                     self.runner.interrupt(w.session);
-                    self.runner.end(w.session);
-                    let _ = store.delete_session(w.session);
+                    self.close_finished(session, &format!("merged; {line}"));
                 }
-                let line = verdict_line(v);
+                let closed = closed && store.session(w.session).is_err();
                 self.set_state(w.issue, IssueState::Done);
                 self.comment(
                     w.issue,
@@ -2456,6 +2456,77 @@ mod tests {
         let e = r.ap.runner.tools().call("merge_branch", &serde_json::json!({"id": sid.to_string()}), r.boss.unwrap()).unwrap_err();
         assert!(e.contains("already merged"), "{e}");
         assert!(!e.contains("push failed"), "{e}");
+    }
+
+    async fn assert_shipped_and_closed(r: &Rig, a: Id, sid: agentbench_core::SessionId, tree: &agentbench_core::Worktree, bare: &std::path::Path) {
+        assert!(remote_has(bare, "feature.txt"), "pushed");
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.store.session(sid).is_err(), "session closed");
+        assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
+        assert!(!crate::git::branch_exists(&r.repo, tree.branch.as_deref().unwrap()), "merged branch deleted");
+        assert!(r.store.workers().unwrap().is_empty());
+        assert_eq!(said_to_boss(r).iter().filter(|t| t.contains("Judge worker ")).count(), 1, "exactly one judge request");
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_started_issue_session_runs_the_whole_pipeline_with_no_manual_step() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let a = todo(&r, "a", 0, &[]);
+        let sid = started_by_boss(&r, a).await;
+        settle(&r).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(boss_told(&r).await.len(), 1);
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        r.ap.tick();
+        r.ap.tick();
+        assert_shipped_and_closed(&r, a, sid, &tree, &bare).await;
+    }
+
+    #[tokio::test]
+    async fn an_autopilot_picked_issue_runs_the_whole_pipeline_with_no_manual_step() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let (a, sid) = worked_on(&r).await;
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(boss_told(&r).await.len(), 1);
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        r.ap.tick();
+        r.ap.tick();
+        assert_shipped_and_closed(&r, a, sid, &tree, &bare).await;
+    }
+
+    #[tokio::test]
+    async fn a_needs_followup_then_pass_loop_ends_shipped_and_closed() {
+        let r = rig(LOOSE);
+        let bare = bare_remote(&r);
+        let (a, sid) = worked_on(&r).await;
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        r.ap.tick();
+        assert_eq!(boss_told(&r).await.len(), 1);
+        judge(&r, sid, "needs_followup", Some("finish it")).unwrap();
+        r.ap.tick();
+        settle(&r).await;
+        commit_in(&tree.path, "later.txt");
+        r.ap.tick();
+        r.ap.tick();
+        idle(&r, r.boss.unwrap()).await;
+        assert_eq!(boss_told(&r).await.len(), 2, "one judge request per turn end");
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        r.ap.tick();
+        r.ap.tick();
+        assert!(remote_has(&bare, "feature.txt") && remote_has(&bare, "later.txt"));
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.store.session(sid).is_err());
+        assert!(!std::path::Path::new(&tree.path).exists());
+        assert!(!crate::git::branch_exists(&r.repo, tree.branch.as_deref().unwrap()));
     }
 
     #[tokio::test]
