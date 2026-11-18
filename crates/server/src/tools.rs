@@ -241,6 +241,14 @@ impl StoreApi {
     }
 
     /// Whether the user has said sessions may start in `target` without asking again.
+    fn reachable_project(&self, v: &Value, own: Id) -> Result<Id, String> {
+        let target = self.find_project(v)?;
+        if target.id == own || self.standing_permission(target.id) {
+            return Ok(target.id);
+        }
+        Err(format!("acting in {} needs the user's permission, which has not been given", target.name))
+    }
+
     fn standing_permission(&self, target: Id) -> bool {
         self.store.setting(ALLOWED_ANY).ok().flatten().as_deref() == Some("1")
             || self.allowed_projects().contains(&target)
@@ -611,9 +619,13 @@ impl Api for StoreApi {
             }
             "file_issue" => {
                 let title = text(args, "title").ok_or("missing `title`")?;
+                let target = match args.get("project").filter(|v| !v.is_null()) {
+                    Some(v) if !sup => self.reachable_project(v, project)?,
+                    _ => project,
+                };
                 let i = s
                     .add_issue(&NewIssue {
-                        project_id: project,
+                        project_id: target,
                         title,
                         body: text(args, "body").unwrap_or_default(),
                         state: state(args)?,
@@ -629,7 +641,13 @@ impl Api for StoreApi {
             "update_issue" => {
                 let issue = id(args)?;
                 own(issue)?;
+                let move_to = match args.get("project").filter(|v| !v.is_null()) {
+                    Some(v) if sup => Some(self.find_project(v)?.id),
+                    Some(v) => Some(self.reachable_project(v, project)?),
+                    None => None,
+                };
                 let patch = IssuePatch {
+                    project: move_to,
                     title: text(args, "title"),
                     body: text(args, "body"),
                     state: state(args)?,
@@ -640,7 +658,7 @@ impl Api for StoreApi {
                     depends_on: depends_on(args)?,
                 };
                 let i = s.update_issue(issue, &patch).map_err(|e| e.0)?;
-                json!({ "id": i.id, "title": i.title, "state": i.state, "labels": i.labels, "goal": i.goal, "off_vision": i.off_vision, "depends_on": i.depends_on, "waiting_on": i.waiting_on })
+                json!({ "id": i.id, "project": i.project_id, "title": i.title, "state": i.state, "labels": i.labels, "goal": i.goal, "off_vision": i.off_vision, "depends_on": i.depends_on, "waiting_on": i.waiting_on })
             }
             "get_issue" => {
                 let issue = id(args)?;
@@ -1475,6 +1493,34 @@ mod tests {
     }
 
     #[test]
+    fn file_issue_names_another_project_only_with_the_start_session_grant_and_never_ignores_it() {
+        let b = boss();
+        let other = b.s.add_project("other", "/b", Some("main"), None).unwrap();
+        let file = json!({"project": other.id, "title": "elsewhere"});
+        let e = b.api.call("file_issue", &file, b.worker).unwrap_err();
+        assert!(e.contains("permission"), "{e}");
+        assert!(b.s.issues().unwrap().iter().all(|i| i.title != "elsewhere"), "nothing filed anywhere");
+        b.s.set_setting(ALLOWED_PROJECTS, &json!([other.id]).to_string()).unwrap();
+        let out = b.api.call("file_issue", &file, b.worker).unwrap();
+        let filed = b.s.issue(out["filed"].as_i64().unwrap()).unwrap();
+        assert_eq!(filed.project_id, other.id);
+        let own = b.api.call("file_issue", &json!({"project": b.project, "title": "home"}), b.worker).unwrap();
+        assert_eq!(b.s.issue(own["filed"].as_i64().unwrap()).unwrap().project_id, b.project);
+    }
+
+    #[test]
+    fn update_issue_moves_an_issue_to_another_project_for_the_supervisor() {
+        let b = boss();
+        let other = b.s.add_project("other", "/b", Some("main"), None).unwrap();
+        let moved = b.api.call("update_issue", &json!({"id": b.issue, "project": other.id}), b.boss).unwrap();
+        assert_eq!(moved["project"], json!(other.id));
+        assert_eq!(b.s.issue(b.issue).unwrap().project_id, other.id);
+        let e = b.api.call("update_issue", &json!({"id": b.issue, "project": b.project}), b.worker).unwrap_err();
+        assert!(!e.is_empty());
+        assert_eq!(b.s.issue(b.issue).unwrap().project_id, other.id);
+    }
+
+    #[test]
     fn get_vision_and_the_goal_fields_work_in_the_tools() {
         let b = boss();
         assert_eq!(b.api.call("get_vision", &json!({"project": b.project}), b.boss).unwrap()["vision"], Value::Null);
@@ -1732,11 +1778,11 @@ mod tests {
             .unwrap();
 
         assert!(api.call("read_session", &json!({"id": b.id.to_string()}), a.id).is_err());
-        assert!(api.call("file_issue", &json!({"title": "x", "project": q.id}), a.id).is_ok());
+        assert!(api.call("file_issue", &json!({"title": "x", "project": q.id}), a.id).is_err());
         assert_eq!(
             s.issues().unwrap().iter().filter(|i| i.project_id == q.id).count(),
             0,
-            "a normal session ignores `project` and files in its own"
+            "a normal session without the grant files nowhere else"
         );
     }
 

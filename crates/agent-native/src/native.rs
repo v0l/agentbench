@@ -386,7 +386,7 @@ fn agentbench_specs() -> Vec<Spec> {
             object(
                 json!({
                     "title": string("One line"),
-                    "project": string("Supervisor chat only: the project to file it in, by name or id"),
+                    "project": string("The project to file it in, by name or id. Another project than your own needs the user's permission, as for start_session; without it the call fails"),
                     "body": string("Details, steps, what done looks like"),
                     "labels": labels_schema(),
                     "state": string("backlog (default), todo, doing, review or done"),
@@ -404,6 +404,7 @@ fn agentbench_specs() -> Vec<Spec> {
             object(
                 json!({
                     "id": id("The issue number"),
+                    "project": string("Move the issue to this project, by name or id (goal is cleared)"),
                     "state": string("backlog, todo, doing, review or done"),
                     "title": string("A new title"),
                     "body": string("A new description"),

@@ -1134,6 +1134,17 @@ impl Store {
     pub fn update_issue(&self, id: Id, patch: &IssuePatch) -> Result<Issue> {
         let mut issue = self.issue(id)?;
         let was_done = issue.state == IssueState::Done;
+        if let Some(project) = patch.project.filter(|p| *p != issue.project_id) {
+            self.project(project)?;
+            let db = self.db();
+            db.execute(
+                "UPDATE issues SET project_id = ?1, goal = NULL WHERE id = ?2",
+                params![project, id],
+            )?;
+            drop(db);
+            issue.project_id = project;
+            issue.goal = None;
+        }
         if let Some(deps) = &patch.depends_on {
             self.set_deps(id, deps)?;
         }
