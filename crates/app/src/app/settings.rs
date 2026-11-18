@@ -156,9 +156,16 @@ impl App {
                                 providers = true;
                             }
                             if st.supervisor_loaded {
-                                row_help(ui, "supervisor", "The model level or name the supervisor chat runs on when a provider does not set one. Empty uses high.", |ui| {
+                                let about = "The model level or name the supervisor chat runs on when a provider does not set one. Empty uses high.";
+                                if ui.ctx().content_rect().width() < 720.0 {
+                                    ui.add(egui::Label::new(egui_bench::text::legend("supervisor")).wrap());
                                     field(ui, &mut st.supervisor_model, "high");
-                                });
+                                    hint(ui, about);
+                                } else {
+                                    row_help(ui, "supervisor", about, |ui| {
+                                        field(ui, &mut st.supervisor_model, "high");
+                                    });
+                                }
                             }
                         });
                         ui.add_space(14.0);
