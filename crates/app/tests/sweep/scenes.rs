@@ -425,7 +425,7 @@ fn s_issues(r: &Rich, cfg: Cfg) -> Built {
 fn s_issue_detail(r: &Rich, cfg: Cfg) -> Built {
     let mut h = open_rich(r, cfg);
     h.state_mut().set_issues_first(true);
-    h.state_mut().open_issue(r.deep_issue);
+    h.state_mut().open_issue_pane(r.deep_issue);
     h.run_steps(5);
     built(h)
 }

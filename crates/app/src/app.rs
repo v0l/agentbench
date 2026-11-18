@@ -2619,6 +2619,11 @@ impl App {
         self.scope = Scope::Everything;
     }
 
+    pub fn open_issue_pane(&mut self, id: Id) {
+        self.detail = Some(id);
+        self.tab = Tab::Issues;
+    }
+
     pub fn open_issue(&mut self, id: Id) {
         self.issue = Some(id);
     }
@@ -2718,22 +2723,28 @@ impl App {
         let mut labels: Vec<String> = all.iter().flat_map(|i| i.labels.clone()).collect();
         labels.sort();
         labels.dedup();
-        ui.horizontal(|ui| {
+        let narrow = self.narrow;
+        let filters = |sort: &mut Sort, group: &mut Group, label: &mut String, query: &mut String, ui: &mut Ui| {
             ui.allocate_ui(Vec2::new(150.0, KEY_H), |ui| {
-                choice(ui, "sort", &mut self.sort, Sort::ALL.map(|s| (s, s.label().to_string())));
+                choice(ui, "sort", sort, Sort::ALL.map(|s| (s, s.label().to_string())));
             });
             ui.allocate_ui(Vec2::new(150.0, KEY_H), |ui| {
-                choice(ui, "group", &mut self.group, Group::ALL.map(|g| (g, g.label().to_string())));
+                choice(ui, "group", group, Group::ALL.map(|g| (g, g.label().to_string())));
             });
             if !labels.is_empty() {
                 ui.allocate_ui(Vec2::new(130.0, KEY_H), |ui| {
                     let options = std::iter::once((String::new(), "all labels".to_string()))
                         .chain(labels.iter().map(|l| (l.clone(), l.clone())));
-                    choice(ui, "label", &mut self.label, options);
+                    choice(ui, "label", label, options);
                 });
             }
-            field(ui, &mut self.query, "search title, text, label, project or agent");
-        });
+            field(ui, query, "search title, text, label, project or agent");
+        };
+        if narrow {
+            ui.horizontal_wrapped(|ui| filters(&mut self.sort, &mut self.group, &mut self.label, &mut self.query, ui));
+        } else {
+            ui.horizontal(|ui| filters(&mut self.sort, &mut self.group, &mut self.label, &mut self.query, ui));
+        }
         ui.add_space(8.0);
         let sessions_now = o.sessions.clone();
         let mut shown: Vec<&Issue> = all
@@ -2775,6 +2786,10 @@ impl App {
                 .collect(),
             Group::Goal => goal_columns(&shown, &visions, &names, everything),
         };
+        if self.narrow {
+            self.phone_board(ui, &columns, &sessions, &names, everything);
+            return;
+        }
         let gap = 10.0;
         let height = ui.available_height();
         let width = ((ui.available_width() - gap * (columns.len().max(1) - 1) as f32)
@@ -2798,6 +2813,36 @@ impl App {
                 }
             });
         });
+    }
+
+    fn phone_board(
+        &mut self,
+        ui: &mut Ui,
+        columns: &[(String, Option<IssueState>, Vec<&Issue>)],
+        sessions: &[Session],
+        names: &HashMap<Id, String>,
+        everything: bool,
+    ) {
+        let key = egui::Id::new("board_column");
+        let wanted = ui.ctx().data(|d| d.get_temp::<String>(key)).unwrap_or_default();
+        let at = columns.iter().position(|c| c.0 == wanted).unwrap_or(0);
+        let mut pick = at;
+        ui.horizontal_wrapped(|ui| {
+            for (i, (label, _, group)) in columns.iter().enumerate() {
+                let text = format!("{label} {}", group.len());
+                let r = tab_chip(ui, &text, VALUE, i == at);
+                if r.clicked() {
+                    pick = i;
+                }
+            }
+        });
+        if pick != at {
+            ui.ctx().data_mut(|d| d.insert_temp(key, columns[pick].0.clone()));
+        }
+        ui.add_space(6.0);
+        if let Some((label, _, group)) = columns.get(pick) {
+            self.board_column(ui, label, group, sessions, names, everything);
+        }
     }
 
     fn board_levels(&mut self, ui: &mut Ui, projects: &[Project]) {
@@ -3101,21 +3146,12 @@ impl App {
 
     fn issue_pane(&mut self, ui: &mut Ui, issue: Issue) {
         let session = self.detail_session().and_then(|sid| self.session_by_id(sid).cloned());
-        ui.horizontal(|ui| {
-            if ui.add(Key::new("board").outline(VALUE)).clicked() {
-                self.detail = None;
-            }
-            Line::new()
-                .value(format!("#{}", crate::hub::untag(issue.id)))
-                .tint(LEGEND)
-                .gap(8.0)
-                .value(&issue.title)
-                .elided(ui);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        let narrow = self.narrow;
+        let controls = |this: &mut Self, ui: &mut Ui| {
                 match &session {
                     Some(s) if s.status.busy() => {
                         if ui.add(Key::new("stop").outline(FAULT)).clicked()
-                            && let Some(c) = &mut self.client
+                            && let Some(c) = &mut this.client
                         {
                             c.interrupt(s.id);
                         }
@@ -3123,7 +3159,7 @@ impl App {
                     _ => {
                         let label = if session.is_some() { "new agent" } else { "start agent" };
                         if ui.add(Key::new(label).solid(READOUT)).clicked() {
-                            self.open_start(Some(&issue));
+                            this.open_start(Some(&issue));
                         }
                     }
                 }
@@ -3134,7 +3170,7 @@ impl App {
                         ("pane-state", issue.id),
                         &mut state,
                         IssueState::ALL.map(|s| (s, s.as_str().to_string())),
-                    ) && let Some(c) = &mut self.client
+                    ) && let Some(c) = &mut this.client
                     {
                         c.update_issue(
                             issue.id,
@@ -3142,8 +3178,24 @@ impl App {
                         );
                     }
                 });
-            });
+        };
+        ui.horizontal(|ui| {
+            if ui.add(Key::new("board").outline(VALUE)).clicked() {
+                self.detail = None;
+            }
+            Line::new()
+                .value(format!("#{}", crate::hub::untag(issue.id)))
+                .tint(LEGEND)
+                .gap(8.0)
+                .value(&issue.title)
+                .elided(ui);
+            if !narrow {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| controls(self, ui));
+            }
         });
+        if narrow {
+            ui.horizontal(|ui| controls(self, ui));
+        }
         ui.add_space(8.0);
         let info_w = if self.narrow { ui.available_width() } else { 340.0 };
         let height = ui.available_height();
