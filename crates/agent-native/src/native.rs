@@ -2505,6 +2505,21 @@ async fn complete(
                 }
             }
             Err(Failure::Transient(e)) => e,
+            Err(Failure::EffortRefused(message)) => {
+                let current = body.get("reasoning_effort").and_then(Value::as_str).unwrap_or("").to_string();
+                let accepted = accepted_efforts(&message).unwrap_or_default();
+                match nearest_effort(&current, &accepted) {
+                    Some(next) if attempt < RETRIES => {
+                        attempt += 1;
+                        body["reasoning_effort"] = json!(next);
+                        io.emit(Event::Warning(format!(
+                            "the server does not accept thinking at {current}; sending the request again at {next} ({attempt}/{RETRIES})"
+                        )));
+                        continue;
+                    }
+                    _ => return Err(message),
+                }
+            }
             Err(Failure::Truncated) => {
                 let current = body.get("reasoning_effort").and_then(Value::as_str).unwrap_or("");
                 match calmer(current) {
@@ -2629,6 +2644,37 @@ enum Failure {
     Fatal(String),
     /// The reply ran into the server's output limit, usually because thinking used it all.
     Truncated,
+    EffortRefused(String),
+}
+
+fn body_has_effort(body: &Value) -> bool {
+    body.get("reasoning_effort").is_some()
+}
+
+fn accepted_efforts(message: &str) -> Option<Vec<String>> {
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("effort") && !lower.contains("supported types") {
+        return None;
+    }
+    let tail = lower.split_once("supported")?.1;
+    let tail = tail.split_once(" are ").or_else(|| tail.split_once(':'))?.1;
+    let found: Vec<String> = tail
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| agentbench_core::EFFORTS.contains(w))
+        .map(str::to_string)
+        .collect();
+    (!found.is_empty()).then_some(found)
+}
+
+fn nearest_effort(current: &str, accepted: &[String]) -> Option<&'static str> {
+    let rank = |e: &str| agentbench_core::EFFORTS.iter().position(|x| *x == e);
+    let want = rank(current)? as i64;
+    accepted
+        .iter()
+        .filter(|a| a.as_str() != current)
+        .filter_map(|a| Some((rank(a)?, a)))
+        .min_by_key(|(r, _)| ((*r as i64 - want).abs(), -(*r as i64)))
+        .and_then(|(r, _)| agentbench_core::EFFORTS.get(r).copied())
 }
 
 const OUTPUT_LIMIT: &str = "the model hit its output limit before it finished, even with less thinking; raise the limit on the server";
@@ -2674,7 +2720,9 @@ async fn attempt_once(
             let retry_after_ms = crate::quota::retry_after_ms(&headers, &text);
             return Err(Failure::Limited { message: e, retry_after_ms });
         }
-        return Err(if status.is_server_error() && status.as_u16() != 500 {
+        return Err(if status.as_u16() == 400 && accepted_efforts(&e).is_some() && body_has_effort(body) {
+            Failure::EffortRefused(e)
+        } else if status.is_server_error() && status.as_u16() != 500 {
             Failure::Transient(e)
         } else {
             Failure::Fatal(e)
@@ -5741,6 +5789,58 @@ for line in sys.stdin:
             io.events().iter().any(|e| matches!(e, Event::Usage(u) if u.effort == "minimal")),
             "the status line is told the effort"
         );
+    }
+
+    #[tokio::test]
+    async fn a_400_naming_the_accepted_efforts_is_retried_with_the_nearest_accepted_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (seen, asked) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if s.read(&mut byte).unwrap_or(0) != 1 {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let text = String::from_utf8_lossy(&head).to_lowercase();
+                let len = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()))
+                    .unwrap_or(0);
+                let mut body = vec![0u8; len];
+                let _ = s.read_exact(&mut body);
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let effort = parsed["reasoning_effort"].as_str().unwrap_or("").to_string();
+                let _ = seen.send(effort.clone());
+                if effort == "high" {
+                    let msg = r#"{"error":{"message":"Unsupported reasoning effort. Supported types are xhigh, medium, low"}}"#;
+                    let _ = s.write_all(format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{msg}", msg.len()).as_bytes());
+                    continue;
+                }
+                let sse = format!("data: {}\n\ndata: [DONE]\n\n", say("done"));
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}", sse.len()).as_bytes());
+            }
+        });
+        let native = Native::new(Model { url, model: "m".into(), effort: "high".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        assert_eq!(asked.recv().unwrap(), "high");
+        assert_eq!(asked.recv().unwrap(), "xhigh");
+        assert!(io.events().iter().any(|e| matches!(e, Event::Text { delta } if delta == "done")));
+        assert!(io.events().iter().any(|e| matches!(e, Event::Warning(n) if n.contains("xhigh"))));
+    }
+
+    #[test]
+    fn the_nearest_accepted_effort_prefers_the_higher_on_a_tie() {
+        assert_eq!(nearest_effort("high", &["xhigh".into(), "medium".into(), "low".into()]), Some("xhigh"));
+        assert_eq!(nearest_effort("minimal", &["medium".into(), "high".into()]), Some("medium"));
+        assert_eq!(nearest_effort("high", &[]), None);
     }
 
     #[tokio::test]
