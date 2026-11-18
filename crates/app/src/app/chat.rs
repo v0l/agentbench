@@ -458,10 +458,8 @@ impl App {
         let mut toggle_open = false;
         ui.add_space(4.0);
         section_panel(ui, |ui| {
-            ui.horizontal(|ui| {
-                let arrow = ui.add(Key::new(if open { "v" } else { ">" }).outline(VALUE));
-                arrow.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "expand supervisor panels"));
-                toggle_open = arrow.clicked();
+            let narrow = self.narrow;
+            let status_line = |ui: &mut Ui| {
                 Line::new()
                     .legend("autopilot")
                     .size(10.0)
@@ -471,20 +469,37 @@ impl App {
                     .size(11.0)
                     .tint(if a.enabled { READOUT } else { VALUE })
                     .elided(ui);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let label = if a.enabled { "pause" } else { "resume" };
-                    let key = ui.add(Key::new(label).outline(if a.enabled { FAULT } else { VALUE }));
-                    key.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "autopilot toggle")
-                    });
-                    flip = key.clicked();
-                    let more = ui.add(Key::new(if levels_open { "hide levels" } else { "levels" }).outline(VALUE));
-                    more.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "automation levels")
-                    });
-                    toggle_levels = more.clicked();
+            };
+            let mut keys = |ui: &mut Ui| {
+                let label = if a.enabled { "pause" } else { "resume" };
+                let key = ui.add(Key::new(label).outline(if a.enabled { FAULT } else { VALUE }));
+                key.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "autopilot toggle")
                 });
+                flip = key.clicked();
+                let more = ui.add(Key::new(if levels_open { "hide levels" } else { "levels" }).outline(VALUE));
+                more.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "automation levels")
+                });
+                toggle_levels = more.clicked();
+            };
+            ui.horizontal(|ui| {
+                let arrow = ui.add(Key::new(if open { "v" } else { ">" }).outline(VALUE));
+                arrow.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "expand supervisor panels"));
+                toggle_open = arrow.clicked();
+                if narrow {
+                    status_line(ui);
+                } else {
+                    status_line(ui);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        keys(ui);
+                    });
+                }
             });
+            if narrow {
+                ui.horizontal(|ui| keys(ui));
+            }
             if open || levels_open {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
