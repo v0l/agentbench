@@ -74,34 +74,25 @@ class WatchService : Service() {
 
     private fun loop() {
         var failures = 0
+        val pacing = Pacing()
         while (running) {
             val cfg = Config(this)
             if (!cfg.ready) {
                 stopSelf()
                 return
             }
-            if (cfg.cursor == 0L) {
-                cfg.cursor = Watcher.check(this, cfg) ?: 0
-            }
-            val r = Net.get(cfg, "/api/changes?since=${cfg.cursor}&wait=25", 30_000)
-            if (r == null) {
+            val gap = pacing.delayBeforeNext(System.currentTimeMillis())
+            if (gap > 0) Net.sleep(gap)
+            pacing.started(System.currentTimeMillis())
+            if (!Watcher.sync(this, cfg, 25)) {
                 val wait = BACKOFF[minOf(failures, BACKOFF.size - 1)]
                 failures += 1
                 note(if (failures > BACKOFF.size) "offline, retrying every ${wait}s" else "reconnecting in ${wait}s")
                 Net.sleep(wait * 1000L)
                 continue
             }
-            if (failures > 0) Watcher.check(this, cfg)
             failures = 0
             note("connected")
-            val cursor = r.optLong("cursor", cfg.cursor)
-            val changes = r.optJSONArray("changes")
-            if (changes != null && changes.length() > 0) {
-                var sessions = false
-                for (i in 0 until changes.length()) if (changes.getJSONObject(i).optString("kind") == "session") sessions = true
-                if (sessions) Watcher.check(this, cfg)
-            }
-            cfg.cursor = cursor
         }
     }
 
@@ -134,7 +125,7 @@ class SyncJob : JobService() {
             val cfg = Config(this)
             if (cfg.ready) {
                 Watcher.channels(this)
-                Watcher.check(this, cfg)
+                Watcher.sync(this, cfg, 0)
             }
             jobFinished(p, false)
         }.start()

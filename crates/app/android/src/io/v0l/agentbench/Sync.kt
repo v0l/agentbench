@@ -39,6 +39,18 @@ class Config(ctx: Context) {
     var known: String
         get() = seen.getString("known", "").orEmpty()
         set(v) = seen.edit().putString("known", v).apply()
+
+    var epoch: Long
+        get() = seen.getLong("epoch", 0)
+        set(v) = seen.edit().putLong("epoch", v).apply()
+
+    var feedCursor: Long
+        get() = seen.getLong("feed_cursor", 0)
+        set(v) = seen.edit().putLong("feed_cursor", v).apply()
+
+    var legacy: Boolean
+        get() = seen.getBoolean("legacy", false)
+        set(v) = seen.edit().putBoolean("legacy", v).apply()
 }
 
 object Net {
@@ -63,10 +75,9 @@ object Net {
         c.setRequestProperty("Authorization", "Bearer ${cfg.token}")
         open = c
         try {
-            if (c.responseCode == 200) JSONObject(c.inputStream.bufferedReader().readText()) else null
+            if (c.responseCode == 200) JSONObject(c.inputStream.bufferedReader().readText()) else { c.errorStream?.close(); null }
         } finally {
             open = null
-            c.disconnect()
         }
     } catch (e: Exception) {
         null
@@ -107,7 +118,80 @@ object Watcher {
         }
     }
 
-    /** Compare the server's chats with what we knew and notify. Returns the server's cursor. */
+    private fun load(cfg: Config): Map<String, Row>? {
+        val o = runCatching { JSONObject(cfg.known) }.getOrNull() ?: return null
+        if (!o.has("v2")) return null
+        val out = HashMap<String, Row>()
+        for (id in o.keys()) {
+            if (id == "v2") continue
+            val a = o.optJSONArray(id) ?: continue
+            out[id] = Row(a.optString(0), a.optString(1), a.optString(2))
+        }
+        return out
+    }
+
+    private fun save(cfg: Config, rows: Map<String, Row>) {
+        val o = JSONObject().put("v2", 1)
+        for ((id, r) in rows) o.put(id, JSONArray().put(r.status).put(r.title).put(r.project))
+        cfg.known = o.toString()
+    }
+
+    /**
+     * One round of the watch: ask the server for status changes only and apply them. The first
+     * call, or a cursor the server no longer has, brings one snapshot of ids and statuses; every
+     * later call brings only what changed. Returns false when the server could not be reached.
+     */
+    fun sync(ctx: Context, cfg: Config, waitSecs: Int): Boolean {
+        if (cfg.legacy) return legacy(ctx, cfg)
+        val r = Net.get(
+            cfg,
+            "/api/changes?kinds=attention&since=${cfg.feedCursor}&epoch=${cfg.epoch}&wait=$waitSecs",
+            waitSecs * 1000 + 5_000,
+        ) ?: return false
+        if (!r.has("epoch")) {
+            cfg.legacy = true
+            return legacy(ctx, cfg)
+        }
+        val list = r.optJSONArray("changes") ?: JSONArray()
+        val deltas = ArrayList<Delta>()
+        for (i in 0 until list.length()) {
+            val d = list.getJSONObject(i)
+            deltas.add(
+                Delta(
+                    d.getString("id"),
+                    d.optBoolean("removed", false),
+                    if (d.has("status")) d.getString("status") else null,
+                    if (d.has("title")) d.getString("title") else null,
+                    if (d.has("project")) d.getString("project") else null,
+                )
+            )
+        }
+        val state = AttentionState(load(cfg))
+        val reset = r.optBoolean("reset", false)
+        val events = state.apply(deltas, reset)
+        val show = events.isNotEmpty() && !visible(ctx)
+        val nm = ctx.getSystemService(NotificationManager::class.java)
+        for (e in events) when (e) {
+            is Event.Cancel -> nm.cancel(e.id.hashCode())
+            is Event.Alert -> if (show) when (e.kind) {
+                "needs" -> notify(ctx, ATTENTION, e.id.hashCode(), "${e.project} needs you", e.title, e.id)
+                "failed" -> notify(ctx, ATTENTION, e.id.hashCode(), "${e.project} failed", e.title, e.id)
+                else -> notify(ctx, DONE, e.id.hashCode(), "${e.project} finished", e.title, e.id)
+            }
+        }
+        if (deltas.isNotEmpty() || reset) save(cfg, state.rows)
+        cfg.epoch = r.optLong("epoch", 0)
+        cfg.feedCursor = r.optLong("cursor", 0)
+        return true
+    }
+
+    private fun legacy(ctx: Context, cfg: Config): Boolean {
+        val ok = check(ctx, cfg) != null
+        if (ok) Net.sleep(30_000)
+        return ok
+    }
+
+    /** Legacy path for a server without the attention feed: the full overview. */
     fun check(ctx: Context, cfg: Config): Long? {
         val o = Net.get(cfg, "/api/overview", 20_000) ?: return null
         val sessions = o.optJSONArray("sessions") ?: JSONArray()
