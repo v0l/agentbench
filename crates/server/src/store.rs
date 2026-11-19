@@ -711,6 +711,23 @@ impl Store {
         Ok(self.db().query_row("SELECT COALESCE(MAX(id), 0) FROM changes", [], |r| r.get(0))?)
     }
 
+    pub fn attention_rows(&self) -> Result<Vec<crate::attention::Row>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT s.id, s.status, s.title, COALESCE(p.name, '') FROM sessions s
+             LEFT JOIN projects p ON p.id = s.project_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::attention::Row {
+                id: r.get(0)?,
+                status: r.get(1)?,
+                title: r.get(2)?,
+                project: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn changes_since(&self, cursor: Id) -> Result<Vec<(Id, String, String)>> {
         let db = self.db();
         let mut stmt = db

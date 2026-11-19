@@ -82,6 +82,7 @@ pub struct Runner {
     titles: Option<Titles>,
     pub base: Arc<Mutex<Base>>,
     pub changed: Arc<Notify>,
+    pub attention: Arc<crate::attention::Attention>,
     pub terminals: crate::terminal::Terminals,
     pub quotas: crate::quota::Quotas,
     /// This runner, as the tracker tools see it, for starting and messaging sessions.
@@ -132,6 +133,7 @@ impl Runner {
             titles: None,
             base: Arc::new(Mutex::new(Base::default())),
             changed,
+            attention: Default::default(),
             terminals: Default::default(),
             quotas: Default::default(),
             me,

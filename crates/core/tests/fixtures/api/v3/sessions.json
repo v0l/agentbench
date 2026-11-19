@@ -1,0 +1,33 @@
+[
+  {
+    "agent": "echo",
+    "agent_session": null,
+    "created_at": 1795082533552,
+    "cwd": "/tmp/.tmpupUemH/demo",
+    "effort": null,
+    "id": "5c21e26d-9b4f-4cfd-b65f-48ba02de46ec",
+    "issue_id": null,
+    "model": null,
+    "parent": null,
+    "project_id": 1,
+    "status": "idle",
+    "title": "hello",
+    "updated_at": 1795082533556,
+    "usage": {
+      "bash_edits": 0,
+      "cache_read_tokens": 0,
+      "context": 0,
+      "cost_usd": 0.0,
+      "effort": "",
+      "file_edits": 0,
+      "host": "",
+      "input_tokens": 0,
+      "lsp": [],
+      "model": "",
+      "output_tokens": 0,
+      "turns": 0,
+      "window": 0
+    },
+    "worktree_id": 1
+  }
+]

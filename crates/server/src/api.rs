@@ -393,9 +393,37 @@ struct Since {
     since: Id,
     #[serde(default)]
     wait: Option<u64>,
+    #[serde(default)]
+    kinds: Option<String>,
+    #[serde(default)]
+    epoch: Option<u64>,
+}
+
+const ATTENTION_SETTLE: Duration = Duration::from_millis(400);
+
+async fn attention_feed(api: &Api, q: &Since) -> Result<serde_json::Value, StoreError> {
+    let store = api.runner.store();
+    let wait = Duration::from_secs(q.wait.unwrap_or(0)).min(LONG_POLL);
+    let deadline = tokio::time::Instant::now() + wait;
+    let since = q.since.max(0) as u64;
+    loop {
+        let notified = api.runner.changed.notified();
+        api.runner.attention.refresh(store.attention_rows()?);
+        let feed = api.runner.attention.feed(since, q.epoch);
+        if feed.wakes() || tokio::time::Instant::now() >= deadline {
+            return Ok(feed.json());
+        }
+        if tokio::time::timeout_at(deadline, notified).await.is_ok() {
+            tokio::time::sleep(ATTENTION_SETTLE.min(deadline - tokio::time::Instant::now())).await;
+        }
+    }
 }
 
 async fn changes(State(api): State<Api>, Query(q): Query<Since>) -> Reply<serde_json::Value> {
+    if q.kinds.as_deref().map(|k| k.split(',').any(|k| k.trim() == "attention")).unwrap_or(false) {
+        return Ok(Json(attention_feed(&api, &q).await?));
+    }
+
     let store = api.runner.store();
     let wait = Duration::from_secs(q.wait.unwrap_or(0)).min(LONG_POLL);
     if !wait.is_zero() && store.cursor()? <= q.since {
@@ -2757,6 +2785,62 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(3), waiter).await.unwrap().unwrap();
         assert!(woke["cursor"].as_i64().unwrap() > cursor);
         assert_eq!(woke["changes"][0]["kind"], "issue");
+    }
+
+    #[tokio::test]
+    async fn the_attention_poll_ignores_messages_and_wakes_on_waiting() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let store = f.api.runner.store();
+        let wt = store.worktrees(Some(pid)).unwrap()[0].id;
+        let s = store.add_session(wt, "echo", "chat", None, None).unwrap();
+        let (_, first) = call(&f.app, "GET", "/api/changes?kinds=attention", None, T).await;
+        assert_eq!(first["reset"], true);
+        assert_eq!(first["changes"].as_array().unwrap().len(), 1);
+        assert_eq!(first["changes"][0]["title"], "chat");
+        let (cursor, epoch) = (first["cursor"].as_i64().unwrap(), first["epoch"].as_u64().unwrap());
+        let uri = format!("/api/changes?kinds=attention&since={cursor}&epoch={epoch}&wait=1");
+        let app2 = f.app.clone();
+        let u2 = uri.clone();
+        let waiter = tokio::spawn(async move { call(&app2, "GET", &u2, None, T).await });
+        for i in 0..5 {
+            store.add_message(s.id, &agentbench_core::Entry::Notice { text: format!("m{i}") }).unwrap();
+            f.api.runner.changed.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let (_, quiet) = waiter.await.unwrap();
+        assert_eq!(quiet["changes"].as_array().unwrap().len(), 0, "{quiet}");
+        assert_eq!(quiet["reset"], false);
+
+        let uri = format!("/api/changes?kinds=attention&since={cursor}&epoch={epoch}&wait=10");
+        let app2 = f.app.clone();
+        let waiter = tokio::spawn(async move { call(&app2, "GET", &uri, None, T).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        store.set_status(s.id, agentbench_core::SessionStatus::Waiting).unwrap();
+        f.api.runner.changed.notify_waiters();
+        let (_, woke) = tokio::time::timeout(Duration::from_secs(3), waiter).await.unwrap().unwrap();
+        assert_eq!(
+            woke["changes"],
+            json!([{"kind": "attention", "id": s.id.to_string(), "status": "waiting"}])
+        );
+        assert!(woke.to_string().len() < 300, "{woke}");
+    }
+
+    #[tokio::test]
+    async fn the_attention_feed_for_50_sessions_stays_small() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let store = f.api.runner.store();
+        let wt = store.worktrees(Some(pid)).unwrap()[0].id;
+        for i in 0..50 {
+            let s = store.add_session(wt, "echo", &format!("chat number {i}"), None, None).unwrap();
+            store.set_status(s.id, agentbench_core::SessionStatus::Running).unwrap();
+        }
+        let (_, snapshot) = call(&f.app, "GET", "/api/changes?kinds=attention", None, T).await;
+        assert_eq!(snapshot["changes"].as_array().unwrap().len(), 50);
+        assert!(snapshot.to_string().len() < 8_000, "{}", snapshot.to_string().len());
+        let text = snapshot.to_string();
+        assert!(!text.contains("question") && !text.contains("entry"));
     }
 
     #[tokio::test]

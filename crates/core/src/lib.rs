@@ -1909,8 +1909,9 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 2;
+pub const API_VERSION: u32 = 3;
 pub const API_ISSUE_DEPS: u32 = 2;
+pub const API_ATTENTION_FEED: u32 = 3;
 pub const MIN_CLIENT_API: u32 = 1;
 pub const API_RULE: &str = "API changes are additive: new fields get serde defaults, never rename or remove a field or enum variant the app decodes, never change a field's type, and add no required request field. A break bumps API_VERSION and MIN_CLIENT_API on purpose and the PR says so. Details in AGENTS.md.";
 pub const API_HEADER: &str = "x-agentbench-api";
