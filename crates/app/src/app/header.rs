@@ -47,14 +47,20 @@ impl App {
         let screen = ctx.content_rect();
         let top = 0.0;
         let before = (self.project, self.session, self.tab);
-        let width = (screen.width() * 0.86).min(420.0);
+        let width = (screen.width() - 48.0).clamp(0.0, 360.0);
         let id = egui::Id::unique("drawer");
         let m = egui::Modal::new(id)
             .backdrop_color(egui::Color32::from_black_alpha(150))
-            .area(egui::Modal::default_area(id).anchor(egui::Align2::LEFT_TOP, Vec2::new(0.0, top)))
+            .area(egui::Modal::default_area(id).constrain(false).anchor(egui::Align2::LEFT_TOP, Vec2::new(0.0, top)))
             .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(8))
             .show(ctx, |ui| {
                 ui.set_width(width - 16.0);
+                ui.set_max_width(width - 16.0);
+                let inner = ui.max_rect();
+                ui.set_clip_rect(ui.clip_rect().intersect(egui::Rect::from_min_max(
+                    egui::pos2(0.0, inner.top()),
+                    egui::pos2(width, inner.bottom()),
+                )));
                 ui.set_height(screen.height() - top - 16.0);
                 // The fleet's status, which has no room in a phone's header.
                 let row = Vec2::new(ui.available_width(), 22.0);

@@ -951,6 +951,101 @@ fn on_a_phone_the_open_drawer_is_fully_on_screen() {
     assert!(off.is_empty(), "widgets outside the screen: {off:?}");
 }
 
+#[test]
+fn on_a_phone_the_drawer_holds_real_long_chips_and_titles() {
+    let rig = real_world_rig();
+    let second = rig_with(Vec::new());
+    let waiting = second.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    second.store.set_status(waiting.id, agentbench_core::SessionStatus::Waiting).unwrap();
+    second.store.set_title(waiting.id, LONG_TITLES[1], true).unwrap();
+    let servers = serde_json::json!([{"slot": 1, "name": "workstation-in-the-basement-with-a-long-name", "url": second.url, "token": TOKEN}]);
+    let mut failures = Vec::new();
+    for (size, scale, ppp) in [
+        ([360.0, 800.0], 1.0, 1.0),
+        ([393.0, 852.0], 1.0, 1.0),
+        ([412.0, 915.0], 1.0, 1.0),
+        ([360.0, 800.0], 1.3, 1.0),
+        ([393.0, 852.0], 1.3, 1.0),
+        ([412.0, 915.0], 1.3, 1.0),
+        ([393.0, 873.0], 1.0, 2.75),
+        ([393.0, 873.0], 1.3, 2.75),
+        ([320.0, 640.0], 1.0, 1.0),
+        ([320.0, 640.0], 1.3, 1.0),
+    ] {
+        let cfg = Cfg { size, scale, ppp, insets: [0.0, 28.0, 0.0, 20.0] };
+        let mut h = harness_cfg(
+            vec![
+                ("url".into(), rig.url.clone()),
+                ("server_name".into(), "desktop-workstation-with-a-very-long-name".into()),
+                ("servers".into(), servers.to_string()),
+            ],
+            cfg,
+        );
+        until(&mut h, "the overview", |h| h.state().overview().is_some_and(|o| o.sessions.len() >= 26));
+        h.run_steps(10);
+        until(&mut h, "the quota", |h| {
+            h.state().overview().and_then(|o| o.usage.as_ref()).is_some_and(|u| u.quotas.len() >= 2)
+        });
+        h.run_steps(3);
+        h.get_by_label("projects").click();
+        h.run_steps(5);
+        assert!(h.state().drawer_open());
+        shot(&mut h, &format!("phone-drawer-real-{}x{}-{scale}-{ppp}", size[0], size[1]));
+        let drawer_w = (size[0] - 48.0).min(360.0);
+        for problem in outside_drawer(&h, size, drawer_w) {
+            failures.push(format!("{size:?} x{scale} ppp{ppp}: {problem}"));
+        }
+        for problem in wrapped_chips(&h, drawer_w) {
+            failures.push(format!("{size:?} x{scale} ppp{ppp}: {problem}"));
+        }
+    }
+    assert!(failures.is_empty(), "{} problems:\n{}", failures.len(), failures.join("\n"));
+}
+
+fn outside_drawer(h: &Harness<'_, App>, size: [f32; 2], drawer_w: f32) -> Vec<String> {
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size[0], size[1]));
+    let areas: Vec<egui::Rect> = h.ctx.memory(|m| {
+        m.areas()
+            .visible_layer_ids()
+            .into_iter()
+            .filter(|l| l.order == egui::Order::Foreground)
+            .filter_map(|l| m.area_rect(l.id))
+            .collect()
+    });
+    let mut out = Vec::new();
+    for a in areas {
+        let is_drawer = a.width() < size[0] - 1.0;
+        if !screen.expand(0.5).contains_rect(a) || is_drawer && (a.width() - drawer_w).abs() > 0.5 {
+            out.push(format!("layer {a:?} on screen {screen:?}, drawer width {drawer_w}"));
+        }
+    }
+    out
+}
+
+fn wrapped_chips(h: &Harness<'_, App>, drawer_w: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in &h.output().shapes {
+        if c.clip_rect.right() <= drawer_w + 1.0 {
+            collect_wrapped(&c.shape, drawer_w, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_wrapped(shape: &egui::epaint::Shape, drawer_w: f32, out: &mut Vec<String>) {
+    match shape {
+        egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| collect_wrapped(s, drawer_w, out)),
+        egui::epaint::Shape::Text(t) => {
+            let text = &t.galley.job.text;
+            let upper = text.chars().any(|c| c.is_alphabetic()) && !text.chars().any(|c| c.is_lowercase());
+            if upper && t.galley.rows.len() > 1 && text.chars().count() <= 24 && t.pos.x < drawer_w {
+                out.push(format!("chip {text:?} wrapped onto {} rows at {:?}", t.galley.rows.len(), t.pos));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn off_screen(h: &Harness<'_, App>, size: [f32; 2]) -> Vec<String> {
     use egui_kittest::kittest::NodeT as _;
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size[0], size[1]));

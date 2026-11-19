@@ -97,7 +97,18 @@ pub fn rig_named(
     model_name: &str,
     extra: Vec<Box<dyn agentbench_server::agent::Agent>>,
 ) -> Rig {
-    let model_name = model_name.to_string();
+    let model = agentbench_server::agent::native::Model {
+        url: model_url.to_string(),
+        model: model_name.to_string(),
+        ..Default::default()
+    };
+    rig_model(model, extra)
+}
+
+pub fn rig_model(
+    model: agentbench_server::agent::native::Model,
+    extra: Vec<Box<dyn agentbench_server::agent::Agent>>,
+) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("demo");
     repo(&main);
@@ -157,7 +168,6 @@ pub fn rig_named(
         output_tokens: None,
         plain: false,
     };
-    let model_url = model_url.to_string();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let models = dir.path().join("models");
     let mut extra = Some(extra);
@@ -166,15 +176,11 @@ pub fn rig_named(
     let addr = listener.local_addr().unwrap();
     {
         let s = store.clone();
-        let model_name = model_name.clone();
+        let model = model.clone();
         let (extra, echo) = (extra.take().unwrap(), echo.take().unwrap());
         rt.spawn(async move {
             let config = agentbench_server::Config {
-                model: agentbench_server::agent::native::Model {
-                    url: model_url.clone(),
-                    model: model_name,
-                    ..Default::default()
-                },
+                model,
                 ..Default::default()
             };
             let model = agentbench_server::agent::native::Shared::new(config.model.clone());
@@ -304,17 +310,31 @@ pub fn click(h: &mut Harness<'_, App>, x: f32, y: f32) {
 }
 
 
-pub fn quota_server(used_pct: u32, resets_in_secs: i64) -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
+pub fn two_quota_server(used_pct: u32, resets_in_secs: i64) -> String {
     let resets = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
         + resets_in_secs;
+    let entry = format!(r#"{{"summary":{{"used_pct":{used_pct},"window":"7d","resets_at":{resets},"exhausted":false}}}}"#);
+    let body = format!(r#"{{"models":{{"code-high":{entry},"code-x-high":{entry}}}}}"#);
+    serve_json(body)
+}
+
+pub fn quota_server(used_pct: u32, resets_in_secs: i64) -> String {
+    let resets = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        + resets_in_secs;
+    serve_json(format!(r#"{{"window":"5h","used_pct":{used_pct},"resets_at":{resets}}}"#))
+}
+
+fn serve_json(body: String) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         use std::io::{Read, Write};
-        let body = format!(r#"{{"window":"5h","used_pct":{used_pct},"resets_at":{resets}}}"#);
         for stream in listener.incoming().flatten() {
             let mut stream = stream;
             let mut buf = [0u8; 4096];
@@ -542,4 +562,73 @@ impl egui::DroppedFile for Dropped {
 pub fn drop_file(h: &mut Harness<'_, App>, name: &str, bytes: Vec<u8>) {
     h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped { path: name.into(), bytes }));
     h.step();
+}
+
+pub const LONG_TITLES: [&str; 8] = [
+    "Merge JSON mode for the structured output path of the native agent, with the grammar cache",
+    "payment-gateway sandbox credentials rotate every night and the integration tests keep failing",
+    "Windows test pass for the installer, the updater and the service wrapper on a clean machine",
+    "Perf: close the gaps in the qwen3-moe and qwen3-next gguf decode path on the Spark",
+    "Keep the directory as data, not as code, so the fleet can be described in one file",
+    "Preempt by swapping KV caches between the two Spark nodes during decode under load",
+    "Review the migration plan for the ledger and its rollback before the Friday deploy window",
+    "Fix on main: the retry storm that happens after a deploy of the api gateway to production",
+];
+
+pub const LONG_BRANCHES: [&str; 3] = [
+    "issue-817-perf-pass-gaps-qwen3-moe-qwen3-next-gguf",
+    "issue-402-something-extremely-long-without-any-break-at-all-so-it-cannot-wrap",
+    "payment-gateway-sandbox-master-merge-candidate-for-release-v0-9-2",
+];
+
+pub fn real_world_rig() -> Rig {
+    use agentbench_core::SessionStatus;
+    let model = agentbench_server::agent::native::Model {
+        url: two_quota_server(64, 7 * 86_400 - 3600),
+        model: "code-high".into(),
+        high: agentbench_server::agent::native::Level {
+            model: "code-x-high".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let rig = rig_model(model, Vec::new());
+    let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    let main = rig.store.main_worktree(project.id).unwrap();
+    for branch in LONG_BRANCHES {
+        worktree_row(&rig, project.id, branch);
+    }
+    let trees = rig.store.worktrees(Some(project.id)).unwrap();
+    let parent = rig.store.add_session(main.id, "native", "Merge JSON mode, working, 14 children", None, None).unwrap();
+    rig.store
+        .add_usage(parent.id, &agentbench_core::Usage { cost_usd: 947.94, turns: 1, ..Default::default() })
+        .unwrap();
+    for i in 0..25 {
+        let tree = &trees[i % trees.len()];
+        let s = rig.store.add_session(tree.id, "native", LONG_TITLES[i % LONG_TITLES.len()], None, None).unwrap();
+        rig.store
+            .set_status(s.id, if i < 9 { SessionStatus::Running } else { SessionStatus::Idle })
+            .unwrap();
+        if i < 14 {
+            rig.store.set_parent(s.id, Some(parent.id)).unwrap();
+        }
+    }
+    rig.store.set_status(parent.id, SessionStatus::Running).unwrap();
+    rig
+}
+
+fn worktree_row(rig: &Rig, project: agentbench_core::Id, branch: &str) {
+    let main = rig.store.worktrees(Some(project)).unwrap().into_iter().find(|w| w.main).unwrap();
+    let dir = std::path::PathBuf::from(&main.path);
+    let target = dir.parent().unwrap().join(format!("demo-{}", &branch[..12.min(branch.len())]));
+    let ok = Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["worktree", "add", "-q", "-b", branch])
+        .arg(&target)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    agentbench_server::projects::sync(&rig.store, project, None).unwrap();
 }

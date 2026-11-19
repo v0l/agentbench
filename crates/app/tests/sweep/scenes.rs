@@ -33,7 +33,7 @@ pub fn rich() -> &'static Rich {
     RICH.get_or_init(fixture)
 }
 
-const TITLES: [&str; 12] = [
+const TITLES: [&str; 20] = [
     "Preempt by swapping KV caches between the two Spark nodes during decode",
     "JSON mode for the structured output path",
     "issue-402-something-extremely-long-without-any-break-at-all-so-it-cannot-wrap",
@@ -46,6 +46,14 @@ const TITLES: [&str; 12] = [
     "Why does the retry storm happen after a deploy of the api",
     "master",
     "Same 2h ago",
+    LONG_TITLES[0],
+    LONG_TITLES[1],
+    LONG_TITLES[2],
+    LONG_TITLES[3],
+    LONG_TITLES[4],
+    LONG_TITLES[5],
+    LONG_TITLES[6],
+    LONG_TITLES[7],
 ];
 
 fn fixture() -> Rich {
