@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+
 mod common;
 use common::*;
+
 
 #[test]
 fn the_tree_issues_and_a_transcript() {
@@ -57,6 +59,7 @@ fn on_a_phone_the_status_line_keeps_the_model_context_and_language_servers() {
     shot(&mut h, "status-line-phone");
     h.get_by_label("send");
 }
+
 
 #[test]
 fn sending_from_the_window_runs_the_agent() {
@@ -135,8 +138,8 @@ fn a_server_that_never_answers_is_offline_not_a_hang() {
 #[test]
 fn a_network_switch_mid_poll_reconnects_on_a_fresh_connection() {
     use std::io::{Read, Write};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     let rig = rig();
     let upstream = rig.url.clone();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -232,7 +235,9 @@ fn the_header_shows_reconnecting_while_the_server_is_gone_and_connected_after() 
     assert!(h.query_by_label_contains("reconnecting").is_none());
     open.store(false, std::sync::atomic::Ordering::SeqCst);
     h.state_mut().drop_connection();
-    until(&mut h, "reconnecting", |h| h.query_by_label_contains("reconnecting").is_some());
+    until(&mut h, "reconnecting", |h| {
+        h.query_by_label_contains("reconnecting").is_some()
+    });
     shot(&mut h, "reconnecting");
     open.store(true, std::sync::atomic::Ordering::SeqCst);
     until(&mut h, "connected again", |h| {
@@ -269,17 +274,15 @@ fn the_window_starts_its_own_server_by_default() {
     let rig = rig();
     let url = format!("http://{}", rig.url);
     let _build = build_lock();
-    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(
-        move |cc| {
-            let url = url.clone();
-            let local = agentbench::LocalServer {
-                start: Box::new(move || {
-                    Ok(agentbench::client::Server { url: url.clone(), token: TOKEN.into() })
-                }),
-            };
-            App::with_local(&cc.egui_ctx, None, None, Some(local))
-        },
-    );
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
+        let url = url.clone();
+        let local = agentbench::LocalServer {
+            start: Box::new(move || {
+                Ok(agentbench::client::Server { url: url.clone(), token: TOKEN.into() })
+            }),
+        };
+        App::with_local(&cc.egui_ctx, None, None, Some(local))
+    });
     drop(_build);
     assert!(h.state().is_local());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
@@ -687,8 +690,7 @@ fn a_judge_message_is_folded_until_clicked() {
         .add_message(
             s.id,
             &Entry::User {
-                text: "#680 Server tab per-request table\n\nJUDGE BODY the worker says it is done"
-                    .into(),
+                text: "#680 Server tab per-request table\n\nJUDGE BODY the worker says it is done".into(),
                 attachments: vec![],
                 from: vec!["judge".into()],
             },
@@ -924,10 +926,7 @@ fn on_a_phone_the_open_drawer_is_fully_on_screen() {
     let main = rig.store.worktrees(None).unwrap().into_iter().find(|w| w.main).unwrap();
     let first = rig.store.sessions().unwrap()[0].clone();
     rig.store
-        .add_usage(
-            first.id,
-            &agentbench_core::Usage { cost_usd: 6.57, turns: 1, ..Default::default() },
-        )
+        .add_usage(first.id, &agentbench_core::Usage { cost_usd: 6.57, turns: 1, ..Default::default() })
         .unwrap();
     for title in [
         "Preempt by swapping KV caches between the two Spark nodes during decode",
@@ -956,8 +955,7 @@ fn on_a_phone_the_open_drawer_is_fully_on_screen() {
 fn on_a_phone_the_drawer_holds_real_long_chips_and_titles() {
     let rig = real_world_rig();
     let second = rig_with(Vec::new());
-    let waiting =
-        second.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let waiting = second.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     second.store.set_status(waiting.id, agentbench_core::SessionStatus::Waiting).unwrap();
     second.store.set_title(waiting.id, LONG_TITLES[1], true).unwrap();
     let servers = serde_json::json!([{"slot": 1, "name": "workstation-in-the-basement-with-a-long-name", "url": second.url, "token": TOKEN}]);
@@ -983,9 +981,7 @@ fn on_a_phone_the_drawer_holds_real_long_chips_and_titles() {
             ],
             cfg,
         );
-        until(&mut h, "the overview", |h| {
-            h.state().overview().is_some_and(|o| o.sessions.len() >= 26)
-        });
+        until(&mut h, "the overview", |h| h.state().overview().is_some_and(|o| o.sessions.len() >= 26));
         h.run_steps(10);
         until(&mut h, "the quota", |h| {
             h.state().overview().and_then(|o| o.usage.as_ref()).is_some_and(|u| u.quotas.len() >= 2)
@@ -1041,15 +1037,9 @@ fn collect_wrapped(shape: &egui::epaint::Shape, drawer_w: f32, out: &mut Vec<Str
         egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| collect_wrapped(s, drawer_w, out)),
         egui::epaint::Shape::Text(t) => {
             let text = &t.galley.job.text;
-            let upper =
-                text.chars().any(|c| c.is_alphabetic()) && !text.chars().any(|c| c.is_lowercase());
-            if upper && t.galley.rows.len() > 1 && text.chars().count() <= 24 && t.pos.x < drawer_w
-            {
-                out.push(format!(
-                    "chip {text:?} wrapped onto {} rows at {:?}",
-                    t.galley.rows.len(),
-                    t.pos
-                ));
+            let upper = text.chars().any(|c| c.is_alphabetic()) && !text.chars().any(|c| c.is_lowercase());
+            if upper && t.galley.rows.len() > 1 && text.chars().count() <= 24 && t.pos.x < drawer_w {
+                out.push(format!("chip {text:?} wrapped onto {} rows at {:?}", t.galley.rows.len(), t.pos));
             }
         }
         _ => {}
@@ -1064,12 +1054,7 @@ fn off_screen(h: &Harness<'_, App>, size: [f32; 2]) -> Vec<String> {
         .filter(|n| n.accesskit_node().bounding_box().is_some())
         .filter(|n| !screen.expand(0.5).contains_rect(n.rect()))
         .map(|n| {
-            format!(
-                "{:?} {:?} {:?}",
-                n.accesskit_node().role(),
-                n.accesskit_node().label(),
-                n.rect()
-            )
+            format!("{:?} {:?} {:?}", n.accesskit_node().role(), n.accesskit_node().label(), n.rect())
         })
         .collect()
 }
@@ -1708,11 +1693,7 @@ fn keyboard_edits_compose_shrink_commit_and_delete_in_the_composer() {
     h.run_steps(2);
     h.event(egui::Event::Text("p".into()));
     h.run_steps(2);
-    assert_eq!(
-        h.state().draft_of(session.id),
-        "say help",
-        "typing lands where the keyboard put the cursor"
-    );
+    assert_eq!(h.state().draft_of(session.id), "say help", "typing lands where the keyboard put the cursor");
     assert_eq!(
         agentbench::system::ime_keyboard(&ctx),
         Some(agentbench::system::ImeText { text: "say help".into(), start: 8, end: 8 }),
@@ -1907,15 +1888,13 @@ fn the_speak_key_sits_in_the_composer_and_says_what_is_missing() {
     // A speech server with no address, so pressing the key never opens a real microphone.
     let url = rig.url.clone();
     let _build = build_lock();
-    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(
-        move |cc| {
-            let mut storage = Mem::default();
-            storage.0.insert("url".into(), url);
-            storage.0.insert("token".into(), TOKEN.into());
-            storage.0.insert("voice_mode".into(), "server".into());
-            App::new(&cc.egui_ctx, Some(&storage), None)
-        },
-    );
+    let mut h = Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
+        let mut storage = Mem::default();
+        storage.0.insert("url".into(), url);
+        storage.0.insert("token".into(), TOKEN.into());
+        storage.0.insert("voice_mode".into(), "server".into());
+        App::new(&cc.egui_ctx, Some(&storage), None)
+    });
     drop(_build);
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     open_home_row(&mut h);
@@ -2091,7 +2070,10 @@ fn the_header_shows_the_quota_and_spend() {
     let mut h = harness(rig.url.clone());
     until(&mut h, "the quota", |h| {
         rig.store.add_usage(first.id, &agentbench_core::Usage::default()).unwrap();
-        h.state().overview().and_then(|o| o.usage.as_ref()).is_some_and(|u| !u.quotas.is_empty())
+        h.state()
+            .overview()
+            .and_then(|o| o.usage.as_ref())
+            .is_some_and(|u| !u.quotas.is_empty())
     });
     rig.store.add_usage(first.id, &usage).unwrap();
     until(&mut h, "the spend", |h| {
@@ -2100,10 +2082,7 @@ fn the_header_shows_the_quota_and_spend() {
     h.run_steps(3);
     let report = h.state().overview().unwrap().usage.clone().unwrap();
     let labels = agentbench::app::usage_labels(&report, None, agentbench_core::now_ms());
-    assert!(
-        labels.iter().any(|(t, hot)| t.starts_with("test-model: 5h 78%, resets ") && *hot),
-        "{labels:?}"
-    );
+    assert!(labels.iter().any(|(t, hot)| t.starts_with("test-model: 5h 78%, resets ") && *hot), "{labels:?}");
     assert!(labels.iter().any(|(t, _)| t.starts_with("$1.25 today")), "{labels:?}");
     shot(&mut h, "quota-header");
 }
@@ -2158,12 +2137,11 @@ fn the_grid_and_its_chats_are_remembered() {
     h.state().store(&mut saved);
     assert_eq!(saved.get_string("grid").as_deref(), Some("2x2"));
     let _build = build_lock();
-    let again =
-        Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(|cc| {
-            saved.0.insert("url".into(), rig.url.clone());
-            saved.0.insert("token".into(), TOKEN.into());
-            App::new(&cc.egui_ctx, Some(&saved), None)
-        });
+    let again = Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(|cc| {
+        saved.0.insert("url".into(), rig.url.clone());
+        saved.0.insert("token".into(), TOKEN.into());
+        App::new(&cc.egui_ctx, Some(&saved), None)
+    });
     drop(_build);
     assert_eq!(again.state().grid(), Grid::Quad);
     assert_eq!(again.state().tile_chat(0), Some(all[0].id));
@@ -2280,6 +2258,7 @@ fn a_reply_has_a_read_aloud_link() {
     shot(&mut h, "read-aloud");
     assert!(h.query_by_label_contains("read aloud").is_some(), "the link sits under the reply");
 }
+
 
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
@@ -2609,7 +2588,9 @@ fn the_add_project_card_shows_its_details_and_accept_adds_the_project() {
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.get_by_label("supervisor").click();
     until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
-    until(&mut h, "the card", |h| h.query_by_label(&format!("accept add project {id}")).is_some());
+    until(&mut h, "the card", |h| {
+        h.query_by_label(&format!("accept add project {id}")).is_some()
+    });
     assert!(h.query_by_label_contains("add project: import newcomer").is_some());
     assert!(h.query_by_label_contains("https://github.com/v0l/newcomer").is_some());
     assert!(h.query_by_label_contains("on main at abcdef12").is_some());
@@ -2630,7 +2611,9 @@ fn rejecting_the_add_project_card_adds_nothing() {
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.get_by_label("supervisor").click();
     until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
-    until(&mut h, "the card", |h| h.query_by_label(&format!("reject add project {id}")).is_some());
+    until(&mut h, "the card", |h| {
+        h.query_by_label(&format!("reject add project {id}")).is_some()
+    });
     h.get_by_label(&format!("reject add project {id}")).click();
     until(&mut h, "the card goes", |h| {
         h.query_by_label(&format!("reject add project {id}")).is_none()
@@ -2740,28 +2723,18 @@ fn the_settings_projects_page_sets_a_level_and_risky_toggles_that_persist() {
     h.run_steps(3);
     assert_eq!(h.state().project_level(project.id), Some((Automation::Delegate, true)));
     h.get_by_label(&format!("{} automation", project.name)).set_value_accesskit(4.0);
-    until(&mut h, "ship saved", |_| {
-        rig.store.project(project.id).unwrap().automation == Some(Automation::Ship)
-    });
+    until(&mut h, "ship saved", |_| rig.store.project(project.id).unwrap().automation == Some(Automation::Ship));
     h.get_by_label(&format!("{} deploy to production", project.name)).click();
     until(&mut h, "deploy on", |_| rig.store.project(project.id).unwrap().risky == [Risky::Deploy]);
     h.get_by_label(&format!("{} automation", project.name)).increment_accesskit();
-    until(&mut h, "full auto", |_| {
-        rig.store.project(project.id).unwrap().automation == Some(Automation::FullAuto)
-    });
+    until(&mut h, "full auto", |_| rig.store.project(project.id).unwrap().automation == Some(Automation::FullAuto));
     h.run_steps(3);
     shot(&mut h, "automation-settings");
     h.get_by_label("default automation").set_value_accesskit(1.0);
-    until(&mut h, "default assist", |h| {
-        h.state().autopilot().is_some_and(|a| a.default_level == Automation::Assist)
-    });
+    until(&mut h, "default assist", |h| h.state().autopilot().is_some_and(|a| a.default_level == Automation::Assist));
     h.get_by_label(&format!("{} use default", project.name)).click();
-    until(&mut h, "back to default", |_| {
-        rig.store.project(project.id).unwrap().automation.is_none()
-    });
-    until(&mut h, "follows assist", |h| {
-        h.state().project_level(project.id) == Some((Automation::Assist, true))
-    });
+    until(&mut h, "back to default", |_| rig.store.project(project.id).unwrap().automation.is_none());
+    until(&mut h, "follows assist", |h| h.state().project_level(project.id) == Some((Automation::Assist, true)));
     assert_eq!(rig.store.project(project.id).unwrap().risky, [Risky::Deploy], "toggles are kept");
 }
 
@@ -2775,16 +2748,11 @@ fn the_supervisor_chat_shows_and_sets_the_levels() {
     h.get_by_label("supervisor").click();
     until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
     h.run_steps(3);
-    assert!(
-        h.query_by_label("automation level delegate").is_some(),
-        "the header names the focused project's level"
-    );
+    assert!(h.query_by_label("automation level delegate").is_some(), "the header names the focused project's level");
     h.get_by_label("automation levels").click();
     h.run_steps(3);
     h.get_by_label(&format!("{} automation", project.name)).set_value_accesskit(0.0);
-    until(&mut h, "manual", |_| {
-        rig.store.project(project.id).unwrap().automation == Some(Automation::Manual)
-    });
+    until(&mut h, "manual", |_| rig.store.project(project.id).unwrap().automation == Some(Automation::Manual));
     until(&mut h, "header follows", |h| h.query_by_label("automation level manual").is_some());
     shot(&mut h, "automation-supervisor");
 }
@@ -2795,29 +2763,18 @@ fn the_all_projects_board_shows_each_projects_level() {
     let rig = rig();
     let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
     rig.store
-        .update_project(
-            project.id,
-            &agentbench_core::ProjectPatch {
-                automation: Some(Some(Automation::Autowork)),
-                ..Default::default()
-            },
-        )
+        .update_project(project.id, &agentbench_core::ProjectPatch { automation: Some(Some(Automation::Autowork)), ..Default::default() })
         .unwrap();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().show_all_projects();
     h.run_steps(3);
     shot(&mut h, "automation-board-chips");
-    assert!(
-        h.query_by_label_contains(&format!("{} autowork", project.name)).is_some(),
-        "the board shows the level"
-    );
+    assert!(h.query_by_label_contains(&format!("{} autowork", project.name)).is_some(), "the board shows the level");
     h.get_by_label("project levels").click();
     h.run_steps(3);
     h.get_by_label(&format!("{} automation", project.name)).decrement_accesskit();
-    until(&mut h, "delegate", |_| {
-        rig.store.project(project.id).unwrap().automation == Some(Automation::Delegate)
-    });
+    until(&mut h, "delegate", |_| rig.store.project(project.id).unwrap().automation == Some(Automation::Delegate));
     shot(&mut h, "automation-board");
 }
 
@@ -3086,6 +3043,7 @@ fn a_waiting_session_on_the_issue_board_carries_the_marker() {
     assert_eq!(marker_count(&h), 2, "one in the side list, one on the issue card");
 }
 
+
 fn chat_server(chat_status: u16, chat_body: &'static str) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -3187,9 +3145,7 @@ fn skipping_the_onboarding_closes_it_and_it_stays_closed() {
     until(&mut h, "the onboarding", |h| h.state().onboarding_open());
     click_label(&mut h, "skip for now");
     assert!(!h.state().onboarding_open());
-    until(&mut h, "it is saved", |_| {
-        rig.store.setting("onboarding").unwrap().as_deref() == Some("skipped")
-    });
+    until(&mut h, "it is saved", |_| rig.store.setting("onboarding").unwrap().as_deref() == Some("skipped"));
     let mut again = harness(rig.url.clone());
     until(&mut again, "the overview", |h| h.state().overview().is_some());
     again.run_steps(20);
@@ -3218,10 +3174,7 @@ fn completing_the_onboarding_writes_a_working_default_and_does_not_show_again() 
         agentbench_server::providers::saved(&rig.store).len() == 1
     });
     until(&mut h, "the welcome page", |h| h.state().onboarding_step() == "welcome");
-    until(&mut h, "the card to show it works", |h| {
-        h.query_by_label("make OpenAI compatible endpoint the default").is_none()
-            && h.query_by_label("edit OpenAI compatible endpoint").is_some()
-    });
+    until(&mut h, "the card to show it works", |h| h.query_by_label("make OpenAI compatible endpoint the default").is_none() && h.query_by_label("edit OpenAI compatible endpoint").is_some());
 
     click_label(&mut h, "next");
     until(&mut h, "the model page", |h| h.state().onboarding_step() == "models");
@@ -3289,7 +3242,9 @@ fn running_the_setup_again_keeps_the_providers_already_set_up() {
     });
     type_into_secret(&mut h, "sk-ant-new");
     click_label(&mut h, "save provider");
-    until(&mut h, "both providers", |_| agentbench_server::providers::saved(&rig.store).len() == 2);
+    until(&mut h, "both providers", |_| {
+        agentbench_server::providers::saved(&rig.store).len() == 2
+    });
     let saved = agentbench_server::providers::saved(&rig.store);
     assert_eq!(saved[0].key, "keep-me", "the first provider is untouched");
     assert!(saved[0].default, "and stays the default");
@@ -3309,9 +3264,7 @@ fn a_failed_test_call_shows_the_servers_own_error() {
     });
     type_into_field(&mut h, 0, &down);
     click_label(&mut h, "test connection");
-    until(&mut h, "the error", |h| {
-        h.query_by_label_contains("Incorrect API key provided").is_some()
-    });
+    until(&mut h, "the error", |h| h.query_by_label_contains("Incorrect API key provided").is_some());
     shot(&mut h, "onboarding-error");
 }
 
@@ -3326,8 +3279,7 @@ fn a_session_with_no_plan_says_so_in_its_details() {
         .into_iter()
         .find(|w| w.branch.as_deref() == Some("fix-login"))
         .unwrap();
-    let linked =
-        rig.store.add_session(side.id, "echo", "work on readme", None, Some(issue)).unwrap();
+    let linked = rig.store.add_session(side.id, "echo", "work on readme", None, Some(issue)).unwrap();
     rig.store.add_message(linked.id, &Entry::user("write it")).unwrap();
     rig.store.set_setting(&format!("no_plan_{}", linked.id), "15").unwrap();
     let mut h = harness(rig.url.clone());
@@ -3412,7 +3364,10 @@ fn the_paste_menu_fills_a_settings_field() {
     h.get_by_label("PASTE").click();
     h.run_steps(4);
     agentbench::system::stand_in_clipboard(None);
-    assert_eq!(h.state().settings_external(), Some("https://pasted.example.com".to_string()));
+    assert_eq!(
+        h.state().settings_external(),
+        Some("https://pasted.example.com".to_string())
+    );
 }
 
 #[test]
@@ -3621,31 +3576,17 @@ fn an_issue_card_shows_its_goal_and_the_board_groups_by_goal() {
             project.id,
             agentbench_core::VisionBody {
                 summary: "s".into(),
-                goals: vec![agentbench_core::Goal {
-                    id: "speed".into(),
-                    text: "fast".into(),
-                    status: Default::default(),
-                }],
+                goals: vec![agentbench_core::Goal { id: "speed".into(), text: "fast".into(), status: Default::default() }],
                 non_goals: vec![],
             },
             "user",
         )
         .unwrap();
     rig.store
-        .add_issue(&NewIssue {
-            project_id: project.id,
-            title: "Cache the board".into(),
-            goal: Some("speed".into()),
-            ..Default::default()
-        })
+        .add_issue(&NewIssue { project_id: project.id, title: "Cache the board".into(), goal: Some("speed".into()), ..Default::default() })
         .unwrap();
     rig.store
-        .add_issue(&NewIssue {
-            project_id: project.id,
-            title: "Add a gimmick".into(),
-            off_vision: true,
-            ..Default::default()
-        })
+        .add_issue(&NewIssue { project_id: project.id, title: "Add a gimmick".into(), off_vision: true, ..Default::default() })
         .unwrap();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the overview", |h| h.state().overview().is_some_and(|o| o.issues.len() == 3));
@@ -3668,24 +3609,13 @@ fn an_issue_card_says_what_it_is_waiting_on() {
     let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
     let first = rig
         .store
-        .add_issue(&NewIssue {
-            project_id: project.id,
-            title: "Build the base".into(),
-            ..Default::default()
-        })
+        .add_issue(&NewIssue { project_id: project.id, title: "Build the base".into(), ..Default::default() })
         .unwrap();
     rig.store
-        .add_issue(&NewIssue {
-            project_id: project.id,
-            title: "Build the roof".into(),
-            depends_on: vec![first.id],
-            ..Default::default()
-        })
+        .add_issue(&NewIssue { project_id: project.id, title: "Build the roof".into(), depends_on: vec![first.id], ..Default::default() })
         .unwrap();
     let mut h = harness(rig.url.clone());
-    until(&mut h, "the overview", |h| {
-        h.state().overview().is_some_and(|o| o.issues.iter().any(|i| !i.waiting_on.is_empty()))
-    });
+    until(&mut h, "the overview", |h| h.state().overview().is_some_and(|o| o.issues.iter().any(|i| !i.waiting_on.is_empty())));
     click(&mut h, 283.0, 20.0);
     h.run_steps(3);
     h.get_by_label(&format!("waiting on #{}", first.id));
@@ -3697,13 +3627,7 @@ fn the_issue_detail_lists_dependencies_and_edits_them() {
     let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
     let add = |title: &str, state, depends_on: Vec<i64>| {
         rig.store
-            .add_issue(&NewIssue {
-                project_id: project.id,
-                title: title.into(),
-                state: Some(state),
-                depends_on,
-                ..Default::default()
-            })
+            .add_issue(&NewIssue { project_id: project.id, title: title.into(), state: Some(state), depends_on, ..Default::default() })
             .unwrap()
             .id
     };
@@ -3712,9 +3636,7 @@ fn the_issue_detail_lists_dependencies_and_edits_them() {
     let mid = add("Zeta middle", agentbench_core::IssueState::Backlog, vec![base]);
     let top = add("Zeta top", agentbench_core::IssueState::Backlog, vec![mid]);
     let mut h = harness(rig.url.clone());
-    until(&mut h, "the overview", |h| {
-        h.state().overview().is_some_and(|o| o.issues.iter().any(|i| i.id == top))
-    });
+    until(&mut h, "the overview", |h| h.state().overview().is_some_and(|o| o.issues.iter().any(|i| i.id == top)));
     click(&mut h, 283.0, 20.0);
     h.run_steps(3);
     h.state_mut().open_issue(mid);
@@ -3725,17 +3647,13 @@ fn the_issue_detail_lists_dependencies_and_edits_them() {
     h.run_steps(3);
     click_label(&mut h, &format!("#{spare} Zeta spare"));
     until(&mut h, "the dependency to be added", |h| {
-        h.state()
-            .overview()
-            .is_some_and(|o| o.issues.iter().any(|i| i.id == mid && i.depends_on.contains(&spare)))
+        h.state().overview().is_some_and(|o| o.issues.iter().any(|i| i.id == mid && i.depends_on.contains(&spare)))
     });
     h.run_steps(3);
     h.get_by_label_contains(&format!("#{spare} (backlog)"));
     click_label(&mut h, &format!("x #{base}"));
     until(&mut h, "the dependency to be removed", |h| {
-        h.state()
-            .overview()
-            .is_some_and(|o| o.issues.iter().any(|i| i.id == mid && i.depends_on == [spare]))
+        h.state().overview().is_some_and(|o| o.issues.iter().any(|i| i.id == mid && i.depends_on == [spare]))
     });
     assert_eq!(rig.store.issue(mid).unwrap().depends_on, [spare]);
 }
@@ -3794,9 +3712,9 @@ fn a_quota_paused_session_reads_paused_and_is_not_counted_as_needing_you() {
         ..Default::default()
     });
     until(&mut h, "paused", |h| {
-        h.state().overview().is_some_and(|o| {
-            o.sessions.iter().any(|s| s.agent == "quotapauser" && s.paused_until.is_some())
-        })
+        h.state()
+            .overview()
+            .is_some_and(|o| o.sessions.iter().any(|s| s.agent == "quotapauser" && s.paused_until.is_some()))
     });
     assert_eq!(h.state().overview().map(|o| agentbench::waiting_on_you(&o.sessions)), Some(0));
     assert_eq!(marker_count(&h), 0);
@@ -3820,9 +3738,7 @@ fn two_servers(first: &Rig, second: &Rig) -> Harness<'static, App> {
 }
 
 fn both_loaded(h: &Harness<'_, App>) -> bool {
-    h.state()
-        .overview()
-        .is_some_and(|o| o.projects.iter().filter(|p| p.name == "demo").count() == 2)
+    h.state().overview().is_some_and(|o| o.projects.iter().filter(|p| p.name == "demo").count() == 2)
 }
 
 #[test]
@@ -3836,8 +3752,11 @@ fn projects_from_both_servers_show_with_a_badge_for_the_remote() {
     let labels: Vec<_> = demos.iter().map(|p| h.state().server_label(p.id)).collect();
     assert!(labels.contains(&None), "the local server has no badge: {labels:?}");
     assert!(labels.contains(&Some("workstation".into())), "{labels:?}");
-    let remote_chats =
-        o.sessions.iter().filter(|s| h.state().server_label(s.project_id).is_some()).count();
+    let remote_chats = o
+        .sessions
+        .iter()
+        .filter(|s| h.state().server_label(s.project_id).is_some())
+        .count();
     assert!(remote_chats >= 3, "the second server's chats are listed");
     assert_eq!(o.issues.iter().filter(|i| i.title == "Write a README").count(), 2);
     assert!(h.query_all_by_label_contains("workstation").count() >= 1);
@@ -3849,8 +3768,13 @@ fn a_chat_on_the_second_server_sends_to_that_server_only() {
     let (first, second) = (rig(), rig());
     let mut h = two_servers(&first, &second);
     until(&mut h, "both overviews", both_loaded);
-    let remote =
-        second.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let remote = second
+        .store
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.title == "say hello")
+        .unwrap();
     let project = h
         .state()
         .overview()
@@ -3890,10 +3814,7 @@ fn a_new_project_goes_to_the_server_picked() {
     h.state_mut().add_project_on_server(1, path.to_str().unwrap());
     let start = Instant::now();
     while second.store.projects().unwrap().iter().all(|p| p.name != "fresh") {
-        assert!(
-            start.elapsed() < Duration::from_secs(30),
-            "the project never reached the second server"
-        );
+        assert!(start.elapsed() < Duration::from_secs(30), "the project never reached the second server");
         h.step();
         std::thread::sleep(Duration::from_millis(30));
     }
@@ -3920,8 +3841,7 @@ fn one_server_going_offline_leaves_the_other_usable() {
     assert!(both_loaded(&h), "its items stay, greyed out");
     assert!(h.query_all_by_label_contains("server offline").count() >= 1);
     shot(&mut h, "one-server-offline");
-    let local =
-        first.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let local = first.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     let project = h
         .state()
         .overview()
@@ -3949,8 +3869,7 @@ fn the_server_list_is_kept_and_the_old_single_server_setting_still_works() {
     h.state_mut().rename_server(1, "build box");
     let mut kept = Mem::default();
     h.state().store(&mut kept);
-    let saved: serde_json::Value =
-        serde_json::from_str(kept.get_string("servers").unwrap().as_str()).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(kept.get_string("servers").unwrap().as_str()).unwrap();
     assert_eq!(saved[0]["name"], "build box");
     assert_eq!(saved[0]["url"], second.url);
     assert_eq!(kept.get_string("server_name").as_deref(), Some("desktop"));
@@ -3970,10 +3889,7 @@ fn each_server_shows_its_memory_disk_and_cpu() {
     until(&mut h, "both overviews", both_loaded);
     let status = h.state().server_statuses();
     assert_eq!(status.len(), 2);
-    assert!(
-        status.iter().all(|(_, up, text)| *up && text.contains("RAM") && text.contains("disk")),
-        "{status:?}"
-    );
+    assert!(status.iter().all(|(_, up, text)| *up && text.contains("RAM") && text.contains("disk")), "{status:?}");
 }
 
 fn wait_for_slot(h: &mut Harness<'_, App>, slot: u32) {
@@ -4036,8 +3952,7 @@ fn an_offline_workspace_is_greyed_out_in_the_bar() {
 #[test]
 fn a_workspace_with_a_waiting_chat_shows_an_activity_dot_and_the_needs_you_panel() {
     let (first, second) = (rig(), rig());
-    let chat =
-        second.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let chat = second.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     let mut h = two_servers(&first, &second);
     until(&mut h, "both overviews", both_loaded);
     second.store.set_status(chat.id, agentbench_core::SessionStatus::Waiting).unwrap();
@@ -4066,12 +3981,8 @@ fn each_workspaces_supervisor_is_reached_from_its_own_view() {
     h.run_steps(2);
     click(&mut h, 1220.0, 784.0);
     let start = Instant::now();
-    while !second.store.messages(sid, 0).unwrap().iter().any(|m| m.entry == Entry::user("status?"))
-    {
-        assert!(
-            start.elapsed() < Duration::from_secs(30),
-            "the message never reached its supervisor"
-        );
+    while !second.store.messages(sid, 0).unwrap().iter().any(|m| m.entry == Entry::user("status?")) {
+        assert!(start.elapsed() < Duration::from_secs(30), "the message never reached its supervisor");
         h.step();
         std::thread::sleep(Duration::from_millis(30));
     }
@@ -4107,8 +4018,7 @@ fn a_proposal_card_from_the_second_workspace_is_answered_there() {
     let dir = tmp.path().join("newcomer");
     repo(&dir);
     let raw = add_project_request(&second, &dir);
-    let (before_first, before_second) =
-        (first.store.projects().unwrap().len(), second.store.projects().unwrap().len());
+    let (before_first, before_second) = (first.store.projects().unwrap().len(), second.store.projects().unwrap().len());
     let mut h = two_servers(&first, &second);
     until(&mut h, "both overviews", both_loaded);
     h.get_by_label_contains("needs you [workstation] proposal");
@@ -4137,16 +4047,14 @@ fn the_selected_workspace_and_supervisor_persist() {
         let _build = build_lock();
         let (a, b) = (first.url.clone(), second.url.clone());
         let _ = b;
-        Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(
-            move |cc| {
-                let mut storage = Mem::default();
-                storage.0.insert("url".into(), a);
-                storage.0.insert("token".into(), TOKEN.into());
-                storage.0.insert("servers".into(), servers.clone());
-                storage.0.insert("view".into(), "1".into());
-                App::new(&cc.egui_ctx, Some(&storage), None)
-            },
-        )
+        Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
+            let mut storage = Mem::default();
+            storage.0.insert("url".into(), a);
+            storage.0.insert("token".into(), TOKEN.into());
+            storage.0.insert("servers".into(), servers.clone());
+            storage.0.insert("view".into(), "1".into());
+            App::new(&cc.egui_ctx, Some(&storage), None)
+        })
     };
     until(&mut again, "the second workspace", |h| {
         h.state().overview().is_some_and(|o| {
@@ -4165,10 +4073,7 @@ fn a_new_issue_in_the_home_view_goes_to_the_workspace_picked() {
     h.state_mut().file_issue_on(project, "Remote only", "body");
     let start = Instant::now();
     while second.store.issues().unwrap().iter().all(|i| i.title != "Remote only") {
-        assert!(
-            start.elapsed() < Duration::from_secs(30),
-            "the issue never reached the second server"
-        );
+        assert!(start.elapsed() < Duration::from_secs(30), "the issue never reached the second server");
         h.step();
         std::thread::sleep(Duration::from_millis(30));
     }
@@ -4182,8 +4087,7 @@ fn an_unknown_session_state_shows_as_unknown() {
     let mut h = harness(canned_server(o.to_string()));
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     assert!(
-        h.state().overview().as_ref().unwrap().sessions[0].status
-            == agentbench_core::SessionStatus::Unknown
+        h.state().overview().as_ref().unwrap().sessions[0].status == agentbench_core::SessionStatus::Unknown
     );
 }
 
@@ -4196,17 +4100,9 @@ fn a_server_that_needs_a_newer_app_shows_the_update_the_app_banner() {
     until(&mut h, "the banner", |h| {
         h.query_by_label_contains("This app is older than the server").is_some()
     });
-    assert!(
-        h.query_by_label_contains(&format!("app v{}, server v9", agentbench_core::API_VERSION))
-            .is_some()
-    );
+    assert!(h.query_by_label_contains(&format!("app v{}, server v9", agentbench_core::API_VERSION)).is_some());
     assert!(h.query_by_label_contains("Update the app").is_some());
-    assert!(
-        h.query_by_label_contains(
-            "cargo install --git https://github.com/v0l/agentbench agentbench"
-        )
-        .is_some()
-    );
+    assert!(h.query_by_label_contains("cargo install --git https://github.com/v0l/agentbench agentbench").is_some());
 }
 
 fn open_first_issue(h: &mut Harness<'_, App>) {
