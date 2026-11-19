@@ -6,6 +6,8 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-19
+
 ### Added
 - `auto_close` in the `autopilot` tool, `AutopilotState`/`AutopilotPatch` and the app's autopilot panel ("close merged sessions").
 - A `parked` label keeps a goal-linked todo issue from being started by the autopilot.
@@ -13,6 +15,7 @@ All notable changes to Agentbench are listed here. The format follows
 - A 400 that lists the accepted `reasoning_effort` values is retried with the nearest accepted one.
 
 ### Fixed
+- Android: the background watcher polls a status-only diff feed (`/api/changes?kinds=attention`) instead of re-downloading the full overview on every session change; about 200 bytes a minute while agents run, where it was megabytes a minute. Needs a v0.9.1 server.
 - Done and merged sessions are closed by default at ship and above, with their worktree and merged branch.
 - Sessions started with `start_session {issue}` join the autopilot, so one path runs judge, review, merge, done and close. `merge_branch` marks the issue done and closes the session too, and says "already merged" instead of a push error when the branch is already in origin.
 - A worker no longer sends the supervisor two judge requests for one head, and a DONE message to the parent is folded into the turn-end report.
