@@ -5,6 +5,7 @@ pub mod attention;
 pub mod autopilot;
 pub mod checkin;
 pub mod cli;
+pub mod compact;
 pub mod git;
 pub mod groom;
 pub mod guards;

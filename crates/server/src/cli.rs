@@ -30,6 +30,15 @@ pub enum Command {
         rotate: bool,
     },
     Agents,
+    /// Compact the notes of one project (or the global notes) with the saved model.
+    CompactMemory {
+        /// The project, by name; leave out for the global notes.
+        #[arg(long)]
+        project: Option<String>,
+        /// A model name or level to use instead of the saved one.
+        #[arg(long)]
+        model: Option<String>,
+    },
     /// Show which languages are found in a folder, and whether a language server is installed.
     Code {
         /// The project folder, default the current one.
@@ -193,6 +202,30 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                     }
                 );
             }
+            Ok(())
+        }
+        Command::CompactMemory { project, model: choice } => {
+            let model = saved_model(&store, &config.model)
+                .choose(match (&choice, crate::compact::settings(&store).model) {
+                    (Some(c), _) => c.clone(),
+                    (None, m) if !m.trim().is_empty() => m,
+                    _ => "high".to_string(),
+                }.as_str());
+            let target = crate::titles::Target { url: model.url, model: model.model, key: model.key };
+            let scopes = match project {
+                Some(name) => {
+                    let found = store
+                        .projects()
+                        .map_err(|e| e.0)?
+                        .into_iter()
+                        .find(|p| p.name == name)
+                        .ok_or_else(|| format!("no project named {name}"))?;
+                    crate::compact::scopes(&store, Some(found.id), false)
+                }
+                None => vec![(crate::memory::Scope::Global, crate::memory::GLOBAL.to_string())],
+            };
+            let done = crate::compact::run(&store, &target, scopes, true).await;
+            println!("{}", serde_json::to_string_pretty(&done).map_err(|e| e.to_string())?);
             Ok(())
         }
         Command::Chat { .. } => unreachable!("handled before the store opens"),

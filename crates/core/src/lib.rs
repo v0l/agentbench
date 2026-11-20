@@ -22,6 +22,98 @@ pub struct NoteHistory {
     pub versions: Vec<NoteVersion>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemoryCompactRequest {
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub project: Option<Id>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemoryScopeReport {
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub before: usize,
+    #[serde(default)]
+    pub after: usize,
+    #[serde(default)]
+    pub skipped: Option<String>,
+    #[serde(default)]
+    pub rewritten: Vec<String>,
+    #[serde(default)]
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub merged: Vec<String>,
+    #[serde(default)]
+    pub dropped: Vec<String>,
+    #[serde(default)]
+    pub redacted: Vec<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MemoryCompaction {
+    #[serde(default)]
+    pub scopes: Vec<MemoryScopeReport>,
+}
+
+impl MemoryCompaction {
+    pub fn summary(&self) -> String {
+        let lines: Vec<String> = self
+            .scopes
+            .iter()
+            .map(|s| match &s.skipped {
+                Some(why) => format!("{}: left alone ({why})", s.scope),
+                None => format!(
+                    "{}: {} to {} bytes, {} merged, {} dropped",
+                    s.scope,
+                    s.before,
+                    s.after,
+                    s.merged.len(),
+                    s.dropped.len()
+                ),
+            })
+            .collect();
+        if lines.is_empty() { "no notes to compact".into() } else { lines.join("; ") }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemorySettings {
+    #[serde(default = "default_note_budget")]
+    pub note_budget: usize,
+    #[serde(default = "default_scope_budget")]
+    pub scope_budget: usize,
+    #[serde(default = "default_auto_compact")]
+    pub auto: bool,
+    #[serde(default)]
+    pub model: String,
+}
+
+fn default_note_budget() -> usize {
+    DEFAULT_NOTE_BUDGET
+}
+
+fn default_scope_budget() -> usize {
+    DEFAULT_SCOPE_BUDGET
+}
+
+fn default_auto_compact() -> bool {
+    true
+}
+
+pub const DEFAULT_NOTE_BUDGET: usize = 4096;
+pub const DEFAULT_SCOPE_BUDGET: usize = 12288;
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        MemorySettings { note_budget: DEFAULT_NOTE_BUDGET, scope_budget: DEFAULT_SCOPE_BUDGET, auto: true, model: String::new() }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
@@ -1947,9 +2039,10 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 3;
+pub const API_VERSION: u32 = 4;
 pub const API_ISSUE_DEPS: u32 = 2;
 pub const API_ATTENTION_FEED: u32 = 3;
+pub const API_MEMORY_COMPACT: u32 = 4;
 pub const MIN_CLIENT_API: u32 = 1;
 pub const API_RULE: &str = "API changes are additive: new fields get serde defaults, never rename or remove a field or enum variant the app decodes, never change a field's type, and add no required request field. A break bumps API_VERSION and MIN_CLIENT_API on purpose and the PR says so. Details in AGENTS.md.";
 pub const API_HEADER: &str = "x-agentbench-api";

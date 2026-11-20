@@ -147,6 +147,9 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects/{id}/sync", post(sync_project))
         .route("/api/projects/{id}/notes", get(list_notes))
         .route("/api/projects/{id}/notes/restore", post(restore_note))
+        .route("/api/memory/compact", post(compact_memory))
+        .route("/api/memory/restore", post(restore_memory))
+        .route("/api/settings/memory", get(get_memory_settings).put(put_memory_settings))
         .route("/api/projects/{id}/vision", get(get_vision).put(put_vision))
         .route("/api/projects/{id}/vision/versions", get(vision_history))
         .route("/api/projects/{id}/vision/restore", post(restore_vision))
@@ -878,6 +881,55 @@ async fn restore_note(
     Ok(Json(()))
 }
 
+async fn compact_memory(
+    State(api): State<Api>,
+    Json(req): Json<agentbench_core::MemoryCompactRequest>,
+) -> Reply<agentbench_core::MemoryCompaction> {
+    let store = api.runner.store();
+    let (project, global) = match req.scope.trim().to_lowercase().as_str() {
+        "" | "project" => (Some(req.project.ok_or_else(|| bad("name the project"))?), false),
+        "global" => (None, true),
+        "all" => (None, true),
+        other => return Err(bad(format!("{other} is not a scope: project, global or all"))),
+    };
+    let mut scopes = crate::compact::scopes(store, project, global);
+    if req.scope.trim().eq_ignore_ascii_case("global") {
+        scopes.retain(|(s, _)| *s == crate::memory::Scope::Global);
+    }
+    let target = crate::compact::target(&api.runner).map_err(bad)?;
+    let done = crate::compact::run(store, &target, scopes, true).await;
+    changed(&api);
+    Ok(Json(done))
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreMemory {
+    #[serde(default)]
+    project: Option<Id>,
+    version: String,
+}
+
+async fn restore_memory(State(api): State<Api>, Json(req): Json<RestoreMemory>) -> Reply<()> {
+    let scope = match req.project {
+        Some(id) => crate::memory::Scope::Project(id),
+        None => crate::memory::Scope::Global,
+    };
+    api.runner.store().memory_store().restore(scope, &req.version).map_err(bad)?;
+    changed(&api);
+    Ok(Json(()))
+}
+
+async fn get_memory_settings(State(api): State<Api>) -> Reply<agentbench_core::MemorySettings> {
+    Ok(Json(crate::compact::settings(api.runner.store())))
+}
+
+async fn put_memory_settings(
+    State(api): State<Api>,
+    Json(new): Json<agentbench_core::MemorySettings>,
+) -> Reply<agentbench_core::MemorySettings> {
+    Ok(Json(crate::compact::save_settings(api.runner.store(), new).map_err(bad)?))
+}
+
 async fn get_vision(
     State(api): State<Api>,
     Path(id): Path<Id>,
@@ -1154,6 +1206,7 @@ async fn put_global_note(
     let topic = topic.ok_or_else(|| bad("missing `topic`"))?;
     let note = body["note"].as_str().unwrap_or_default();
     api.runner.store().set_global_note(topic, note)?;
+    crate::compact::after_write(&api.runner, crate::memory::Scope::Global);
     changed(&api);
     get_global_notes(State(api)).await
 }
