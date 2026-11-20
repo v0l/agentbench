@@ -735,6 +735,16 @@ pub fn looks_like_challenge(title: &str, body: &str) -> bool {
         .any(|m| title.contains(m) || (head.len() < 600 && head.contains(m)))
 }
 
+pub fn fetch_text_script(path: &str, quoted_url: &str) -> String {
+    if path.ends_with(".gz") {
+        format!(
+            "fetch({quoted_url}, {{ credentials: 'include' }}).then(r => new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).text())"
+        )
+    } else {
+        format!("fetch({quoted_url}, {{ credentials: 'include' }}).then(r => r.text())")
+    }
+}
+
 impl Live {
     async fn page_html(&self, url: &str) -> Result<String, String> {
         self.goto(url).await?;
@@ -758,9 +768,7 @@ impl Live {
         let origin = url.origin().ascii_serialization();
         self.page_html(&origin).await?;
         let wanted = serde_json::to_string(url.as_str()).map_err(|e| e.to_string())?;
-        let body = self
-            .eval(&format!("fetch({wanted}, {{ credentials: 'include' }}).then(r => r.text())"))
-            .await?;
+        let body = self.eval(&fetch_text_script(url.path(), &wanted)).await?;
         Ok(body.as_str().unwrap_or_default().to_string())
     }
 
@@ -2274,6 +2282,53 @@ function later() { setTimeout(() => { document.body.insertAdjacentHTML('beforeen
         assert_eq!(body, "<rss><channel><item>one</item></channel></rss>");
         let again = b.page_html(&format!("{base}/")).await.unwrap();
         assert!(again.contains("home"));
+    }
+
+    #[test]
+    fn a_gz_path_is_decompressed_in_the_page_and_other_paths_are_read_as_text() {
+        let gz = fetch_text_script("/sitemaps/a.xml.gz", "\"u\"");
+        assert!(gz.contains("DecompressionStream('gzip')"), "{gz}");
+        let plain = fetch_text_script("/feed", "\"u\"");
+        assert!(!plain.contains("DecompressionStream") && plain.ends_with("r.text())"), "{plain}");
+    }
+
+    #[tokio::test]
+    async fn raw_body_reads_a_gzipped_sitemap_as_text() {
+        use std::io::{Read, Write};
+        if screenshot::browser().is_none() {
+            return;
+        }
+        const GZ: [u8; 59] = [
+            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xb3, 0x29, 0x2d, 0xca, 0x29, 0x4e,
+            0x2d, 0xb1, 0xb3, 0x01, 0xd2, 0x76, 0x36, 0x39, 0xf9, 0xc9, 0x76, 0x19, 0x25, 0x25, 0x05, 0xc5,
+            0x56, 0xfa, 0xfa, 0x15, 0x7a, 0x99, 0xa9, 0xfa, 0x89, 0x36, 0xfa, 0x20, 0x31, 0x1b, 0x7d, 0xb0,
+            0xb4, 0x3e, 0x54, 0x31, 0x00, 0xdb, 0x05, 0xb3, 0x8a, 0x35, 0x00, 0x00, 0x00,
+        ];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let (kind, body): (&str, Vec<u8>) = if path.ends_with(".gz") {
+                    ("application/octet-stream", GZ.to_vec())
+                } else {
+                    ("text/html", b"<html><body>home</body></html>".to_vec())
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+        let b = Browsers::default();
+        let body = b.raw_body(&format!("http://127.0.0.1:{port}/sitemaps/a.xml.gz")).await.unwrap();
+        assert_eq!(body, "<urlset><url><loc>https://x.ie/a</loc></url></urlset>");
     }
 
     #[test]
