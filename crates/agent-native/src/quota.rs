@@ -434,6 +434,10 @@ impl Quotas {
         self.map().base = Some(model.clone());
     }
 
+    pub fn level_model(&self, level: &str) -> Option<String> {
+        self.map().base.as_ref().and_then(|b| b.level(level)).map(|m| m.model)
+    }
+
     pub fn resolves_to(&self, chosen: Option<&str>, model: &str) -> bool {
         if model.is_empty() {
             return true;

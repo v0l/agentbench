@@ -320,7 +320,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 33] = [
+pub const AGENTBENCH_TOOLS: [&str; 34] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -354,6 +354,7 @@ pub const AGENTBENCH_TOOLS: [&str; 33] = [
     "answer_session",
     "escalate_question",
     "judge_session",
+    "check_in",
 ];
 
 /// How long `wait_for_session` waits when not told, and the longest it may.
@@ -475,6 +476,18 @@ fn agentbench_specs() -> Vec<Spec> {
                     "followup": string("For needs_followup: the message the worker gets"),
                 }),
                 &["id", "verdict", "reason"],
+            ),
+        ),
+        Spec::new(
+            "check_in",
+            "Supervisor chat only. Answer a check_in message about a running worker on a lower model: continue (leave it), message (send `text` to it) or escalate (stop it and start a takeover in the same worktree on the top model, with `text` as the reason). A check_in marked STUCK means repeated failing runs, a test that went from passing to failing, repeated compactions, or no commit while dirty files grow: a stuck worker goes to the top model at once.",
+            object(
+                json!({
+                    "id": string("The worker session id"),
+                    "action": json!({ "type": "string", "enum": ["continue", "message", "escalate"] }),
+                    "text": string("For message: what the worker gets. For escalate: why"),
+                }),
+                &["id", "action"],
             ),
         ),
         Spec::new(
@@ -616,7 +629,7 @@ fn agentbench_specs() -> Vec<Spec> {
         ),
         Spec::new(
             "autopilot",
-            "Supervisor chat only. Read the autopilot loop (its pause switch, caps, workers and recent activity feed) or change it. The loop starts workers on todo issues by priority up to the caps in projects at autowork or above, hands each finished worker to you to judge with judge_session and acts only on your verdict, nudges stuck sessions and, in projects at ship or above, merges and pushes branches you judged concluded_pass. Levels are set with set_automation. Call with no arguments to read it.",
+            "Supervisor chat only. Read the autopilot loop (its pause switch, caps, workers and recent activity feed) or change it. The loop starts workers on todo issues by priority up to the caps in projects at autowork or above, hands each finished worker to you to judge with judge_session and acts only on your verdict, nudges stuck sessions, sends you a check_in message for workers on lower models (answer it with check_in: continue, message or escalate) and, in projects at ship or above, merges and pushes branches you judged concluded_pass. Levels are set with set_automation. Call with no arguments to read it.",
             object(
                 json!({
                     "enabled": json!({ "type": "boolean", "description": "Run or pause the loop everywhere" }),
@@ -624,6 +637,12 @@ fn agentbench_specs() -> Vec<Spec> {
                     "project_cap": id("Most workers at once in one project"),
                     "stuck_minutes": id("Minutes without output before a nudge"),
                     "max_nudges": id("Nudges before a stuck session is stopped"),
+                    "check_in_minutes": id("Minutes a worker on a lower model runs between check_in messages to you; 0 turns them off"),
+                    "check_in_all": json!({ "type": "boolean", "description": "Also check in on workers already on the top model (default off)" }),
+                    "auto_escalate": json!({ "type": "boolean", "description": "Escalate a stuck worker to the top model without waiting for you (default off)" }),
+                    "stuck_failed_runs": id("Same test or build command failing this many times in a row marks a check_in stuck"),
+                    "stuck_compactions": id("Compactions in one turn that mark a check_in stuck"),
+                    "stuck_no_commit_minutes": id("Minutes with no commit while dirty files grow that mark a check_in stuck"),
                     "auto_close": json!({ "type": "boolean", "description": "Close a session and remove its worktree once its branch is merged and its issue done (default on)" }),
                 }),
                 &[],

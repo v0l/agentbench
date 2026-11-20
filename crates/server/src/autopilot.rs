@@ -16,6 +16,16 @@ const CAP: &str = "autopilot_cap";
 const PROJECT_CAP: &str = "autopilot_project_cap";
 const STUCK_MINUTES: &str = "autopilot_stuck_minutes";
 const MAX_NUDGES: &str = "autopilot_max_nudges";
+pub(crate) const CHECK_IN_MINUTES: &str = "autopilot_check_in_minutes";
+pub(crate) const CHECK_IN_ALL: &str = "autopilot_check_in_all";
+pub(crate) const AUTO_ESCALATE: &str = "autopilot_auto_escalate";
+pub(crate) const STUCK_FAILED_RUNS: &str = "autopilot_stuck_failed_runs";
+pub(crate) const STUCK_COMPACTIONS: &str = "autopilot_stuck_compactions";
+pub(crate) const STUCK_NO_COMMIT_MINUTES: &str = "autopilot_stuck_no_commit_minutes";
+pub const DEFAULT_CHECK_IN_MINUTES: u64 = 30;
+pub const DEFAULT_STUCK_FAILED_RUNS: u32 = 3;
+pub const DEFAULT_STUCK_COMPACTIONS: u32 = 2;
+pub const DEFAULT_STUCK_NO_COMMIT_MINUTES: u64 = 45;
 const MERGE: &str = "autopilot_merge";
 const IDLE: &str = "autopilot_idle";
 const AGENT: &str = "autopilot_agent";
@@ -36,7 +46,7 @@ const NEEDS_USER: &str = "needs-user";
 const BLOCKED: &str = "blocked";
 const AUTHOR: &str = "autopilot";
 
-fn flag(store: &Store, key: &str) -> bool {
+pub(crate) fn flag(store: &Store, key: &str) -> bool {
     store.setting(key).ok().flatten().as_deref() == Some("1")
 }
 
@@ -44,7 +54,7 @@ fn auto_close_on(store: &Store) -> bool {
     store.setting(AUTO_CLOSE).ok().flatten().as_deref() != Some("0")
 }
 
-fn number<T: std::str::FromStr>(store: &Store, key: &str, default: T) -> T {
+pub(crate) fn number<T: std::str::FromStr>(store: &Store, key: &str, default: T) -> T {
     store.setting(key).ok().flatten().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
 }
 
@@ -173,6 +183,12 @@ pub fn state(store: &Store) -> AutopilotState {
         default_level: default_level(store),
         idle: flag(store, IDLE),
         auto_close: auto_close_on(store),
+        check_in_minutes: number(store, CHECK_IN_MINUTES, DEFAULT_CHECK_IN_MINUTES),
+        check_in_all: flag(store, CHECK_IN_ALL),
+        auto_escalate: flag(store, AUTO_ESCALATE),
+        stuck_failed_runs: number(store, STUCK_FAILED_RUNS, DEFAULT_STUCK_FAILED_RUNS),
+        stuck_compactions: number(store, STUCK_COMPACTIONS, DEFAULT_STUCK_COMPACTIONS),
+        stuck_no_commit_minutes: number(store, STUCK_NO_COMMIT_MINUTES, DEFAULT_STUCK_NO_COMMIT_MINUTES),
         workers: workers.iter().filter(|w| is_active(&w.state)).count() as u32,
         activity: store.autopilot_log(30).unwrap_or_default(),
     }
@@ -195,6 +211,25 @@ pub fn apply(store: &Store, patch: &AutopilotPatch) -> Result<AutopilotState, St
     }
     if let Some(n) = patch.max_nudges {
         store.set_setting(MAX_NUDGES, &n.to_string())?;
+    }
+    if let Some(n) = patch.check_in_minutes {
+        store.set_setting(CHECK_IN_MINUTES, &n.to_string())?;
+    }
+    if let Some(n) = patch.stuck_failed_runs {
+        store.set_setting(STUCK_FAILED_RUNS, &n.to_string())?;
+    }
+    if let Some(n) = patch.stuck_compactions {
+        store.set_setting(STUCK_COMPACTIONS, &n.to_string())?;
+    }
+    if let Some(n) = patch.stuck_no_commit_minutes {
+        store.set_setting(STUCK_NO_COMMIT_MINUTES, &n.to_string())?;
+    }
+    if let Some(on) = patch.check_in_all {
+        store.set_setting(CHECK_IN_ALL, if on { "1" } else { "0" })?;
+    }
+    if let Some(on) = patch.auto_escalate {
+        store.set_setting(AUTO_ESCALATE, if on { "1" } else { "0" })?;
+        store.log_autopilot(None, None, if on { "auto-escalating stuck sessions is on" } else { "auto-escalating stuck sessions is off" })?;
     }
     if let Some(on) = patch.auto_close {
         store.set_setting(AUTO_CLOSE, if on { "1" } else { "0" })?;
@@ -512,7 +547,7 @@ fn last_error(store: &Store, session: agentbench_core::SessionId) -> String {
         .unwrap_or_else(|| "the session failed".into())
 }
 
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     let t = text.trim();
     if t.chars().count() <= max {
         return t.to_string();
@@ -522,20 +557,22 @@ fn clip(text: &str, max: usize) -> String {
 
 #[derive(Clone)]
 pub struct Autopilot {
-    runner: Runner,
+    pub(crate) runner: Runner,
     said: Arc<Mutex<HashSet<String>>>,
+    pub(crate) checks: Arc<Mutex<HashMap<SessionId, crate::checkin::Check>>>,
+    pub(crate) stuck_hook: Arc<Mutex<Option<crate::checkin::StuckHook>>>,
 }
 
 impl Autopilot {
     pub fn new(runner: Runner) -> Autopilot {
-        Autopilot { runner, said: Default::default() }
+        Autopilot { runner, said: Default::default(), checks: Default::default(), stuck_hook: Default::default() }
     }
 
-    fn store(&self) -> &Store {
+    pub(crate) fn store(&self) -> &Store {
         self.runner.store()
     }
 
-    fn log(&self, project: Option<Id>, issue: Option<Id>, text: &str) {
+    pub(crate) fn log(&self, project: Option<Id>, issue: Option<Id>, text: &str) {
         let _ = self.store().log_autopilot(project, issue, text);
         self.runner.changed.notify_waiters();
     }
@@ -757,7 +794,9 @@ impl Autopilot {
         match w.state.as_str() {
             "working" | "asking" => {
                 if running {
-                    self.watch(w, &session, now);
+                    if !self.check_in(w, &session, now) {
+                        self.watch(w, &session, now);
+                    }
                 } else {
                     self.finished(w, &session, now);
                 }
@@ -2527,6 +2566,202 @@ mod tests {
         assert!(r.store.session(sid).is_err());
         assert!(!std::path::Path::new(&tree.path).exists());
         assert!(!crate::git::branch_exists(&r.repo, tree.branch.as_deref().unwrap()));
+    }
+
+    const LONG: &str = r#"read p; sleep 20; echo '{"text":"later"}'"#;
+
+    async fn running_worker(r: &Rig) -> (agentbench_core::SessionId, String) {
+        todo(r, "a", 0, &[]);
+        on(r);
+        r.store.set_setting(STUCK_MINUTES, "100000").unwrap();
+        r.ap.tick();
+        let w = r.store.workers().unwrap().remove(0);
+        let tree = r.store.worktree(r.store.session(w.session).unwrap().worktree_id).unwrap();
+        for _ in 0..200 {
+            if r.store.messages(w.session, 0).unwrap().iter().any(|m| matches!(m.entry, Entry::User { .. })) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        (w.session, tree.path)
+    }
+
+    fn ran(r: &Rig, sid: agentbench_core::SessionId, command: &str, out: &str, error: bool) {
+        r.store
+            .add_message(
+                sid,
+                &Entry::Tool {
+                    call_id: format!("{command}{out}{}", r.store.messages(sid, 0).unwrap().len()),
+                    name: "bash".into(),
+                    input: serde_json::json!({ "command": command }),
+                    output: Some(out.into()),
+                    error,
+                },
+            )
+            .unwrap();
+    }
+
+    const BAD: &str = "test result: FAILED. 1 passed; 2 failed\n[exit 101 in 3.0s]";
+    const GOOD: &str = "test result: ok. 3 passed; 0 failed\n[exit 0 in 3.0s]";
+
+    async fn check_ins(r: &Rig) -> Vec<String> {
+        idle(r, r.boss.unwrap()).await;
+        said_to_boss(r)
+            .iter()
+            .flat_map(|t| t.split("UTC] check_in ").skip(1).map(|p| format!("check_in {p}")).collect::<Vec<_>>())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_lower_model_session_gets_a_check_in_each_interval_and_a_top_model_one_does_not() {
+        let r = rig(LONG);
+        let (sid, _) = running_worker(&r).await;
+        let now = crate::store::now();
+        r.ap.tick_at(now + 29 * 60_000);
+        assert!(check_ins(&r).await.is_empty(), "not before the interval");
+        r.ap.tick_at(now + 31 * 60_000);
+        let told = check_ins(&r).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].contains(&format!("check_in {sid}:")) && told[0].contains("issue #1") && told[0].contains("Dirty files"), "{}", told[0]);
+        r.ap.tick_at(now + 40 * 60_000);
+        assert_eq!(check_ins(&r).await.len(), 1, "nothing again until another interval");
+        r.ap.tick_at(now + 62 * 60_000);
+        assert_eq!(check_ins(&r).await.len(), 2);
+
+        let top = rig(LONG);
+        let (sid, _) = running_worker(&top).await;
+        top.store.set_model(sid, Some("high")).unwrap();
+        top.ap.tick_at(crate::store::now() + 31 * 60_000);
+        assert!(check_ins(&top).await.is_empty());
+        top.store.set_setting(CHECK_IN_ALL, "1").unwrap();
+        top.ap.tick_at(crate::store::now() + 31 * 60_000);
+        assert_eq!(check_ins(&top).await.len(), 1, "unless the setting turns it on");
+    }
+
+    #[tokio::test]
+    async fn repeated_failing_runs_send_one_early_stuck_check_in() {
+        let r = rig(LONG);
+        let (sid, _) = running_worker(&r).await;
+        for _ in 0..3 {
+            ran(&r, sid, "cargo test -p x", BAD, true);
+        }
+        r.ap.tick();
+        r.ap.tick();
+        let told = check_ins(&r).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].contains("STUCK") && told[0].contains("failed 3 or more times"), "{}", told[0]);
+        assert!(told[0].contains("(exit 101)") && told[0].contains("test result: FAILED"), "{}", told[0]);
+        assert!(r.store.session(sid).map(|s| crate::checkin::is_stuck(&r.store, s.id)).unwrap());
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        r.ap.on_stuck(std::sync::Arc::new(move |s| sink.lock().unwrap().push(s.session)));
+        ran(&r, sid, "cargo test -p x", BAD, true);
+        r.ap.tick();
+        assert_eq!(check_ins(&r).await.len(), 1, "each early signal is sent once");
+        assert_eq!(seen.lock().unwrap().len(), 0, "the hook fires with the signal, not on repeats");
+    }
+
+    #[tokio::test]
+    async fn a_test_that_passed_and_now_fails_marks_the_check_in_stuck() {
+        let r = rig(LONG);
+        let (sid, _) = running_worker(&r).await;
+        ran(&r, sid, "cargo test", GOOD, false);
+        r.ap.tick();
+        assert!(check_ins(&r).await.is_empty());
+        ran(&r, sid, "cargo test", BAD, true);
+        r.ap.tick();
+        let told = check_ins(&r).await;
+        assert_eq!(told.len(), 1);
+        assert!(told[0].contains("passed earlier in this session and now fails"), "{}", told[0]);
+    }
+
+    #[tokio::test]
+    async fn a_new_commit_shows_in_the_next_check_in_and_clears_the_no_commit_signal() {
+        let r = rig(LONG);
+        let (sid, path) = running_worker(&r).await;
+        let now = crate::store::now();
+        std::fs::write(std::path::Path::new(&path).join("a.txt"), "1").unwrap();
+        r.ap.tick_at(now + 1000);
+        std::fs::write(std::path::Path::new(&path).join("b.txt"), "1").unwrap();
+        std::fs::write(std::path::Path::new(&path).join("c.txt"), "1").unwrap();
+        r.ap.tick_at(now + 46 * 60_000);
+        let told = check_ins(&r).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].contains("STUCK") && told[0].contains("no commit for") && told[0].contains("Dirty files: 3"), "{}", told[0]);
+        assert!(crate::checkin::is_stuck(&r.store, sid));
+        commit_in(&path, "d.txt");
+        r.ap.tick_at(now + 80 * 60_000);
+        let told = check_ins(&r).await;
+        assert_eq!(told.len(), 2, "{told:?}");
+        let commits = |t: &str| t.split("Commits this turn: ").nth(1).and_then(|r| r.split(',').next()).and_then(|n| n.parse::<u32>().ok()).unwrap();
+        assert_eq!(commits(&told[1]), commits(&told[0]) + 1, "{}", told[1]);
+        assert!(!told[1].contains("STUCK"), "{}", told[1]);
+        assert!(!crate::checkin::is_stuck(&r.store, sid));
+    }
+
+    #[tokio::test]
+    async fn two_compactions_in_a_turn_mark_it_stuck() {
+        let r = rig(LONG);
+        let (sid, _) = running_worker(&r).await;
+        r.store.add_message(sid, &Entry::Summary { text: "a".into() }).unwrap();
+        r.ap.tick();
+        assert!(check_ins(&r).await.is_empty());
+        r.store.add_message(sid, &Entry::Summary { text: "b".into() }).unwrap();
+        r.ap.tick();
+        let told = check_ins(&r).await;
+        assert!(told.len() == 1 && told[0].contains("2 compactions in one turn"), "{told:?}");
+    }
+
+    fn escalate_tool(r: &Rig, sid: agentbench_core::SessionId, action: &str) -> Result<serde_json::Value, String> {
+        r.ap.runner.tools().call(
+            "check_in",
+            &serde_json::json!({"id": sid.to_string(), "action": action, "text": "going in circles"}),
+            r.boss.unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn escalate_starts_a_takeover_in_the_same_worktree_on_the_top_model() {
+        let r = rig(LONG);
+        let (sid, _) = running_worker(&r).await;
+        let before = r.store.session(sid).unwrap();
+        assert!(escalate_tool(&r, sid, "nonsense").is_err());
+        assert_eq!(escalate_tool(&r, sid, "continue").unwrap()["action"], "continue");
+        let out = escalate_tool(&r, sid, "escalate").unwrap();
+        let taken: agentbench_core::SessionId = serde_json::from_value(out["takeover"].clone()).unwrap();
+        let t = r.store.session(taken).unwrap();
+        assert_eq!(t.worktree_id, before.worktree_id);
+        assert_eq!(t.model.as_deref(), Some("high"));
+        assert_eq!(t.issue_id, before.issue_id);
+        idle(&r, sid).await;
+        let workers = r.store.workers().unwrap();
+        assert!(workers.iter().any(|w| w.session == taken) && workers.iter().all(|w| w.session != sid));
+    }
+
+    #[tokio::test]
+    async fn auto_escalate_off_only_reports_and_on_takes_over() {
+        let r = rig(LONG);
+        let (sid, _) = running_worker(&r).await;
+        for _ in 0..3 {
+            ran(&r, sid, "cargo test", BAD, true);
+        }
+        r.ap.tick();
+        assert_eq!(check_ins(&r).await.len(), 1);
+        assert!(r.ap.runner.is_running(sid), "off: only reported");
+        assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.model.as_deref() == Some("high") && s.parent.is_some()).count(), 0);
+
+        let r = rig(LONG);
+        let (sid, _) = running_worker(&r).await;
+        apply(&r.store, &AutopilotPatch { auto_escalate: Some(true), ..Default::default() }).unwrap();
+        for _ in 0..3 {
+            ran(&r, sid, "cargo test", BAD, true);
+        }
+        r.ap.tick();
+        let told = check_ins(&r).await;
+        assert!(told[0].contains("Auto-escalate is on"), "{}", told[0]);
+        idle(&r, sid).await;
+        assert!(r.store.sessions().unwrap().iter().any(|s| s.model.as_deref() == Some("high") && s.title.starts_with("takeover")));
+        assert!(feed(&r).iter().any(|l| l.contains("auto-escalated")));
     }
 
     #[tokio::test]

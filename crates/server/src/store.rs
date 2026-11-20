@@ -459,6 +459,7 @@ fn session_row(row: &Row) -> rusqlite::Result<Session> {
         deferred: 0,
         queue_system: row.get::<_, i64>("queue_system")? != 0,
         paused_until: None,
+            stuck: false,
         released: row.get::<_, i64>("released")? != 0,
     })
 }

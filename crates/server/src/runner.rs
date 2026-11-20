@@ -455,6 +455,7 @@ impl Runner {
                 .and_then(|n| n.parse().ok());
             s.deferred = self.store.deferred_count(s.id).unwrap_or_default();
             s.paused_until = crate::quota::paused_until(&self.store, s.id);
+            s.stuck = crate::checkin::is_stuck(&self.store, s.id);
         }
         sessions
     }

@@ -2992,6 +2992,13 @@ impl App {
                 .size(10.5);
         }
         line.gap(8.0).note(ago(s.updated_at)).size(10.5).elided(ui);
+        if s.stuck {
+            Line::new()
+                .value("stuck")
+                .tint(egui::Color32::from_rgb(220, 90, 70))
+                .size(10.5)
+                .elided(ui);
+        }
         if let Some(n) = s.no_plan_reads {
             let text = format!("no plan after {n} reads");
             let r = Line::new()
@@ -3756,6 +3763,7 @@ mod tests {
             queue_system: false,
             paused_until: None,
             released: false,
+            stuck: false,
             no_plan_reads: None,
             parent: None,
         };

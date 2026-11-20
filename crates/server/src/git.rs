@@ -256,6 +256,17 @@ pub fn is_dirty(path: &Path) -> Result<bool, String> {
     Ok(!git(path, &["status", "--porcelain"])?.is_empty())
 }
 
+pub fn dirty_count(path: &Path) -> Result<usize, String> {
+    Ok(git(path, &["status", "--porcelain"])?.lines().count())
+}
+
+pub fn commit_times(path: &Path, limit: usize) -> Vec<i64> {
+    let n = format!("-{limit}");
+    git(path, &["log", &n, "--format=%ct"])
+        .map(|out| out.lines().filter_map(|l| l.trim().parse::<i64>().ok()).map(|t| t * 1000).collect())
+        .unwrap_or_default()
+}
+
 pub fn valid_branch(main: &Path, branch: &str) -> bool {
     !branch.trim().is_empty() && git(main, &["check-ref-format", "--branch", branch]).is_ok()
 }

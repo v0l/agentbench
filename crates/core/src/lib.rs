@@ -464,6 +464,8 @@ pub struct Session {
     pub paused_until: Option<i64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub released: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stuck: bool,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -1759,6 +1761,18 @@ pub struct AutopilotState {
     #[serde(default)]
     pub auto_close: bool,
     #[serde(default)]
+    pub check_in_minutes: u64,
+    #[serde(default)]
+    pub check_in_all: bool,
+    #[serde(default)]
+    pub auto_escalate: bool,
+    #[serde(default)]
+    pub stuck_failed_runs: u32,
+    #[serde(default)]
+    pub stuck_compactions: u32,
+    #[serde(default)]
+    pub stuck_no_commit_minutes: u64,
+    #[serde(default)]
     pub activity: Vec<Activity>,
 }
 
@@ -1778,6 +1792,18 @@ pub struct AutopilotPatch {
     pub default_level: Option<Automation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_close: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_in_minutes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_in_all: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_escalate: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_failed_runs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_compactions: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_no_commit_minutes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

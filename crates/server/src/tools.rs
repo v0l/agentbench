@@ -1107,6 +1107,33 @@ impl Api for StoreApi {
                 }
                 json!({ "judged": worker.id, "verdict": judged.verdict, "head": judged.head })
             }
+            "check_in" => {
+                if !sup {
+                    return Err("only the supervisor chat can use check_in".into());
+                }
+                let worker = s.session(session_id(args)?).map_err(|e| e.0)?;
+                if worker.parent != Some(session) {
+                    return Err("that session is not one of yours".into());
+                }
+                let runner = self.runner.get()?;
+                let action = text(args, "action").unwrap_or_default().trim().to_lowercase();
+                match action.as_str() {
+                    "continue" => json!({ "checked_in": worker.id, "action": "continue" }),
+                    "message" => {
+                        let words = text(args, "text").filter(|t| !t.trim().is_empty()).ok_or("message needs `text`, the message the worker gets")?;
+                        runner.send(&worker, words.trim()).map_err(|e| e.0)?;
+                        json!({ "checked_in": worker.id, "action": "message" })
+                    }
+                    "escalate" => {
+                        let why = text(args, "text").unwrap_or_default();
+                        let brief = format!("Why the supervisor escalated: {}\n\n{}", why.trim(), crate::autopilot::last_reply(s, worker.id));
+                        let taken = crate::checkin::escalate(&runner, &worker, &brief).map_err(|e| e.0)?;
+                        let _ = s.log_autopilot(Some(worker.project_id), worker.issue_id, &format!("session {}: escalated to the top model in session {}", worker.id, taken.id));
+                        json!({ "checked_in": worker.id, "action": "escalate", "takeover": taken.id, "model": taken.model })
+                    }
+                    _ => return Err("`action` is one of continue, message, escalate".into()),
+                }
+            }
             "stop_session" => {
                 let other = self.managed(&me, args)?;
                 let runner = self.runner.get()?;
@@ -1211,6 +1238,12 @@ impl Api for StoreApi {
                     max_nudges: num("max_nudges"),
                     default_level: None,
                     auto_close: flag("auto_close"),
+                    check_in_minutes: args.get("check_in_minutes").and_then(Value::as_u64),
+                    check_in_all: flag("check_in_all"),
+                    auto_escalate: flag("auto_escalate"),
+                    stuck_failed_runs: num("stuck_failed_runs"),
+                    stuck_compactions: num("stuck_compactions"),
+                    stuck_no_commit_minutes: args.get("stuck_no_commit_minutes").and_then(Value::as_u64),
                 };
                 let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
                 json!(state)
@@ -1310,6 +1343,7 @@ impl Api for StoreApi {
                 | "autopilot"
                 | "merge_branch"
                 | "judge_session"
+                | "check_in"
                 | "set_automation"
                 | "approve_action"
                 | "add_project"

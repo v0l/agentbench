@@ -313,6 +313,21 @@ and the session, its worktree and the merged branch are closed. `auto_close`
 closing off. Label an issue `parked` to keep the picker off it. `merge_branch`
 is for a branch with no issue.
 
+A worker on a model below the top level (anything but the `high` level) gets a
+`check_in` message to the supervisor every `check_in_minutes` of a turn
+(default 30), with its time on the issue, commits, dirty files, last bash
+commands with exit codes, last `test result:` lines and compactions. The
+supervisor answers with the `check_in` tool: `continue`, `message` (send text)
+or `escalate`, which stops the session and starts a takeover in the same
+worktree on the top model. A check_in is marked stuck, and sent at once and
+only once per signal, when the same test or build command failed
+`stuck_failed_runs` times in a row (3), a test that passed now fails,
+`stuck_compactions` compactions happened in one turn (2), or there was no commit
+for `stuck_no_commit_minutes` (45) while dirty files grew. The session list
+shows a `stuck` badge while the last check_in was stuck. `check_in_all` also
+checks in on top-model sessions; `auto_escalate` (off) escalates stuck sessions
+by itself and tells the supervisor. All of these are in the `autopilot` tool.
+
 When a server sends no cost, it is worked out from a price table, in USD per
 million tokens. Claude models have defaults; a model with no entry, such as a
 local one, costs 0. Entries match the start of the model name, the longest wins,

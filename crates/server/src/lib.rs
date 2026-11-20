@@ -3,6 +3,7 @@ pub mod agent;
 pub mod api;
 pub mod attention;
 pub mod autopilot;
+pub mod checkin;
 pub mod cli;
 pub mod git;
 pub mod host;
