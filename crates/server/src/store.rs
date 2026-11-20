@@ -1,7 +1,8 @@
 use agentbench_core::{
     Automation, Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue,
-    NoteVersion, Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Vision, VisionBody, Worktree,
+    Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Vision, VisionBody, Worktree,
 };
+use crate::memory::{Memory, Scope};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -383,28 +384,10 @@ pub struct SeenTree {
 #[derive(Clone)]
 pub struct Store {
     conn: Arc<Mutex<Connection>>,
+    memory: Arc<Memory>,
 }
 
-pub fn hash_note(body: &str) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in body.trim().bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("{h:016x}")
-}
-
-fn note_version_row(r: &Row) -> rusqlite::Result<NoteVersion> {
-    Ok(NoteVersion {
-        id: r.get(0)?,
-        topic: r.get(1)?,
-        body: r.get(2)?,
-        hash: r.get(3)?,
-        author: r.get(4)?,
-        session: r.get(5)?,
-        created_at: r.get(6)?,
-    })
-}
+pub use crate::memory::hash_note;
 
 const MS_PER_DAY: i64 = 86_400_000;
 
@@ -619,6 +602,11 @@ fn not_found(what: &str, id: impl std::fmt::Display) -> StoreError {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
+        let memory = path.parent().unwrap_or(Path::new(".")).join("memory");
+        Store::open_with_memory(path, memory)
+    }
+
+    pub fn open_with_memory(path: &Path, memory: std::path::PathBuf) -> Result<Store> {
         if let Some(dir) = path.parent() {
             let existed = dir.is_dir();
             std::fs::create_dir_all(dir).map_err(|e| StoreError(e.to_string()))?;
@@ -631,17 +619,18 @@ impl Store {
                     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
             }
         }
-        let store = Store::setup(Connection::open(path)?)?;
+        let memory = Memory::open(memory);
+        let store = Store::setup(Connection::open(path)?, memory)?;
         #[cfg(unix)]
         restrict_database_files(path);
         Ok(store)
     }
 
     pub fn memory() -> Result<Store> {
-        Store::setup(Connection::open_in_memory()?)
+        Store::setup(Connection::open_in_memory()?, Memory::temporary())
     }
 
-    fn setup(conn: Connection) -> Result<Store> {
+    fn setup(conn: Connection, memory: Memory) -> Result<Store> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "OFF")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
@@ -664,7 +653,8 @@ impl Store {
             }
         }
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let store = Store { conn: Arc::new(Mutex::new(conn)) };
+        let store = Store { conn: Arc::new(Mutex::new(conn)), memory: Arc::new(memory) };
+        store.import_notes()?;
         if store.setting(WIRE_TRANSCRIPTS)?.is_none() {
             store.convert_native_transcripts()?;
         }
@@ -1528,14 +1518,60 @@ impl Store {
         Ok(())
     }
 
+    pub fn memory_root(&self) -> &Path {
+        self.memory.root()
+    }
+
     /// What was remembered about a project, as (topic, note), oldest topic first.
     pub fn notes(&self, project_id: Id) -> Result<Vec<(String, String)>> {
-        let db = self.db();
-        let mut stmt = db.prepare(
-            "SELECT topic, body FROM notes WHERE project_id = ?1 ORDER BY updated_at, topic",
-        )?;
-        let rows = stmt.query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        Ok(self.memory.list(Scope::Project(project_id)))
+    }
+
+    fn import_notes(&self) -> Result<()> {
+        if !self.memory.is_empty() {
+            return Ok(());
+        }
+        let mut rows = Vec::new();
+        {
+            let db = self.db();
+            let mut stmt = db.prepare(
+                "SELECT p.id, p.name, n.topic, n.body FROM notes n JOIN projects p ON p.id = n.project_id
+                 ORDER BY n.updated_at, n.topic",
+            )?;
+            for r in stmt.query_map([], |r| Ok((r.get::<_, Id>(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?)))? {
+                let (id, name, topic, body) = r?;
+                rows.push((Scope::Project(id), name, topic, body));
+            }
+            let mut stmt = db.prepare("SELECT topic, body FROM global_notes ORDER BY updated_at, topic")?;
+            for r in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+                let (topic, body) = r?;
+                rows.push((Scope::Global, String::new(), topic, body));
+            }
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.memory.import(&rows).map_err(StoreError)
+    }
+
+    #[cfg(test)]
+    pub fn legacy_insert_note(&self, project_id: Id, topic: &str, body: &str) {
+        self.db()
+            .execute(
+                "INSERT INTO notes (project_id, topic, body, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params![project_id, topic, body, now()],
+            )
+            .unwrap();
+    }
+
+    #[cfg(test)]
+    pub fn legacy_insert_global(&self, topic: &str, body: &str) {
+        self.db()
+            .execute(
+                "INSERT INTO global_notes (topic, body, updated_at) VALUES (?1, ?2, ?3)",
+                params![topic, body, now()],
+            )
+            .unwrap();
     }
 
     pub fn add_watch(&self, watched: SessionId, watcher: SessionId) -> Result<()> {
@@ -1774,15 +1810,7 @@ impl Store {
     }
 
     pub fn note_hash(&self, project_id: Id, topic: &str) -> Result<String> {
-        let body: Option<String> = self
-            .db()
-            .query_row(
-                "SELECT body FROM notes WHERE project_id = ?1 AND topic = ?2",
-                params![project_id, topic],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(body.map(|b| hash_note(&b)).unwrap_or_default())
+        Ok(self.memory.hash(Scope::Project(project_id), topic))
     }
 
     pub fn set_note(
@@ -1790,54 +1818,14 @@ impl Store {
         project_id: Id,
         topic: &str,
         body: &str,
-        author: &str,
-        session: Option<SessionId>,
+        _author: &str,
+        _session: Option<SessionId>,
         based_on: Option<&str>,
     ) -> Result<bool> {
-        let mut db = self.db();
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let current: Option<String> = tx
-            .query_row(
-                "SELECT body FROM notes WHERE project_id = ?1 AND topic = ?2",
-                params![project_id, topic],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let current_hash = current.as_deref().map(hash_note).unwrap_or_default();
-        if let Some(base) = based_on {
-            if base.trim() != current_hash {
-                return Err(StoreError(format!(
-                    "note `{topic}` changed since you read it (now {current_hash}); recall it again and retry with based_on set to the new hash"
-                )));
-            }
-        } else if current.is_some() {
-            return Err(StoreError(format!(
-                "note `{topic}` exists; pass based_on={current_hash} (from recall) to replace it"
-            )));
-        }
-        let body = body.trim();
-        let n = if body.is_empty() {
-            tx.execute(
-                "DELETE FROM notes WHERE project_id = ?1 AND topic = ?2",
-                params![project_id, topic],
-            )?
-        } else {
-            tx.execute(
-                "INSERT INTO notes (project_id, topic, body, updated_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(project_id, topic) DO UPDATE
-                 SET body = excluded.body, updated_at = excluded.updated_at",
-                params![project_id, topic, body, now()],
-            )?
-        };
-        if n > 0 {
-            tx.execute(
-                "INSERT INTO note_versions (project_id, topic, body, hash, author, session, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![project_id, topic, body, hash_note(body), author, session, now()],
-            )?;
-        }
-        tx.commit()?;
-        Ok(n > 0)
+        let name = self.project(project_id)?.name;
+        self.memory
+            .set(Scope::Project(project_id), &name, topic, body, based_on)
+            .map_err(StoreError)
     }
 
     pub fn proposals(&self, state: agentbench_core::ProposalState) -> Result<Vec<agentbench_core::Proposal>> {
@@ -1996,67 +1984,22 @@ impl Store {
             .ok_or_else(|| not_found("vision", id))
     }
 
-    pub fn note_versions(&self, project_id: Id, topic: &str) -> Result<Vec<NoteVersion>> {
-        let db = self.db();
-        let mut stmt = db.prepare(
-            "SELECT id, topic, body, hash, author, session, created_at FROM note_versions
-             WHERE project_id = ?1 AND topic = ?2 ORDER BY id DESC",
-        )?;
-        let rows = stmt.query_map(params![project_id, topic], note_version_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     pub fn note_topics(&self, project_id: Id) -> Result<Vec<String>> {
-        let db = self.db();
-        let mut stmt = db.prepare(
-            "SELECT topic FROM note_versions WHERE project_id = ?1 GROUP BY topic ORDER BY MAX(id) DESC",
-        )?;
-        let rows = stmt.query_map([project_id], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        Ok(self.memory.list(Scope::Project(project_id)).into_iter().map(|(t, _)| t).collect())
     }
 
-    pub fn restore_note(
-        &self,
-        project_id: Id,
-        version: Id,
-        author: &str,
-        session: Option<SessionId>,
-    ) -> Result<()> {
-        let (topic, body): (String, String) = self
-            .db()
-            .query_row(
-                "SELECT topic, body FROM note_versions WHERE id = ?1 AND project_id = ?2",
-                params![version, project_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or_else(|| StoreError(format!("no note version {version}")))?;
-        let current = self.note_hash(project_id, &topic)?;
-        self.set_note(project_id, &topic, &body, author, session, Some(&current))?;
-        Ok(())
+    pub fn restore_note(&self, _project_id: Id, version: Id) -> Result<()> {
+        Err(StoreError(format!("no note version {version}: notes are plain files and keep no history")))
     }
 
     pub fn global_notes(&self) -> Result<Vec<(String, String)>> {
-        let db = self.db();
-        let mut stmt =
-            db.prepare("SELECT topic, body FROM global_notes ORDER BY updated_at, topic")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        Ok(self.memory.list(Scope::Global))
     }
 
     pub fn set_global_note(&self, topic: &str, body: &str) -> Result<bool> {
-        let db = self.db();
-        let n = if body.trim().is_empty() {
-            db.execute("DELETE FROM global_notes WHERE topic = ?1", params![topic])?
-        } else {
-            db.execute(
-                "INSERT INTO global_notes (topic, body, updated_at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(topic) DO UPDATE
-                 SET body = excluded.body, updated_at = excluded.updated_at",
-                params![topic, body.trim(), now()],
-            )?
-        };
-        Ok(n > 0)
+        let current = self.memory.hash(Scope::Global, topic);
+        let based_on = (!current.is_empty()).then_some(current.as_str());
+        self.memory.set(Scope::Global, "", topic, body, based_on).map_err(StoreError)
     }
 
     pub fn reset_running(&self) -> Result<Vec<SessionId>> {

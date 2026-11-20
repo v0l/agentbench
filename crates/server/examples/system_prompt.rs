@@ -8,7 +8,7 @@ fn main() -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let home = home();
     let config = Config::load(&home.join("agentbench.toml"))?;
-    let store = Store::open(&home.join("agentbench.db")).map_err(|e| e.0)?;
+    let store = Store::open_with_memory(&home.join("agentbench.db"), agentbench_server::memory::default_root()).map_err(|e| e.0)?;
     let model = saved_model(&store, &config.model);
 
     let project = store.project_by_path(&cwd.to_string_lossy()).map_err(|e| e.0)?;

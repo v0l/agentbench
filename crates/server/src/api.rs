@@ -858,8 +858,7 @@ async fn list_notes(
     let mut out = Vec::new();
     for topic in store.note_topics(id)? {
         let body = current.iter().find(|(t, _)| *t == topic).map(|(_, b)| b.clone());
-        let versions = store.note_versions(id, &topic)?;
-        out.push(agentbench_core::NoteHistory { topic, current: body, versions });
+        out.push(agentbench_core::NoteHistory { topic, current: body, versions: Vec::new() });
     }
     Ok(Json(out))
 }
@@ -874,7 +873,7 @@ async fn restore_note(
     Path(id): Path<Id>,
     Json(req): Json<RestoreNote>,
 ) -> Reply<()> {
-    api.runner.store().restore_note(id, req.version, "user", None)?;
+    api.runner.store().restore_note(id, req.version)?;
     changed(&api);
     Ok(Json(()))
 }

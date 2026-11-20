@@ -1987,7 +1987,6 @@ mod tests {
             me.id,
         );
         assert!(stale.unwrap_err().contains("changed since"));
-        assert_eq!(s.note_versions(main.project_id, "tests").unwrap().len(), 2);
         api.call("remember", &json!({"topic": "style", "note": "rustfmt"}), me.id).unwrap();
         let all = api.call("recall", &json!({}), me.id).unwrap();
         assert_eq!(all.as_array().unwrap().len(), 2);
@@ -1998,22 +1997,6 @@ mod tests {
         api.call("remember", &json!({"topic": "style", "note": "", "based_on": h}), me.id).unwrap();
         assert_eq!(s.notes(main.project_id).unwrap().len(), 1);
         assert!(api.call("remember", &json!({"note": "x"}), me.id).is_err());
-    }
-
-    #[test]
-    fn a_prior_note_version_can_be_restored_and_keeps_its_author() {
-        let s = Store::memory().unwrap();
-        let (_, main) = crate::store::testing::project(&s, "/a");
-        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
-        let p = main.project_id;
-        s.set_note(p, "t", "one", "agent", Some(me.id), None).unwrap();
-        let h = s.note_hash(p, "t").unwrap();
-        s.set_note(p, "t", "two", "user", None, Some(&h)).unwrap();
-        let versions = s.note_versions(p, "t").unwrap();
-        assert_eq!((versions[0].author.as_str(), versions[1].session), ("user", Some(me.id)));
-        s.restore_note(p, versions[1].id, "user", None).unwrap();
-        assert_eq!(s.notes(p).unwrap(), [("t".to_string(), "one".to_string())]);
-        assert_eq!(s.note_versions(p, "t").unwrap().len(), 3);
     }
 
     #[test]
