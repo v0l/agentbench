@@ -1,5 +1,4 @@
 use serde_json::Value;
-use std::collections::HashMap;
 use std::time::Duration;
 
 const POLL: Duration = Duration::from_secs(1);
@@ -21,7 +20,7 @@ impl Limits {
     }
 
     pub async fn exceeded(&self, root: Option<u32>) -> u64 {
-        let (Some(mb), Some(root)) = (self.memory_mb, root) else {
+        let (Some(mb), Some(root), true) = (self.memory_mb, root, cfg!(target_os = "linux")) else {
             return std::future::pending().await;
         };
         let cap = mb << 20;
@@ -51,6 +50,17 @@ fn tree_memory(root: u32, children: impl Fn(u32) -> Vec<u32>, rss: impl Fn(u32) 
     total
 }
 
+#[cfg(not(target_os = "linux"))]
+fn proc_children(_pid: u32) -> Vec<u32> {
+    Vec::new()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn proc_rss(_pid: u32) -> u64 {
+    0
+}
+
+#[cfg(target_os = "linux")]
 fn proc_children(pid: u32) -> Vec<u32> {
     let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
         return Vec::new();
@@ -64,6 +74,7 @@ fn proc_children(pid: u32) -> Vec<u32> {
     out
 }
 
+#[cfg(target_os = "linux")]
 fn proc_rss(pid: u32) -> u64 {
     let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/statm")) else {
         return 0;
@@ -72,6 +83,7 @@ fn proc_rss(pid: u32) -> u64 {
     pages * page_size()
 }
 
+#[cfg(target_os = "linux")]
 fn page_size() -> u64 {
     static SIZE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *SIZE.get_or_init(|| {
@@ -88,6 +100,7 @@ fn page_size() -> u64 {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn a_memory_limit_defaults_to_1g_and_zero_turns_it_off() {
@@ -96,7 +109,7 @@ mod tests {
         assert_eq!(Limits::from_args(&json!({"memory_mb": 512})).memory_mb, Some(512));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_process_tree_over_its_memory_limit_is_reported() {
         let mut child = tokio::process::Command::new("bash")

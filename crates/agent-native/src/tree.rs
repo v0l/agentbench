@@ -1,6 +1,8 @@
-use std::time::Duration;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
+#[cfg(unix)]
+use {std::time::Duration, tokio::process::Command};
 
+#[cfg(unix)]
 const TERM_GRACE: Duration = Duration::from_secs(3);
 
 /// Stop a child and everything it started: TERM to its process group, then KILL if it lingers.
