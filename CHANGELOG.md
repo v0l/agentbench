@@ -6,6 +6,11 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-20
+
+### Fixed
+- The Windows build compiles again: the native agent's memory limit reads `/proc` on Linux only and is not enforced on other systems. 0.9.1 was never published because of this.
+
 ## [0.9.1] - 2026-11-19
 
 ### Added
