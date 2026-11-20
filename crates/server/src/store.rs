@@ -1,6 +1,6 @@
 use agentbench_core::{
     Automation, Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue,
-    NoteVersion, Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Vision, VisionBody, Worktree,
+    Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Vision, VisionBody, Worktree,
 };
 use crate::memory::{Memory, Scope};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -1818,13 +1818,13 @@ impl Store {
         project_id: Id,
         topic: &str,
         body: &str,
-        author: &str,
-        session: Option<SessionId>,
+        _author: &str,
+        _session: Option<SessionId>,
         based_on: Option<&str>,
     ) -> Result<bool> {
         let name = self.project(project_id)?.name;
         self.memory
-            .set(Scope::Project(project_id), &name, topic, body, (author, session), based_on)
+            .set(Scope::Project(project_id), &name, topic, body, based_on)
             .map_err(StoreError)
     }
 
@@ -1984,38 +1984,12 @@ impl Store {
             .ok_or_else(|| not_found("vision", id))
     }
 
-    pub fn note_versions(&self, project_id: Id, topic: &str) -> Result<Vec<NoteVersion>> {
-        Ok(self
-            .memory
-            .history(Scope::Project(project_id))
-            .into_iter()
-            .find(|(t, _)| t == topic)
-            .map(|(_, v)| v)
-            .unwrap_or_default())
-    }
-
     pub fn note_topics(&self, project_id: Id) -> Result<Vec<String>> {
-        Ok(self.memory.history(Scope::Project(project_id)).into_iter().map(|(t, _)| t).collect())
+        Ok(self.memory.list(Scope::Project(project_id)).into_iter().map(|(t, _)| t).collect())
     }
 
-    pub fn restore_note(
-        &self,
-        project_id: Id,
-        version: Id,
-        author: &str,
-        session: Option<SessionId>,
-    ) -> Result<()> {
-        let found = self
-            .memory
-            .history(Scope::Project(project_id))
-            .into_iter()
-            .flat_map(|(t, v)| v.into_iter().map(move |v| (t.clone(), v)))
-            .find(|(_, v)| v.id == version)
-            .ok_or_else(|| StoreError(format!("no note version {version}")))?;
-        let (topic, v) = found;
-        let current = self.note_hash(project_id, &topic)?;
-        self.set_note(project_id, &topic, &v.body, author, session, Some(&current))?;
-        Ok(())
+    pub fn restore_note(&self, _project_id: Id, version: Id) -> Result<()> {
+        Err(StoreError(format!("no note version {version}: notes are plain files and keep no history")))
     }
 
     pub fn global_notes(&self) -> Result<Vec<(String, String)>> {
@@ -2025,7 +1999,7 @@ impl Store {
     pub fn set_global_note(&self, topic: &str, body: &str) -> Result<bool> {
         let current = self.memory.hash(Scope::Global, topic);
         let based_on = (!current.is_empty()).then_some(current.as_str());
-        self.memory.set(Scope::Global, "", topic, body, ("user", None), based_on).map_err(StoreError)
+        self.memory.set(Scope::Global, "", topic, body, based_on).map_err(StoreError)
     }
 
     pub fn reset_running(&self) -> Result<Vec<SessionId>> {

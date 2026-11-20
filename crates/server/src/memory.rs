@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use agentbench_core::{Id, NoteVersion, SessionId};
+use agentbench_core::Id;
 
 pub fn default_root() -> PathBuf {
     if let Some(dir) = crate::env_var("MEMORY") {
@@ -26,7 +25,6 @@ pub struct Memory {
     owned: bool,
     locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     resolve: Mutex<()>,
-    git: Mutex<()>,
 }
 
 impl Drop for Memory {
@@ -106,7 +104,6 @@ impl Memory {
             owned,
             locks: Mutex::new(HashMap::new()),
             resolve: Mutex::new(()),
-            git: Mutex::new(()),
         }
     }
 
@@ -127,55 +124,6 @@ impl Memory {
     fn lock_for(&self, path: &Path) -> Arc<Mutex<()>> {
         let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         locks.entry(path.to_path_buf()).or_default().clone()
-    }
-
-    fn git(&self, args: &[&str]) -> Result<String, String> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(["-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"])
-            .args(args)
-            .output()
-            .map_err(err)?;
-        if out.status.success() {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        } else {
-            Err(String::from_utf8_lossy(&out.stderr).into_owned())
-        }
-    }
-
-    fn ensure_repo(&self) -> Result<(), String> {
-        std::fs::create_dir_all(&self.root).map_err(err)?;
-        if self.git(&["rev-parse", "--is-inside-work-tree"]).is_err() {
-            self.git(&["init", "-q"])?;
-        }
-        Ok(())
-    }
-
-    fn commit(&self, paths: &[String], message: &str, author: &str, session: Option<SessionId>) {
-        let _guard = self.git.lock().unwrap_or_else(|e| e.into_inner());
-        let result = (|| {
-            self.ensure_repo()?;
-            let mut add = vec!["add", "-A", "--"];
-            add.extend(paths.iter().map(String::as_str));
-            self.git(&add)?;
-            let email = match session {
-                Some(s) => format!("{author}+{s}@agentbench"),
-                None => format!("{author}@agentbench"),
-            };
-            let who = format!("{author} <{email}>");
-            let mut commit =
-                vec!["commit", "-q", "--allow-empty-message", "--author", &who, "-m", message, "--"];
-            commit.extend(paths.iter().map(String::as_str));
-            let env_name = format!("user.name={author}");
-            let env_email = format!("user.email={email}");
-            let mut full = vec!["-c", env_name.as_str(), "-c", env_email.as_str()];
-            full.extend(commit);
-            self.git(&full)
-        })();
-        if let Err(e) = result {
-            tracing::debug!("memory commit skipped: {e}");
-        }
     }
 
     fn folder(&self, scope: Scope, name: Option<&str>) -> Option<PathBuf> {
@@ -249,10 +197,6 @@ impl Memory {
             .unwrap_or_default()
     }
 
-    fn rel(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned()
-    }
-
     fn path_for(&self, dir: &Path, topic: &str) -> PathBuf {
         let existing = self.files(dir).into_iter().find(|f| f.topic == topic);
         if let Some(f) = existing {
@@ -274,10 +218,8 @@ impl Memory {
         scope_name: &str,
         topic: &str,
         body: &str,
-        by: (&str, Option<SessionId>),
         based_on: Option<&str>,
     ) -> Result<bool, String> {
-        let (author, session) = by;
         let dir = self.folder(scope, Some(scope_name)).ok_or("memory folder unavailable")?;
         let path = self.path_for(&dir, topic);
         let lock = self.lock_for(&path);
@@ -296,12 +238,6 @@ impl Memory {
             ));
         }
         let body = body.trim();
-        let rel = self.rel(&path);
-        let mut paths = vec![rel];
-        if scope != Scope::Global {
-            paths.push(self.rel(&dir.join(PROJECT_FILE)));
-        }
-        let label = format!("{}/{}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), topic);
         if body.is_empty() {
             if current.is_none() {
                 return Ok(false);
@@ -312,62 +248,7 @@ impl Memory {
             std::fs::write(&tmp, render(topic, body)).map_err(err)?;
             std::fs::rename(&tmp, &path).map_err(err)?;
         }
-        self.commit(&paths, &label, author, session);
         Ok(true)
-    }
-
-    pub fn history(&self, scope: Scope) -> Vec<(String, Vec<NoteVersion>)> {
-        let Some(dir) = self.folder(scope, None) else { return Vec::new() };
-        let _guard = self.git.lock().unwrap_or_else(|e| e.into_inner());
-        let rel_dir = self.rel(&dir);
-        let Ok(names) = self.git(&["log", "--name-only", "--format=", "--", &rel_dir]) else {
-            return Vec::new();
-        };
-        let mut seen = Vec::new();
-        for line in names.lines().map(str::trim).filter(|l| l.ends_with(".md")) {
-            if !seen.iter().any(|s| s == line) {
-                seen.push(line.to_string());
-            }
-        }
-        let mut out = Vec::new();
-        for file in seen {
-            let Ok(log) = self.git(&["log", "--format=%H%x1f%an%x1f%ae%x1f%ct", "--", &file]) else {
-                continue;
-            };
-            let stem = Path::new(&file)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let mut versions = Vec::new();
-            for line in log.lines() {
-                let mut parts = line.split('\x1f');
-                let (Some(hash), Some(author), Some(email), Some(time)) =
-                    (parts.next(), parts.next(), parts.next(), parts.next())
-                else {
-                    continue;
-                };
-                let Ok(text) = self.git(&["show", &format!("{hash}:{file}")]) else { continue };
-                let (topic, body) = parse(&stem, &text);
-                let session = email
-                    .split('@')
-                    .next()
-                    .and_then(|l| l.split_once('+'))
-                    .and_then(|(_, s)| s.parse().ok());
-                versions.push(NoteVersion {
-                    id: i64::from_str_radix(&hash[..15.min(hash.len())], 16).unwrap_or(0),
-                    topic,
-                    hash: hash_note(&body),
-                    body,
-                    author: author.to_string(),
-                    session,
-                    created_at: time.parse::<i64>().unwrap_or(0) * 1000,
-                });
-            }
-            if let Some(newest) = versions.first() {
-                out.push((newest.topic.clone(), versions));
-            }
-        }
-        out
     }
 
     pub fn import(&self, notes: &[(Scope, String, String, String)]) -> Result<(), String> {
@@ -376,7 +257,6 @@ impl Memory {
             let path = self.path_for(&dir, topic);
             std::fs::write(path, render(topic, body)).map_err(err)?;
         }
-        self.commit(&[".".to_string()], "Import notes", "agentbench", None);
         Ok(())
     }
 }
@@ -390,16 +270,6 @@ mod tests {
     use agent_native::Api;
     use serde_json::json;
 
-    fn log(root: &Path) -> Vec<String> {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["log", "--format=%s"])
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect()
-    }
-
     fn folder(root: &Path, id: Id) -> PathBuf {
         std::fs::read_dir(root)
             .unwrap()
@@ -410,14 +280,13 @@ mod tests {
     }
 
     #[test]
-    fn remember_writes_a_markdown_file_and_a_commit() {
+    fn remember_writes_a_markdown_file() {
         let s = Store::memory().unwrap();
         let (_, main) = project(&s, "/a");
         let p = main.project_id;
         s.set_note(p, "Test Cmds", "cargo test", "agent", None, None).unwrap();
         let dir = folder(s.memory_root(), p);
         assert_eq!(std::fs::read_to_string(dir.join("test-cmds.md")).unwrap(), "# Test Cmds\n\ncargo test\n");
-        assert_eq!(log(s.memory_root()), ["demo/Test Cmds"]);
         assert_eq!(s.notes(p).unwrap(), [("Test Cmds".to_string(), "cargo test".to_string())]);
     }
 
@@ -452,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_deletes_the_file_and_commits() {
+    fn forgetting_deletes_the_file() {
         let s = Store::memory().unwrap();
         let (_, main) = project(&s, "/a");
         let p = main.project_id;
@@ -461,26 +330,6 @@ mod tests {
         assert!(s.set_note(p, "t", "", "agent", None, Some(&h)).unwrap());
         assert!(!folder(s.memory_root(), p).join("t.md").exists());
         assert!(s.notes(p).unwrap().is_empty());
-        assert_eq!(log(s.memory_root()), ["demo/t", "demo/t"]);
-    }
-
-    #[test]
-    fn versions_come_from_commits_and_restore_writes_an_old_one() {
-        let s = Store::memory().unwrap();
-        let (_, main) = project(&s, "/a");
-        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
-        let p = main.project_id;
-        s.set_note(p, "t", "one", "agent", Some(me.id), None).unwrap();
-        let h = s.note_hash(p, "t").unwrap();
-        s.set_note(p, "t", "two", "user", None, Some(&h)).unwrap();
-        let versions = s.note_versions(p, "t").unwrap();
-        assert_eq!(versions.len(), 2);
-        assert_eq!((versions[0].body.as_str(), versions[0].author.as_str()), ("two", "user"));
-        assert_eq!((versions[1].body.as_str(), versions[1].session), ("one", Some(me.id)));
-        s.restore_note(p, versions[1].id, "user", None).unwrap();
-        assert_eq!(s.notes(p).unwrap()[0].1, "one");
-        assert_eq!(s.note_versions(p, "t").unwrap().len(), 3);
-        assert_eq!(s.note_topics(p).unwrap(), ["t"]);
     }
 
     #[test]
@@ -498,13 +347,11 @@ mod tests {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.notes(p).unwrap(), [("tests".to_string(), "cargo test".to_string())]);
         assert_eq!(s.global_notes().unwrap(), [("style".to_string(), "no em dashes".to_string())]);
-        assert_eq!(log(s.memory_root()), ["Import notes"]);
         let h = s.note_hash(p, "tests").unwrap();
         s.set_note(p, "tests", "", "user", None, Some(&h)).unwrap();
         drop(s);
         let s = Store::open(&path).unwrap();
         assert!(s.notes(p).unwrap().is_empty(), "the deleted note must not come back");
-        assert_eq!(log(s.memory_root()).iter().filter(|l| *l == "Import notes").count(), 1);
     }
 
     #[test]
@@ -518,7 +365,7 @@ mod tests {
         assert_eq!(s.notes(p).unwrap().len(), 1);
         let h = s.note_hash(p, "t").unwrap();
         s.set_note(p, "t", "two", "agent", None, Some(&h)).unwrap();
-        let folders = std::fs::read_dir(s.memory_root()).unwrap().flatten().filter(|e| e.path().is_dir() && e.file_name() != ".git").count();
+        let folders = std::fs::read_dir(s.memory_root()).unwrap().flatten().filter(|e| e.path().is_dir()).count();
         assert_eq!(folders, 1);
     }
 
