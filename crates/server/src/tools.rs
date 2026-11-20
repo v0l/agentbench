@@ -596,7 +596,51 @@ impl Api for StoreApi {
         if sup {
             self.gate(tool, args, project, session)?;
         }
+        if let Some(hit) = crate::guards::hit(s, tool, args) {
+            if hit.ask {
+                return Err(format!("{} Ask the user with ask_user first, and only go on with their yes.", hit.refusal()));
+            }
+            return Err(hit.refusal());
+        }
         let out = match tool {
+            "report_process_issue" => {
+                let r = crate::process::Report {
+                    category: text(args, "category").unwrap_or_default(),
+                    title: text(args, "title").unwrap_or_default(),
+                    what_happened: text(args, "what_happened").unwrap_or_default(),
+                    cost: text(args, "cost").unwrap_or_default(),
+                    suggestion: text(args, "suggestion").unwrap_or_default(),
+                    ..Default::default()
+                };
+                match crate::process::report(s, &r, &me)? {
+                    crate::process::Filed::New(i) => json!({ "filed": i }),
+                    crate::process::Filed::Bumped(i, n) => json!({ "bumped": i, "count": n, "note": "an open report already covers this; your occurrence was added to it" }),
+                }
+            }
+            "guard_rules" => {
+                if !sup {
+                    return Err("only the supervisor edits the guard rules".into());
+                }
+                let mut rules = crate::guards::load(s)?;
+                if let Some(id) = text(args, "remove") {
+                    rules.rules.retain(|r| r.id != id.trim());
+                    crate::guards::save(s, &rules)?;
+                } else if let Some(rule) = args.get("rule").filter(|v| !v.is_null()) {
+                    let rule: crate::guards::Rule =
+                        serde_json::from_value(rule.clone()).map_err(|e| format!("bad `rule`: {e}"))?;
+                    rules.rules.retain(|r| r.id != rule.id);
+                    rules.rules.push(rule);
+                    crate::guards::save(s, &rules)?;
+                }
+                json!({ "file": crate::guards::path(s), "rules": rules.rules })
+            }
+            "check_guard" => {
+                let tool = text(args, "tool").unwrap_or_default();
+                match crate::guards::hit(s, &tool, args.get("args").unwrap_or(&Value::Null)) {
+                    Some(h) => json!({ "hit": h.id, "ask": h.ask, "message": h.message }),
+                    None => json!({ "hit": null }),
+                }
+            }
             "list_issues" => {
                 let filter = state(args)?;
                 let goal = text(args, "goal").map(|g| g.trim().to_string()).filter(|g| !g.is_empty());
@@ -976,6 +1020,7 @@ impl Api for StoreApi {
                     return Err(format!("{} no longer exists", other.cwd));
                 }
                 if me.parent == Some(other.id) && body.trim_start().starts_with("DONE") {
+                    crate::process::undelivered(s, &me, other.id);
                     return Ok(json!({ "sent": null, "note": "not delivered: your parent is told when your turn ends, with your reply, the diff and your test runs, so a DONE line is the end of your reply" }));
                 }
                 // The prefix also keeps a message that starts with a slash from running as a command.
@@ -1352,6 +1397,7 @@ impl Api for StoreApi {
         if matches!(
             tool,
             "file_issue"
+                | "report_process_issue"
                 | "autopilot"
                 | "merge_branch"
                 | "judge_session"
@@ -1499,6 +1545,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn report_process_issue_files_a_process_issue_and_a_repeat_bumps_it() {
+        let b = boss();
+        let args = json!({"category": "environment", "what_happened": "tp tests fail when run in parallel on one GPU", "cost": "30 min"});
+        let out = b.api.call("report_process_issue", &args, b.worker).unwrap();
+        let id = out["filed"].as_i64().unwrap();
+        let i = b.s.issue(id).unwrap();
+        assert_eq!((i.state, i.goal.clone(), i.labels.clone()), (IssueState::Backlog, None, vec!["process".to_string()]));
+        assert!(i.body.contains(&b.worker.to_string()));
+        let again = json!({"category": "environment", "what_happened": "The tp tests failed again running in parallel on the one GPU"});
+        let out = b.api.call("report_process_issue", &again, b.worker).unwrap();
+        assert_eq!((out["bumped"].as_i64(), out["count"].as_u64()), (Some(id), Some(2)));
+        assert!(b.api.call("report_process_issue", &json!({"category": "other"}), b.worker).is_err());
+    }
+
+    #[test]
+    fn the_guard_rules_refuse_a_push_to_main_brief_and_only_the_supervisor_edits_them() {
+        let b = boss();
+        let e = b.api.call("file_issue", &json!({"title": "t", "body": "fix it then git push origin main"}), b.worker).unwrap_err();
+        assert!(e.contains("worker-no-push"), "{e}");
+        b.api.call("file_issue", &json!({"title": "t", "body": "fix it and commit on your branch"}), b.worker).unwrap();
+        let e = b.api.call("start_session", &json!({"prompt": "Review PR #4 and report", "model": "low"}), b.worker).unwrap_err();
+        assert!(e.contains("pr-review-model"), "{e}");
+        let rule = json!({"rule": {"id": "no-friday", "tools": ["file_issue"], "fields": ["title"], "pattern": "(?i)friday deploy", "action": "refuse", "message": "no"}});
+        assert!(b.api.call("guard_rules", &rule, b.worker).is_err());
+        b.api.call("guard_rules", &rule, b.boss).unwrap();
+        assert!(b.api.call("file_issue", &json!({"title": "Friday deploy"}), b.worker).unwrap_err().contains("no-friday"));
+        let found = b.api.call("check_guard", &json!({"tool": "bash", "args": {"command": "gh pr review 4 --approve"}}), b.worker).unwrap();
+        assert_eq!((found["hit"].as_str(), found["ask"].as_bool()), (Some("pr-reviews"), Some(true)));
     }
 
     #[test]

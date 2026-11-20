@@ -155,11 +155,28 @@ pub fn minutes(cost: &str) -> f64 {
         .sum()
 }
 
+const STOP: [&str; 40] = [
+    "the", "and", "for", "was", "were", "are", "this", "that", "with", "when", "then", "than", "from", "into", "onto", "one", "again",
+    "its", "has", "had", "have", "not", "but", "you", "your", "our", "out", "too", "very", "each", "time", "times", "came", "back",
+    "did", "does", "they", "them", "there", "their",
+];
+
+fn stem(w: &str) -> String {
+    for suffix in ["ing", "ed", "es", "s"] {
+        if let Some(s) = w.strip_suffix(suffix)
+            && s.len() >= 3
+        {
+            return s.to_string();
+        }
+    }
+    w.to_string()
+}
+
 fn words(text: &str) -> HashSet<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|w| w.len() >= 4)
-        .map(str::to_string)
+        .filter(|w| w.len() >= 3 && !STOP.contains(w))
+        .map(stem)
         .collect()
 }
 
@@ -364,6 +381,9 @@ pub fn restarted(store: &Store, sessions: usize) -> Option<Filed> {
 static TOOL_ERROR: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"[0-9]+").unwrap());
 
 pub fn tool_error(store: &Store, session: &Session, tool: &str, output: &str) -> Option<Filed> {
+    if matches!(tool, "bash" | "bash_output") {
+        return None;
+    }
     let first = output.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
     let shape: String = TOOL_ERROR.replace_all(first, "N").chars().take(80).collect();
     let key = format!("tool-error:{tool}:{shape}");
@@ -458,7 +478,7 @@ pub struct Ranked {
 pub fn ranked(store: &Store, project: Id, since: i64) -> Vec<Ranked> {
     let mut out: Vec<Ranked> = open_reports(store, project)
         .into_iter()
-        .filter(|i| i.updated_at > since)
+        .filter(|i| i.updated_at >= since)
         .map(|i| {
             let m = meta(store, &i);
             Ranked { count: m.count.max(count_in(&i.title)), minutes: m.minutes, category: m.category, issue: i }
@@ -566,7 +586,12 @@ pub fn send_digest(runner: &crate::runner::Runner, now_ms: i64) -> bool {
     let text = digest(store, now_ms);
     let _ = store.set_setting(DIGEST_LAST, &now_ms.to_string());
     match text {
-        Some(t) => runner.tell(&sup, &t, crate::runner::Origin::new("process", None)).is_ok(),
+        Some(t) => {
+            if let Err(e) = runner.tell(&sup, &t, crate::runner::Origin::new("process", None)) {
+                tracing::warn!("the process digest waits for the supervisor: {}", e.0);
+            }
+            true
+        }
         None => false,
     }
 }
@@ -660,11 +685,12 @@ mod tests {
     fn a_tool_error_repeated_three_times_files_once() {
         let (s, w) = setup();
         for n in 0..4 {
-            tool_error(&s, &w, "bash", &format!("error: port {} in use", 7000 + n));
+            tool_error(&s, &w, "edit_file", &format!("error: no match at line {}", 7000 + n));
         }
+        assert!(tool_error(&s, &w, "bash", "exit 1").is_none() && tool_error(&s, &w, "bash", "exit 1").is_none() && tool_error(&s, &w, "bash", "exit 1").is_none(), "a failing command is not a harness error");
         let open = open_reports(&s, agentbench(&s));
         assert_eq!(open.len(), 1);
-        assert!(open[0].title.contains("bash keeps failing"), "{}", open[0].title);
+        assert!(open[0].title.contains("edit_file keeps failing"), "{}", open[0].title);
     }
 
     #[test]
@@ -703,6 +729,24 @@ mod tests {
         assert!(line.contains("Make it a guard"), "{line}");
         assert!(!d.lines().find(|l| l.contains(&format!("#{} ", big.id()))).unwrap().contains("guard"));
         assert!(d.contains("guards.toml") && d.contains("closed as noise"));
+    }
+
+    #[test]
+    fn the_digest_is_sent_to_the_supervisor_once_a_day() {
+        let (s, w) = setup();
+        let dir = tempfile::tempdir().unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
+        let boss = s.add_session(s.main_worktree(sup.id).unwrap().id, "native", "boss", None, None).unwrap();
+        let runner = crate::runner::Runner::new(s.clone(), vec![]);
+        let t = now();
+        assert!(!send_digest(&runner, t), "nothing to say yet");
+        file(&s, &rep("ports collide between worker test servers", "5 min"), Some(&w)).unwrap();
+        assert!(!send_digest(&runner, t + 1000), "not a day since the last one");
+        assert!(send_digest(&runner, t + DAY_MS));
+        assert!(!send_digest(&runner, t + DAY_MS + 1000), "once a day");
+        let told = s.deferred(boss.id).unwrap();
+        assert_eq!(told.len(), 1);
+        assert!(told[0].text.starts_with("Daily process digest"), "{}", told[0].text);
     }
 
     #[test]

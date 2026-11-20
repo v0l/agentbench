@@ -1407,6 +1407,7 @@ async fn send(
     api.runner
         .send_with(&session, &msg.text, &msg.attachments)
         .map_err(|e| Failure(StatusCode::CONFLICT, e.0))?;
+    crate::process::correction(api.runner.store(), &session, &msg.text);
     Ok(StatusCode::ACCEPTED)
 }
 

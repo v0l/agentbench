@@ -758,6 +758,7 @@ impl Runner {
     }
 
     pub fn resume(&self, sessions: &[SessionId]) {
+        crate::process::restarted(&self.store, sessions.len());
         for id in sessions {
             let Ok(session) = self.store.session(*id) else { continue };
             if let Err(e) = self.send(&session, RESUME_PROMPT) {
@@ -870,6 +871,11 @@ impl Runner {
         }
         runner.changed.notify_waiters();
         if ran {
+            if let Ok(done) = runner.store.session(session_id)
+                && done.status == SessionStatus::Idle
+            {
+                crate::process::from_reply(&runner.store, &done, &crate::autopilot::last_reply(&runner.store, session_id));
+            }
             runner.tell_watchers(session_id);
         }
         if runner.store.session(session_id).is_ok_and(|s| s.status == SessionStatus::Idle) {
@@ -1706,6 +1712,11 @@ impl Io for Sink {
                 }
             }
             Event::ToolEnd { call_id, name, output, error } => {
+                if error
+                    && let Ok(me) = self.store.session(self.session)
+                {
+                    crate::process::tool_error(&self.store, &me, &name, &output);
+                }
                 let known = self.lock().tools.remove(&call_id);
                 match known {
                     Some((id, input)) => {
@@ -1729,6 +1740,11 @@ impl Io for Sink {
             Event::Usage(u) => {
                 let quota = u.quota.clone();
                 let _ = self.store.add_usage(self.session, &u);
+                if (u.bash_edits > 0 || u.bash_sleeps > 0)
+                    && let Ok(me) = self.store.session(self.session)
+                {
+                    crate::process::usage(&self.store, &me, &u);
+                }
                 if let Some(q) = quota {
                     self.runner.observe_quota(q);
                 }
@@ -4671,6 +4687,12 @@ mod deferred_tests {
         assert!(out["sent"].is_null(), "{out}");
         assert!(said_to(&r, r.boss.id).is_empty());
         assert_eq!(r.store.deferred_count(r.boss.id).unwrap(), 0);
+        let filed: Vec<_> = r.store.issues().unwrap().into_iter().filter(|i| i.labels.contains(&crate::process::LABEL.to_string())).collect();
+        assert_eq!(filed.len(), 1, "an undelivered message files one process report");
+        assert!(filed[0].body.contains(&r.worker.id.to_string()), "{}", filed[0].body);
+        r.runner.api.call("send_message", &args, r.worker.id).unwrap();
+        let again = r.store.issue(filed[0].id).unwrap();
+        assert!(again.title.ends_with("(x2)"), "{}", again.title);
     }
 
     #[tokio::test]

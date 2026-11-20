@@ -354,10 +354,12 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 35] = [
+pub const AGENTBENCH_TOOLS: [&str; 37] = [
     "list_issues",
     "get_issue",
     "file_issue",
+    "report_process_issue",
+    "guard_rules",
     "update_issue",
     "comment_on_issue",
     "list_sessions",
@@ -433,6 +435,33 @@ fn agentbench_specs() -> Vec<Spec> {
                     "depends_on": depends_on_schema("Issue numbers this one waits on (any project). It is not started until all are done, then it is released automatically; use this for ordered work instead of parking issues with no goal"),
                 }),
                 &["title"],
+            ),
+        ),
+        Spec::new(
+            "report_process_issue",
+            "Report a problem with the process, not the code: the harness, a tool, a brief, conflicting instructions, a missing permission, the environment, or time wasted. \
+             Your session, project, issue and model are attached. A repeat of an open report bumps its count instead of filing again. At most 3 per turn.",
+            object(
+                json!({
+                    "category": string("harness bug, tool missing or awkward, brief unclear or wrong, instruction conflict, permission or credential gap, environment (GPU, ports, restarts), wasted time, user correction, or other"),
+                    "what_happened": string("What happened, as facts"),
+                    "cost": string("Time or tokens lost, a rough guess such as `20 min` or `50k tokens`"),
+                    "suggestion": string("How to fix it, if you know"),
+                    "title": string("One line; made from what_happened when left out"),
+                }),
+                &["category", "what_happened"],
+            ),
+        ),
+        Spec::new(
+            "guard_rules",
+            "Supervisor chat only. Read or add the guard rules, the one file every guard reads. A rule refuses (or asks the user about) a tool call whose fields match its regex. \
+             With no `rule` it lists them. With `rule` it adds or replaces the rule with that id; with `remove` it deletes one.",
+            object(
+                json!({
+                    "rule": json!({ "type": "object", "description": "{id, tools: [tool names, bash included], fields: [argument names], pattern: regex, require_field?, require?: regex the field must match for the call to pass, action: refuse or ask, message}" }),
+                    "remove": string("The id of a rule to delete"),
+                }),
+                &[],
             ),
         ),
         Spec::new(
@@ -3006,6 +3035,7 @@ impl Native {
                     io.emit(Event::Usage(Usage { bash_sleeps: 1, ..Usage::default() }));
                     return Err(super::steer::sleep_refusal(seconds));
                 }
+                guard_bash(args, cx, io).await?;
                 let note = steer_note(command, io);
                 let ran = bash(
                     ws.root(),
@@ -3108,6 +3138,29 @@ impl Native {
                 ))
             }
         }
+    }
+}
+
+async fn guard_bash(args: &Value, cx: &Context, io: &dyn Io) -> Result<(), String> {
+    let Ok(found) = io.api().call("check_guard", &json!({ "tool": "bash", "args": args }), cx.session) else {
+        return Ok(());
+    };
+    let Some(id) = found["hit"].as_str() else { return Ok(()) };
+    let message = found["message"].as_str().unwrap_or_default();
+    let refusal = format!("refused by the guard rule `{id}`: {message}");
+    if !found["ask"].as_bool().unwrap_or(false) {
+        return Err(refusal);
+    }
+    let command = args.get("command").and_then(Value::as_str).unwrap_or_default();
+    let question = Question {
+        text: format!("{message}\n\nThe agent wants to run:\n\n{}", clip(command, 600)),
+        options: vec![ALLOW_ONCE.into(), DENY.into()],
+        multiple: false,
+        secret: false,
+    };
+    match io.ask(question).await {
+        Ok(a) if a.trim() == ALLOW_ONCE => Ok(()),
+        _ => Err(format!("{refusal} The user did not allow it.")),
     }
 }
 

@@ -13,6 +13,8 @@ pub struct Rule {
     pub fields: Vec<String>,
     pub pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require: Option<String>,
@@ -33,9 +35,10 @@ pub struct Rules {
 
 pub const DEFAULTS: &str = r#"[[rule]]
 id = "worker-no-push"
-tools = ["start_session", "send_message", "file_issue", "update_issue"]
+tools = ["start_session", "send_message", "file_issue"]
 fields = ["prompt", "text", "body"]
 pattern = '(?i)\bpush\b[^.\n]{0,40}\b(to|into|onto)\s+(origin[ /])?(main|master)\b|\bgit\s+push\s+(-\S+\s+)*\S+\s+(\S+:)?(main|master)\b|\bmerge\b[^.\n]{0,30}\band push\b'
+unless = '(?i)\b(never|not|don.t|do not|no|without)\s+(git\s+)?(merge and\s+)?push'
 action = "refuse"
 message = "Workers never push to main or master: they commit on their branch and the supervisor or autopilot merges. Rewrite the brief to end at 'commit on your branch'."
 
@@ -90,6 +93,9 @@ pub fn check(rule: &Rule) -> Result<(), String> {
     if let Some(r) = &rule.require {
         regex::Regex::new(r).map_err(|e| format!("{}: require: {e}", rule.id))?;
     }
+    if let Some(r) = &rule.unless {
+        regex::Regex::new(r).map_err(|e| format!("{}: unless: {e}", rule.id))?;
+    }
     if !matches!(rule.action.as_str(), "refuse" | "ask") {
         return Err(format!("{}: action is refuse or ask", rule.id));
     }
@@ -129,6 +135,11 @@ pub fn matches(rules: &Rules, tool: &str, args: &Value) -> Option<Hit> {
             r.fields.iter().map(|f| field(args, f)).collect()
         };
         if !text.iter().any(|t| pattern.is_match(t)) {
+            return None;
+        }
+        if let Some(u) = &r.unless
+            && text.iter().any(|t| regex::Regex::new(u).is_ok_and(|u| u.is_match(t)))
+        {
             return None;
         }
         if let (Some(f), Some(req)) = (&r.require_field, &r.require) {
@@ -179,7 +190,7 @@ mod tests {
         }
         assert_eq!(id("file_issue", json!({"title": "t", "body": "then push it to main"})).as_deref(), Some("worker-no-push"));
         assert_eq!(id("send_message", json!({"text": "push to main now"})).as_deref(), Some("worker-no-push"));
-        for ok in ["Fix it and commit on your branch.", "git push -u origin issue-12-fix", "The main loop is slow."] {
+        for ok in ["Fix it and commit on your branch.", "git push -u origin issue-12-fix", "The main loop is slow.", "Never push to main; the supervisor merges."] {
             assert_eq!(id("start_session", json!({"prompt": ok})), None, "{ok}");
         }
     }
