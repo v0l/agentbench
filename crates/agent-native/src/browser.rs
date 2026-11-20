@@ -2215,6 +2215,73 @@ function later() { setTimeout(() => { document.body.insertAdjacentHTML('beforeen
         assert!(failed.trim_matches('"').is_empty(), "{failed}");
     }
 
+    #[test]
+    fn challenge_pages_are_recognised_by_title_or_short_body() {
+        assert!(looks_like_challenge("Just a moment...", ""));
+        assert!(looks_like_challenge("independent.ie", "Verifying you are human"));
+        assert!(looks_like_challenge("Attention Required! | Cloudflare", "Sorry"));
+        assert!(!looks_like_challenge("Dundalk news", "Gardai arrested a man"));
+    }
+
+    fn served(routes: &'static [(&'static str, &'static str, &'static str)]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let line = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let (kind, body) = routes
+                    .iter()
+                    .find(|r| r.0 == path)
+                    .map(|r| (r.1, r.2))
+                    .unwrap_or(("text/plain", "missing"));
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn page_html_returns_the_whole_rendered_document_unclipped() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let base = served(&[("/big", "text/html", "<html><body><script>document.body.append('x'.repeat(30000))</script></body></html>")]);
+        let b = Browsers::default();
+        let html = b.page_html(&format!("{base}/big")).await.unwrap();
+        assert!(html.starts_with("<html") && html.len() > 30_000, "{}", html.len());
+    }
+
+    #[tokio::test]
+    async fn raw_body_fetches_from_inside_the_page() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let base = served(&[
+            ("/", "text/html", "<html><body>home</body></html>"),
+            ("/feed", "application/rss+xml", "<rss><channel><item>one</item></channel></rss>"),
+        ]);
+        let b = Browsers::default();
+        let body = b.raw_body(&format!("{base}/feed")).await.unwrap();
+        assert_eq!(body, "<rss><channel><item>one</item></channel></rss>");
+        let again = b.page_html(&format!("{base}/")).await.unwrap();
+        assert!(again.contains("home"));
+    }
+
+    #[test]
+    fn browsers_can_be_shared_between_tasks() {
+        fn shareable<T: Clone + Send + Sync + 'static>() {}
+        shareable::<Browsers>();
+    }
+
     #[tokio::test]
     async fn the_private_browser_does_not_announce_automation() {
         if screenshot::browser().is_none() {
