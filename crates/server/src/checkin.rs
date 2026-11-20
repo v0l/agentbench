@@ -319,6 +319,9 @@ impl Autopilot {
         let note = if escalating { "Auto-escalate is on: the session was stopped and a takeover started on the top model." } else { "" };
         let body = report(session, first_on_issue, &t, &f, now, &reasons, note);
         if stuck {
+            if !fresh.is_empty() {
+                crate::process::stuck(store, session, &reasons);
+            }
             let hook = self.stuck_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
             if let Some(hook) = hook {
                 hook(&StuckSignal { session: session.id, issue: session.issue_id, reasons: reasons.clone() });

@@ -2667,6 +2667,9 @@ mod tests {
         assert!(told[0].contains("STUCK") && told[0].contains("failed 3 or more times"), "{}", told[0]);
         assert!(told[0].contains("(exit 101)") && told[0].contains("test result: FAILED"), "{}", told[0]);
         assert!(r.store.session(sid).map(|s| crate::checkin::is_stuck(&r.store, s.id)).unwrap());
+        let process: Vec<_> = r.store.issues().unwrap().into_iter().filter(|i| i.labels.iter().any(|l| l == crate::process::LABEL)).collect();
+        assert_eq!(process.len(), 1, "a stuck check_in feeds the process queue");
+        assert!(process[0].title.starts_with("Session stuck"), "{}", process[0].title);
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
         r.ap.on_stuck(std::sync::Arc::new(move |s| sink.lock().unwrap().push(s.session)));

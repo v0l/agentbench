@@ -397,6 +397,19 @@ pub fn tool_error(store: &Store, session: &Session, tool: &str, output: &str) ->
     )
 }
 
+pub fn stuck(store: &Store, session: &Session, reasons: &[String]) -> Option<Filed> {
+    let first = reasons.first()?;
+    let shape: String = TOOL_ERROR.replace_all(first, "N").chars().take(60).collect();
+    capture(
+        store,
+        Some(session),
+        &format!("stuck:{shape}"),
+        "wasted_time",
+        &format!("Session stuck: {}", shape.trim()),
+        &format!("A check_in found the session stuck: {}.", reasons.join("; ")),
+    )
+}
+
 pub fn usage(store: &Store, session: &Session, delta: &agentbench_core::Usage) {
     let total = &session.usage;
     if delta.bash_edits > 0 && total.bash_edits >= REPEATS as u64 {
