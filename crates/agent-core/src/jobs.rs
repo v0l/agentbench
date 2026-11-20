@@ -12,6 +12,40 @@ pub type Owner = String;
 
 const KEPT: usize = 256 * 1024;
 const RUNNING_MAX: usize = 8;
+pub const TAIL: usize = 32 * 1024;
+
+pub enum Until {
+    Exit,
+    Pattern(regex::Regex),
+}
+
+impl Until {
+    pub fn pattern(text: &str) -> Result<Until, String> {
+        if text.trim().eq_ignore_ascii_case("exit") {
+            return Ok(Until::Exit);
+        }
+        regex::Regex::new(text).map(Until::Pattern).map_err(|e| format!("bad `until` regex: {e}"))
+    }
+}
+
+fn tail_of(text: &str) -> (String, Option<String>) {
+    if text.len() <= TAIL {
+        return (text.to_string(), None);
+    }
+    let mut from = text.len() - TAIL;
+    while !text.is_char_boundary(from) {
+        from += 1;
+    }
+    if let Some(nl) = text[from..].find('\n') {
+        from += nl + 1;
+    }
+    let lines = text.lines().count();
+    let shown = text[from..].lines().count();
+    (
+        text[from..].to_string(),
+        Some(format!("[{lines} lines of new output, showing the last {shown}]\n")),
+    )
+}
 
 #[derive(Default)]
 struct Output {
@@ -214,13 +248,36 @@ impl Jobs {
         wait: Duration,
         stop: &CancellationToken,
     ) -> Result<String, String> {
+        self.output_until(session, handle, wait, None, stop).await
+    }
+
+    pub async fn output_until(
+        &self,
+        session: &str,
+        handle: &str,
+        wait: Duration,
+        until: Option<&Until>,
+        stop: &CancellationToken,
+    ) -> Result<String, String> {
         let job = self.find(session, handle)?;
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             let notified = job.woke.notified();
             {
                 let o = lock(&job.out);
-                if o.read < o.dropped + o.bytes.len() || o.exit.is_some() {
+                if o.exit.is_some() {
+                    break;
+                }
+                let fresh = o.read < o.dropped + o.bytes.len();
+                let done = match until {
+                    None => fresh,
+                    Some(Until::Exit) => false,
+                    Some(Until::Pattern(re)) => {
+                        let start = o.read.max(o.dropped) - o.dropped;
+                        String::from_utf8_lossy(&o.bytes[start..]).lines().any(|l| re.is_match(l))
+                    }
+                };
+                if done {
                     break;
                 }
             }
@@ -233,18 +290,20 @@ impl Jobs {
         let mut o = lock(&job.out);
         let start = o.read.max(o.dropped);
         let skipped = start - o.read;
-        let text = String::from_utf8_lossy(&o.bytes[start - o.dropped..]).into_owned();
+        let full = String::from_utf8_lossy(&o.bytes[start - o.dropped..]).into_owned();
+        let (text, counted) = tail_of(&full);
         o.read = o.dropped + o.bytes.len();
         let state = match o.exit {
             None => format!("[{handle} still running after {}s]", job.started.elapsed().as_secs()),
             Some(Some(c)) => format!("[{handle} exited {c}]"),
             Some(None) => format!("[{handle} ended]"),
         };
-        let lost = if skipped > 0 {
+        let mut lost = if skipped > 0 {
             format!("[{skipped} bytes of older output were dropped]\n")
         } else {
             String::new()
         };
+        lost.push_str(&counted.unwrap_or_default());
         Ok(format!(
             "{lost}{text}{}{state}",
             if text.ends_with('\n') || text.is_empty() { "" } else { "\n" }
@@ -301,6 +360,92 @@ mod tests {
         let last = jobs.output(SID, &h, Duration::from_secs(1), &stop).await.unwrap();
         assert!(last.contains("exited"), "{last}");
         assert!(jobs.list(SID).contains("exited"));
+    }
+
+    #[tokio::test]
+    async fn until_exit_waits_for_the_exit_not_for_output() {
+        let jobs = Jobs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let stop = CancellationToken::new();
+        let h = jobs.start(SID, dir.path(), "echo chatty; sleep 1; echo end", &open()).unwrap();
+        let began = Instant::now();
+        let out = jobs
+            .output_until(SID, &h, Duration::from_secs(600), Some(&Until::Exit), &stop)
+            .await
+            .unwrap();
+        assert!(out.contains("exited 0") && out.contains("end"), "{out}");
+        assert!(began.elapsed() < Duration::from_secs(10), "{:?}", began.elapsed());
+    }
+
+    #[tokio::test]
+    async fn until_a_pattern_returns_on_the_matching_line_not_earlier_ones() {
+        let jobs = Jobs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let stop = CancellationToken::new();
+        let cmd = "echo compiling; sleep 1; echo more; sleep 1; echo 'test result: FAILED'; sleep 30";
+        let h = jobs.start(SID, dir.path(), cmd, &open()).unwrap();
+        let until = Until::pattern("test result:|panicked").unwrap();
+        let began = Instant::now();
+        let out = jobs
+            .output_until(SID, &h, Duration::from_secs(60), Some(&until), &stop)
+            .await
+            .unwrap();
+        assert!(out.contains("test result: FAILED") && out.contains("still running"), "{out}");
+        assert!(out.contains("compiling") && out.contains("more"), "{out}");
+        assert!(began.elapsed() >= Duration::from_secs(2), "returned on an earlier line");
+        assert!(began.elapsed() < Duration::from_secs(20));
+        jobs.kill(SID, &h).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn until_a_pattern_returns_on_exit_when_nothing_matches() {
+        let jobs = Jobs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let stop = CancellationToken::new();
+        let h = jobs.start(SID, dir.path(), "echo fine; exit 2", &open()).unwrap();
+        let until = Until::pattern("never-printed").unwrap();
+        let out = jobs
+            .output_until(SID, &h, Duration::from_secs(60), Some(&until), &stop)
+            .await
+            .unwrap();
+        assert!(out.contains("exited 2"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_an_until_wait() {
+        let jobs = Jobs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let stop = CancellationToken::new();
+        let h = jobs.start(SID, dir.path(), "sleep 30", &open()).unwrap();
+        let canceller = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            canceller.cancel();
+        });
+        let began = Instant::now();
+        let err = jobs
+            .output_until(SID, &h, Duration::from_secs(600), Some(&Until::Exit), &stop)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "stopped");
+        assert!(began.elapsed() < Duration::from_secs(5));
+        jobs.kill(SID, &h).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn long_output_is_returned_as_a_capped_tail_with_a_line_count() {
+        let jobs = Jobs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let stop = CancellationToken::new();
+        let h = jobs.start(SID, dir.path(), "seq 1 40000; echo last-line", &open()).unwrap();
+        let out = jobs
+            .output_until(SID, &h, Duration::from_secs(30), Some(&Until::Exit), &stop)
+            .await
+            .unwrap();
+        assert!(out.len() <= TAIL + 512, "{}", out.len());
+        assert!(out.contains("last-line") && out.contains("exited 0"), "tail kept");
+        assert!(out.contains("40001 lines") && out.contains("showing the last"), "{}", &out[..200]);
+        assert!(!out.contains("\n1\n"), "head dropped");
     }
 
     #[tokio::test]

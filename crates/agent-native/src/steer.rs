@@ -160,6 +160,102 @@ pub fn edit_shaped(command: &str) -> Option<Shape> {
     written_target(&head, heredoc).map(|(shape, _)| shape)
 }
 
+const SLEEP_LIMIT_SECS: f64 = 30.0;
+
+fn top_level_segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                current.push(c);
+                if c == '\\' && q == '"' {
+                    if let Some(n) = chars.next() {
+                        current.push(n);
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    current.push(c);
+                }
+                '\\' => {
+                    current.push(c);
+                    if let Some(n) = chars.next() {
+                        current.push(n);
+                    }
+                }
+                ';' | '&' | '\n' | '|' | '(' | ')' | '{' | '}' => {
+                    segments.push(std::mem::take(&mut current));
+                }
+                _ => current.push(c),
+            },
+        }
+    }
+    segments.push(current);
+    segments
+}
+
+fn duration_secs(word: &str) -> Option<f64> {
+    let (number, unit) = match word.char_indices().find(|(_, c)| c.is_alphabetic()) {
+        Some((i, _)) => word.split_at(i),
+        None => (word, "s"),
+    };
+    let n: f64 = number.parse().ok()?;
+    let scale = match unit {
+        "s" | "" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        "d" => 86400.0,
+        _ => return None,
+    };
+    Some(n * scale)
+}
+
+fn sleep_secs(segment: &str) -> Option<f64> {
+    let mut words = segment.split_whitespace().peekable();
+    while matches!(words.peek(), Some(&("do" | "then" | "else" | "nohup" | "exec" | "time"))) {
+        words.next();
+    }
+    if words.peek() == Some(&"timeout") {
+        words.next();
+        while words.peek().is_some_and(|w| w.starts_with('-')) {
+            words.next();
+        }
+        words.next();
+    }
+    if words.next()? != "sleep" {
+        return None;
+    }
+    let mut total = 0.0;
+    let mut any = false;
+    for w in words {
+        total += duration_secs(w)?;
+        any = true;
+    }
+    any.then_some(total)
+}
+
+pub fn sleep_wait(command: &str) -> Option<u64> {
+    let (head, _) = split_heredocs(command);
+    let longest = top_level_segments(&head)
+        .iter()
+        .filter_map(|s| sleep_secs(s))
+        .fold(0.0_f64, f64::max);
+    (longest >= SLEEP_LIMIT_SECS).then_some(longest as u64)
+}
+
+pub fn sleep_refusal(seconds: u64) -> String {
+    format!(
+        "Refused: `sleep {seconds}` to wait for work. Don't sleep to wait for work. Run it with `background: true` and wait with `bash_output` `until: \"exit\"` (or a regex such as \"test result:|error|FAILED\"), which wakes as soon as it finishes. Nothing was run."
+    )
+}
+
 pub fn note(shape: Shape) -> &'static str {
     match shape {
         Shape::NewFile => {
@@ -180,6 +276,39 @@ pub fn note(shape: Shape) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_sleeps_used_as_waits_are_found() {
+        for (command, secs) in [
+            ("sleep 300; cat x", 300),
+            ("nohup cargo test > log 2>&1 & sleep 300; cat log", 300),
+            ("cargo build && sleep 5m && cat log", 300),
+            ("timeout 400 sleep 100", 100),
+            ("sleep 580; cat /tmp/pdl417/small.log", 580),
+            ("sleep 240; ssh spark 'cat /tmp/retest-dry.log'", 240),
+            ("sleep 30", 30),
+            ("sleep 1m 30", 90),
+        ] {
+            assert_eq!(sleep_wait(command), Some(secs), "{command}");
+        }
+    }
+
+    #[test]
+    fn short_sleeps_scripts_and_remote_programs_are_left_alone() {
+        for command in [
+            "sleep 2",
+            "sleep 0.5; echo hi",
+            "while ! curl -s localhost:80; do sleep 1; done",
+            "bash run.sh",
+            "./wait-for-it.sh --timeout 300",
+            "ssh spark 'sleep 600'",
+            "echo \"sleep 300\"",
+            "grep -rn 'sleep 100' src",
+            "cat > /tmp/x.sh <<EOF\nsleep 300\nEOF",
+        ] {
+            assert_eq!(sleep_wait(command), None, "{command}");
+        }
+    }
 
     #[test]
     fn edit_shaped_commands_are_named() {

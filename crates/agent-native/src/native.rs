@@ -362,6 +362,7 @@ const WAIT_MAX: u64 = 540;
 /// How long `bash_output` waits for something new when not told, and the longest it may.
 const OUTPUT_WAIT: u64 = 0;
 const OUTPUT_WAIT_MAX: u64 = 60;
+const OUTPUT_UNTIL_MAX: u64 = 1800;
 
 fn agentbench_specs() -> Vec<Spec> {
     let depends_on_schema = |about: &str| json!({ "type": "array", "items": { "type": "integer" }, "description": about });
@@ -793,13 +794,14 @@ fn bash_spec() -> Spec {
          bash is only for programs. Runs a shell command in the worktree and reads what it prints: git, cargo, tests, scripts, anything installed. \
          It runs as the user with their environment, in the worktree. Do not use it to read, search, list, create or edit files \
          (cat, head, sed, grep, find, ls, tee, heredocs, python or perl one-liners): read_file, search_files, list_files, write_file, \
-         edit_file, replace_in_files and the code_* tools do that, and a bash command that edits a file gets a note telling you so.",
+         edit_file, replace_in_files and the code_* tools do that, and a bash command that edits a file gets a note telling you so. \
+         To wait for a long job, run it with background:true and call bash_output with until; never sleep.",
         object(
             json!({
                 "command": string("The command line, run by bash -c"),
                 "timeout_s": { "type": "integer", "description": "Seconds before it is killed, default 120, at most 600" },
                 "memory_mb": { "type": "integer", "description": "Memory cap in MB for the command and every process it starts, default 1024. The whole tree is killed when it goes over. Raise it for builds, tests and anything heavy (cargo, vLLM); 0 removes the cap. Not applied with background" },
-                "background": { "type": "boolean", "description": "Start it and answer at once with a handle, for a dev server, a watcher or a long build. Read it with bash_output and stop it with bash_kill. Needs no timeout" },
+                "background": { "type": "boolean", "description": "Start it and answer at once with a handle. Use it for anything that may take more than a few minutes (long builds, tests, GPU runs, remote work like `ssh host 'cd x && cmd'`, which ends when the remote command does), and for dev servers and watchers. Wait for it with bash_output `until`, which wakes the moment it finishes; read it with bash_output and stop it with bash_kill. Needs no timeout. Never sleep to wait: `sleep 30` or more is refused" },
             }),
             &["command"],
         ),
@@ -812,11 +814,13 @@ fn job_specs() -> Vec<Spec> {
         Spec::new(
             "bash_output",
             "Read what a background command has printed since you last read it, and whether it is still running or how it exited. \
-             With no handle it lists your background commands.",
+             With no handle it lists your background commands. To wait for a long job run it with bash background:true and \
+             call this with `until` (and wait_s up to 1800); never sleep.",
             object(
                 json!({
                     "handle": handle(),
-                    "wait_s": json!({ "type": "integer", "description": "Wait up to this many seconds for new output when there is none, default 0, at most 60" }),
+                    "wait_s": json!({ "type": "integer", "description": "Wait up to this many seconds for new output when there is none, default 0, at most 60; with `until` at most 1800" }),
+                    "until": string("Wait for the end instead of any output: \"exit\" returns only when the job exits, any other value is a regex and returns when a new output line matches it (for example `test result:|error\\[|panicked|FAILED`), or when the job exits. Returns the last 32 KB with a line count. Use this instead of sleep"),
                 }),
                 &[],
             ),
@@ -2878,9 +2882,16 @@ impl Native {
             "bash_output" => match files::text(args, &["handle", "id"]) {
                 None => Ok(self.jobs.list(&cx.session.to_string())),
                 Some(h) => {
+                    let until = match files::text(args, &["until"]).filter(|u| !u.trim().is_empty()) {
+                        Some(u) => Some(agent_core::jobs::Until::pattern(u)?),
+                        None => None,
+                    };
+                    let cap = if until.is_some() { OUTPUT_UNTIL_MAX } else { OUTPUT_WAIT_MAX };
                     let wait = number(&["wait_s", "wait"]).map_or(OUTPUT_WAIT, |n| n as u64);
-                    let wait = Duration::from_secs(wait.min(OUTPUT_WAIT_MAX));
-                    self.jobs.output(&cx.session.to_string(), h, wait, io.stop()).await
+                    let wait = Duration::from_secs(wait.min(cap));
+                    self.jobs
+                        .output_until(&cx.session.to_string(), h, wait, until.as_ref(), io.stop())
+                        .await
                 }
             },
             "bash_kill" => {
@@ -2894,6 +2905,10 @@ impl Native {
             "todo_write" => agent_core::todo::write(args),
             "bash" => {
                 let command = files::text(args, &["command", "cmd"]).ok_or("missing `command`")?;
+                if let Some(seconds) = super::steer::sleep_wait(command) {
+                    io.emit(Event::Usage(Usage { bash_sleeps: 1, ..Usage::default() }));
+                    return Err(super::steer::sleep_refusal(seconds));
+                }
                 let note = steer_note(command, io);
                 let ran = bash(
                     ws.root(),
@@ -5060,6 +5075,54 @@ for line in sys.stdin:
             .await
             .unwrap();
         assert!(!plain.contains("[note"), "{plain}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_long_sleep_is_refused_and_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = TestIo::new(Arc::new(FakeApi));
+        let native = Native::default();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let c = context();
+        let err = native
+            .tool("bash", &json!({"command": "touch ran; sleep 300; cat x"}), &ws, &c, &io)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Don't sleep to wait for work") && err.contains("until"), "{err}");
+        assert!(!dir.path().join("ran").exists());
+        assert!(io.events().iter().any(|e| matches!(e, Event::Usage(u) if u.bash_sleeps == 1)));
+        let ok = native.tool("bash", &json!({"command": "sleep 2; echo ok"}), &ws, &c, &io).await.unwrap();
+        assert!(ok.contains("ok"), "{ok}");
+        std::fs::write(dir.path().join("w.sh"), "sleep 0.1\necho scripted\n").unwrap();
+        let ok = native.tool("bash", &json!({"command": "bash w.sh"}), &ws, &c, &io).await.unwrap();
+        assert!(ok.contains("scripted"), "{ok}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_output_until_exit_waits_past_the_plain_cap_and_wakes_on_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = TestIo::new(Arc::new(FakeApi));
+        let native = Native::default();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let c = context();
+        native
+            .tool("bash", &json!({"command": "echo a; sleep 1; echo b", "background": true}), &ws, &c, &io)
+            .await
+            .unwrap();
+        let began = std::time::Instant::now();
+        let out = native
+            .tool("bash_output", &json!({"handle": "job-1", "until": "exit", "wait_s": 600}), &ws, &c, &io)
+            .await
+            .unwrap();
+        assert!(out.contains("exited 0") && out.contains('b'), "{out}");
+        assert!(began.elapsed() < Duration::from_secs(10));
+        let bad = native
+            .tool("bash_output", &json!({"handle": "job-1", "until": "("}), &ws, &c, &io)
+            .await
+            .unwrap_err();
+        assert!(bad.contains("until"), "{bad}");
     }
 
     #[tokio::test]

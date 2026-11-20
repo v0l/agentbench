@@ -500,6 +500,9 @@ pub struct Usage {
     /// Bash calls that wrote or edited a file, which the file tools do better. A total.
     #[serde(default)]
     pub bash_edits: u64,
+    /// Bash calls refused for sleeping to wait on work. A total.
+    #[serde(default)]
+    pub bash_sleeps: u64,
     /// Calls to write_file, edit_file and replace_in_files. A total.
     #[serde(default)]
     pub file_edits: u64,
@@ -547,6 +550,7 @@ impl Usage {
         self.cost_usd += other.cost_usd;
         self.turns += other.turns;
         self.bash_edits += other.bash_edits;
+        self.bash_sleeps += other.bash_sleeps;
         self.file_edits += other.file_edits;
         if other.context > 0 {
             self.context = other.context;
