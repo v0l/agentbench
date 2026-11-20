@@ -36,7 +36,7 @@ Guards read one file, `guards.toml` in the memory folder (`~/.agents/memory/guar
 
 - `worker-no-push`: a brief, message or issue body telling a worker to push to main or master is refused.
 - `pr-review-model`: a PR review session not on the top model is refused.
-- `pr-reviews`: posting GitHub comments or reviews from bash asks the user first.
+- `pr-reviews`: a worker started by the supervisor may post GitHub comments or reviews from bash only when its brief says `approved to post`; otherwise it is refused. The brief is read from the session, never from the call. The user's own chats are not limited.
 
 A rule matches a tool call when one of its `fields` matches `pattern`, `unless` does not match, and, when set, `require_field` fails to match `require`. `action` is `refuse` or `ask`. The supervisor adds or removes rules with the `guard_rules` tool; new rules need no code.
 

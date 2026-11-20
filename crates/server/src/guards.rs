@@ -57,8 +57,10 @@ id = "pr-reviews"
 tools = ["bash"]
 fields = ["command"]
 pattern = '(?i)\bgh\s+(pr\s+(review|comment)|issue\s+comment)\b|\bgh\s+api\b[^\n]*(/comments|/reviews)\b[^\n]*(-X\s*POST|--method\s+POST|-f\s|--field\s|-F\s)'
-action = "ask"
-message = "Posting GitHub comments or reviews needs the user's approval each time."
+require_field = "_brief"
+require = '(?i)^\(user chat\)$|\bapproved to post\b'
+action = "refuse"
+message = "A worker posts GitHub comments or reviews only when the supervisor's brief says `approved to post`. Put the review in your reply instead; the supervisor decides whether it is posted."
 "#;
 
 pub fn path(store: &Store) -> PathBuf {
@@ -209,13 +211,16 @@ mod tests {
     }
 
     #[test]
-    fn posting_a_github_review_asks_and_reading_a_pr_does_not() {
-        let h = matches(&rules(), "bash", &json!({"command": "gh pr review 41 --comment -b 'nice'"})).unwrap();
-        assert!(h.ask && h.id == "pr-reviews");
-        assert!(matches(&rules(), "bash", &json!({"command": "gh pr comment 41 -b hi"})).is_some());
-        assert!(matches(&rules(), "bash", &json!({"command": "gh api repos/a/b/pulls/4/comments -f body=x"})).is_some());
+    fn a_worker_posting_a_review_is_refused_without_an_approved_brief() {
+        let post = |cmd: &str, brief: &str| matches(&rules(), "bash", &json!({"command": cmd, "_brief": brief}));
+        let h = post("gh pr review 41 --comment -b 'nice'", "Review PR #41 and report").unwrap();
+        assert!(!h.ask && h.id == "pr-reviews");
+        assert!(post("gh pr comment 41 -b hi", "").is_some(), "no brief, no posting");
+        assert!(post("gh api repos/a/b/pulls/4/comments -f body=x", "Review PR #4").is_some());
+        assert!(post("gh pr review 41 --approve", "Review PR #41. You are approved to post the review.").is_none());
+        assert!(post("gh pr review 41 --approve", "(user chat)").is_none(), "the user's own chat is theirs to decide");
         for ok in ["gh pr view 41", "gh pr diff 41", "gh api repos/a/b/pulls/4/comments", "cargo test"] {
-            assert!(matches(&rules(), "bash", &json!({"command": ok})).is_none(), "{ok}");
+            assert!(post(ok, "").is_none(), "{ok}");
         }
     }
 

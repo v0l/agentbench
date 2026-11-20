@@ -2647,6 +2647,11 @@ impl App {
         self.tab = if on { Tab::Issues } else { Tab::Chat };
     }
 
+    pub fn show_process_issues(&mut self) {
+        self.tab = Tab::Issues;
+        self.filter = Filter::Process;
+    }
+
     pub fn show_all_projects(&mut self) {
         self.tab = Tab::Issues;
         self.scope = Scope::Everything;

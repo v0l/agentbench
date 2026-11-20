@@ -96,6 +96,20 @@ fn fixture() -> Rich {
                 .id
         })
         .collect();
+    for (title, labels) in [
+        ("Final send_message to the parent comes back not delivered (x3)", vec!["process"]),
+        ("Agents keep editing files from bash after the harness note, every session, all week (x12)", vec!["process", "a-long-label-name"]),
+    ] {
+        rig.store
+            .add_issue(&NewIssue {
+                project_id: project.id,
+                title: title.into(),
+                state: Some(agentbench_core::IssueState::Backlog),
+                labels: labels.into_iter().map(String::from).collect(),
+                ..Default::default()
+            })
+            .unwrap();
+    }
     let deep_issue = rig
         .store
         .add_issue(&NewIssue {
@@ -430,6 +444,14 @@ fn s_issues(r: &Rich, cfg: Cfg) -> Built {
     built(h)
 }
 
+fn s_process(r: &Rich, cfg: Cfg) -> Built {
+    let mut h = open_rich(r, cfg);
+    h.state_mut().set_issues_first(true);
+    h.state_mut().show_process_issues();
+    h.run_steps(4);
+    built(h)
+}
+
 fn s_issue_detail(r: &Rich, cfg: Cfg) -> Built {
     let mut h = open_rich(r, cfg);
     h.state_mut().set_issues_first(true);
@@ -664,4 +686,5 @@ pub const SCENES: &[Scene] = &[
     Scene { id: 35, name: "offline", build: s_offline },
     Scene { id: 36, name: "onboarding", build: s_onboarding },
     Scene { id: 37, name: "viewer", build: s_viewer },
+    Scene { id: 38, name: "issues-process", build: s_process },
 ];
