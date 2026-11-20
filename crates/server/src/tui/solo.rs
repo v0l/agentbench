@@ -171,6 +171,7 @@ impl Chat {
             queue_system: false,
             paused_until: None,
             released: false,
+            stuck: false,
         }
     }
 }
