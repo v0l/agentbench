@@ -4436,6 +4436,24 @@ mod deferred_tests {
     }
 
     #[tokio::test]
+    async fn the_session_context_carries_notes_read_from_files() {
+        let r = rig();
+        let p = r.worker.project_id;
+        r.store.set_note(p, "tests", "cargo test", "agent", None, None).unwrap();
+        r.store.set_global_note("style", "plain words").unwrap();
+        let dir = std::fs::read_dir(r.store.memory_root())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|d| std::fs::read_to_string(d.join(".project")).is_ok_and(|s| s.trim() == p.to_string()))
+            .unwrap();
+        std::fs::write(dir.join("tests.md"), "# tests\n\nedited on disk\n").unwrap();
+        let context = r.runner.context(&r.worker);
+        assert_eq!(context.notes, [("tests".to_string(), "edited on disk".to_string())]);
+        assert_eq!(context.global_notes, [("style".to_string(), "plain words".to_string())]);
+    }
+
+    #[tokio::test]
     async fn a_system_message_waits_for_the_supervisor_to_finish_its_turn() {
         let r = rig();
         r.runner.send(&r.boss, "review the queue").unwrap();

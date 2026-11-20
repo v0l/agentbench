@@ -7,6 +7,7 @@ pub mod cli;
 pub mod git;
 pub mod host;
 pub mod local;
+pub mod memory;
 pub mod projects;
 pub mod quota;
 pub mod providers;
