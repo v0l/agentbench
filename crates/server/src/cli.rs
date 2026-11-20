@@ -205,7 +205,12 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Command::CompactMemory { project, model: choice } => {
-            let model = saved_model(&store, &config.model).choose(choice.as_deref().unwrap_or_default());
+            let model = saved_model(&store, &config.model)
+                .choose(match (&choice, crate::compact::settings(&store).model) {
+                    (Some(c), _) => c.clone(),
+                    (None, m) if !m.trim().is_empty() => m,
+                    _ => "high".to_string(),
+                }.as_str());
             let target = crate::titles::Target { url: model.url, model: model.model, key: model.key };
             let scopes = match project {
                 Some(name) => {

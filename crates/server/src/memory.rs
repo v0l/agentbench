@@ -14,6 +14,8 @@ pub fn default_root() -> PathBuf {
 pub const GLOBAL: &str = "global";
 const PROJECT_FILE: &str = ".project";
 const HISTORY: &str = ".history";
+pub const BACKOFF_GROWTH: usize = 1024;
+pub const BACKOFF_MS: i64 = 6 * 3_600_000;
 pub const CHANGED: &str = "changed since you read it";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +30,7 @@ pub struct Memory {
     locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     resolve: Mutex<()>,
     claims: Mutex<HashSet<String>>,
-    attempted: Mutex<HashMap<String, String>>,
+    attempted: Mutex<HashMap<String, (usize, i64)>>,
 }
 
 impl Drop for Memory {
@@ -285,12 +287,13 @@ impl Memory {
         self.claims.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
     }
 
-    pub fn already_tried(&self, key: &str, fingerprint: &str) -> bool {
-        self.attempted.lock().unwrap_or_else(|e| e.into_inner()).get(key).is_some_and(|f| f == fingerprint)
+    pub fn backed_off(&self, key: &str, size: usize, now: i64) -> bool {
+        let tried = self.attempted.lock().unwrap_or_else(|e| e.into_inner()).get(key).copied();
+        tried.is_some_and(|(was, at)| size < was + BACKOFF_GROWTH && now - at < BACKOFF_MS)
     }
 
-    pub fn tried(&self, key: &str, fingerprint: String) {
-        self.attempted.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string(), fingerprint);
+    pub fn note_attempt(&self, key: &str, size: usize, now: i64) {
+        self.attempted.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string(), (size, now));
     }
 
     fn history(dir: &Path) -> PathBuf {

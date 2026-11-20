@@ -81,7 +81,7 @@ impl MemoryCompaction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemorySettings {
     #[serde(default = "default_note_budget")]
     pub note_budget: usize,
@@ -89,6 +89,8 @@ pub struct MemorySettings {
     pub scope_budget: usize,
     #[serde(default = "default_auto_compact")]
     pub auto: bool,
+    #[serde(default)]
+    pub model: String,
 }
 
 fn default_note_budget() -> usize {
@@ -108,7 +110,7 @@ pub const DEFAULT_SCOPE_BUDGET: usize = 12288;
 
 impl Default for MemorySettings {
     fn default() -> Self {
-        MemorySettings { note_budget: DEFAULT_NOTE_BUDGET, scope_budget: DEFAULT_SCOPE_BUDGET, auto: true }
+        MemorySettings { note_budget: DEFAULT_NOTE_BUDGET, scope_budget: DEFAULT_SCOPE_BUDGET, auto: true, model: String::new() }
     }
 }
 

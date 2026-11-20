@@ -2,7 +2,7 @@
   {
     "blocks": [],
     "body": "details",
-    "created_at": 1795180879993,
+    "created_at": 1795204735393,
     "depends_on": [],
     "goal": null,
     "id": 1,
@@ -14,7 +14,7 @@
     "project_id": 1,
     "state": "doing",
     "title": "Fix it",
-    "updated_at": 1795180879993,
+    "updated_at": 1795204735393,
     "waiting_on": []
   }
 ]

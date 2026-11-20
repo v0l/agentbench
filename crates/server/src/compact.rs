@@ -268,7 +268,7 @@ fn parse(reply: &str) -> Result<Answer, String> {
     Ok(answer)
 }
 
-fn check(before: &[(String, String)], answer: &Answer, settings: MemorySettings) -> Result<(), String> {
+fn check(before: &[(String, String)], answer: &Answer, settings: &MemorySettings) -> Result<(), String> {
     let after = &answer.notes;
     let old: usize = before.iter().map(|(_, b)| b.len()).sum();
     let new: usize = after.iter().map(|n| n.body.len()).sum();
@@ -323,12 +323,12 @@ fn check(before: &[(String, String)], answer: &Answer, settings: MemorySettings)
     Ok(())
 }
 
-fn over_budget(memory: &Memory, scope: Scope, settings: MemorySettings) -> bool {
+fn over_budget(memory: &Memory, scope: Scope, settings: &MemorySettings) -> bool {
     let (total, largest) = memory.sizes(scope);
     total > settings.scope_budget || largest > settings.note_budget
 }
 
-fn user_message(notes: &[(String, String)], settings: MemorySettings, rejected: Option<&str>) -> String {
+fn user_message(notes: &[(String, String)], settings: &MemorySettings, rejected: Option<&str>) -> String {
     let total: usize = notes.iter().map(|(_, b)| b.len()).sum();
     let sizes: Vec<String> = notes.iter().map(|(t, b)| format!("{t}: {} bytes", b.len())).collect();
     let mut text = format!(
@@ -351,7 +351,7 @@ pub async fn compact_scope<F, Fut>(
     memory: &Memory,
     scope: Scope,
     label: &str,
-    settings: MemorySettings,
+    settings: &MemorySettings,
     force: bool,
     model: &F,
 ) -> MemoryScopeReport
@@ -378,7 +378,7 @@ async fn compact_claimed<F, Fut>(
     memory: &Memory,
     scope: Scope,
     label: &str,
-    settings: MemorySettings,
+    settings: &MemorySettings,
     force: bool,
     model: &F,
 ) -> MemoryScopeReport
@@ -521,6 +521,7 @@ pub fn save_settings(store: &Store, new: MemorySettings) -> Result<MemorySetting
         note_budget: new.note_budget.clamp(512, 1 << 20),
         scope_budget: new.scope_budget.clamp(1024, 4 << 20),
         auto: new.auto,
+        model: new.model.trim().to_string(),
     };
     let text = serde_json::to_string(&clean).map_err(|e| e.to_string())?;
     store.set_setting(SETTING, &text).map_err(|e| e.0)?;
@@ -529,6 +530,8 @@ pub fn save_settings(store: &Store, new: MemorySettings) -> Result<MemorySetting
 
 pub fn target(runner: &Runner) -> Result<Target, String> {
     let main = runner.titles().ok_or("this server has no model to compact notes with")?.main();
+    let chosen = settings(runner.store()).model;
+    let main = main.choose(if chosen.trim().is_empty() { "high" } else { chosen.trim() });
     if main.model.trim().is_empty() || main.url.trim().is_empty() {
         return Err("pick a server and model for the native agent under settings".into());
     }
@@ -565,7 +568,7 @@ pub async fn run(
     };
     let mut report = MemoryCompaction::default();
     for (scope, label) in scopes {
-        let one = compact_scope(store.memory_store(), scope, &label, settings, force, &model).await;
+        let one = compact_scope(store.memory_store(), scope, &label, &settings, force, &model).await;
         if one.skipped.as_deref() == Some("no notes") {
             continue;
         }
@@ -588,12 +591,11 @@ pub fn after_write(runner: &Runner, scope: Scope) {
     let store = runner.store().clone();
     let settings = settings(&store);
     let memory = store.memory_store();
-    if !settings.auto || !over_budget(memory, scope, settings) {
+    if !settings.auto || !over_budget(memory, scope, &settings) {
         return;
     }
     let key = format!("{scope:?}");
-    let print = memory.fingerprint(scope);
-    if memory.already_tried(&key, &print) {
+    if memory.backed_off(&key, memory.sizes(scope).0, crate::store::now()) {
         return;
     }
     let Ok(target) = target(runner) else { return };
@@ -604,11 +606,11 @@ pub fn after_write(runner: &Runner, scope: Scope) {
     };
     let changed = runner.changed.clone();
     handle.spawn(async move {
-        let done = run(&store, &target, vec![(scope, label)], false).await;
         let memory = store.memory_store();
-        if done.scopes.iter().all(|s| s.skipped.is_some()) {
-            memory.tried(&format!("{scope:?}"), memory.fingerprint(scope));
-        }
+        let key = format!("{scope:?}");
+        memory.note_attempt(&key, memory.sizes(scope).0, crate::store::now());
+        run(&store, &target, vec![(scope, label)], false).await;
+        memory.note_attempt(&key, memory.sizes(scope).0, crate::store::now());
         changed.notify_waiters();
     });
 }
@@ -629,7 +631,7 @@ mod tests {
     }
 
     fn small() -> MemorySettings {
-        MemorySettings { note_budget: 400, scope_budget: 900, auto: true }
+        MemorySettings { note_budget: 400, scope_budget: 900, auto: true, model: String::new() }
     }
 
     fn merged_reply() -> String {
@@ -651,7 +653,7 @@ mod tests {
             let out = if q.is_empty() { Err("no more replies".to_string()) } else { Ok(q.remove(0)) };
             async move { out }
         };
-        let report = compact_scope(memory, scope, "demo", settings, force, &model).await;
+        let report = compact_scope(memory, scope, "demo", &settings, force, &model).await;
         let n = *calls.borrow();
         (report, n)
     }
@@ -666,7 +668,7 @@ mod tests {
         assert_eq!(report.merged, ["tests again"]);
         assert_eq!(memory.list(scope).len(), 2);
 
-        let roomy = MemorySettings { note_budget: 4096, scope_budget: 12288, auto: true };
+        let roomy = MemorySettings::default();
         let (report, calls) = go(&memory, scope, roomy, false, vec![merged_reply()]).await;
         assert_eq!(calls, 0);
         assert_eq!(report.skipped.as_deref(), Some("under budget"));
@@ -677,7 +679,7 @@ mod tests {
         let memory = Memory::temporary();
         let scope = Scope::Global;
         memory.set(scope, "", "big", &"x ".repeat(300), None).unwrap();
-        let settings = MemorySettings { note_budget: 200, scope_budget: 100_000, auto: true };
+        let settings = MemorySettings { note_budget: 200, scope_budget: 100_000, ..MemorySettings::default() };
         let (report, calls) = go(&memory, scope, settings, false, vec!["=== NOTE: big ===\nx".into()]).await;
         assert_eq!((calls, report.skipped), (1, None));
         assert_eq!(memory.list(scope), [("big".to_string(), "x".to_string())]);
@@ -717,8 +719,8 @@ mod tests {
             notes: vec![Rewritten { topic: "a".into(), from: vec![], body: "y".repeat(60) }],
             dropped: vec![],
         };
-        let settings = MemorySettings { note_budget: 4096, scope_budget: 12288, auto: true };
-        assert!(check(&before, &answer, settings).unwrap_err().contains("grew"));
+        let settings = MemorySettings::default();
+        assert!(check(&before, &answer, &settings).unwrap_err().contains("grew"));
     }
 
     #[tokio::test]
@@ -791,6 +793,56 @@ mod tests {
         assert_eq!(lost(old, new, false), ["project_cap"]);
     }
 
+    #[test]
+    fn a_scope_that_was_tried_is_left_alone_until_it_grows_or_six_hours_pass() {
+        let memory = Memory::temporary();
+        let key = "Project(1)";
+        assert!(!memory.backed_off(key, 13_000, 0));
+        memory.note_attempt(key, 13_000, 0);
+        assert!(memory.backed_off(key, 13_000, 1000));
+        assert!(memory.backed_off(key, 13_000 + crate::memory::BACKOFF_GROWTH - 1, 1000));
+        assert!(!memory.backed_off(key, 13_000 + crate::memory::BACKOFF_GROWTH, 1000));
+        assert!(!memory.backed_off(key, 13_000, crate::memory::BACKOFF_MS));
+        assert!(!memory.backed_off("Global", 13_000, 1000));
+    }
+
+    #[tokio::test]
+    async fn a_pass_accepted_over_budget_does_not_run_again_on_the_next_remember() {
+        let store = Store::memory().unwrap();
+        let (project, _) = crate::store::testing::project(&store, "/a");
+        let memory = store.memory_store();
+        let scope = Scope::Project(project.id);
+        memory.set(scope, "demo", "tests", &"run cargo test -p server.\n".repeat(40), None).unwrap();
+        let (report, _) = go(memory, scope, small(), false, vec!["=== NOTE: tests ===\n".to_string() + &"run cargo test -p server.\n".repeat(35)]).await;
+        assert_eq!(report.skipped, None, "{report:?}");
+        assert!(over_budget(memory, scope, &small()));
+        let key = format!("{scope:?}");
+        memory.note_attempt(&key, memory.sizes(scope).0, crate::store::now());
+        assert!(memory.backed_off(&key, memory.sizes(scope).0 + 100, crate::store::now()));
+    }
+
+    #[tokio::test]
+    async fn folder_names_and_other_folders_survive_a_pass() {
+        let store = Store::memory().unwrap();
+        let (project, _) = crate::store::testing::project(&store, "/a");
+        let memory = store.memory_store();
+        let scope = Scope::Project(project.id);
+        memory.set(scope, "demo", "tests", &"run cargo test -p server.\n".repeat(40), None).unwrap();
+        memory.set(scope, "demo", "tests again", &"run cargo test -p server.\n".repeat(40), None).unwrap();
+        memory.set(Scope::Global, "", "style", "terse", None).unwrap();
+        let names = |root: &std::path::Path| {
+            let mut v: Vec<String> = std::fs::read_dir(root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        };
+        let before = names(store.memory_root());
+        let reply = "=== NOTE: tests | from: tests again ===\nrun cargo test -p server.".to_string();
+        let (report, _) = go(memory, scope, small(), false, vec![reply]).await;
+        assert_eq!(report.skipped, None, "{report:?}");
+        assert_eq!(names(store.memory_root()), before);
+        assert_eq!(memory.list(Scope::Global), [("style".to_string(), "terse".to_string())]);
+    }
+
     #[tokio::test]
     async fn a_result_that_does_not_shrink_enough_is_rejected() {
         let (memory, scope) = filled();
@@ -821,7 +873,7 @@ mod tests {
             }
             async { Ok("=== NOTE: tests | from: tests again ===\nrun cargo test -p server.\n\n=== NOTE: hosts ===\nbuild box is 10.0.0.9, path /srv/build".to_string()) }
         };
-        let report = compact_scope(&memory, scope, "demo", small(), false, &model).await;
+        let report = compact_scope(&memory, scope, "demo", &small(), false, &model).await;
         assert_eq!(*calls.borrow(), 2, "{report:?}");
         assert_eq!(report.skipped, None);
         let hosts = memory.list(scope).into_iter().find(|(t, _)| t == "hosts").unwrap().1;
@@ -842,7 +894,7 @@ mod tests {
             memory.set(scope, "demo", "hosts", &body, Some(&hash)).unwrap();
             async { Ok("=== NOTE: tests | from: tests again ===\nrun cargo test.\n\n=== NOTE: hosts ===\nstale".to_string()) }
         };
-        let report = compact_scope(&memory, scope, "demo", small(), false, &model).await;
+        let report = compact_scope(&memory, scope, "demo", &small(), false, &model).await;
         assert!(report.skipped.is_some());
         let hosts = memory.list(scope).into_iter().find(|(t, _)| t == "hosts").unwrap().1;
         assert_eq!(hosts, format!("build box is 10.0.0.{ATTEMPTS}, path /srv/build"));
@@ -919,7 +971,7 @@ mod tests {
             *seen.borrow_mut() = user;
             async { Ok("=== NOTE: deploy ===\nrun it.".to_string()) }
         };
-        compact_scope(&memory, scope, "demo", small(), false, &model).await;
+        compact_scope(&memory, scope, "demo", &small(), false, &model).await;
         assert!(!seen.borrow().contains("hunter2"));
     }
 
@@ -952,17 +1004,17 @@ mod tests {
             from: from.iter().map(|s| s.to_string()).collect(),
             body: "z".repeat(n),
         };
-        let settings = MemorySettings { note_budget: 4096, scope_budget: 12288, auto: true };
+        let settings = MemorySettings::default();
         let answer = |notes: Vec<Rewritten>| Answer { notes, dropped: Vec::new() };
-        assert!(check(&before, &answer(vec![note("c", &[], 10)]), settings).is_err());
-        assert!(check(&before, &answer(vec![note("c", &["nope"], 10)]), settings).is_err());
-        assert!(check(&before, &answer(vec![note("c", &["a", "b"], 200)]), settings).is_err());
-        assert!(check(&before, &answer(vec![note("c", &["a", "b"], 60)]), settings).is_ok());
-        assert!(check(&before, &answer(vec![note("a", &[], 10)]), settings).is_err());
+        assert!(check(&before, &answer(vec![note("c", &[], 10)]), &settings).is_err());
+        assert!(check(&before, &answer(vec![note("c", &["nope"], 10)]), &settings).is_err());
+        assert!(check(&before, &answer(vec![note("c", &["a", "b"], 200)]), &settings).is_err());
+        assert!(check(&before, &answer(vec![note("c", &["a", "b"], 60)]), &settings).is_ok());
+        assert!(check(&before, &answer(vec![note("a", &[], 10)]), &settings).is_err());
         let dropping = Answer { notes: vec![note("a", &[], 10)], dropped: vec![("b".into(), "done".into())] };
-        assert!(check(&before, &dropping, settings).is_ok());
+        assert!(check(&before, &dropping, &settings).is_ok());
         let twice = Answer { notes: vec![note("a", &[], 10)], dropped: vec![("a".into(), "x".into()), ("b".into(), "x".into())] };
-        assert!(check(&before, &twice, settings).is_err());
+        assert!(check(&before, &twice, &settings).is_err());
     }
 
     #[tokio::test]

@@ -12,29 +12,37 @@
   "autopilot": {
     "activity": [],
     "auto_close": true,
+    "auto_escalate": false,
     "cap": 4,
+    "check_in_all": false,
+    "check_in_minutes": 30,
     "default_level": "delegate",
     "enabled": false,
+    "groom": true,
+    "groom_hours": 24,
     "idle": false,
     "max_nudges": 2,
     "project_cap": 2,
+    "stuck_compactions": 2,
+    "stuck_failed_runs": 3,
     "stuck_minutes": 15,
+    "stuck_no_commit_minutes": 45,
     "workers": 0
   },
   "cursor": 9,
   "host": {
     "cores": 48,
-    "disk_free": 617802358784,
+    "disk_free": 633961062400,
     "disk_total": 3935812239360,
-    "load": 9.18,
+    "load": 13.84,
     "mem_total": 66741592064,
-    "mem_used": 33418620928
+    "mem_used": 33460088832
   },
   "issues": [
     {
       "blocks": [],
       "body": "details",
-      "created_at": 1795180879993,
+      "created_at": 1795204735393,
       "depends_on": [],
       "goal": null,
       "id": 1,
@@ -46,7 +54,7 @@
       "project_id": 1,
       "state": "doing",
       "title": "Fix it",
-      "updated_at": 1795180879993,
+      "updated_at": 1795204735393,
       "waiting_on": []
     }
   ],
@@ -55,12 +63,12 @@
     {
       "automation": null,
       "branch": "main",
-      "created_at": 1795180879991,
+      "created_at": 1795204735391,
       "deploy": null,
       "home": false,
       "id": 1,
       "name": "demo",
-      "path": "/tmp/.tmpE0NxhE/demo",
+      "path": "/tmp/.tmpi2Z0rm/demo",
       "pinned": false,
       "remote": null,
       "risky": [],
@@ -72,17 +80,17 @@
     {
       "agent": "echo",
       "agent_session": null,
-      "created_at": 1795180879993,
-      "cwd": "/tmp/.tmpE0NxhE/demo",
+      "created_at": 1795204735393,
+      "cwd": "/tmp/.tmpi2Z0rm/demo",
       "effort": null,
-      "id": "e35f4132-fe5d-4ed4-a4ff-6a711588329d",
+      "id": "466b802f-257d-44fa-a40d-4d19b1eaf4c2",
       "issue_id": null,
       "model": null,
       "parent": null,
       "project_id": 1,
       "status": "idle",
       "title": "hello",
-      "updated_at": 1795180879996,
+      "updated_at": 1795204735395,
       "usage": {
         "bash_edits": 0,
         "bash_sleeps": 0,
@@ -120,18 +128,18 @@
       "total_usd": -0.0
     }
   },
-  "version": "0.9.1",
+  "version": "0.9.2",
   "visions": [],
   "worktrees": [
     {
       "branch": "main",
-      "created_at": 1795180879992,
-      "head": "36ec51ff81df03b36a243c94835496d9189dc813",
+      "created_at": 1795204735392,
+      "head": "8d7b45b99ad2b59493074c3228023a914a09b350",
       "id": 1,
       "main": true,
       "missing": false,
       "owned": false,
-      "path": "/tmp/.tmpE0NxhE/demo",
+      "path": "/tmp/.tmpi2Z0rm/demo",
       "project_id": 1
     }
   ]
