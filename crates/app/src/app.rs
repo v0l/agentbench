@@ -23,6 +23,7 @@ mod header;
 mod modals;
 mod onboarding;
 mod pairing;
+mod projects;
 mod settings;
 mod side;
 mod transcript;
@@ -51,6 +52,7 @@ enum Icon {
 enum Tab {
     Chat,
     Issues,
+    Projects,
 }
 
 /// How the chat area is tiled: columns across and rows down. One tile is focused; opening a chat replaces what it shows.
@@ -712,6 +714,8 @@ pub struct App {
     scope: Scope,
     project_query: String,
     project_sort: ProjectSort,
+    project_view: Option<Id>,
+    project_notes: HashMap<Id, Vec<agentbench_core::NoteHistory>>,
     tag_filter: String,
     edit_tags: Option<(Id, String)>,
     notes_view: Option<(Id, Vec<agentbench_core::NoteHistory>)>,
@@ -914,6 +918,8 @@ impl App {
             scope: Scope::Project,
             project_query: String::new(),
             project_sort: ProjectSort::Name,
+            project_view: None,
+            project_notes: HashMap::new(),
             tag_filter: String::new(),
             edit_tags: None,
             notes_view: None,
@@ -2131,6 +2137,7 @@ impl App {
                 }
             }
             Reply::Notes(pid, n) => {
+                self.project_notes.insert(pid, n.clone());
                 if self.notes_view.as_ref().is_some_and(|(p, _)| *p == pid) {
                     self.notes_view = Some((pid, n));
                 }
@@ -3478,6 +3485,7 @@ impl App {
             egui::Frame::NONE.inner_margin(Margin::same(10)).show(ui, |ui| match self.tab {
                 Tab::Issues => self.issues(ui),
                 Tab::Chat => self.chat(ui),
+                Tab::Projects => self.projects_tab(ui),
             });
         });
         self.modals(&ctx);

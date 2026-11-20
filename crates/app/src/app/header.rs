@@ -96,7 +96,7 @@ impl App {
         });
         let issues_label = format!("issues {open}");
         let opts: Vec<(Tab, &str)> =
-            vec![(Tab::Chat, "agents"), (Tab::Issues, issues_label.as_str())];
+            vec![(Tab::Chat, "agents"), (Tab::Issues, issues_label.as_str()), (Tab::Projects, "projects")];
         if self.issues_first && self.tab == Tab::Issues {
             return;
         }

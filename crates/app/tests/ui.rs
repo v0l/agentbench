@@ -4157,3 +4157,173 @@ fn a_missing_endpoint_is_not_an_error() {
         _ => panic!("odd reply"),
     }
 }
+
+fn project_rig() -> (Rig, agentbench_core::Id) {
+    use agentbench_core::{Goal, GoalStatus, IssueState, VisionBody};
+    let rig = rig();
+    let p = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+    rig.store
+        .set_vision(
+            p.id,
+            VisionBody {
+                summary: "A bench for coding agents".into(),
+                goals: vec![
+                    Goal { id: "g-fast".into(), text: "Make the board fast".into(), status: GoalStatus::Active },
+                    Goal { id: "g-old".into(), text: "Ship the first release".into(), status: GoalStatus::Done },
+                ],
+                non_goals: vec!["A hosted service".into()],
+            },
+            "test",
+        )
+        .unwrap();
+    for (title, state) in [("Cache the tree", IssueState::Doing), ("Trim the header", IssueState::Todo)] {
+        rig.store
+            .add_issue(&NewIssue {
+                project_id: p.id,
+                title: title.into(),
+                state: Some(state),
+                goal: Some("g-fast".into()),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    rig.store.set_note(p.id, "tests", "run cargo test", "test", None, None).unwrap();
+    let running = rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    rig.store.set_status(running.id, agentbench_core::SessionStatus::Running).unwrap();
+    (rig, p.id)
+}
+
+fn open_projects(h: &mut Harness<'_, App>) {
+    until(h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().set_tab_projects();
+    h.run_steps(3);
+}
+
+#[test]
+fn the_projects_list_shows_every_project_with_its_counts() {
+    let (rig, _) = project_rig();
+    let mut h = harness(rig.url.clone());
+    open_projects(&mut h);
+    shot(&mut h, "projects-list");
+    h.get_by_label("open project demo");
+    let id = h.state().listed_projects().into_iter().find(|id| h.state().server_label(*id).is_none() && h.state().overview().unwrap().projects.iter().any(|p| p.id == *id && p.name == "demo")).unwrap();
+    let (counts, running, vision) = h.state().project_summary(id).unwrap();
+    assert_eq!(counts, [0, 2, 1, 0, 0]);
+    assert_eq!(running, 1);
+    assert!(vision);
+    let listed = h.state().listed_projects();
+    let o = h.state().overview().unwrap();
+    assert_eq!(listed.len(), o.projects.iter().filter(|p| !p.supervisor).count());
+}
+
+#[test]
+fn the_projects_list_filters_and_sorts() {
+    let (rig, _) = project_rig();
+    let mut h = harness(rig.url.clone());
+    open_projects(&mut h);
+    h.state_mut().set_project_query("zzz-nothing");
+    h.run_steps(2);
+    assert!(h.state().listed_projects().is_empty());
+    assert!(h.query_by_label("open project demo").is_none());
+    h.state_mut().set_project_query("dem");
+    h.run_steps(2);
+    assert_eq!(h.state().listed_projects().len(), 1);
+    h.state_mut().set_project_query("");
+    h.state_mut().set_project_sort("most open issues");
+    h.run_steps(2);
+    let o = h.state().overview().unwrap();
+    let open = |id| o.issues.iter().filter(|i| i.project_id == id && i.state.is_open()).count();
+    let listed = h.state().listed_projects();
+    let user: Vec<_> = listed.iter().filter(|id| o.projects.iter().any(|p| p.id == **id && !p.builtin())).collect();
+    assert!(user.windows(2).all(|w| open(*w[0]) >= open(*w[1])));
+}
+
+#[test]
+fn clicking_a_project_opens_its_view_with_goals_agents_and_notes() {
+    let (rig, id) = project_rig();
+    let mut h = harness_at(rig.url.clone(), [1280.0, 1400.0]);
+    open_projects(&mut h);
+    h.get_by_label("open project demo").click();
+    h.run_steps(3);
+    assert_eq!(h.state().project_view(), Some(id));
+    until(&mut h, "the notes", |h| h.state().project_notes_len(id) == 1);
+    shot(&mut h, "project-view");
+    h.get_by_label("A bench for coding agents");
+    h.get_by_label("Make the board fast");
+    h.get_by_label("goal g-fast");
+    h.get_by_label("open chat say hello");
+    h.get_by_label("A hosted service");
+    h.get_by_label("TESTS").click();
+    h.run_steps(2);
+    h.get_by_label("run cargo test");
+    h.get_by_label("all projects").click();
+    h.run_steps(2);
+    assert_eq!(h.state().project_view(), None);
+}
+
+#[test]
+fn the_projects_screens_fit_a_phone() {
+    for size in [[390.0, 844.0], [412.0, 900.0]] {
+        let (rig, id) = project_rig();
+        let mut h = harness_at(rig.url.clone(), size);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_project_view(id);
+        h.state_mut().close_project_view();
+        h.state_mut().set_tab_projects();
+        h.run_steps(3);
+        let tag = size[0] as u32;
+        shot(&mut h, &format!("projects-list-{tag}"));
+        let bad = off_sideways(&h, size);
+        assert!(bad.is_empty(), "list at {size:?}: {bad:?}");
+        h.get_by_label("open project demo").click();
+        h.run_steps(3);
+        until(&mut h, "the notes", |h| h.state().project_notes_len(id) == 1);
+        shot(&mut h, &format!("project-view-{tag}"));
+        let bad = off_sideways(&h, size);
+        assert!(bad.is_empty(), "view at {size:?}: {bad:?}");
+    }
+}
+
+fn off_sideways(h: &Harness<'_, App>, size: [f32; 2]) -> Vec<String> {
+    sideways(h, size)
+}
+
+fn sideways(h: &Harness<'_, App>, size: [f32; 2]) -> Vec<String> {
+    use egui_kittest::kittest::NodeT as _;
+    h.root()
+        .children_recursive()
+        .filter(|n| n.accesskit_node().bounding_box().is_some())
+        .filter(|n| n.rect().left() < -0.5 || n.rect().right() > size[0] + 0.5)
+        .map(|n| format!("{:?} {:?} {:?}", n.accesskit_node().role(), n.accesskit_node().label(), n.rect()))
+        .collect()
+}
+
+#[test]
+fn the_whole_project_view_renders_tall() {
+    for size in [[1280.0, 2000.0], [412.0, 2400.0], [390.0, 2400.0]] {
+        let (rig, id) = project_rig();
+        for n in 0..2 {
+            rig.store
+                .add_issue(&NewIssue {
+                    project_id: id,
+                    title: format!("Shipped change {n}"),
+                    state: Some(agentbench_core::IssueState::Done),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let mut h = harness_at(rig.url.clone(), size);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_project_view(id);
+        until(&mut h, "the notes", |h| h.state().project_notes_len(id) == 1);
+        shot(&mut h, &format!("project-tall-{}", size[0] as u32));
+        h.get_by_label("TESTS").click();
+        h.run_steps(2);
+        h.get_by_label("run cargo test");
+        shot(&mut h, &format!("project-tall-open-{}", size[0] as u32));
+        if size[0] < 700.0 {
+            let bad = sideways(&h, size);
+            assert!(bad.is_empty(), "tall view at {size:?}: {bad:?}");
+        }
+    }
+}
