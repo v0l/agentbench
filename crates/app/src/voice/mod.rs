@@ -199,6 +199,54 @@ impl Endpoint {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Release {
+    Nothing,
+    Finish,
+    Cancel,
+    TooShort,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Hold {
+    held: bool,
+    off: bool,
+}
+
+impl Hold {
+    pub fn held(&self) -> bool {
+        self.held
+    }
+
+    pub fn off_button(&self) -> bool {
+        self.held && self.off
+    }
+
+    pub fn press(&mut self) {
+        self.held = true;
+        self.off = false;
+    }
+
+    pub fn drag(&mut self, over_button: bool) {
+        if self.held {
+            self.off = !over_button;
+        }
+    }
+
+    pub fn release(&mut self, seconds: f32) -> Release {
+        if !std::mem::take(&mut self.held) {
+            return Release::Nothing;
+        }
+        if std::mem::take(&mut self.off) {
+            Release::Cancel
+        } else if seconds < MIN_SECONDS {
+            Release::TooShort
+        } else {
+            Release::Finish
+        }
+    }
+}
+
 /// What the voice has to hand to the window.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Said {
@@ -390,6 +438,41 @@ mod tests {
     fn street_noise_does_not_hold_the_take_open() {
         let after = done_after_speech(street).expect("the take never ended");
         assert!(after < 3.5, "ended {after}s after the speech");
+    }
+
+    #[test]
+    fn press_hold_and_release_gives_one_take() {
+        let mut h = Hold::default();
+        h.press();
+        h.drag(true);
+        assert!(h.held() && !h.off_button());
+        assert_eq!(h.release(2.0), Release::Finish);
+        assert_eq!(h.release(2.0), Release::Nothing);
+    }
+
+    #[test]
+    fn a_short_tap_gives_no_take() {
+        let mut h = Hold::default();
+        h.press();
+        assert_eq!(h.release(MIN_SECONDS - 0.1), Release::TooShort);
+    }
+
+    #[test]
+    fn sliding_off_and_releasing_cancels() {
+        let mut h = Hold::default();
+        h.press();
+        h.drag(false);
+        assert!(h.off_button());
+        assert_eq!(h.release(3.0), Release::Cancel);
+    }
+
+    #[test]
+    fn sliding_back_on_keeps_the_take() {
+        let mut h = Hold::default();
+        h.press();
+        h.drag(false);
+        h.drag(true);
+        assert_eq!(h.release(3.0), Release::Finish);
     }
 
     #[test]

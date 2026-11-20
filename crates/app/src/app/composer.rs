@@ -246,6 +246,59 @@ impl App {
         out
     }
 
+    pub(super) fn hold_gesture(
+        &mut self,
+        ui: &mut Ui,
+        key: &egui::Response,
+        listening: bool,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) {
+        use crate::voice::Release;
+        let now = ui.input(|i| i.time);
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        if !self.hold.held() {
+            if !listening
+                && !self.voice.busy()
+                && key.is_pointer_button_down_on()
+                && let Some(tile) = self.drawing
+            {
+                self.begin_speech(tile, wake);
+                if self.voice.listening() {
+                    self.hold.press();
+                }
+            }
+        } else {
+            if let Some(p) = pointer {
+                self.hold.drag(key.rect.expand(4.0).contains(p));
+            }
+            if ui.input(|i| i.pointer.primary_released() || !i.pointer.any_down()) {
+                let seconds = self.voice.seconds();
+                match self.hold.release(seconds) {
+                    Release::Finish => self.voice.finish(&self.speech_now(), wake),
+                    Release::Cancel => {
+                        self.voice.cancel();
+                        self.drop_speech();
+                    }
+                    Release::TooShort => {
+                        self.voice.cancel();
+                        self.drop_speech();
+                        self.hint = Some((now + 2.0, "Hold to talk"));
+                    }
+                    Release::Nothing => {}
+                }
+            }
+            ui.ctx().request_repaint();
+        }
+        if let Some((until, text)) = self.hint {
+            if now < until {
+                ui.label(egui::RichText::new(text).color(LEGEND).size(12.0));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            } else {
+                self.hint = None;
+            }
+        }
+    }
+
     /// The key that speaks into the composer: press to start the microphone, press again to stop
     /// and have what was said written into the draft.
     pub(super) fn speak_key(&mut self, ui: &mut Ui) {
@@ -258,7 +311,14 @@ impl App {
             move || ctx.request_repaint()
         };
         let (listening, reading) = (self.voice.listening(), self.voice.reading());
-        let label = if listening {
+        let hold_mode = self.speech.hold_to_talk;
+        let label = if listening && hold_mode {
+            if self.hold.off_button() {
+                "release to cancel".to_string()
+            } else {
+                format!("recording {:.0}s", self.voice.seconds())
+            }
+        } else if listening {
             format!("stop {:.0}s", self.voice.seconds())
         } else if reading {
             let w = self.voice.status.clone();
@@ -266,7 +326,9 @@ impl App {
         } else {
             "speak".to_string()
         };
-        let key = if listening {
+        let key = if listening && hold_mode && self.hold.off_button() {
+            Key::new(&label).outline(FAULT)
+        } else if listening {
             Key::new(&label).solid(FAULT)
         } else {
             Key::new(&label).outline(if reading { LEGEND } else { VALUE }).enabled(!reading)
@@ -286,7 +348,9 @@ impl App {
             key.clone()
                 .on_hover_text("speak instead of typing (Ctrl+M); it stops when you go quiet");
         }
-        if key.clicked() {
+        if hold_mode {
+            self.hold_gesture(ui, &key, listening, wake);
+        } else if key.clicked() {
             if listening {
                 self.voice.finish(&self.speech_now(), wake);
             } else if let Some(tile) = self.drawing {

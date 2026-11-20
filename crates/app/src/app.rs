@@ -774,6 +774,8 @@ pub struct App {
     icon_tx: std::sync::mpsc::Sender<(Id, Option<egui::ColorImage>)>,
     icon_rx: std::sync::mpsc::Receiver<(Id, Option<egui::ColorImage>)>,
     voice: crate::voice::Voice,
+    hold: crate::voice::Hold,
+    hint: Option<(f64, &'static str)>,
     speech: crate::voice::Settings,
     /// Reading a reply aloud, and the message being read.
     reader: crate::voice::Reader,
@@ -981,6 +983,8 @@ impl App {
             icon_tx: icon_channel.0,
             icon_rx: icon_channel.1,
             voice: Default::default(),
+            hold: Default::default(),
+            hint: None,
             reader: Default::default(),
             reading: None,
             speech: crate::voice::Settings::load(storage),

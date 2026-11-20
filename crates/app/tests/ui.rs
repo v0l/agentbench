@@ -1902,6 +1902,31 @@ fn escape_stops_the_agent_working_in_the_open_chat() {
 }
 
 #[test]
+fn hold_to_talk_shows_in_the_composer_at_both_sizes() {
+    let rig = rig();
+    for (tag, size) in [("desktop", [1280.0, 800.0]), ("phone", [412.0, 900.0])] {
+        let url = rig.url.clone();
+        let _build = build_lock();
+        let mut h =
+            Harness::builder().with_size(size).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
+                let mut storage = Mem::default();
+                storage.0.insert("url".into(), url);
+                storage.0.insert("token".into(), TOKEN.into());
+                storage.0.insert("voice_mode".into(), "server".into());
+                storage.0.insert("voice_hold".into(), "1".into());
+                App::new(&cc.egui_ctx, Some(&storage), None)
+            });
+        drop(_build);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        open_home_row(&mut h);
+        h.run_steps(3);
+        shot(&mut h, &format!("hold-composer-{tag}"));
+        h.state_mut().blank_chat_in_home();
+        h.run_steps(3);
+    }
+}
+
+#[test]
 fn the_speak_key_sits_in_the_composer_and_says_what_is_missing() {
     let rig = rig();
     // A speech server with no address, so pressing the key never opens a real microphone.

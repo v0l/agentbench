@@ -146,6 +146,7 @@ impl Voice {
             (take.endpoint.feed(&heard), heard.len())
         };
         match heard {
+            Heard::Done | Heard::GaveUp if settings.hold_to_talk => {}
             Heard::Done => self.finish(settings, wake),
             Heard::GaveUp => {
                 self.state = State::Idle;
