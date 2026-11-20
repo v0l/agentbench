@@ -373,6 +373,29 @@ impl VisionEdit {
 enum Filter {
     Open,
     All,
+    Process,
+}
+
+fn is_process(issue: &Issue) -> bool {
+    issue.labels.iter().any(|l| l.eq_ignore_ascii_case("process"))
+}
+
+fn process_count(issue: &Issue) -> u32 {
+    issue
+        .title
+        .trim_end()
+        .strip_suffix(')')
+        .and_then(|t| t.rsplit_once("(x"))
+        .and_then(|(_, n)| n.parse().ok())
+        .unwrap_or(1)
+}
+
+fn filter_keeps(filter: Filter, issue: &Issue) -> bool {
+    match filter {
+        Filter::Open => issue.state.is_open(),
+        Filter::All => true,
+        Filter::Process => issue.state.is_open() && is_process(issue),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2724,10 +2747,15 @@ impl App {
         });
         ui.add_space(8.0);
         let open = all.iter().filter(|i| i.state.is_open()).count();
+        let process: u32 = all.iter().filter(|i| filter_keeps(Filter::Process, i)).map(process_count).sum();
         segments(
             ui,
             &mut self.filter,
-            &[(Filter::Open, "open", Some(open)), (Filter::All, "all", Some(all.len()))],
+            &[
+                (Filter::Open, "open", Some(open)),
+                (Filter::All, "all", Some(all.len())),
+                (Filter::Process, "process", Some(process as usize)),
+            ],
         );
         ui.add_space(8.0);
         let mut labels: Vec<String> = all.iter().flat_map(|i| i.labels.clone()).collect();
@@ -2759,7 +2787,7 @@ impl App {
         let sessions_now = o.sessions.clone();
         let mut shown: Vec<&Issue> = all
             .iter()
-            .filter(|i| self.filter == Filter::All || i.state.is_open())
+            .filter(|i| filter_keeps(self.filter, i))
             .filter(|i| {
                 let project = names.get(&i.project_id).map_or("", String::as_str);
                 issue_matches(i, project, &sessions_now, &self.query, &self.label)
@@ -3527,6 +3555,18 @@ mod tests {
             created_at: 0,
             updated_at: id,
         }
+    }
+
+    #[test]
+    fn the_process_filter_keeps_open_process_issues_and_sums_their_counts() {
+        let a = issue(1, "DONE message not delivered (x3)", &["process"], 0);
+        let b = issue(2, "GPU tests collide", &["process"], 0);
+        let c = issue(3, "Fix login", &["bug"], 0);
+        let mut done = issue(4, "Old (x9)", &["process"], 0);
+        done.state = IssueState::Done;
+        let kept: Vec<_> = [&a, &b, &c, &done].into_iter().filter(|i| filter_keeps(Filter::Process, i)).collect();
+        assert_eq!(kept.iter().map(|i| i.id).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(kept.iter().map(|i| process_count(i)).sum::<u32>(), 4);
     }
 
     #[test]

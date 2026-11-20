@@ -347,7 +347,10 @@ When your prompt contains `PARENT=<id>`, you are a worker.\n\n\
 - Always send exactly one final message, including when you fail.\n\
  - When your prompt names a PARENT, questions go to that supervisor, not the user. Decide yourself when you can, and ask only when you cannot. Secrets still go to the user.\n\
 - Finish the work. Do the tests, the verification and every follow-up you can do yourself before reporting. End with a conclusion in one of two states: rigid (verified, tests pass, nothing left) or needs more work, listing only what you genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). Never end with a todo list of things you could have done.\n\
-</orchestration>";
+</orchestration>\n\n\
+<process_reports>\n\
+When the process, not the code, cost you time (a harness bug, an awkward or missing tool, an unclear brief, conflicting instructions, a missing permission, the environment), call `report_process_issue` once per distinct problem, with facts and a rough cost, not complaints. A final DONE line may end with an optional `process: <what happened>` line; the harness files it.\n\
+</process_reports>";
 
 fn supervisor_brief(c: &Context) -> String {
     format!(
@@ -369,6 +372,7 @@ fn supervisor_brief(c: &Context) -> String {
          - Projects: `add_project` asks the user to import a checkout, create a repo or clone one as a new project. It only files a request the user confirms; you hear back when they accept or decline.\n\
          - Nudge: `send_message` to a stalled or drifting session. `notify_user` only for what needs the user: a decision, a failure you cannot route around, or a finished piece of work.\n\
          - Remember: `remember` keeps the user's standing preferences and decisions.\n\
+         - Process: agents file `process` issues (labelled `process`, backlog, no goal, never started by the autopilot) for problems with the process rather than the code: self-reports, harness auto-capture, user corrections and stuck sessions all land in that one queue, and a repeat bumps the count in the title. Once a day a process digest arrives here ranked by count and cost. End every item in exactly one outcome: a note or `AGENTS.md` edit when the fix is guidance; a rule in the guard rules file (`guard_rules`) when it can be checked, which an item marked \"make it a guard\" (count 2 or more) should get; a todo issue with the concrete fix when it needs code; or close it as noise. Merge or drop the notes the digest lists as stale or duplicate. Tell the user in one line what changed. Report your own process problems with `report_process_issue` too.\n\
          - Vision: each project has a vision, the user's summary and ordered goals for it. Judge and start work against it: an issue serves a goal (`goal` on `file_issue` and `update_issue`) or is off_vision. File follow-ups with a goal, or leave them in backlog, and never start an off-vision or goalless issue without the user. `get_vision` reads it; `set_vision` is a proposal the user confirms, unless they typed the text themselves. Many issues come from agent reviews and follow-ups, not from the user: do not treat every todo as worth doing.\n\
          - Order: for ordered work set `depends_on` (issue numbers, any project) on `file_issue` or `update_issue` instead of parking issues with no goal. A dependent waits until every dependency is done, then moves to todo if it has a goal, or gets an \"unblocked\" comment.\n\
          </role>\n\n\
@@ -608,6 +612,14 @@ mod tests {
         for word in ["SMALL", "MEDIUM", "LARGE"] {
             assert!(!sup.contains(word), "{word}");
         }
+    }
+
+    #[test]
+    fn both_briefs_say_when_to_report_a_process_issue() {
+        let b = brief(&context());
+        assert!(b.contains("report_process_issue") && b.contains("`process:"), "{b}");
+        let sup = brief(&Context { supervisor: true, ..context() });
+        assert!(sup.contains("process digest") && sup.contains("guard_rules") && sup.contains("one line what changed"), "{sup}");
     }
 
     #[test]
