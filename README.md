@@ -13,6 +13,11 @@ picked up within 15 seconds. **Issues** belong to a project; starting an agent
 on one gives it a fresh worktree named after the issue and moves the issue to
 doing.
 
+The **projects** tab lists every project with its automation level, running
+agents, issue counts, vision and last activity, filtered and sorted. Opening one
+shows its overview, vision and goals with issue counts, agents at work, issues,
+memory notes and recent activity, stacked so it reads on a phone.
+
 Everything lives in one SQLite file. The window talks to the server only over
 its REST API, so it can sit on another machine.
 

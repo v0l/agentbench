@@ -169,7 +169,7 @@ impl App {
         }
     }
 
-    fn project_badge(&mut self, ui: &mut Ui, rect: egui::Rect, project: Id, name: &str) {
+    pub(super) fn project_badge(&mut self, ui: &mut Ui, rect: egui::Rect, project: Id, name: &str) {
         if let Some(Icon::Ready(tex)) = self.project_icon(project) {
             let tex = tex.clone();
             egui::Image::new((tex.id(), rect.size())).corner_radius(4.0).paint_at(ui, rect);
