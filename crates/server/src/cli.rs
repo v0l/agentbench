@@ -102,7 +102,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         .await;
     }
     let config = Config::load(&home.join("agentbench.toml"))?;
-    let store = Store::open(&home.join("agentbench.db")).map_err(|e| e.0)?;
+    let store = Store::open_with_memory(&home.join("agentbench.db"), crate::memory::default_root()).map_err(|e| e.0)?;
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => {
             tracing::info!("agentbench {} in {}", env!("CARGO_PKG_VERSION"), home.display());

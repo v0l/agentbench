@@ -602,6 +602,11 @@ fn not_found(what: &str, id: impl std::fmt::Display) -> StoreError {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
+        let memory = path.parent().unwrap_or(Path::new(".")).join("memory");
+        Store::open_with_memory(path, memory)
+    }
+
+    pub fn open_with_memory(path: &Path, memory: std::path::PathBuf) -> Result<Store> {
         if let Some(dir) = path.parent() {
             let existed = dir.is_dir();
             std::fs::create_dir_all(dir).map_err(|e| StoreError(e.to_string()))?;
@@ -614,7 +619,7 @@ impl Store {
                     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
             }
         }
-        let memory = Memory::open(path.parent().unwrap_or(Path::new(".")).join("memory"));
+        let memory = Memory::open(memory);
         let store = Store::setup(Connection::open(path)?, memory)?;
         #[cfg(unix)]
         restrict_database_files(path);

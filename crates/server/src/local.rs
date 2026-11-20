@@ -15,7 +15,7 @@ impl Local {
     pub fn open(home_dir: Option<PathBuf>) -> Result<Local, String> {
         let home = home_dir.unwrap_or_else(home);
         let config = Config::load(&home.join("agentbench.toml"))?;
-        let store = Store::open(&home.join("agentbench.db")).map_err(|e| e.0)?;
+        let store = Store::open_with_memory(&home.join("agentbench.db"), crate::memory::default_root()).map_err(|e| e.0)?;
         let token = token(&store).map_err(|e| e.0)?;
         let listen = config
             .listen

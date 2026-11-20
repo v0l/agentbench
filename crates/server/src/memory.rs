@@ -5,6 +5,13 @@ use std::sync::{Arc, Mutex};
 
 use agentbench_core::{Id, NoteVersion, SessionId};
 
+pub fn default_root() -> PathBuf {
+    if let Some(dir) = crate::env_var("MEMORY") {
+        return PathBuf::from(dir);
+    }
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".agents").join("memory")
+}
+
 pub const GLOBAL: &str = "global";
 const PROJECT_FILE: &str = ".project";
 
@@ -109,7 +116,10 @@ impl Memory {
 
     pub fn is_empty(&self) -> bool {
         match std::fs::read_dir(&self.root) {
-            Ok(entries) => entries.flatten().all(|e| e.file_name() == ".git"),
+            Ok(entries) => !entries.flatten().any(|e| {
+                let path = e.path();
+                path.is_dir() && (path.join(PROJECT_FILE).exists() || e.file_name() == GLOBAL)
+            }),
             Err(_) => true,
         }
     }
@@ -136,7 +146,7 @@ impl Memory {
 
     fn ensure_repo(&self) -> Result<(), String> {
         std::fs::create_dir_all(&self.root).map_err(err)?;
-        if !self.root.join(".git").exists() {
+        if self.git(&["rev-parse", "--is-inside-work-tree"]).is_err() {
             self.git(&["init", "-q"])?;
         }
         Ok(())
