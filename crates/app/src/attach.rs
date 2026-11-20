@@ -31,11 +31,20 @@ impl Pending {
 
 /// A file read in the background, on its way to the composer.
 pub enum Arrived {
-    File { name: String, mime: String, data: Vec<u8>, preview: Option<egui::ColorImage> },
+    File {
+        name: String,
+        mime: String,
+        data: Vec<u8>,
+        preview: Option<egui::ColorImage>,
+    },
     Failed(String),
     Saved(String),
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-    SavedTo { key: (SessionId, agentbench_core::Id), path: std::path::PathBuf, told: String },
+    SavedTo {
+        key: (SessionId, agentbench_core::Id),
+        path: std::path::PathBuf,
+        told: String,
+    },
 }
 
 pub use agent_ui::transcript::{Thumb, excerpt};
@@ -335,7 +344,8 @@ pub fn open_external(
     _session: SessionId,
     file: &Attachment,
 ) {
-    let _ = tx.send(Arrived::Failed(format!("{} cannot be opened from the browser app", file.name)));
+    let _ =
+        tx.send(Arrived::Failed(format!("{} cannot be opened from the browser app", file.name)));
     ctx.request_repaint();
 }
 
@@ -443,15 +453,16 @@ pub fn sweep(dir: &std::path::Path, days: u64) {
 /// A file name that stays inside its folder: no separators, no traversal, never empty.
 pub fn safe_name(name: &str) -> String {
     let last = name.rsplit(['/', '\\']).next().unwrap_or_default();
-    let clean: String = last.chars().filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c)).collect();
+    let clean: String =
+        last.chars().filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c)).collect();
     let clean = clean.trim().trim_matches('.').trim().to_string();
     if clean.is_empty() { "file".to_string() } else { clean }
 }
 
 const RUNNABLE: &[&str] = &[
     "sh", "bash", "zsh", "fish", "csh", "ksh", "desktop", "exe", "bat", "cmd", "com", "scr", "msi",
-    "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "lnk", "reg", "appimage", "jar", "run",
-    "app", "command", "pkg", "dmg", "deb", "rpm", "apk", "py", "pl", "rb", "hta", "cpl", "url",
+    "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "lnk", "reg", "appimage", "jar", "run", "app",
+    "command", "pkg", "dmg", "deb", "rpm", "apk", "py", "pl", "rb", "hta", "cpl", "url",
     "workflow", "action", "terminal",
 ];
 
@@ -464,7 +475,11 @@ pub fn is_runnable(name: &str) -> bool {
 
 /// Where an attachment is kept after download.
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-fn cached_path(dir: &std::path::Path, key: (SessionId, agentbench_core::Id), name: &str) -> std::path::PathBuf {
+fn cached_path(
+    dir: &std::path::Path,
+    key: (SessionId, agentbench_core::Id),
+    name: &str,
+) -> std::path::PathBuf {
     dir.join(key.0.to_string()).join(key.1.to_string()).join(safe_name(name))
 }
 
@@ -564,7 +579,14 @@ pub fn reveal(tx: Sender<Arrived>, ctx: egui::Context, path: std::path::PathBuf)
 }
 
 #[cfg(target_os = "android")]
-pub fn save(tx: Sender<Arrived>, ctx: egui::Context, name: String, mime: String, data: Vec<u8>, view: bool) {
+pub fn save(
+    tx: Sender<Arrived>,
+    ctx: egui::Context,
+    name: String,
+    mime: String,
+    data: Vec<u8>,
+    view: bool,
+) {
     crate::spawn_blocking(move || {
         let told = match crate::voice::android::save_download(&name, &mime, &data, view) {
             Ok(()) => Arrived::Saved(format!("saved {name} to Downloads")),
@@ -576,7 +598,14 @@ pub fn save(tx: Sender<Arrived>, ctx: egui::Context, name: String, mime: String,
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn save(tx: Sender<Arrived>, ctx: egui::Context, name: String, _mime: String, _data: Vec<u8>, _view: bool) {
+pub fn save(
+    tx: Sender<Arrived>,
+    ctx: egui::Context,
+    name: String,
+    _mime: String,
+    _data: Vec<u8>,
+    _view: bool,
+) {
     let _ = tx.send(Arrived::Failed(format!("{name} cannot be saved from the browser app")));
     ctx.request_repaint();
 }
@@ -665,7 +694,9 @@ mod tests {
 
     #[test]
     fn programs_and_scripts_are_not_opened() {
-        for n in ["a.sh", "x.EXE", "run.bat", "t.desktop", "App.AppImage", "x.jar", "m.msi", "p.ps1"] {
+        for n in
+            ["a.sh", "x.EXE", "run.bat", "t.desktop", "App.AppImage", "x.jar", "m.msi", "p.ps1"]
+        {
             assert!(is_runnable(n), "{n}");
         }
         for n in ["a.txt", "pic.png", "report.pdf", "notes", "sh", "archive.tar.gz"] {
@@ -694,7 +725,10 @@ mod tests {
         assert!(open_bytes(&dir, &open, (sid, 9), "x.sh", b"#!").is_err());
         assert_eq!(seen.lock().unwrap().len(), 2);
         let failing = |_: &std::path::Path| Err("no handler".to_string());
-        assert_eq!(open_bytes(&dir, &failing, (sid, 9), "r.txt", b"hello").unwrap_err(), "no handler");
+        assert_eq!(
+            open_bytes(&dir, &failing, (sid, 9), "r.txt", b"hello").unwrap_err(),
+            "no handler"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

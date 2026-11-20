@@ -4,7 +4,8 @@ use base64::Engine;
 const ICON_BYTES: u64 = 256 * 1024;
 
 pub(super) fn initials(name: &str) -> String {
-    let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> =
+        name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
     let mut out: String = match words.as_slice() {
         [] => "?".to_string(),
         [one] => one.chars().take(2).collect(),
@@ -52,14 +53,20 @@ fn decode_icon(icon: &str) -> Option<egui::ColorImage> {
 
 impl App {
     fn workspace_texture(&mut self, ctx: &egui::Context, slot: u32) -> Option<egui::TextureHandle> {
-        let icon = self.servers.iter().find(|r| r.slot == slot).map(|r| r.icon.clone()).unwrap_or_default();
+        let icon = self
+            .servers
+            .iter()
+            .find(|r| r.slot == slot)
+            .map(|r| r.icon.clone())
+            .unwrap_or_default();
         if icon.is_empty() {
             self.server_icons.remove(&slot);
             return None;
         }
         if self.server_icons.get(&slot).is_none_or(|(have, _)| *have != icon) {
-            let tex = decode_icon(&icon)
-                .map(|img| ctx.load_texture(format!("workspace-icon-{slot}"), img, Default::default()));
+            let tex = decode_icon(&icon).map(|img| {
+                ctx.load_texture(format!("workspace-icon-{slot}"), img, Default::default())
+            });
             self.server_icons.insert(slot, (icon, tex));
         }
         self.server_icons.get(&slot).and_then(|(_, t)| t.clone())
@@ -77,13 +84,18 @@ impl App {
         let icon = if agent_ui::key::phone(&ctx) { agent_ui::key::TAP } else { 40.0 };
         let mut pick: Option<Option<u32>> = None;
         let mut add = false;
-        let entries: Vec<(Option<u32>, String)> = std::iter::once((None, "all workspaces".to_string()))
-            .chain(self.server_names().into_iter().map(|(s, n)| (Some(s), n)))
-            .collect();
+        let entries: Vec<(Option<u32>, String)> =
+            std::iter::once((None, "all workspaces".to_string()))
+                .chain(self.server_names().into_iter().map(|(s, n)| (Some(s), n)))
+                .collect();
         egui::Panel::left("workspaces")
             .exact_size(56.0)
             .resizable(false)
-            .frame(egui::Frame::NONE.fill(CHASSIS.gamma_multiply(0.6)).inner_margin(egui::Margin::symmetric(8, 8)))
+            .frame(
+                egui::Frame::NONE
+                    .fill(CHASSIS.gamma_multiply(0.6))
+                    .inner_margin(egui::Margin::symmetric(8, 8)),
+            )
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 for (slot, name) in &entries {
@@ -91,14 +103,17 @@ impl App {
                     let selected = self.view == *slot;
                     let (running, waiting, pending, down) = match slot {
                         Some(s) => {
-                            let (r, w, p) = self.client.as_ref().map_or((0, 0, 0), |c| c.activity(*s));
+                            let (r, w, p) =
+                                self.client.as_ref().map_or((0, 0, 0), |c| c.activity(*s));
                             (r, w, p, self.client.as_ref().is_some_and(|c| c.offline(*s).is_some()))
                         }
                         None => {
                             let c = self.client.as_ref();
                             let all = c.map(|c| c.slots()).unwrap_or_default();
                             let sum = |f: fn((usize, usize, usize)) -> usize| {
-                                all.iter().map(|s| f(c.map_or((0, 0, 0), |c| c.activity(*s)))).sum::<usize>()
+                                all.iter()
+                                    .map(|s| f(c.map_or((0, 0, 0), |c| c.activity(*s))))
+                                    .sum::<usize>()
                             };
                             (sum(|a| a.0), sum(|a| a.1), sum(|a| a.2), false)
                         }
@@ -108,7 +123,9 @@ impl App {
                         Some(_) => format!("workspace {name}"),
                         None => "all workspaces".to_string(),
                     };
-                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label)
+                    });
                     let fill = match slot {
                         Some(_) => colour_of(name),
                         None => CHASSIS.gamma_multiply(1.6),
@@ -139,8 +156,16 @@ impl App {
                         ui.painter().rect_filled(pill, 1.5, VALUE);
                     }
                     if !down && waiting + pending > 0 {
-                        ui.painter().circle_filled(rect.right_top() + Vec2::new(-3.0, 3.0), 6.0, CHASSIS);
-                        ui.painter().circle_filled(rect.right_top() + Vec2::new(-3.0, 3.0), 4.5, FAULT);
+                        ui.painter().circle_filled(
+                            rect.right_top() + Vec2::new(-3.0, 3.0),
+                            6.0,
+                            CHASSIS,
+                        );
+                        ui.painter().circle_filled(
+                            rect.right_top() + Vec2::new(-3.0, 3.0),
+                            4.5,
+                            FAULT,
+                        );
                         resp.widget_info(|| {
                             egui::WidgetInfo::labeled(
                                 egui::WidgetType::Button,
@@ -150,19 +175,39 @@ impl App {
                         });
                     } else if down {
                         resp.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{label}, offline"))
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!("{label}, offline"),
+                            )
                         });
                     } else if running > 0 {
                         resp.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{label}, working"))
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                true,
+                                format!("{label}, working"),
+                            )
                         });
-                        ui.painter().circle_filled(rect.right_bottom() + Vec2::new(-3.0, -3.0), 6.0, CHASSIS);
-                        ui.painter().circle_filled(rect.right_bottom() + Vec2::new(-3.0, -3.0), 4.5, TRACE);
+                        ui.painter().circle_filled(
+                            rect.right_bottom() + Vec2::new(-3.0, -3.0),
+                            6.0,
+                            CHASSIS,
+                        );
+                        ui.painter().circle_filled(
+                            rect.right_bottom() + Vec2::new(-3.0, -3.0),
+                            4.5,
+                            TRACE,
+                        );
                     }
                     let tip = self.workspace_tip(*slot, name, down);
                     resp.clone().on_hover_ui(|ui| {
                         for (i, line) in tip.iter().enumerate() {
-                            ui.label(egui::RichText::new(line).size(if i == 0 { 12.0 } else { 10.5 }));
+                            ui.label(egui::RichText::new(line).size(if i == 0 {
+                                12.0
+                            } else {
+                                10.5
+                            }));
                         }
                     });
                     if resp.clicked() {
@@ -173,8 +218,15 @@ impl App {
                     }
                 }
                 let (rect, resp) = ui.allocate_exact_size(Vec2::splat(icon), Sense::click());
-                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add workspace"));
-                ui.painter().rect_stroke(rect, 20.0, Stroke::new(1.0, LEGEND), egui::StrokeKind::Inside);
+                resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add workspace")
+                });
+                ui.painter().rect_stroke(
+                    rect,
+                    20.0,
+                    Stroke::new(1.0, LEGEND),
+                    egui::StrokeKind::Inside,
+                );
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -205,7 +257,10 @@ impl App {
             return vec![name.to_string()];
         };
         let Some(slot) = slot else {
-            return vec!["All workspaces".to_string(), "projects and chats from every workspace together".to_string()];
+            return vec![
+                "All workspaces".to_string(),
+                "projects and chats from every workspace together".to_string(),
+            ];
         };
         let mut out = vec![name.to_string(), c.url(slot)];
         out.extend(c.compat(slot).notice());
@@ -248,7 +303,10 @@ impl App {
                 });
                 footer(ui, |ui| {
                     let ready = !w.url.trim().is_empty() && !w.token.trim().is_empty();
-                    if ui.add(Key::new("add").solid(READOUT).enabled(ready).min_width(100.0)).clicked() {
+                    if ui
+                        .add(Key::new("add").solid(READOUT).enabled(ready).min_width(100.0))
+                        .clicked()
+                    {
                         go = true;
                     }
                     if ui.add(Key::new("cancel").outline(VALUE).min_width(100.0)).clicked() {
@@ -261,7 +319,11 @@ impl App {
         }
         if go {
             keep_icon(&mut w.icon);
-            let name = if w.name.trim().is_empty() { crate::hub::host_name(&w.url) } else { w.name.trim().to_string() };
+            let name = if w.name.trim().is_empty() {
+                crate::hub::host_name(&w.url)
+            } else {
+                w.name.trim().to_string()
+            };
             let slot = self.add_server(&name, w.url.trim(), w.token.trim());
             if let Some(r) = self.servers.iter_mut().find(|r| r.slot == slot) {
                 r.icon = w.icon.clone();

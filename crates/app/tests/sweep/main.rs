@@ -41,9 +41,8 @@ fn parse_size(spec: &str) -> Size {
     let parts: Vec<&str> = spec.split(':').collect();
     let dims: Vec<f32> = parts[0].split('x').map(|v| v.parse().unwrap()).collect();
     let scale = parts.get(1).map_or(1.0, |s| s.parse().unwrap());
-    let insets: Vec<f32> = parts
-        .get(2)
-        .map_or(vec![0.0; 4], |s| s.split(',').map(|v| v.parse().unwrap()).collect());
+    let insets: Vec<f32> =
+        parts.get(2).map_or(vec![0.0; 4], |s| s.split(',').map(|v| v.parse().unwrap()).collect());
     Size { size: [dims[0], dims[1]], scale, insets: [insets[0], insets[1], insets[2], insets[3]] }
 }
 
@@ -125,7 +124,10 @@ fn problems(h: &Harness<'static, App>, s: Size) -> Vec<(&'static str, String)> {
         let ok = r.height() >= TAP - 0.5 && r.width() >= TAP_SHORT
             || r.width() >= TAP - 0.5 && r.height() >= TAP_SHORT;
         if !ok && !TAP_ALLOWED.iter().any(|a| label.contains(a)) {
-            out.push(("tap-target", format!("{:?} {label:?} {:.0}x{:.0} at {r:?}", role, r.width(), r.height())));
+            out.push((
+                "tap-target",
+                format!("{:?} {label:?} {:.0}x{:.0} at {r:?}", role, r.width(), r.height()),
+            ));
         }
     }
     let popups: Vec<egui::Rect> = h.ctx.memory(|m| {
@@ -138,7 +140,6 @@ fn problems(h: &Harness<'static, App>, s: Size) -> Vec<(&'static str, String)> {
     });
     for (i, a) in keys.iter().enumerate() {
         for b in &keys[i + 1..] {
-
             if popups.iter().any(|p| p.intersects(*a) || p.intersects(*b)) {
                 continue;
             }

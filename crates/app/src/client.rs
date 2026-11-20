@@ -72,7 +72,9 @@ pub struct Client {
     watch_wait: u64,
     pub pending: usize,
     #[cfg(not(target_arch = "wasm32"))]
-    writes: tokio::sync::mpsc::UnboundedSender<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
+    writes: tokio::sync::mpsc::UnboundedSender<
+        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    >,
 }
 
 /// How long an ordinary request may take before the window calls the server offline.
@@ -107,8 +109,12 @@ fn reason(e: &reqwest::Error) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn ordered_writes() -> tokio::sync::mpsc::UnboundedSender<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>();
+fn ordered_writes() -> tokio::sync::mpsc::UnboundedSender<
+    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<
+        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    >();
     crate::spawn(async move {
         while let Some(task) = rx.recv().await {
             task.await;
@@ -228,8 +234,9 @@ impl Client {
         let tx = self.tx.clone();
         let wake = self.wake.clone();
         let method = req.try_clone().and_then(|r| r.build().ok()).map(|r| r.method().clone());
-        let ordered =
-            method.as_ref().is_some_and(|m| matches!(*m, Method::PUT | Method::PATCH | Method::DELETE));
+        let ordered = method
+            .as_ref()
+            .is_some_and(|m| matches!(*m, Method::PUT | Method::PATCH | Method::DELETE));
         let reading = method == Some(Method::GET);
         self.pending += 1;
         let task = async move {
@@ -334,11 +341,8 @@ impl Client {
 
     pub fn restore_note(&mut self, project: Id, version: Id) {
         let body = Self::json(&serde_json::json!({ "version": version }));
-        let req = self.request(
-            Method::POST,
-            &format!("/api/projects/{project}/notes/restore"),
-            body,
-        );
+        let req =
+            self.request(Method::POST, &format!("/api/projects/{project}/notes/restore"), body);
         self.send(req, move |_: serde_json::Value| Reply::Done("note restored".into()));
         self.notes(project);
     }
@@ -350,16 +354,18 @@ impl Client {
     }
 
     pub fn put_vision(&mut self, project: Id, body: &agentbench_core::VisionBody) {
-        self.act(Method::PUT, &format!("/api/projects/{project}/vision"), Some(body), "vision saved");
+        self.act(
+            Method::PUT,
+            &format!("/api/projects/{project}/vision"),
+            Some(body),
+            "vision saved",
+        );
     }
 
     pub fn restore_vision(&mut self, project: Id, version: Id) {
         let body = Self::json(&serde_json::json!({ "version": version }));
-        let req = self.request(
-            Method::POST,
-            &format!("/api/projects/{project}/vision/restore"),
-            body,
-        );
+        let req =
+            self.request(Method::POST, &format!("/api/projects/{project}/vision/restore"), body);
         self.send(req, move |_: serde_json::Value| Reply::Done("vision restored".into()));
     }
 
@@ -739,7 +745,8 @@ impl Client {
     }
 
     pub fn rename_session(&mut self, session: SessionId, title: &str) {
-        let patch = agentbench_core::SessionPatch { title: Some(title.to_string()), ..Default::default() };
+        let patch =
+            agentbench_core::SessionPatch { title: Some(title.to_string()), ..Default::default() };
         self.act(Method::PATCH, &format!("/api/sessions/{session}"), Some(&patch), "");
     }
 

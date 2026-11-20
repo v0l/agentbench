@@ -242,8 +242,12 @@ impl App {
             return;
         }
         let (mut go, mut close) = (false, false);
-        let servers: Vec<(u32, String)> =
-            self.client.as_ref().filter(|h| h.multi()).map(|_| self.server_names()).unwrap_or_default();
+        let servers: Vec<(u32, String)> = self
+            .client
+            .as_ref()
+            .filter(|h| h.multi())
+            .map(|_| self.server_names())
+            .unwrap_or_default();
         let Some(a) = &mut self.add_project else {
             return;
         };
@@ -408,7 +412,11 @@ impl App {
                     } else if p.home {
                         "~ (no repo)".to_string()
                     } else {
-                        format!("{}{}", p.name, badges.get(&p.id).map(|n| format!(" [{n}]")).unwrap_or_default())
+                        format!(
+                            "{}{}",
+                            p.name,
+                            badges.get(&p.id).map(|n| format!(" [{n}]")).unwrap_or_default()
+                        )
                     },
                 )
             })
@@ -642,7 +650,10 @@ impl App {
                                     );
                                 },
                             );
-                            ui.add(egui::Label::new(egui::RichText::new(what).size(11.5).color(VALUE)).wrap());
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(what).size(11.5).color(VALUE))
+                                    .wrap(),
+                            );
                         });
                     }
                 });
@@ -655,7 +666,11 @@ impl App {
                 ui.add_space(8.0);
                 note(
                     ui,
-                    &format!("agentbench {} (api {})", env!("CARGO_PKG_VERSION"), agentbench_core::API_VERSION),
+                    &format!(
+                        "agentbench {} (api {})",
+                        env!("CARGO_PKG_VERSION"),
+                        agentbench_core::API_VERSION
+                    ),
                     LEGEND,
                 );
                 footer(ui, |ui| {
@@ -724,7 +739,12 @@ impl App {
             .vision_edit
             .as_ref()
             .and_then(|e| {
-                self.overview.as_ref()?.projects.iter().find(|p| p.id == e.project).map(|p| p.name.clone())
+                self.overview
+                    .as_ref()?
+                    .projects
+                    .iter()
+                    .find(|p| p.id == e.project)
+                    .map(|p| p.name.clone())
             })
             .unwrap_or_default();
         let Some(e) = &mut self.vision_edit else {
@@ -740,40 +760,62 @@ impl App {
                     section(ui, "summary", "what the project is for", |ui| {
                         prose(ui, &mut e.summary, "vision summary", 3);
                     });
-                    section(ui, "goals", "in order; work is judged against the active ones", |ui| {
-                        let mut drop = None;
-                        for (n, g) in e.goals.iter_mut().enumerate() {
-                            ui.horizontal(|ui| {
-                                let id = if g.id.is_empty() { "new".to_string() } else { g.id.clone() };
-                                Line::new().value(id).tint(LEGEND).size(11.0).show(ui);
-                                ui.allocate_ui(Vec2::new(110.0, KEY_H), |ui| {
-                                    choice(
-                                        ui,
-                                        ("goal status", n),
-                                        &mut g.status,
-                                        [
-                                            agentbench_core::GoalStatus::Active,
-                                            agentbench_core::GoalStatus::Done,
-                                            agentbench_core::GoalStatus::Dropped,
-                                        ]
-                                        .map(|s| (s, s.as_str().to_string())),
-                                    );
+                    section(
+                        ui,
+                        "goals",
+                        "in order; work is judged against the active ones",
+                        |ui| {
+                            let mut drop = None;
+                            for (n, g) in e.goals.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    let id = if g.id.is_empty() {
+                                        "new".to_string()
+                                    } else {
+                                        g.id.clone()
+                                    };
+                                    Line::new().value(id).tint(LEGEND).size(11.0).show(ui);
+                                    ui.allocate_ui(Vec2::new(110.0, KEY_H), |ui| {
+                                        choice(
+                                            ui,
+                                            ("goal status", n),
+                                            &mut g.status,
+                                            [
+                                                agentbench_core::GoalStatus::Active,
+                                                agentbench_core::GoalStatus::Done,
+                                                agentbench_core::GoalStatus::Dropped,
+                                            ]
+                                            .map(|s| (s, s.as_str().to_string())),
+                                        );
+                                    });
+                                    if ui
+                                        .add(
+                                            Key::new("drop")
+                                                .id_salt(("drop goal", n))
+                                                .outline(FAULT),
+                                        )
+                                        .clicked()
+                                    {
+                                        drop = Some(n);
+                                    }
                                 });
-                                if ui.add(Key::new("drop").id_salt(("drop goal", n)).outline(FAULT)).clicked() {
-                                    drop = Some(n);
-                                }
+                                field(ui, &mut g.text, "goal text");
+                            }
+                            if let Some(n) = drop {
+                                e.goals.remove(n);
+                            }
+                            let add = ui.add(Key::new("add goal").outline(VALUE));
+                            add.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    "add goal",
+                                )
                             });
-                            field(ui, &mut g.text, "goal text");
-                        }
-                        if let Some(n) = drop {
-                            e.goals.remove(n);
-                        }
-                        let add = ui.add(Key::new("add goal").outline(VALUE));
-                        add.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add goal"));
-                        if add.clicked() {
-                            e.goals.push(agentbench_core::Goal::default());
-                        }
-                    });
+                            if add.clicked() {
+                                e.goals.push(agentbench_core::Goal::default());
+                            }
+                        },
+                    );
                     section(ui, "non-goals", "one per line", |ui| {
                         prose(ui, &mut e.non_goals, "non-goals", 3);
                     });
@@ -785,7 +827,9 @@ impl App {
                             let tag = if n == 0 { " (current)" } else { "" };
                             note(ui, format!("{}{tag}: {}", v.author, v.body.summary), LEGEND);
                             if n > 0
-                                && ui.add(Key::new(format!("restore {}", v.id)).outline(VALUE)).clicked()
+                                && ui
+                                    .add(Key::new(format!("restore {}", v.id)).outline(VALUE))
+                                    .clicked()
                             {
                                 restore = Some(v.id);
                             }
@@ -794,7 +838,9 @@ impl App {
                 });
                 footer(ui, |ui| {
                     let key = ui.add(Key::new("save vision").solid(READOUT).min_width(100.0));
-                    key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "save vision"));
+                    key.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "save vision")
+                    });
                     if key.clicked() {
                         save = true;
                     }

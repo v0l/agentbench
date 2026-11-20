@@ -64,13 +64,12 @@ impl App {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "add project")
         });
         if add.clicked() {
-            self.add_project =
-                Some(AddProject {
-                    slot: self.project.map(crate::hub::slot_of).unwrap_or(0),
-                    path: String::new(),
-                    name: String::new(),
-                    create: false,
-                });
+            self.add_project = Some(AddProject {
+                slot: self.project.map(crate::hub::slot_of).unwrap_or(0),
+                path: String::new(),
+                name: String::new(),
+                create: false,
+            });
         }
     }
 
@@ -113,17 +112,38 @@ impl App {
         section_panel(ui, |ui| {
             Line::new().legend("needs you").size(10.0).tint(READOUT).elided(ui);
             for (slot, name, id, title, sup) in &rows {
-                let label = format!("[{name}] {}", if *sup { format!("supervisor: {title}") } else { title.clone() });
-                let r = ui.add(egui::Label::new(egui::RichText::new(&label).size(11.0).color(VALUE)).sense(Sense::click()));
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("needs you {label}")));
+                let label = format!(
+                    "[{name}] {}",
+                    if *sup { format!("supervisor: {title}") } else { title.clone() }
+                );
+                let r = ui.add(
+                    egui::Label::new(egui::RichText::new(&label).size(11.0).color(VALUE))
+                        .sense(Sense::click()),
+                );
+                r.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        format!("needs you {label}"),
+                    )
+                });
                 if r.clicked() {
                     open = Some((*slot, *id, *sup));
                 }
             }
             for (slot, name, summary) in &cards {
                 let label = format!("[{name}] proposal: {summary}");
-                let r = ui.add(egui::Label::new(egui::RichText::new(&label).size(11.0).color(VALUE)).sense(Sense::click()));
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("needs you {label}")));
+                let r = ui.add(
+                    egui::Label::new(egui::RichText::new(&label).size(11.0).color(VALUE))
+                        .sense(Sense::click()),
+                );
+                r.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        true,
+                        format!("needs you {label}"),
+                    )
+                });
                 if r.clicked() {
                     review = Some(*slot);
                 }
@@ -197,7 +217,11 @@ impl App {
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
         let released = if s.released { ", user controlled" } else { "" };
         resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("chat {}{released}{}", s.title, self.server_note(s.project_id)))
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                format!("chat {}{released}{}", s.title, self.server_note(s.project_id)),
+            )
         });
         let tiled =
             self.grid_now().slots() > 1 && self.tab == Tab::Chat && self.shown().contains(&s.id);
@@ -217,7 +241,10 @@ impl App {
             ui.painter().rect_filled(row, 3.0, fill);
         }
         if waiting {
-            let rail = egui::Rect::from_min_max(row.left_top(), egui::pos2(row.left() + 3.0, row.bottom()));
+            let rail = egui::Rect::from_min_max(
+                row.left_top(),
+                egui::pos2(row.left() + 3.0, row.bottom()),
+            );
             ui.painter().rect_filled(rail, 1.0, READOUT);
             let pill = needs_you_pill(ui, row);
             let id = ui.id().with(("needs-you", s.id));
@@ -331,7 +358,8 @@ impl App {
                 }
             }
             if s.released {
-                let back = ui.add(Key::new("hand back to supervisor").outline(VALUE).min_width(width));
+                let back =
+                    ui.add(Key::new("hand back to supervisor").outline(VALUE).min_width(width));
                 back.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::Role::Button, true, "hand back to supervisor")
                 });
@@ -389,13 +417,7 @@ fn needs_you_pill(ui: &Ui, row: egui::Rect) -> egui::Rect {
     let p = ui.painter();
     p.rect_filled(rect, 2.0, READOUT.gamma_multiply(0.2));
     p.rect_stroke(rect, 2.0, Stroke::new(1.0, READOUT), egui::StrokeKind::Inside);
-    p.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "? NEEDS YOU",
-        legend_font(9.5),
-        READOUT,
-    );
+    p.text(rect.center(), egui::Align2::CENTER_CENTER, "? NEEDS YOU", legend_font(9.5), READOUT);
     rect
 }
 

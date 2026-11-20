@@ -68,7 +68,13 @@ fn question(q: &Question) -> shared::Question<'_> {
 }
 
 impl App {
-    fn show_item(&mut self, ui: &mut Ui, session: SessionId, id: Id, item: &Item) -> Option<Action> {
+    fn show_item(
+        &mut self,
+        ui: &mut Ui,
+        session: SessionId,
+        id: Id,
+        item: &Item,
+    ) -> Option<Action> {
         let mut fetch = Fetch { tray: &mut self.tray, client: self.client.as_ref(), session };
         let reading = self.reading.filter(|_| self.reader.busy());
         let mut show = shared::Show {
@@ -155,7 +161,12 @@ impl App {
         }
     }
 
-    fn save_file(&mut self, ctx: &egui::Context, session: SessionId, file: &agentbench_core::Attachment) {
+    fn save_file(
+        &mut self,
+        ctx: &egui::Context,
+        session: SessionId,
+        file: &agentbench_core::Attachment,
+    ) {
         let Some(c) = &self.client else { return };
         let (tx, ctx) = (self.tray.sender(), ctx.clone());
         let (name, mime) = (file.name.clone(), file.mime.clone());
@@ -163,7 +174,8 @@ impl App {
         c.attachment(session, file.id, move |bytes| match bytes {
             Some(data) => crate::attach::save_keyed(tx, ctx, key, name, mime, data),
             None => {
-                let _ = tx.send(crate::attach::Arrived::Failed(format!("could not download {name}")));
+                let _ =
+                    tx.send(crate::attach::Arrived::Failed(format!("could not download {name}")));
                 ctx.request_repaint();
             }
         });

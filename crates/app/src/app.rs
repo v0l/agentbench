@@ -1,16 +1,16 @@
 use crate::client::{Reply, Server};
-use crate::hub::{Hub, Remote};
 use crate::fonts::{self, Installed, Typeface};
-use agent_ui::form::{field, field_then, prose, secret};
+use crate::hub::{Hub, Remote};
 use crate::picker::ModelPicker;
 use crate::scan::Scan;
+use agent_ui::form::{field, field_then, prose, secret};
+use agent_ui::key::Key;
 use agentbench_core::{
     Comment, Entry, Id, Issue, IssuePatch, IssueState, Lsp, LspHealth, Message, NewComment,
     NewIssue, NewProject, NewSession, NewWorktree, Overview, Place, Project, ProjectPatch,
     Question, Session, SessionId, SessionStatus, Worktree,
 };
 use egui::{Align, Layout, Margin, Sense, Stroke, Ui, Vec2};
-use agent_ui::key::Key;
 use egui_bench::markdown;
 use egui_bench::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -30,8 +30,8 @@ mod viewer;
 mod widgets;
 
 use self::settings::{model_input, pairing_of};
-pub use self::widgets::{status_counts, usage_labels};
 use self::widgets::*;
+pub use self::widgets::{status_counts, usage_labels};
 use agent_ui::widgets::{code_block, spinner};
 
 const SIDE_W: f32 = 320.0;
@@ -152,7 +152,8 @@ fn list_key(s: &Session) -> (bool, std::cmp::Reverse<(i64, String)>) {
     (s.status != SessionStatus::Waiting, chat_key(s))
 }
 
-pub const INSTALL_COMMAND: &str = "cargo install --git https://github.com/v0l/agentbench agentbench";
+pub const INSTALL_COMMAND: &str =
+    "cargo install --git https://github.com/v0l/agentbench agentbench";
 pub const RELEASES_URL: &str = "https://github.com/v0l/agentbench/releases/latest";
 
 pub fn waiting_on_you(sessions: &[Session]) -> usize {
@@ -234,7 +235,9 @@ fn goal_columns<'a>(
             let mine: Vec<&Issue> = shown
                 .iter()
                 .copied()
-                .filter(|i| i.project_id == v.project_id && i.goal.as_deref() == Some(g.id.as_str()))
+                .filter(|i| {
+                    i.project_id == v.project_id && i.goal.as_deref() == Some(g.id.as_str())
+                })
                 .collect();
             if everything && mine.is_empty() {
                 continue;
@@ -1662,7 +1665,11 @@ impl App {
         };
         hub.compat_notices()
             .into_iter()
-            .map(|(slot, text)| if hub.multi() { format!("{}: {text}", hub.name(slot)) } else { text })
+            .map(
+                |(slot, text)| {
+                    if hub.multi() { format!("{}: {text}", hub.name(slot)) } else { text }
+                },
+            )
             .collect()
     }
 
@@ -1687,7 +1694,12 @@ impl App {
                         ui.hyperlink_to(RELEASES_URL, RELEASES_URL);
                     } else {
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(egui::RichText::new(INSTALL_COMMAND).monospace().size(11.5).color(VALUE));
+                            ui.label(
+                                egui::RichText::new(INSTALL_COMMAND)
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(VALUE),
+                            );
                             ui.hyperlink_to("or download a release", RELEASES_URL);
                         });
                     }
@@ -1770,7 +1782,8 @@ impl App {
         if self.view.is_some_and(|v| v != 0 && !self.servers.iter().any(|r| r.slot == v)) {
             self.view = None;
         }
-        if self.home_supervisor != 0 && !self.servers.iter().any(|r| r.slot == self.home_supervisor) {
+        if self.home_supervisor != 0 && !self.servers.iter().any(|r| r.slot == self.home_supervisor)
+        {
             self.home_supervisor = 0;
         }
         if let Some(c) = &mut self.client {
@@ -1788,7 +1801,12 @@ impl App {
     }
 
     pub fn file_issue_on(&mut self, project: Id, title: &str, body: &str) {
-        let new = NewIssue { project_id: project, title: title.into(), body: body.into(), ..Default::default() };
+        let new = NewIssue {
+            project_id: project,
+            title: title.into(),
+            body: body.into(),
+            ..Default::default()
+        };
         if let Some(c) = &mut self.client {
             c.add_issue(&new);
         }
@@ -2495,7 +2513,9 @@ impl App {
         let agent = o
             .agents
             .iter()
-            .find(|a| a.available && !self.preferred_agent.is_empty() && a.name == self.preferred_agent)
+            .find(|a| {
+                a.available && !self.preferred_agent.is_empty() && a.name == self.preferred_agent
+            })
             .or_else(|| o.agents.iter().find(|a| a.available && a.name == "pi"))
             .or_else(|| o.agents.iter().find(|a| a.available))
             .map(|a| a.name.clone())
@@ -2538,7 +2558,9 @@ impl App {
     }
 
     fn patch_project(&mut self, id: Id, patch: ProjectPatch) {
-        if let Some(p) = self.overview.as_mut().and_then(|o| o.projects.iter_mut().find(|p| p.id == id)) {
+        if let Some(p) =
+            self.overview.as_mut().and_then(|o| o.projects.iter_mut().find(|p| p.id == id))
+        {
             if let Some(l) = patch.automation {
                 p.automation = l;
             }
@@ -2573,8 +2595,16 @@ impl App {
             ui.spacing_mut().item_spacing.x = 8.0;
             let width = width.min((ui.available_width() - 100.0).max(60.0));
             picked = level_slider(ui, &label, level, inherited, width);
-            let word = if inherited { format!("{} (default)", level.label()) } else { level.label().to_string() };
-            Line::new().set(word).size(11.0).tint(if inherited { READOUT_DIM } else { READOUT }).show(ui);
+            let word = if inherited {
+                format!("{} (default)", level.label())
+            } else {
+                level.label().to_string()
+            };
+            Line::new()
+                .set(word)
+                .size(11.0)
+                .tint(if inherited { READOUT_DIM } else { READOUT })
+                .show(ui);
         });
         if let Some(l) = picked {
             self.set_project_level(project.id, Some(l));
@@ -2586,7 +2616,10 @@ impl App {
             a.auto_close = on;
         }
         if let Some(c) = &mut self.client {
-            c.autopilot(&agentbench_core::AutopilotPatch { auto_close: Some(on), ..Default::default() });
+            c.autopilot(&agentbench_core::AutopilotPatch {
+                auto_close: Some(on),
+                ..Default::default()
+            });
         }
     }
 
@@ -2767,7 +2800,11 @@ impl App {
         labels.sort();
         labels.dedup();
         let narrow = self.narrow;
-        let filters = |sort: &mut Sort, group: &mut Group, label: &mut String, query: &mut String, ui: &mut Ui| {
+        let filters = |sort: &mut Sort,
+                       group: &mut Group,
+                       label: &mut String,
+                       query: &mut String,
+                       ui: &mut Ui| {
             ui.allocate_ui(Vec2::new(150.0, KEY_H), |ui| {
                 choice(ui, "sort", sort, Sort::ALL.map(|s| (s, s.label().to_string())));
             });
@@ -2784,9 +2821,13 @@ impl App {
             field(ui, query, "search title, text, label, project or agent");
         };
         if narrow {
-            ui.horizontal_wrapped(|ui| filters(&mut self.sort, &mut self.group, &mut self.label, &mut self.query, ui));
+            ui.horizontal_wrapped(|ui| {
+                filters(&mut self.sort, &mut self.group, &mut self.label, &mut self.query, ui)
+            });
         } else {
-            ui.horizontal(|ui| filters(&mut self.sort, &mut self.group, &mut self.label, &mut self.query, ui));
+            ui.horizontal(|ui| {
+                filters(&mut self.sort, &mut self.group, &mut self.label, &mut self.query, ui)
+            });
         }
         ui.add_space(8.0);
         let sessions_now = o.sessions.clone();
@@ -2825,7 +2866,13 @@ impl App {
             Group::State => IssueState::ALL
                 .into_iter()
                 .filter(|s| self.filter == Filter::All || s.is_open())
-                .map(|s| (s.as_str().to_string(), Some(s), shown.iter().copied().filter(|i| i.state == s).collect()))
+                .map(|s| {
+                    (
+                        s.as_str().to_string(),
+                        Some(s),
+                        shown.iter().copied().filter(|i| i.state == s).collect(),
+                    )
+                })
                 .collect(),
             Group::Goal => goal_columns(&shown, &visions, &names, everything),
         };
@@ -2889,12 +2936,15 @@ impl App {
     }
 
     fn board_levels(&mut self, ui: &mut Ui, projects: &[Project]) {
-        let open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("board_levels"))).unwrap_or(false);
+        let open =
+            ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("board_levels"))).unwrap_or(false);
         let mut flip = false;
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let key = ui.add(Key::new(if open { "hide levels" } else { "levels" }).outline(VALUE));
-            key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "project levels"));
+            key.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "project levels")
+            });
             flip = key.clicked();
             if !open {
                 let default = self.default_level();
@@ -2902,7 +2952,8 @@ impl App {
                     let level = p.level(default);
                     let tint = if p.automation.is_none() { READOUT_DIM } else { READOUT };
                     let text = format!("{} {}", p.name, level.label());
-                    let c = chip(ui, &text, tint, p.automation.is_some()).on_hover_text(level.about());
+                    let c =
+                        chip(ui, &text, tint, p.automation.is_some()).on_hover_text(level.about());
                     c.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
                 }
             }
@@ -2913,7 +2964,10 @@ impl App {
                 for p in projects {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.allocate_ui(Vec2::new(140.0, 18.0), |ui| { ui.set_width(140.0); Line::new().value(&p.name).size(11.0).elided(ui); });
+                        ui.allocate_ui(Vec2::new(140.0, 18.0), |ui| {
+                            ui.set_width(140.0);
+                            Line::new().value(&p.name).size(11.0).elided(ui);
+                        });
                         self.level_row(ui, p, 160.0);
                     });
                 }
@@ -2972,25 +3026,24 @@ impl App {
             hint(ui, &format!("{working} agent{} working", if working == 1 { "" } else { "s" }));
         }
         ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .id_salt(("column", label))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt(("column", label)).auto_shrink([false, false]).show(
+            ui,
+            |ui| {
                 ui.set_width(ui.available_width());
                 for issue in group.iter().copied() {
                     let project = if everything { names.get(&issue.project_id) } else { None };
                     self.issue_card(ui, issue, sessions, project.map(String::as_str));
                     ui.add_space(6.0);
                 }
-            });
+            },
+        );
     }
 
     fn session_data(ui: &mut Ui, s: &Session) {
         let (tint, word) = match (s.status, s.paused_until) {
-            (SessionStatus::Running, Some(t)) => (
-                READOUT,
-                format!("paused for quota until {}", agentbench_core::clock_hm(t)),
-            ),
+            (SessionStatus::Running, Some(t)) => {
+                (READOUT, format!("paused for quota until {}", agentbench_core::clock_hm(t)))
+            }
             _ => {
                 let (tint, word) = status_look(s.status);
                 (tint, word.to_string())
@@ -3021,7 +3074,10 @@ impl App {
         if s.usage.bash_edits + s.usage.file_edits > 0 {
             line = line
                 .gap(8.0)
-                .measured(format!("edits {} file / {} bash", s.usage.file_edits, s.usage.bash_edits))
+                .measured(format!(
+                    "edits {} file / {} bash",
+                    s.usage.file_edits, s.usage.bash_edits
+                ))
                 .size(10.5);
         }
         line.gap(8.0).note(ago(s.updated_at)).size(10.5).elided(ui);
@@ -3085,10 +3141,17 @@ impl App {
                 if !issue.waiting_on.is_empty() && deps_known {
                     let text = format!(
                         "waiting on {}",
-                        issue.waiting_on.iter().map(|d| format!("#{}", crate::hub::untag(*d))).collect::<Vec<_>>().join(", ")
+                        issue
+                            .waiting_on
+                            .iter()
+                            .map(|d| format!("#{}", crate::hub::untag(*d)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
                     let c = chip(ui, &text, FAULT, false);
-                    c.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
+                    c.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text)
+                    });
                 }
             },
             |ui| {
@@ -3120,10 +3183,14 @@ impl App {
                     if let Some(goal) = &issue.goal {
                         let label = format!("goal {goal}");
                         let c = chip(ui, goal, READOUT, true);
-                        c.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label));
+                        c.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label)
+                        });
                     } else if issue.off_vision {
                         let c = chip(ui, "off vision", FAULT, false);
-                        c.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "off vision"));
+                        c.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "off vision")
+                        });
                     }
                     for s in &mine {
                         let (tint, word) = status_look(s.status);
@@ -3198,36 +3265,36 @@ impl App {
         let session = self.detail_session().and_then(|sid| self.session_by_id(sid).cloned());
         let narrow = self.narrow;
         let controls = |this: &mut Self, ui: &mut Ui| {
-                match &session {
-                    Some(s) if s.status.busy() => {
-                        if ui.add(Key::new("stop").outline(FAULT)).clicked()
-                            && let Some(c) = &mut this.client
-                        {
-                            c.interrupt(s.id);
-                        }
-                    }
-                    _ => {
-                        let label = if session.is_some() { "new agent" } else { "start agent" };
-                        if ui.add(Key::new(label).solid(READOUT)).clicked() {
-                            this.open_start(Some(&issue));
-                        }
+            match &session {
+                Some(s) if s.status.busy() => {
+                    if ui.add(Key::new("stop").outline(FAULT)).clicked()
+                        && let Some(c) = &mut this.client
+                    {
+                        c.interrupt(s.id);
                     }
                 }
-                let mut state = issue.state;
-                ui.allocate_ui(Vec2::new(110.0, KEY_H), |ui| {
-                    if choice(
-                        ui,
-                        ("pane-state", issue.id),
-                        &mut state,
-                        IssueState::ALL.map(|s| (s, s.as_str().to_string())),
-                    ) && let Some(c) = &mut this.client
-                    {
-                        c.update_issue(
-                            issue.id,
-                            &IssuePatch { state: Some(state), ..Default::default() },
-                        );
+                _ => {
+                    let label = if session.is_some() { "new agent" } else { "start agent" };
+                    if ui.add(Key::new(label).solid(READOUT)).clicked() {
+                        this.open_start(Some(&issue));
                     }
-                });
+                }
+            }
+            let mut state = issue.state;
+            ui.allocate_ui(Vec2::new(110.0, KEY_H), |ui| {
+                if choice(
+                    ui,
+                    ("pane-state", issue.id),
+                    &mut state,
+                    IssueState::ALL.map(|s| (s, s.as_str().to_string())),
+                ) && let Some(c) = &mut this.client
+                {
+                    c.update_issue(
+                        issue.id,
+                        &IssuePatch { state: Some(state), ..Default::default() },
+                    );
+                }
+            });
         };
         ui.horizontal(|ui| {
             if ui.add(Key::new("board").outline(VALUE)).clicked() {
@@ -3305,12 +3372,16 @@ impl App {
             None => format!("#{} (done)", crate::hub::untag(*id)),
         };
         if !issue.depends_on.is_empty() {
-            let text = format!("depends on {}", issue.depends_on.iter().map(word).collect::<Vec<_>>().join(", "));
+            let text = format!(
+                "depends on {}",
+                issue.depends_on.iter().map(word).collect::<Vec<_>>().join(", ")
+            );
             ui.add_space(4.0);
             ui.label(egui::RichText::new(text).font(mono(10.5)).color(LEGEND));
         }
         if !issue.blocks.is_empty() {
-            let text = format!("blocks {}", issue.blocks.iter().map(word).collect::<Vec<_>>().join(", "));
+            let text =
+                format!("blocks {}", issue.blocks.iter().map(word).collect::<Vec<_>>().join(", "));
             ui.label(egui::RichText::new(text).font(mono(10.5)).color(LEGEND));
         }
         let mut changed = None;
@@ -3540,8 +3611,8 @@ impl eframe::App for App {
 
 #[cfg(test)]
 mod tests {
-    use agent_ui::transcript::{tool_body, tool_summary};
     use super::*;
+    use agent_ui::transcript::{tool_body, tool_summary};
 
     fn issue(id: Id, title: &str, labels: &[&str], priority: i64) -> Issue {
         Issue {

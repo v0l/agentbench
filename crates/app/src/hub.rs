@@ -50,7 +50,17 @@ impl Link {
         let wake = wake.clone();
         let mut client = Client::new(server, move || wake());
         client.overview();
-        Link { slot, name, client, overview: None, cursor: None, watching: false, offline: None, compat: agentbench_core::Compat::Ok, api: 0 }
+        Link {
+            slot,
+            name,
+            client,
+            overview: None,
+            cursor: None,
+            watching: false,
+            offline: None,
+            compat: agentbench_core::Compat::Ok,
+            api: 0,
+        }
     }
 
     fn watch(&mut self) {
@@ -157,14 +167,12 @@ fn merge(links: &[Link], focus: Option<u32>, supervisor: u32) -> Option<Overview
             i
         }));
         out.sessions.extend(
-            o.sessions
-                .iter()
-                .filter(|x| Some(x.id) != o.supervisor || s == bs)
-                .cloned()
-                .map(|mut x| {
+            o.sessions.iter().filter(|x| Some(x.id) != o.supervisor || s == bs).cloned().map(
+                |mut x| {
                     retag_session(&mut x, s);
                     x
-                }),
+                },
+            ),
         );
         out.visions.extend(o.visions.iter().cloned().map(|mut v| {
             v.id = tag(s, v.id);
@@ -206,7 +214,15 @@ impl Hub {
                 &wake,
             )
         }));
-        Hub { links, sessions: HashMap::new(), dirty: false, focus: None, supervisor: 0, wake, min_server_api: MIN_SERVER_API }
+        Hub {
+            links,
+            sessions: HashMap::new(),
+            dirty: false,
+            focus: None,
+            supervisor: 0,
+            wake,
+            min_server_api: MIN_SERVER_API,
+        }
     }
 
     pub fn sync(&mut self, primary_name: &str, extras: &[Remote]) {
@@ -248,7 +264,11 @@ impl Hub {
     }
 
     pub fn url(&self, slot: u32) -> String {
-        self.links.iter().find(|l| l.slot == slot).map(|l| l.client.server.url.clone()).unwrap_or_default()
+        self.links
+            .iter()
+            .find(|l| l.slot == slot)
+            .map(|l| l.client.server.url.clone())
+            .unwrap_or_default()
     }
 
     pub fn activity(&self, slot: u32) -> (usize, usize, usize) {
@@ -256,8 +276,16 @@ impl Hub {
         else {
             return (0, 0, 0);
         };
-        let running = o.sessions.iter().filter(|s| s.status == agentbench_core::SessionStatus::Running).count();
-        let waiting = o.sessions.iter().filter(|s| s.status == agentbench_core::SessionStatus::Waiting).count();
+        let running = o
+            .sessions
+            .iter()
+            .filter(|s| s.status == agentbench_core::SessionStatus::Running)
+            .count();
+        let waiting = o
+            .sessions
+            .iter()
+            .filter(|s| s.status == agentbench_core::SessionStatus::Waiting)
+            .count();
         let pending = o.triage.as_ref().map_or(0, |t| t.proposals.len());
         (running, waiting, pending)
     }
@@ -268,7 +296,9 @@ impl Hub {
             let Some(o) = &l.overview else {
                 continue;
             };
-            for s in o.sessions.iter().filter(|s| s.status == agentbench_core::SessionStatus::Waiting) {
+            for s in
+                o.sessions.iter().filter(|s| s.status == agentbench_core::SessionStatus::Waiting)
+            {
                 out.push((l.slot, s.id, s.title.clone(), Some(s.id) == o.supervisor));
             }
         }
@@ -312,7 +342,10 @@ impl Hub {
     }
 
     pub fn server_has(&self, slot: u32, needs: u32) -> bool {
-        self.links.iter().find(|l| l.slot == slot).is_none_or(|l| l.overview.is_none() || agentbench_core::server_has(l.api, needs))
+        self.links
+            .iter()
+            .find(|l| l.slot == slot)
+            .is_none_or(|l| l.overview.is_none() || agentbench_core::server_has(l.api, needs))
     }
 
     pub fn compat_notices(&self) -> Vec<(u32, String)> {
@@ -582,7 +615,9 @@ impl Hub {
             project_id: untag(new.project_id),
             issue_id: new.issue_id.map(untag),
             place: match &new.place {
-                Place::Existing { worktree_id } => Place::Existing { worktree_id: untag(*worktree_id) },
+                Place::Existing { worktree_id } => {
+                    Place::Existing { worktree_id: untag(*worktree_id) }
+                }
                 other => other.clone(),
             },
             ..new.clone()

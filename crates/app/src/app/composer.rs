@@ -235,7 +235,8 @@ impl App {
                 }
             });
         });
-        let bottom = if narrow { ui.cursor().min.y.max(ui.min_rect().bottom()) } else { ui.cursor().min.y };
+        let bottom =
+            if narrow { ui.cursor().min.y.max(ui.min_rect().bottom()) } else { ui.cursor().min.y };
         let height = bottom - top;
         let before = self.composer_h.insert(self.drawing, height);
         if before.is_none_or(|b| (b - height).abs() > 0.5) {

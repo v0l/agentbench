@@ -179,10 +179,7 @@ pub fn rig_model(
         let model = model.clone();
         let (extra, echo) = (extra.take().unwrap(), echo.take().unwrap());
         rt.spawn(async move {
-            let config = agentbench_server::Config {
-                model,
-                ..Default::default()
-            };
+            let config = agentbench_server::Config { model, ..Default::default() };
             let model = agentbench_server::agent::native::Shared::new(config.model.clone());
             let mut agents: Vec<Box<dyn agentbench_server::agent::Agent>> = vec![Box::new(echo)];
             agents.push(Box::new(agentbench_server::agent::Native::shared(model.clone())));
@@ -238,15 +235,19 @@ impl Default for Cfg {
 
 pub fn harness_cfg(storage: Vec<(String, String)>, cfg: Cfg) -> Harness<'static, App> {
     let _build = build_lock();
-    let mut h = Harness::builder().with_size(cfg.size).with_pixels_per_point(cfg.ppp).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
-        let mut mem = Mem::default();
-        mem.0.insert("token".into(), TOKEN.into());
-        mem.0.insert("font_size".into(), (agentbench::fonts::BASE * cfg.scale).to_string());
-        for (k, v) in storage {
-            mem.0.insert(k, v);
-        }
-        App::new(&cc.egui_ctx, Some(&mem), None)
-    });
+    let mut h = Harness::builder()
+        .with_size(cfg.size)
+        .with_pixels_per_point(cfg.ppp)
+        .wgpu_setup(gpu_setup())
+        .build_eframe(move |cc| {
+            let mut mem = Mem::default();
+            mem.0.insert("token".into(), TOKEN.into());
+            mem.0.insert("font_size".into(), (agentbench::fonts::BASE * cfg.scale).to_string());
+            for (k, v) in storage {
+                mem.0.insert(k, v);
+            }
+            App::new(&cc.egui_ctx, Some(&mem), None)
+        });
     let [left, top, right, bottom] = cfg.insets;
     if cfg.insets != [0.0; 4] {
         h.input_mut().safe_area_insets =
@@ -293,7 +294,6 @@ pub fn shot(h: &mut Harness<'_, App>, name: &str) {
     }
 }
 
-
 pub fn click(h: &mut Harness<'_, App>, x: f32, y: f32) {
     let pos = egui::pos2(x, y);
     h.event(egui::Event::PointerMoved(pos));
@@ -309,24 +309,23 @@ pub fn click(h: &mut Harness<'_, App>, x: f32, y: f32) {
     }
 }
 
-
 pub fn two_quota_server(used_pct: u32, resets_in_secs: i64) -> String {
-    let resets = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-        + resets_in_secs;
-    let entry = format!(r#"{{"summary":{{"used_pct":{used_pct},"window":"7d","resets_at":{resets},"exhausted":false}}}}"#);
+    let resets =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+            as i64
+            + resets_in_secs;
+    let entry = format!(
+        r#"{{"summary":{{"used_pct":{used_pct},"window":"7d","resets_at":{resets},"exhausted":false}}}}"#
+    );
     let body = format!(r#"{{"models":{{"code-high":{entry},"code-x-high":{entry}}}}}"#);
     serve_json(body)
 }
 
 pub fn quota_server(used_pct: u32, resets_in_secs: i64) -> String {
-    let resets = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-        + resets_in_secs;
+    let resets =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+            as i64
+            + resets_in_secs;
     serve_json(format!(r#"{{"window":"5h","used_pct":{used_pct},"resets_at":{resets}}}"#))
 }
 
@@ -348,7 +347,6 @@ fn serve_json(body: String) -> String {
     });
     format!("http://{addr}/v1")
 }
-
 
 pub fn canned_server(overview: String) -> String {
     use std::io::{Read, Write};
@@ -380,12 +378,11 @@ pub fn canned_server(overview: String) -> String {
     addr
 }
 
-
 pub fn recorded_overview() -> serde_json::Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/api/v1/overview.json");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/api/v1/overview.json");
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
-
 
 pub fn png(w: u32, h: u32) -> Vec<u8> {
     let img = image::RgbaImage::from_pixel(w, h, image::Rgba([40, 160, 220, 255]));
@@ -441,7 +438,6 @@ pub fn long_chat(rig: &Rig, turns: usize) -> agentbench_core::Session {
     s
 }
 
-
 pub fn lsp(
     name: &str,
     dir: &str,
@@ -484,12 +480,10 @@ pub fn give_usage(rig: &Rig) -> agentbench_core::Session {
     session
 }
 
-
 pub fn click_label(h: &mut Harness<'_, App>, label: &str) {
     h.get_by_label(label).click();
     h.run_steps(3);
 }
-
 
 pub fn add_project_request(rig: &Rig, dir: &std::path::Path) -> agentbench_core::Id {
     let request = agentbench_core::AddProject {
@@ -516,7 +510,6 @@ pub fn add_project_request(rig: &Rig, dir: &std::path::Path) -> agentbench_core:
     rig.store.add_proposal("add_project:test", &proposal).unwrap()
 }
 
-
 pub fn crowd_the_supervisor(rig: &Rig) {
     for i in 0..23 {
         let dir = rig._dir.path().join(format!("crowd-{i}"));
@@ -540,13 +533,11 @@ pub fn crowd_the_supervisor(rig: &Rig) {
     }
 }
 
-
 #[derive(Debug)]
 pub struct Dropped {
     pub path: std::path::PathBuf,
     pub bytes: Vec<u8>,
 }
-
 
 impl egui::DroppedFile for Dropped {
     fn path(&self) -> &std::path::Path {
@@ -557,7 +548,6 @@ impl egui::DroppedFile for Dropped {
         Ok(self.bytes.clone())
     }
 }
-
 
 pub fn drop_file(h: &mut Harness<'_, App>, name: &str, bytes: Vec<u8>) {
     h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped { path: name.into(), bytes }));
@@ -599,13 +589,22 @@ pub fn real_world_rig() -> Rig {
         worktree_row(&rig, project.id, branch);
     }
     let trees = rig.store.worktrees(Some(project.id)).unwrap();
-    let parent = rig.store.add_session(main.id, "native", "Merge JSON mode, working, 14 children", None, None).unwrap();
+    let parent = rig
+        .store
+        .add_session(main.id, "native", "Merge JSON mode, working, 14 children", None, None)
+        .unwrap();
     rig.store
-        .add_usage(parent.id, &agentbench_core::Usage { cost_usd: 947.94, turns: 1, ..Default::default() })
+        .add_usage(
+            parent.id,
+            &agentbench_core::Usage { cost_usd: 947.94, turns: 1, ..Default::default() },
+        )
         .unwrap();
     for i in 0..25 {
         let tree = &trees[i % trees.len()];
-        let s = rig.store.add_session(tree.id, "native", LONG_TITLES[i % LONG_TITLES.len()], None, None).unwrap();
+        let s = rig
+            .store
+            .add_session(tree.id, "native", LONG_TITLES[i % LONG_TITLES.len()], None, None)
+            .unwrap();
         rig.store
             .set_status(s.id, if i < 9 { SessionStatus::Running } else { SessionStatus::Idle })
             .unwrap();

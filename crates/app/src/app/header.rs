@@ -51,7 +51,11 @@ impl App {
         let id = egui::Id::unique("drawer");
         let m = egui::Modal::new(id)
             .backdrop_color(egui::Color32::from_black_alpha(150))
-            .area(egui::Modal::default_area(id).constrain(false).anchor(egui::Align2::LEFT_TOP, Vec2::new(0.0, top)))
+            .area(
+                egui::Modal::default_area(id)
+                    .constrain(false)
+                    .anchor(egui::Align2::LEFT_TOP, Vec2::new(0.0, top)),
+            )
             .frame(egui::Frame::NONE.fill(CHASSIS).inner_margin(8))
             .show(ctx, |ui| {
                 ui.set_width(width - 16.0);
@@ -64,10 +68,14 @@ impl App {
                 ui.set_height(screen.height() - top - 16.0);
                 // The fleet's status, which has no room in a phone's header.
                 let row = Vec2::new(ui.available_width(), 22.0);
-                ui.allocate_ui_with_layout(row, Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
-                    ui.set_max_width(row.x);
-                    self.header_badges(ui);
-                });
+                ui.allocate_ui_with_layout(
+                    row,
+                    Layout::left_to_right(Align::Center).with_main_wrap(true),
+                    |ui| {
+                        ui.set_max_width(row.x);
+                        self.header_badges(ui);
+                    },
+                );
                 ui.add_space(4.0);
                 ui.spacing_mut().item_spacing.y = 4.0;
                 self.side(ui);

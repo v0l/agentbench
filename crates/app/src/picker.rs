@@ -3,8 +3,8 @@
 //! server with thousands of models costs the same as one with ten.
 
 use agent_ui::form::field;
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use agent_ui::key::Key;
+use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use egui_bench::prelude::*;
 
 const ROW_H: f32 = 30.0;

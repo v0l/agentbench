@@ -66,11 +66,17 @@ enum Act {
 
 fn blurb(kind: ProviderKind) -> &'static str {
     match kind {
-        ProviderKind::ClaudeSubscription => "Sign in with the Claude Code app you already pay for. No key to paste.",
-        ProviderKind::CodexSubscription => "Sign in with your ChatGPT plan through the Codex app. No key to paste.",
+        ProviderKind::ClaudeSubscription => {
+            "Sign in with the Claude Code app you already pay for. No key to paste."
+        }
+        ProviderKind::CodexSubscription => {
+            "Sign in with your ChatGPT plan through the Codex app. No key to paste."
+        }
         ProviderKind::AnthropicKey => "Pay as you go with a key from console.anthropic.com.",
         ProviderKind::OpenaiKey => "Pay as you go with a key from platform.openai.com.",
-        ProviderKind::Endpoint => "YALR, Ollama, OpenRouter or any server that speaks the OpenAI API.",
+        ProviderKind::Endpoint => {
+            "YALR, Ollama, OpenRouter or any server that speaks the OpenAI API."
+        }
         ProviderKind::Local => "A model running on this machine, such as Ollama or llama.cpp.",
     }
 }
@@ -303,34 +309,62 @@ impl App {
                 footer(ui, |ui| match ob.step {
                     Step::Welcome => {
                         let ready = !ob.working.is_empty();
-                        if act_key(ui, Key::new("next").solid(READOUT).enabled(ready).min_width(110.0), "next").clicked() {
+                        if act_key(
+                            ui,
+                            Key::new("next").solid(READOUT).enabled(ready).min_width(110.0),
+                            "next",
+                        )
+                        .clicked()
+                        {
                             act = Some(Act::Go(Step::Models));
                         }
-                        if act_key(ui, Key::new("skip for now").outline(VALUE).min_width(130.0), "skip for now").clicked() {
+                        if act_key(
+                            ui,
+                            Key::new("skip for now").outline(VALUE).min_width(130.0),
+                            "skip for now",
+                        )
+                        .clicked()
+                        {
                             act = Some(Act::Skip);
                         }
                     }
                     Step::Setup(_) => {
-                        if act_key(ui, Key::new("back").outline(VALUE).min_width(100.0), "back").clicked() {
+                        if act_key(ui, Key::new("back").outline(VALUE).min_width(100.0), "back")
+                            .clicked()
+                        {
                             act = Some(Act::Go(Step::Welcome));
                         }
                     }
                     Step::Models => {
-                        if act_key(ui, Key::new("next").solid(READOUT).min_width(110.0), "next").clicked() {
+                        if act_key(ui, Key::new("next").solid(READOUT).min_width(110.0), "next")
+                            .clicked()
+                        {
                             act = Some(Act::Go(Step::Finish));
                         }
-                        if act_key(ui, Key::new("back").outline(VALUE).min_width(100.0), "back").clicked() {
+                        if act_key(ui, Key::new("back").outline(VALUE).min_width(100.0), "back")
+                            .clicked()
+                        {
                             act = Some(Act::Go(Step::Welcome));
                         }
                     }
                     Step::Finish => {
-                        if act_key(ui, Key::new("start a session").solid(READOUT).min_width(160.0), "start a session").clicked() {
+                        if act_key(
+                            ui,
+                            Key::new("start a session").solid(READOUT).min_width(160.0),
+                            "start a session",
+                        )
+                        .clicked()
+                        {
                             act = Some(Act::Finish(true));
                         }
-                        if act_key(ui, Key::new("finish").outline(VALUE).min_width(100.0), "finish").clicked() {
+                        if act_key(ui, Key::new("finish").outline(VALUE).min_width(100.0), "finish")
+                            .clicked()
+                        {
                             act = Some(Act::Finish(false));
                         }
-                        if act_key(ui, Key::new("back").outline(VALUE).min_width(100.0), "back").clicked() {
+                        if act_key(ui, Key::new("back").outline(VALUE).min_width(100.0), "back")
+                            .clicked()
+                        {
                             act = Some(Act::Go(Step::Models));
                         }
                     }
@@ -582,55 +616,86 @@ fn subscription(
         ProviderKind::ClaudeSubscription => ("Claude Code", "claude"),
         _ => ("Codex", "codex"),
     };
-    section(ui, "this machine", &format!("{name} keeps the login, agentbench never stores it"), |ui| {
-        Line::new().legend("app").column(ui, 90.0).value(if cli.installed { "installed" } else { "not installed" }).show(ui);
-        if cli.installed && !cli.path.is_empty() {
-            hint(ui, &cli.path);
-        }
-        status(
-            ui,
-            cli.logged_in,
-            &if cli.logged_in {
-                cli.detail.clone()
-            } else if cli.detail.is_empty() {
-                "not signed in".to_string()
-            } else {
-                format!("not signed in: {}", cli.detail)
-            },
-        );
-        if !cli.installed && !cli.logged_in {
-            note(ui, &format!("{name} is not installed on this machine. Install it, then check again."), LEGEND);
-            code_block(ui, &cli.install, VALUE, ("install", command));
-            if act_key(ui, Key::new("copy command").outline(VALUE), "copy install command").clicked() {
-                ui.ctx().copy_text(cli.install.clone());
+    section(
+        ui,
+        "this machine",
+        &format!("{name} keeps the login, agentbench never stores it"),
+        |ui| {
+            Line::new()
+                .legend("app")
+                .column(ui, 90.0)
+                .value(if cli.installed { "installed" } else { "not installed" })
+                .show(ui);
+            if cli.installed && !cli.path.is_empty() {
+                hint(ui, &cli.path);
             }
-        }
-        ui.horizontal_wrapped(|ui| {
-            if cli.installed && !cli.logged_in {
-                let label = format!("sign in with {name}");
-                if act_key(ui, Key::new("sign in").solid(READOUT).min_width(100.0).enabled(!ob.login.running), &label).clicked() {
-                    *act = Some(Act::SignIn(command));
+            status(
+                ui,
+                cli.logged_in,
+                &if cli.logged_in {
+                    cli.detail.clone()
+                } else if cli.detail.is_empty() {
+                    "not signed in".to_string()
+                } else {
+                    format!("not signed in: {}", cli.detail)
+                },
+            );
+            if !cli.installed && !cli.logged_in {
+                note(
+                    ui,
+                    &format!(
+                        "{name} is not installed on this machine. Install it, then check again."
+                    ),
+                    LEGEND,
+                );
+                code_block(ui, &cli.install, VALUE, ("install", command));
+                if act_key(ui, Key::new("copy command").outline(VALUE), "copy install command")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(cli.install.clone());
                 }
             }
-            if act_key(ui, Key::new("check again").outline(VALUE), "check again").clicked() {
-                *act = Some(Act::Recheck);
-            }
-        });
-    });
+            ui.horizontal_wrapped(|ui| {
+                if cli.installed && !cli.logged_in {
+                    let label = format!("sign in with {name}");
+                    if act_key(
+                        ui,
+                        Key::new("sign in")
+                            .solid(READOUT)
+                            .min_width(100.0)
+                            .enabled(!ob.login.running),
+                        &label,
+                    )
+                    .clicked()
+                    {
+                        *act = Some(Act::SignIn(command));
+                    }
+                }
+                if act_key(ui, Key::new("check again").outline(VALUE), "check again").clicked() {
+                    *act = Some(Act::Recheck);
+                }
+            });
+        },
+    );
     if let Some(s) = &ob.login.screen {
         ui.add_space(8.0);
         section(ui, "sign in", "complete the steps here and in your browser", |ui| {
             egui::Frame::NONE.fill(CHASSIS).inner_margin(6).show(ui, |ui| {
                 ui.set_min_height(cell_h * 6.0);
                 ui.add(
-                    egui::Label::new(egui::RichText::new(s.rows.join("\n").trim_end()).font(font.clone()))
-                        .wrap_mode(egui::TextWrapMode::Extend),
+                    egui::Label::new(
+                        egui::RichText::new(s.rows.join("\n").trim_end()).font(font.clone()),
+                    )
+                    .wrap_mode(egui::TextWrapMode::Extend),
                 );
             });
             if !s.alive {
                 hint(ui, "The login has finished. Check again to see if it worked.");
             } else {
-                hint(ui, "Type here if the app asks for a code. Open the link it prints in a browser.");
+                hint(
+                    ui,
+                    "Type here if the app asks for a code. Open the link it prints in a browser.",
+                );
             }
         });
     }
@@ -661,7 +726,9 @@ fn endpoint(
         _ => "the base URL, ending in /v1 for most servers",
     };
     section(ui, "connection", what, |ui| {
-        if !matches!(kind, ProviderKind::AnthropicKey | ProviderKind::OpenaiKey) || !p.url.is_empty() {
+        if !matches!(kind, ProviderKind::AnthropicKey | ProviderKind::OpenaiKey)
+            || !p.url.is_empty()
+        {
             row_help(ui, "address", "The base URL of the API.", |ui| {
                 field(ui, &mut p.url, kind.default_url());
             });
@@ -679,7 +746,13 @@ fn endpoint(
         let testing = busy.contains(&kind);
         ui.horizontal(|ui| {
             let label = if testing { "testing" } else { "test" };
-            if act_key(ui, Key::new(label).solid(READOUT).min_width(100.0).enabled(ready && !testing), "test connection").clicked() {
+            if act_key(
+                ui,
+                Key::new(label).solid(READOUT).min_width(100.0).enabled(ready && !testing),
+                "test connection",
+            )
+            .clicked()
+            {
                 *act = Some(Act::Test(p.clone()));
             }
         });
@@ -689,11 +762,23 @@ fn endpoint(
             None => hint(ui, "The test sends one short message and shows the server's own answer."),
         }
         let passed = matches!(&check, Some(Some(c)) if c.ok);
-        if act_key(ui, Key::new("save").solid(if passed { OK } else { READOUT }).min_width(100.0).enabled(ready), "save provider").clicked() {
+        if act_key(
+            ui,
+            Key::new("save")
+                .solid(if passed { OK } else { READOUT })
+                .min_width(100.0)
+                .enabled(ready),
+            "save provider",
+        )
+        .clicked()
+        {
             *act = Some(Act::Save(p.clone()));
         }
         if !passed {
-            hint(ui, "You can save before it passes. The health check on the first page will keep showing the error.");
+            hint(
+                ui,
+                "You can save before it passes. The health check on the first page will keep showing the error.",
+            );
         }
     });
 }
@@ -761,8 +846,13 @@ fn finish(ui: &mut Ui, ob: &mut Onboard) {
     });
     ui.add_space(8.0);
     section(ui, "first project", "optional, a folder with a git repo", |ui| {
-        row_help(ui, "folder", "Any folder on the server. Leave it empty to add one later.", |ui| {
-            field(ui, &mut ob.project, "~/git/my-project");
-        });
+        row_help(
+            ui,
+            "folder",
+            "Any folder on the server. Leave it empty to add one later.",
+            |ui| {
+                field(ui, &mut ob.project, "~/git/my-project");
+            },
+        );
     });
 }
