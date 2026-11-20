@@ -567,6 +567,24 @@ async fn start_own() -> Result<Live, String> {
     result
 }
 
+pub fn browser_identity(reported: &str) -> String {
+    reported.replace("HeadlessChrome", "Chrome")
+}
+
+const ACCEPT_LANGUAGE: &str = "en-IE,en-GB;q=0.9,en;q=0.8";
+
+async fn present_as_browser(cdp: &Cdp, target: &str) -> Result<(), String> {
+    let version = cdp.call(None, "Browser.getVersion", json!({})).await?;
+    let agent = browser_identity(version["userAgent"].as_str().unwrap_or_default());
+    cdp.call(
+        Some(target),
+        "Network.setUserAgentOverride",
+        json!({ "userAgent": agent, "acceptLanguage": ACCEPT_LANGUAGE }),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn start(chrome: &std::path::Path, dir: &std::path::Path) -> Result<Live, String> {
     let mut child = Command::new(chrome)
         .args([
@@ -613,6 +631,7 @@ async fn start(chrome: &std::path::Path, dir: &std::path::Path) -> Result<Live, 
         json!({ "width": WIDTH, "height": HEIGHT, "deviceScaleFactor": 1, "mobile": false }),
     )
     .await?;
+    present_as_browser(&cdp, &target).await?;
     Ok(Live {
         cdp,
         target,
@@ -651,6 +670,7 @@ impl Live {
                 json!({ "width": WIDTH, "height": HEIGHT, "deviceScaleFactor": 1, "mobile": false }),
             )
             .await?;
+            present_as_browser(&self.cdp, &self.target).await?;
         }
         let seen = self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if !seen.is_empty() && seen != "about:blank" {
@@ -1990,6 +2010,34 @@ function later() { setTimeout(() => { document.body.insertAdjacentHTML('beforeen
         .await
         .unwrap();
         assert_eq!(picked, "no");
+    }
+
+    #[test]
+    fn the_headless_marker_is_dropped_from_the_agent_a_site_sees() {
+        let reported = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/130.0.0.0 Safari/537.36";
+        assert_eq!(
+            browser_identity(reported),
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_private_browser_sends_a_normal_agent_and_language() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let (_dir, ws) = workspace_with(&[("q.html", QUESTIONS)]);
+        let b = Browsers::default();
+        act(&b, &ws, json!({"action": "goto", "url": "q.html"})).await.unwrap();
+        let seen = act(
+            &b,
+            &ws,
+            json!({"action": "eval", "js": "navigator.userAgent + ' | ' + navigator.languages.join(',')"}),
+        )
+        .await
+        .unwrap();
+        assert!(!seen.contains("HeadlessChrome"), "{seen}");
+        assert!(seen.contains("en-IE"), "{seen}");
     }
 
     #[tokio::test]
