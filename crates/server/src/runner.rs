@@ -48,16 +48,20 @@ impl Message {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Origin {
-    pub source: &'static str,
+    pub source: std::borrow::Cow<'static, str>,
     pub worker: Option<SessionId>,
     pub urgent: bool,
 }
 
 impl Origin {
     pub fn new(source: &'static str, worker: Option<SessionId>) -> Origin {
-        Origin { source, worker, urgent: false }
+        Origin { source: source.into(), worker, urgent: false }
+    }
+
+    pub fn named(source: String, worker: Option<SessionId>) -> Origin {
+        Origin { source: source.into(), worker, urgent: false }
     }
 
     pub fn urgent(self, urgent: bool) -> Origin {
@@ -476,7 +480,7 @@ impl Runner {
         if text.is_empty() {
             return Err(StoreError("nothing to send".into()));
         }
-        self.store.defer(session.id, origin.source, origin.worker, origin.urgent, text)?;
+        self.store.defer(session.id, &origin.source, origin.worker, origin.urgent, text)?;
         self.changed.notify_waiters();
         self.deliver_deferred(session.id)
     }
@@ -4544,7 +4548,7 @@ mod deferred_tests {
         r.runner.send(&r.boss, "go").unwrap();
         started(&r, &r.boss_log).await;
         let urgent = Origin::new("session", Some(r.worker.id)).urgent(true);
-        r.runner.tell(&r.boss, "BLOCKED early", urgent).unwrap();
+        r.runner.tell(&r.boss, "BLOCKED early", urgent.clone()).unwrap();
         idle(&r.runner, r.boss.id).await;
         let seen = log(&r.boss_log);
         assert!(!seen.iter().any(|l| l.starts_with("steer")), "under the threshold it waits: {seen:?}");

@@ -354,7 +354,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 34] = [
+pub const AGENTBENCH_TOOLS: [&str; 35] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -389,6 +389,7 @@ pub const AGENTBENCH_TOOLS: [&str; 34] = [
     "escalate_question",
     "judge_session",
     "check_in",
+    "groom_done",
 ];
 
 /// How long `wait_for_session` waits when not told, and the longest it may.
@@ -522,6 +523,17 @@ fn agentbench_specs() -> Vec<Spec> {
                     "text": string("For message: what the worker gets. For escalate: why"),
                 }),
                 &["id", "action"],
+            ),
+        ),
+        Spec::new(
+            "groom_done",
+            "Supervisor chat only. Close a groom message about a project whose todo queue ran empty: say what you did in one line. It goes to the autopilot feed and restarts the wait before the next groom of that project.",
+            object(
+                json!({
+                    "project": string("The project that was groomed, by name or id"),
+                    "summary": string("One line: what was promoted, merged, closed or left"),
+                }),
+                &["project", "summary"],
             ),
         ),
         Spec::new(
@@ -673,6 +685,8 @@ fn agentbench_specs() -> Vec<Spec> {
                     "max_nudges": id("Nudges before a stuck session is stopped"),
                     "check_in_minutes": id("Minutes a worker on a lower model runs between check_in messages to you; 0 turns them off"),
                     "check_in_all": json!({ "type": "boolean", "description": "Also check in on workers already on the top model (default off)" }),
+                    "groom": json!({ "type": "boolean", "description": "Send you a groom message when a project at autowork or above has an empty todo queue, no running worker and a backlog (default on)" }),
+                    "groom_hours": id("Hours between groom messages for one project (default 24); it is also sent only after the backlog changed"),
                     "auto_escalate": json!({ "type": "boolean", "description": "Escalate a stuck worker to the top model without waiting for you (default off)" }),
                     "stuck_failed_runs": id("Same test or build command failing this many times in a row marks a check_in stuck"),
                     "stuck_compactions": id("Compactions in one turn that mark a check_in stuck"),

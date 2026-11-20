@@ -342,6 +342,16 @@ shows a `stuck` badge while the last check_in was stuck. `check_in_all` also
 checks in on top-model sessions; `auto_escalate` (off) escalates stuck sessions
 by itself and tells the supervisor. All of these are in the `autopilot` tool.
 
+When a project at autowork or above has no `todo` issue, no running worker and at
+least one `backlog` issue, the autopilot sends the supervisor one `groom <project>:`
+message with the vision, active goals, the backlog (oldest first, 40 at most) and
+the last 10 done issues. The supervisor grooms with `update_issue` and
+`comment_on_issue` (promote only issues that serve an active goal, merge
+duplicates, close stale ones; with no vision it asks the user for one) and ends
+with the `groom_done` tool, whose one-line summary goes to the autopilot feed.
+A project is groomed at most once per `groom_hours` (24) and again only after its
+backlog changed. `groom` (on) and `groom_hours` are in the `autopilot` tool.
+
 When a server sends no cost, it is worked out from a price table, in USD per
 million tokens. Claude models have defaults; a model with no entry, such as a
 local one, costs 0. Entries match the start of the model name, the longest wins,

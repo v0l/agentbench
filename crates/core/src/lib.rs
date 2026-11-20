@@ -1767,6 +1767,10 @@ pub struct AutopilotState {
     #[serde(default)]
     pub auto_escalate: bool,
     #[serde(default)]
+    pub groom: bool,
+    #[serde(default)]
+    pub groom_hours: u64,
+    #[serde(default)]
     pub stuck_failed_runs: u32,
     #[serde(default)]
     pub stuck_compactions: u32,
@@ -1798,6 +1802,10 @@ pub struct AutopilotPatch {
     pub check_in_all: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_escalate: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groom: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groom_hours: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck_failed_runs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

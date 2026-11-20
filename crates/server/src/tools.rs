@@ -1240,6 +1240,8 @@ impl Api for StoreApi {
                     auto_close: flag("auto_close"),
                     check_in_minutes: args.get("check_in_minutes").and_then(Value::as_u64),
                     check_in_all: flag("check_in_all"),
+                    groom: flag("groom"),
+                    groom_hours: args.get("groom_hours").and_then(Value::as_u64),
                     auto_escalate: flag("auto_escalate"),
                     stuck_failed_runs: num("stuck_failed_runs"),
                     stuck_compactions: num("stuck_compactions"),
@@ -1304,6 +1306,16 @@ impl Api for StoreApi {
                     Err(crate::autopilot::Unshipped::Failed(e)) => return Err(format!("merge failed: {e}")),
                 }
             }
+            "groom_done" => {
+                if !sup {
+                    return Err("only the supervisor chat can use groom_done".into());
+                }
+                let named = args.get("project").filter(|v| !v.is_null()).ok_or("groom_done needs `project`")?;
+                let p = self.find_project(named)?;
+                let summary = text(args, "summary").unwrap_or_default();
+                crate::groom::done(s, &p, &summary, crate::store::now()).map_err(|e| e.0)?;
+                json!({ "groomed": p.name })
+            }
             "set_automation" => self.set_automation(args, session)?,
             "get_vision" => match s.vision(project).map_err(|e| e.0)? {
                 Some(v) => vision_json(&v),
@@ -1344,6 +1356,7 @@ impl Api for StoreApi {
                 | "merge_branch"
                 | "judge_session"
                 | "check_in"
+                | "groom_done"
                 | "set_automation"
                 | "approve_action"
                 | "add_project"
