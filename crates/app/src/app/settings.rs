@@ -482,10 +482,7 @@ impl App {
             Some(ProjectAction::Level(id, level)) => self.set_project_level(id, level),
             Some(ProjectAction::Risky(id, risky)) => self.set_project_risky(id, risky),
             Some(ProjectAction::Deploy(id, deploy)) => {
-                self.patch_project(
-                    id,
-                    agentbench_core::ProjectPatch { deploy: Some(deploy), ..Default::default() },
-                );
+                self.patch_project(id, agentbench_core::ProjectPatch { deploy: Some(deploy), ..Default::default() });
             }
             Some(ProjectAction::DefaultLevel(level)) => self.set_default_level(level),
             None => {}
@@ -653,9 +650,7 @@ pub(super) fn servers_section(ui: &mut Ui, st: &mut Settings) {
             if let Some((_, up, text)) = line(r.slot) {
                 crate::app::widgets::server_status(ui, up, &text);
             }
-            let key = ui.add(
-                Key::new("remove workspace").outline(FAULT).id_salt(("remove-server", r.slot)),
-            );
+            let key = ui.add(Key::new("remove workspace").outline(FAULT).id_salt(("remove-server", r.slot)));
             if key.clicked() {
                 remove = Some(r.slot);
             }
@@ -840,7 +835,11 @@ pub(super) fn speech_section(
             "Hold the speak button while you talk and let go to send. Slide off the button to cancel. Off: tap to start, and it stops when you go quiet.",
             |ui| {
                 let on = sp.hold_to_talk;
-                if tap_toggle(ui, if on { "on" } else { "off" }, on).clicked() {
+                let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
+                t.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "hold to talk")
+                });
+                if t.clicked() {
                     sp.hold_to_talk = !on;
                 }
             },
@@ -1054,33 +1053,17 @@ fn automation_rows(
     let body = |ui: &mut Ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         let width = if narrow { ui.available_width().clamp(100.0, 170.0) } else { 170.0 };
-        if let Some(l) =
-            level_slider(ui, &format!("{} automation", p.name), level, inherited, width)
-        {
+        if let Some(l) = level_slider(ui, &format!("{} automation", p.name), level, inherited, width) {
             *action = Some(ProjectAction::Level(p.id, Some(l)));
         }
         if narrow {
             ui.end_row();
         }
-        let word = if inherited {
-            format!("{} (default)", level.label())
-        } else {
-            level.label().to_string()
-        };
-        Line::new()
-            .set(word)
-            .size(11.0)
-            .tint(if inherited { READOUT_DIM } else { READOUT })
-            .show(ui);
+        let word = if inherited { format!("{} (default)", level.label()) } else { level.label().to_string() };
+        Line::new().set(word).size(11.0).tint(if inherited { READOUT_DIM } else { READOUT }).show(ui);
         if !inherited {
             let k = ui.add(Key::new("use default").outline(VALUE).id_salt(("default", p.id)));
-            k.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    true,
-                    format!("{} use default", p.name),
-                )
-            });
+            k.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{} use default", p.name)));
             if k.clicked() {
                 *action = Some(ProjectAction::Level(p.id, None));
             }
@@ -1090,12 +1073,7 @@ fn automation_rows(
         ui.add(egui::Label::new(egui_bench::text::legend("automation")).wrap());
         ui.horizontal_wrapped(body);
     } else {
-        row_help(
-            ui,
-            "automation",
-            "What the supervisor may do here without asking. Above this it proposes instead.",
-            body,
-        );
+        row_help(ui, "automation", "What the supervisor may do here without asking. Above this it proposes instead.", body);
     }
     hint(ui, level.about());
     row_help(
@@ -1108,16 +1086,10 @@ fn automation_rows(
                     let on = p.risky.contains(&r);
                     let t = tap_toggle(ui, r.label(), on);
                     t.widget_info(|| {
-                        egui::WidgetInfo::selected(
-                            egui::Role::CheckBox,
-                            true,
-                            on,
-                            format!("{} {}", p.name, r.label()),
-                        )
+                        egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, format!("{} {}", p.name, r.label()))
                     });
                     if t.clicked() {
-                        let mut next: Vec<Risky> =
-                            p.risky.iter().copied().filter(|x| *x != r).collect();
+                        let mut next: Vec<Risky> = p.risky.iter().copied().filter(|x| *x != r).collect();
                         if !on {
                             next.push(r);
                         }
@@ -1137,13 +1109,8 @@ fn automation_rows(
             let mut save = false;
             row(ui, "deploy", |ui| {
                 field_then(ui, text, "command run from the main checkout", 150.0, |ui| {
-                    save = ui
-                        .add(Key::new("save").solid(READOUT).id_salt(("deploy-save", id)))
-                        .clicked();
-                    if ui
-                        .add(Key::new("cancel").outline(VALUE).id_salt(("deploy-cancel", id)))
-                        .clicked()
-                    {
+                    save = ui.add(Key::new("save").solid(READOUT).id_salt(("deploy-save", id))).clicked();
+                    if ui.add(Key::new("cancel").outline(VALUE).id_salt(("deploy-cancel", id))).clicked() {
                         done = true;
                     }
                 });
@@ -1158,11 +1125,7 @@ fn automation_rows(
         }
         None => {
             row(ui, "deploy", |ui| {
-                Line::new()
-                    .set(p.deploy.as_deref().unwrap_or("not set"))
-                    .size(11.0)
-                    .tint(if p.deploy.is_some() { READOUT } else { LEGEND })
-                    .show(ui);
+                Line::new().set(p.deploy.as_deref().unwrap_or("not set")).size(11.0).tint(if p.deploy.is_some() { READOUT } else { LEGEND }).show(ui);
                 let k = ui.add(Key::new("edit").outline(VALUE).id_salt(("deploy-edit", p.id)));
                 if k.clicked() {
                     *deploying = Some((p.id, p.deploy.clone().unwrap_or_default()));
@@ -1183,20 +1146,14 @@ fn projects_section(
     let mut action = None;
     let phone = ui.ctx().content_rect().width() < 720.0;
     section(ui, "automation", "for projects with no level of their own", |ui| {
-        row_help(
-            ui,
-            "default",
-            "The level every project follows until it is given its own.",
-            |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                let width =
-                    if phone { (ui.available_width() - 110.0).clamp(60.0, 170.0) } else { 170.0 };
-                if let Some(l) = level_slider(ui, "default automation", default, false, width) {
-                    action = Some(ProjectAction::DefaultLevel(l));
-                }
-                Line::new().set(default.label()).size(11.0).show(ui);
-            },
-        );
+        row_help(ui, "default", "The level every project follows until it is given its own.", |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let width = if phone { (ui.available_width() - 110.0).clamp(60.0, 170.0) } else { 170.0 };
+            if let Some(l) = level_slider(ui, "default automation", default, false, width) {
+                action = Some(ProjectAction::DefaultLevel(l));
+            }
+            Line::new().set(default.label()).size(11.0).show(ui);
+        });
         hint(ui, default.about());
     });
     ui.add_space(8.0);

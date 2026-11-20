@@ -1,8 +1,8 @@
 //! A chat: the tiles, a tile's header, and the session view that holds the transcript above the composer.
 
 use super::transcript::latest_plan;
-use super::*;
 use agent_ui::transcript::plan_panel;
+use super::*;
 
 const PANEL_MAX_H: f32 = 120.0;
 
@@ -431,8 +431,7 @@ impl App {
             .filter(|p| !p.builtin())
             .cloned()
             .collect();
-        let levels_open =
-            ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("levels_open"))).unwrap_or(false);
+        let levels_open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("levels_open"))).unwrap_or(false);
         let mut toggle_levels = false;
         let open_id = egui::Id::new("autopilot_open");
         let open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
@@ -458,9 +457,7 @@ impl App {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "autopilot toggle")
                 });
                 flip = key.clicked();
-                let more = ui.add(
-                    Key::new(if levels_open { "hide levels" } else { "levels" }).outline(VALUE),
-                );
+                let more = ui.add(Key::new(if levels_open { "hide levels" } else { "levels" }).outline(VALUE));
                 more.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "automation levels")
                 });
@@ -468,13 +465,7 @@ impl App {
             };
             ui.horizontal(|ui| {
                 let arrow = ui.add(Key::new(if open { "v" } else { ">" }).outline(VALUE));
-                arrow.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::WidgetType::Button,
-                        true,
-                        "expand supervisor panels",
-                    )
-                });
+                arrow.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "expand supervisor panels"));
                 toggle_open = arrow.clicked();
                 if narrow {
                     status_line(ui);
@@ -490,28 +481,19 @@ impl App {
                 ui.horizontal(|ui| keys(ui));
             }
             if open || levels_open {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    let mut close = a.auto_close;
-                    if ui.checkbox(&mut close, "close merged sessions").changed() {
-                        new_close = Some(close);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| {
-                        ui.set_width(70.0);
-                        Line::new().legend("default").size(10.0).tint(LEGEND).elided(ui);
-                    });
-                    new_default = level_slider(
-                        ui,
-                        "default automation",
-                        a.default_level,
-                        false,
-                        150.0f32.min((ui.available_width() - 100.0).max(60.0)),
-                    );
-                    Line::new().set(a.default_level.label()).size(11.0).show(ui);
-                });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let mut close = a.auto_close;
+                if ui.checkbox(&mut close, "close merged sessions").changed() {
+                    new_close = Some(close);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().legend("default").size(10.0).tint(LEGEND).elided(ui); });
+                new_default = level_slider(ui, "default automation", a.default_level, false, 150.0f32.min((ui.available_width() - 100.0).max(60.0)));
+                Line::new().set(a.default_level.label()).size(11.0).show(ui);
+            });
             }
             if levels_open {
                 egui::ScrollArea::vertical()
@@ -522,10 +504,7 @@ impl App {
                         for p in &projects {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 8.0;
-                                ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| {
-                                    ui.set_width(70.0);
-                                    Line::new().value(&p.name).size(11.0).elided(ui);
-                                });
+                                ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().value(&p.name).size(11.0).elided(ui); });
                                 self.level_row(ui, p, 150.0);
                             });
                         }
@@ -559,8 +538,7 @@ impl App {
     fn triage_panel(&mut self, ui: &mut Ui) {
         let Some(mut t) = self.overview.as_ref().and_then(|o| o.triage.clone()) else { return };
         t.proposals.retain(|p| p.kind != agentbench_core::ProposalKind::AddProject);
-        let autopilot_open =
-            ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("autopilot_open"))).unwrap_or(false);
+        let autopilot_open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("autopilot_open"))).unwrap_or(false);
         if t.proposals.is_empty() && !t.running && !autopilot_open {
             return;
         }
@@ -592,127 +570,70 @@ impl App {
                     n => format!("{n} proposals"),
                 };
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let more =
-                        ui.add(Key::new(if open { "hide" } else { "details" }).outline(VALUE));
-                    more.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            format!("triage details, {count}"),
-                        )
-                    });
+                    let more = ui.add(Key::new(if open { "hide" } else { "details" }).outline(VALUE));
+                    more.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("triage details, {count}")));
                     toggle = more.clicked();
                     let key = ui.add_enabled(!t.running, Key::new("run now").outline(VALUE));
-                    key.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "triage run")
-                    });
+                    key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "triage run"));
                     run = key.clicked();
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        Line::new()
-                            .legend("triage review")
-                            .size(10.0)
-                            .tint(LEGEND)
-                            .gap(8.0)
-                            .value(&count)
-                            .size(11.0)
-                            .tint(READOUT)
-                            .gap(8.0)
-                            .note(&status)
-                            .size(10.0)
-                            .elided(ui);
+                        Line::new().legend("triage review").size(10.0).tint(LEGEND).gap(8.0).value(&count).size(11.0).tint(READOUT).gap(8.0).note(&status).size(10.0).elided(ui);
                     });
                 });
             });
             if open {
-                egui::ScrollArea::vertical()
-                    .id_salt("triage_scroll")
-                    .max_height(PANEL_MAX_H)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        for p in &projects {
-                            let id = egui::Id::new(("triage_note", p.id));
-                            let mut text =
-                                ui.ctx().data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| {
-                                    t.notes
-                                        .iter()
-                                        .find(|(pid, _)| *pid == p.id)
-                                        .map(|(_, n)| n.clone())
-                                        .unwrap_or_default()
-                                });
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 8.0;
-                                ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| {
-                                    ui.set_width(70.0);
-                                    Line::new().value(&p.name).size(11.0).elided(ui);
-                                });
-                                let edit = ui.add(
-                                    egui::TextEdit::singleline(&mut text)
-                                        .hint_text("what matters here")
-                                        .desired_width(220.0),
-                                );
-                                crate::system::ime_field(&edit, &text);
-                                if edit.changed() {
-                                    ui.ctx().data_mut(|d| d.insert_temp(id, text.clone()));
-                                }
-                                if edit.lost_focus() {
-                                    note = Some((p.id, text.clone()));
-                                }
-                            });
+            egui::ScrollArea::vertical()
+                .id_salt("triage_scroll")
+                .max_height(PANEL_MAX_H)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+            for p in &projects {
+                let id = egui::Id::new(("triage_note", p.id));
+                let mut text = ui.ctx().data(|d| d.get_temp::<String>(id)).unwrap_or_else(|| {
+                    t.notes.iter().find(|(pid, _)| *pid == p.id).map(|(_, n)| n.clone()).unwrap_or_default()
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.allocate_ui(Vec2::new(70.0, 18.0), |ui| { ui.set_width(70.0); Line::new().value(&p.name).size(11.0).elided(ui); });
+                    let edit = ui.add(egui::TextEdit::singleline(&mut text).hint_text("what matters here").desired_width(220.0));
+                    crate::system::ime_field(&edit, &text);
+                    if edit.changed() {
+                        ui.ctx().data_mut(|d| d.insert_temp(id, text.clone()));
+                    }
+                    if edit.lost_focus() {
+                        note = Some((p.id, text.clone()));
+                    }
+                });
+            }
+            for pr in &t.proposals {
+                ui.add_space(2.0);
+                let where_ = pr.projects.iter().filter_map(|i| names.get(i).cloned()).collect::<Vec<_>>().join(", ");
+                let sessions = if pr.sessions.is_empty() { String::new() } else { format!(", {} sessions", pr.sessions.len()) };
+                let evidence = format!(
+                    "{} across {} project{} ({where_}): issues {}{sessions}",
+                    pr.kind.as_str(),
+                    pr.projects.len(),
+                    if pr.projects.len() == 1 { "" } else { "s" },
+                    pr.issues.iter().map(|i| format!("#{i}")).collect::<Vec<_>>().join(" ")
+                );
+                Line::new().value(&pr.summary).size(11.5).elided(ui);
+                ui.horizontal(|ui| {
+                    Line::new().note(&evidence).size(10.0).elided(ui);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let reject = ui.add(Key::new("reject").outline(FAULT));
+                        reject.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("reject proposal {}", pr.id)));
+                        if reject.clicked() {
+                            decide = Some((pr.id, false));
                         }
-                        for pr in &t.proposals {
-                            ui.add_space(2.0);
-                            let where_ = pr
-                                .projects
-                                .iter()
-                                .filter_map(|i| names.get(i).cloned())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            let sessions = if pr.sessions.is_empty() {
-                                String::new()
-                            } else {
-                                format!(", {} sessions", pr.sessions.len())
-                            };
-                            let evidence = format!(
-                                "{} across {} project{} ({where_}): issues {}{sessions}",
-                                pr.kind.as_str(),
-                                pr.projects.len(),
-                                if pr.projects.len() == 1 { "" } else { "s" },
-                                pr.issues
-                                    .iter()
-                                    .map(|i| format!("#{i}"))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            );
-                            Line::new().value(&pr.summary).size(11.5).elided(ui);
-                            ui.horizontal(|ui| {
-                                Line::new().note(&evidence).size(10.0).elided(ui);
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    let reject = ui.add(Key::new("reject").outline(FAULT));
-                                    reject.widget_info(|| {
-                                        egui::WidgetInfo::labeled(
-                                            egui::WidgetType::Button,
-                                            true,
-                                            format!("reject proposal {}", pr.id),
-                                        )
-                                    });
-                                    if reject.clicked() {
-                                        decide = Some((pr.id, false));
-                                    }
-                                    let accept = ui.add(Key::new("accept").outline(READOUT));
-                                    accept.widget_info(|| {
-                                        egui::WidgetInfo::labeled(
-                                            egui::WidgetType::Button,
-                                            true,
-                                            format!("accept proposal {}", pr.id),
-                                        )
-                                    });
-                                    if accept.clicked() {
-                                        decide = Some((pr.id, true));
-                                    }
-                                });
-                            });
+                        let accept = ui.add(Key::new("accept").outline(READOUT));
+                        accept.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("accept proposal {}", pr.id)));
+                        if accept.clicked() {
+                            decide = Some((pr.id, true));
                         }
                     });
+                });
+            }
+                });
             }
         });
         if toggle {
@@ -747,9 +668,7 @@ impl App {
             .filter(|(slot, _)| *slot == here)
             .filter_map(|(_, p)| {
                 p.changes.iter().find_map(|c| match c {
-                    agentbench_core::Change::AddProject { request } => {
-                        Some((p.id, request.clone()))
-                    }
+                    agentbench_core::Change::AddProject { request } => Some((p.id, request.clone())),
                     _ => None,
                 })
             })
@@ -759,55 +678,26 @@ impl App {
         for (id, r) in &cards {
             ui.add_space(4.0);
             section_panel(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(format!("add project: {} {}", r.mode.as_str(), r.name))
-                        .size(11.5)
-                        .color(READOUT),
-                );
+                ui.label(egui::RichText::new(format!("add project: {} {}", r.mode.as_str(), r.name)).size(11.5).color(READOUT));
                 ui.label(egui::RichText::new(&format!("path {}", r.path)).size(10.0).color(LEGEND));
                 if let Some(remote) = &r.remote {
-                    ui.label(
-                        egui::RichText::new(&format!("remote {remote}")).size(10.0).color(LEGEND),
-                    );
+                    ui.label(egui::RichText::new(&format!("remote {remote}")).size(10.0).color(LEGEND));
                 }
                 if let Some(branch) = &r.branch {
                     let head = r.head.as_deref().map(|h| &h[..h.len().min(8)]).unwrap_or("");
-                    ui.label(
-                        egui::RichText::new(&format!("on {branch} at {head}"))
-                            .size(10.0)
-                            .color(LEGEND),
-                    );
+                    ui.label(egui::RichText::new(&format!("on {branch} at {head}")).size(10.0).color(LEGEND));
                 }
                 if let Some(free) = r.free_bytes {
-                    ui.label(
-                        egui::RichText::new(&format!(
-                            "{:.1} GB free on that disk",
-                            free as f64 / 1e9
-                        ))
-                        .size(10.0)
-                        .color(LEGEND),
-                    );
+                    ui.label(egui::RichText::new(&format!("{:.1} GB free on that disk", free as f64 / 1e9)).size(10.0).color(LEGEND));
                 }
                 ui.horizontal(|ui| {
                     let accept = ui.add(Key::new("accept").outline(READOUT));
-                    accept.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            format!("accept add project {id}"),
-                        )
-                    });
+                    accept.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("accept add project {id}")));
                     if accept.clicked() {
                         decide = Some((*id, true));
                     }
                     let reject = ui.add(Key::new("reject").outline(FAULT));
-                    reject.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            true,
-                            format!("reject add project {id}"),
-                        )
-                    });
+                    reject.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("reject add project {id}")));
                     if reject.clicked() {
                         decide = Some((*id, false));
                     }

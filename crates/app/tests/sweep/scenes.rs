@@ -199,8 +199,7 @@ fn fixture() -> Rich {
             &Entry::Question {
                 id: "q1".into(),
                 question: agentbench_core::Question {
-                    text: "Which licence should the new crate use, given it links the GPL parts?"
-                        .into(),
+                    text: "Which licence should the new crate use, given it links the GPL parts?".into(),
                     options: vec![
                         "GPL-3.0-only".into(),
                         "Apache-2.0 with the runtime exception".into(),
@@ -233,19 +232,8 @@ fn fixture() -> Rich {
     rig.store.set_status(faulty.id, SessionStatus::Failed).unwrap();
 
     let files = rig.store.add_session(main.id, "native", "files and pictures", None, None).unwrap();
-    let pic = rig
-        .store
-        .add_attachment(files.id, "screenshot-of-the-error.png", "image/png", &png(300, 200))
-        .unwrap();
-    let log = rig
-        .store
-        .add_attachment(
-            files.id,
-            "build-output-2026-11-18-with-a-long-name.log",
-            "text/plain",
-            &[b'x'; 5000],
-        )
-        .unwrap();
+    let pic = rig.store.add_attachment(files.id, "screenshot-of-the-error.png", "image/png", &png(300, 200)).unwrap();
+    let log = rig.store.add_attachment(files.id, "build-output-2026-11-18-with-a-long-name.log", "text/plain", &[b'x'; 5000]).unwrap();
     rig.store
         .add_message(
             files.id,
@@ -259,17 +247,14 @@ fn fixture() -> Rich {
     rig.store
         .add_message(files.id, &Entry::File { text: "the report you asked for".into(), file: log })
         .unwrap();
-    rig.store
-        .add_message(files.id, &Entry::Assistant { text: "Looking at the picture now.".into() })
-        .unwrap();
+    rig.store.add_message(files.id, &Entry::Assistant { text: "Looking at the picture now.".into() }).unwrap();
 
     let sup_project = rig.store.supervisor_project().unwrap().unwrap();
     let sup_tree = rig.store.main_worktree(sup_project.id).unwrap();
-    let supervisor =
-        match rig.store.sessions().unwrap().into_iter().find(|s| s.project_id == sup_project.id) {
-            Some(s) => s,
-            None => rig.store.add_session(sup_tree.id, "native", "Supervisor", None, None).unwrap(),
-        };
+    let supervisor = match rig.store.sessions().unwrap().into_iter().find(|s| s.project_id == sup_project.id) {
+        Some(s) => s,
+        None => rig.store.add_session(sup_tree.id, "native", "Supervisor", None, None).unwrap(),
+    };
     for e in [
         Entry::user("what is running"),
         Entry::Assistant { text: "The worker is on the drawer fix. Two issues wait on it.".into() },
@@ -279,12 +264,8 @@ fn fixture() -> Rich {
     rig.store.set_setting("autopilot", "1").unwrap();
     rig.store.set_setting("autopilot_cap", "6").unwrap();
     rig.store.add_worker(first, issues[0], project.id).unwrap();
-    rig.store
-        .log_autopilot(Some(project.id), Some(issues[0]), "started a worker on the drawer fix")
-        .unwrap();
-    rig.store
-        .log_autopilot(None, None, "judged the allocator branch, sent back for tests")
-        .unwrap();
+    rig.store.log_autopilot(Some(project.id), Some(issues[0]), "started a worker on the drawer fix").unwrap();
+    rig.store.log_autopilot(None, None, "judged the allocator branch, sent back for tests").unwrap();
     rig.store
         .update_project(
             project.id,
@@ -298,9 +279,7 @@ fn fixture() -> Rich {
         let proposal = agentbench_core::Proposal {
             id: 0,
             kind: agentbench_core::ProposalKind::Stale,
-            summary: format!(
-                "Close stale issue number {i} that nobody has touched since the spring"
-            ),
+            summary: format!("Close stale issue number {i} that nobody has touched since the spring"),
             issues: vec![issues[i]],
             sessions: vec![],
             projects: vec![project.id],
@@ -599,11 +578,9 @@ fn s_supervisor_cards(r: &Rich, cfg: Cfg) -> Built {
 
 fn two(r: &Rich, cfg: Cfg) -> (Harness<'static, App>, Rig) {
     let second = rig();
-    let chat =
-        second.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let chat = second.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
     second.store.set_status(chat.id, SessionStatus::Waiting).unwrap();
-    let servers =
-        serde_json::json!([{"slot": 1, "name": "workstation", "url": second.url, "token": TOKEN}]);
+    let servers = serde_json::json!([{"slot": 1, "name": "workstation", "url": second.url, "token": TOKEN}]);
     let mut h = harness_cfg(
         vec![
             ("url".into(), r.calm.url.clone()),
@@ -613,9 +590,7 @@ fn two(r: &Rich, cfg: Cfg) -> (Harness<'static, App>, Rig) {
         cfg,
     );
     until(&mut h, "both overviews", |h| {
-        h.state()
-            .overview()
-            .is_some_and(|o| o.projects.iter().filter(|p| p.name == "demo").count() == 2)
+        h.state().overview().is_some_and(|o| o.projects.iter().filter(|p| p.name == "demo").count() == 2)
     });
     h.run_steps(4);
     (h, second)

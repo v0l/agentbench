@@ -50,12 +50,7 @@ fn attachment(s: &Shown) -> Attachment {
 }
 
 impl App {
-    pub(super) fn open_viewer(
-        &mut self,
-        ctx: &egui::Context,
-        session: SessionId,
-        file: &Attachment,
-    ) {
+    pub(super) fn open_viewer(&mut self, ctx: &egui::Context, session: SessionId, file: &Attachment) {
         let mut files: Vec<Attachment> = self
             .transcripts
             .get(&session)

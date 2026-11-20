@@ -124,11 +124,7 @@ pub(super) fn status_badge(ui: &mut Ui, sessions: &[Session]) {
     }
 }
 
-pub fn usage_labels(
-    report: &agentbench_core::UsageReport,
-    project: Option<agentbench_core::Id>,
-    now: i64,
-) -> Vec<(String, bool)> {
+pub fn usage_labels(report: &agentbench_core::UsageReport, project: Option<agentbench_core::Id>, now: i64) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = report
         .quotas
         .iter()
@@ -139,16 +135,15 @@ pub fn usage_labels(
         let mine = project
             .and_then(|id| report.spend.projects.iter().find(|p| p.project_id == id))
             .map_or(0.0, |p| p.total_usd);
-        out.push((format!("${:.2} today, ${mine:.2} project", report.spend.today_usd), false));
+        out.push((
+            format!("${:.2} today, ${mine:.2} project", report.spend.today_usd),
+            false,
+        ));
     }
     out
 }
 
-pub(super) fn usage_badges(
-    ui: &mut Ui,
-    report: Option<&agentbench_core::UsageReport>,
-    project: Option<agentbench_core::Id>,
-) {
+pub(super) fn usage_badges(ui: &mut Ui, report: Option<&agentbench_core::UsageReport>, project: Option<agentbench_core::Id>) {
     let Some(report) = report else { return };
     let now = agentbench_core::now_ms();
     for (text, hot) in usage_labels(report, project, now).into_iter().rev() {
@@ -178,13 +173,9 @@ pub(super) fn level_slider(
 ) -> Option<agentbench_core::Automation> {
     use agentbench_core::Automation;
     let stops = Automation::ALL.len();
-    let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(width, if agent_ui::key::phone(ui.ctx()) { agent_ui::key::TAP } else { 18.0 }),
-        Sense::click_and_drag(),
-    );
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, if agent_ui::key::phone(ui.ctx()) { agent_ui::key::TAP } else { 18.0 }), Sense::click_and_drag());
     let pad = 7.0;
-    let x_of =
-        |i: usize| rect.left() + pad + (rect.width() - 2.0 * pad) * i as f32 / (stops - 1) as f32;
+    let x_of = |i: usize| rect.left() + pad + (rect.width() - 2.0 * pad) * i as f32 / (stops - 1) as f32;
     let mut picked = None;
     if let Some(p) = resp.interact_pointer_pos()
         && (resp.clicked() || resp.dragged())
@@ -199,8 +190,7 @@ pub(super) fn level_slider(
         use egui::accesskit::{Action, ActionData};
         for r in i.accesskit_action_requests(resp.id, Action::SetValue) {
             if let Some(ActionData::NumericValue(v)) = r.data {
-                picked =
-                    Some(Automation::from_rank(v.round().clamp(0.0, (stops - 1) as f64) as u8));
+                picked = Some(Automation::from_rank(v.round().clamp(0.0, (stops - 1) as f64) as u8));
             }
         }
         if i.has_accesskit_action_request(resp.id, Action::Increment) && rank + 1 < stops {
@@ -235,14 +225,8 @@ pub(super) fn level_slider(
     let tint = if inherited { READOUT_DIM } else { READOUT };
     let p = ui.painter();
     let y = rect.center().y;
-    p.line_segment(
-        [egui::pos2(x_of(0), y), egui::pos2(x_of(stops - 1), y)],
-        Stroke::new(2.0, ETCH),
-    );
-    p.line_segment(
-        [egui::pos2(x_of(0), y), egui::pos2(x_of(value.rank() as usize), y)],
-        Stroke::new(2.0, tint),
-    );
+    p.line_segment([egui::pos2(x_of(0), y), egui::pos2(x_of(stops - 1), y)], Stroke::new(2.0, ETCH));
+    p.line_segment([egui::pos2(x_of(0), y), egui::pos2(x_of(value.rank() as usize), y)], Stroke::new(2.0, tint));
     for i in 0..stops {
         let lit = i <= value.rank() as usize;
         p.circle_filled(egui::pos2(x_of(i), y), 2.5, if lit { tint } else { ETCH });
@@ -337,6 +321,7 @@ pub(super) fn speech_in_link(link: &str) -> Option<(String, bool)> {
     })
 }
 
+
 pub(super) fn server_status(ui: &mut Ui, up: bool, text: &str) {
     status(ui, up, text);
 }
@@ -347,9 +332,7 @@ pub(super) fn server_chip(ui: &mut Ui, name: &str, down: bool) {
     let tint = if down { LEGEND } else { egui::Color32::from(fill) };
     let text = if down { format!("{name}  server offline") } else { name.to_string() };
     let r = tab_chip(ui, &text, tint, false);
-    r.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("server {text}"))
-    });
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("server {text}")));
 }
 
 pub(super) fn tap_toggle(ui: &mut Ui, text: &str, on: bool) -> egui::Response {
@@ -369,30 +352,16 @@ pub(super) fn tap_toggle(ui: &mut Ui, text: &str, on: bool) -> egui::Response {
         let p = ui.painter();
         let fill = if on { tint.gamma_multiply(0.18) } else { WELL };
         p.rect_filled(rect, 2.0, fill);
-        p.rect_stroke(
-            rect,
-            2.0,
-            Stroke::new(1.0, if lit { tint } else { ETCH }),
-            egui::StrokeKind::Inside,
-        );
+        p.rect_stroke(rect, 2.0, Stroke::new(1.0, if lit { tint } else { ETCH }), egui::StrokeKind::Inside);
         let tick = egui::Rect::from_center_size(
             egui::pos2(rect.left() + 11.0, rect.center().y),
             Vec2::splat(8.0),
         );
-        p.rect_stroke(
-            tick,
-            1.0,
-            Stroke::new(1.0, if lit { tint } else { LEGEND }),
-            egui::StrokeKind::Inside,
-        );
+        p.rect_stroke(tick, 1.0, Stroke::new(1.0, if lit { tint } else { LEGEND }), egui::StrokeKind::Inside);
         if on {
             p.rect_filled(tick.shrink(2.0), 0.0, tint);
         }
-        p.galley(
-            egui::pos2(tick.right() + 6.0, rect.center().y - galley.size().y / 2.0),
-            galley,
-            tint,
-        );
+        p.galley(egui::pos2(tick.right() + 6.0, rect.center().y - galley.size().y / 2.0), galley, tint);
     }
     resp
 }

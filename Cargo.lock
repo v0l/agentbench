@@ -227,6 +227,7 @@ dependencies = [
  "image",
  "jni",
  "log",
+ "ndk",
  "ndk-context",
  "ndk-sys",
  "opener",

@@ -293,9 +293,7 @@ fn set_system_clipboard_text(text: &str) {
             .call_static_method(
                 jni_str!("android/content/ClipData"),
                 jni_str!("newPlainText"),
-                jni_sig!(
-                    "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;"
-                ),
+                jni_sig!("(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;"),
                 &[(&label).into(), (&body).into()],
             )?
             .l()?;

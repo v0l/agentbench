@@ -33,7 +33,7 @@ enum State {
 
 /// An open microphone and what it has heard so far.
 struct Take {
-    _stream: cpal::Stream,
+    _stream: Box<dyn std::any::Any>,
     heard: Arc<Mutex<Vec<f32>>>,
     peak: Arc<AtomicU32>,
     rate: u32,
@@ -319,6 +319,34 @@ fn models_dir() -> std::path::PathBuf {
 
 /// Open the default microphone and start collecting mono samples.
 fn open() -> Result<Take, String> {
+    #[cfg(target_os = "android")]
+    {
+        let heard = Arc::new(Mutex::new(Vec::with_capacity(RATE as usize * 10)));
+        let peak = Arc::new(AtomicU32::new(0));
+        let stream = super::android::open_voice_stream(
+            RATE as usize * MAX_SECONDS,
+            heard.clone(),
+            peak.clone(),
+        )?;
+        let rate = stream.rate;
+        return Ok(Take {
+            _stream: Box::new(stream),
+            heard,
+            peak,
+            rate,
+            device: "microphone (voice recognition)".into(),
+            since: Instant::now(),
+            endpoint: Endpoint::new(rate),
+            partial_at: 0,
+            partial_busy: Arc::new(AtomicBool::new(false)),
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    open_cpal()
+}
+
+#[cfg_attr(target_os = "android", allow(dead_code))]
+fn open_cpal() -> Result<Take, String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -354,7 +382,7 @@ fn open() -> Result<Take, String> {
     .map_err(|e| format!("{name}: {e}"))?;
     stream.play().map_err(|e| format!("{name}: {e}"))?;
     Ok(Take {
-        _stream: stream,
+        _stream: Box::new(stream),
         heard,
         peak,
         rate,
@@ -371,7 +399,7 @@ fn tracing_free_warn(e: &str) {
 }
 
 /// One callback's worth of samples, mixed to mono and appended until the take is as long as allowed.
-fn push<T: cpal::SizedSample>(
+pub(super) fn push<T: cpal::SizedSample>(
     data: &[T],
     channels: usize,
     limit: usize,

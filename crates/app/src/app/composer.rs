@@ -235,8 +235,7 @@ impl App {
                 }
             });
         });
-        let bottom =
-            if narrow { ui.cursor().min.y.max(ui.min_rect().bottom()) } else { ui.cursor().min.y };
+        let bottom = if narrow { ui.cursor().min.y.max(ui.min_rect().bottom()) } else { ui.cursor().min.y };
         let height = bottom - top;
         let before = self.composer_h.insert(self.drawing, height);
         if before.is_none_or(|b| (b - height).abs() > 0.5) {
@@ -253,9 +252,7 @@ impl App {
         listening: bool,
         wake: impl Fn() + Send + Sync + 'static,
     ) {
-        use crate::voice::Release;
         let now = ui.input(|i| i.time);
-        let pointer = ui.input(|i| i.pointer.interact_pos());
         if !self.hold.held() {
             if !listening
                 && !self.voice.busy()
@@ -268,34 +265,17 @@ impl App {
                 }
             }
         } else {
-            if let Some(p) = pointer {
+            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
                 self.hold.drag(key.rect.expand(4.0).contains(p));
             }
-            if ui.input(|i| i.pointer.primary_released() || !i.pointer.any_down()) {
-                let seconds = self.voice.seconds();
-                match self.hold.release(seconds) {
-                    Release::Finish => self.voice.finish(&self.speech_now(), wake),
-                    Release::Cancel => {
-                        self.voice.cancel();
-                        self.drop_speech();
-                    }
-                    Release::TooShort => {
-                        self.voice.cancel();
-                        self.drop_speech();
-                        self.hint = Some((now + 2.0, "Hold to talk"));
-                    }
-                    Release::Nothing => {}
-                }
+            if !ui.input(|i| i.pointer.any_down()) {
+                self.release_hold(now, wake);
             }
             ui.ctx().request_repaint();
         }
-        if let Some((until, text)) = self.hint {
-            if now < until {
-                ui.label(egui::RichText::new(text).color(LEGEND).size(12.0));
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
-            } else {
-                self.hint = None;
-            }
+        if let Some(text) = self.hold_hint(now) {
+            ui.label(egui::RichText::new(text).color(LEGEND).size(12.0));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
 
