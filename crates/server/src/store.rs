@@ -1519,6 +1519,10 @@ impl Store {
         Ok(())
     }
 
+    pub fn memory_store(&self) -> &Memory {
+        &self.memory
+    }
+
     pub fn memory_root(&self) -> &Path {
         self.memory.root()
     }

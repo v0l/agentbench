@@ -343,6 +343,13 @@ impl Client {
         self.notes(project);
     }
 
+    pub fn compact_notes(&mut self, project: Id) {
+        let body = Self::json(&serde_json::json!({ "scope": "project", "project": project }));
+        let req = self.request(Method::POST, "/api/memory/compact", body);
+        self.send(req, move |done: agentbench_core::MemoryCompaction| Reply::Done(done.summary()));
+        self.notes(project);
+    }
+
     pub fn vision_versions(&mut self, project: Id) {
         let req =
             self.request(Method::GET, &format!("/api/projects/{project}/vision/versions"), None);

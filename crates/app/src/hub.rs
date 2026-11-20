@@ -523,6 +523,11 @@ impl Hub {
         c.restore_note(id, untag(version));
     }
 
+    pub fn compact_notes(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.compact_notes(id);
+    }
+
     pub fn vision_versions(&mut self, project: Id) {
         let (c, id) = self.by_id(project);
         c.vision_versions(id);

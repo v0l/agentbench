@@ -499,6 +499,7 @@ fn describe(tool: &str, args: &Value) -> String {
         "update_issue" => "update an issue",
         "comment_on_issue" => "comment on an issue",
         "remember" => "keep a note",
+        "compact_memory" => "compact the notes",
         "rename_session" => "rename a session",
         "start_session" => "start a session",
         "send_message" => "send a message to a session",
@@ -1226,11 +1227,51 @@ impl Api for StoreApi {
                 }
                 s.set_note(project, &topic, &note, "agent", Some(me.id), based_on.as_deref())
                     .map_err(|e| e.0)?;
+                if let Ok(runner) = self.runner.get() {
+                    crate::compact::after_write(&runner, crate::memory::Scope::Project(project));
+                }
                 if note.trim().is_empty() {
                     json!({ "forgot": topic })
                 } else {
                     json!({ "remembered": topic })
                 }
+            }
+            "compact_memory" => {
+                let which = text(args, "scope").map(|t| t.trim().to_lowercase()).unwrap_or_default();
+                let (project_only, global) = match which.as_str() {
+                    "" | "project" => (Some(project), false),
+                    "global" if sup => (None, true),
+                    "all" if sup => (None, true),
+                    "global" | "all" => {
+                        return Err("global notes are read-only to agents: ask the user to compact them".into());
+                    }
+                    other => return Err(format!("{other} is not a scope: project, global or all")),
+                };
+                let scopes = match which.as_str() {
+                    "global" => crate::compact::scopes(s, Some(project), true).split_off(1),
+                    _ => crate::compact::scopes(s, project_only, global),
+                };
+                let runner = self.runner.get()?;
+                let target = crate::compact::target(&runner)?;
+                let store = s.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let task = async move {
+                    let _ = tx.send(crate::compact::run(&store, &target, scopes, true).await);
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => {
+                        handle.spawn(task);
+                    }
+                    Err(_) => {
+                        std::thread::spawn(move || {
+                            if let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                                rt.block_on(task);
+                            }
+                        });
+                    }
+                }
+                let report = rx.recv().map_err(|_| "the compaction stopped before it finished".to_string())?;
+                json!(report)
             }
             "recall" => {
                 let global = text(args, "scope").is_some_and(|s| s.trim().eq_ignore_ascii_case("global"));

@@ -354,7 +354,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 37] = [
+pub const AGENTBENCH_TOOLS: [&str; 38] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -379,6 +379,7 @@ pub const AGENTBENCH_TOOLS: [&str; 37] = [
     "add_project",
     "remember",
     "recall",
+    "compact_memory",
     "notify_user",
     "send_file",
     "autopilot",
@@ -699,6 +700,14 @@ fn agentbench_specs() -> Vec<Spec> {
             "Read the notes kept for this project with remember, optionally only those matching a word. Pass scope `global` to read the global notes, which are read-only to you.",
             object(
                 json!({ "project": string("Supervisor chat only: the project by name or id"), "scope": string("`global` for the notes shared by all projects"), "topic": string("Only notes whose topic or text has this word") }),
+                &[],
+            ),
+        ),
+        Spec::new(
+            "compact_memory",
+            "Shrink this project's notes with a summarising model pass, like conversation compaction: duplicates are merged, history and finished items dropped, every current host, path, command, trap, decision and number kept, and secrets replaced by a pointer. The old version is kept and can be restored. Reports bytes before and after, and the topics merged or dropped. Notes are also compacted by themselves once they pass their size budget. Supervisor chat can pass scope `global` or `all`.",
+            object(
+                json!({ "project": string("Supervisor chat only: the project by name or id"), "scope": string("`project` (default), or for the supervisor `global` or `all`") }),
                 &[],
             ),
         ),

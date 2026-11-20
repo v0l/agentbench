@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -13,6 +13,8 @@ pub fn default_root() -> PathBuf {
 
 pub const GLOBAL: &str = "global";
 const PROJECT_FILE: &str = ".project";
+const HISTORY: &str = ".history";
+pub const CHANGED: &str = "changed since you read it";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -25,6 +27,8 @@ pub struct Memory {
     owned: bool,
     locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
     resolve: Mutex<()>,
+    claims: Mutex<HashSet<String>>,
+    attempted: Mutex<HashMap<String, String>>,
 }
 
 impl Drop for Memory {
@@ -104,6 +108,8 @@ impl Memory {
             owned,
             locks: Mutex::new(HashMap::new()),
             resolve: Mutex::new(()),
+            claims: Mutex::new(HashSet::new()),
+            attempted: Mutex::new(HashMap::new()),
         }
     }
 
@@ -258,6 +264,129 @@ impl Memory {
             std::fs::write(path, render(topic, body)).map_err(err)?;
         }
         Ok(())
+    }
+
+    pub fn sizes(&self, scope: Scope) -> (usize, usize) {
+        let notes = self.list(scope);
+        (notes.iter().map(|(_, b)| b.len()).sum(), notes.iter().map(|(_, b)| b.len()).max().unwrap_or(0))
+    }
+
+    pub fn fingerprint(&self, scope: Scope) -> String {
+        let mut notes = self.list(scope);
+        notes.sort();
+        hash_note(&notes.iter().map(|(t, b)| format!("{t}\n{b}\n")).collect::<String>())
+    }
+
+    pub fn claim(&self, key: &str) -> bool {
+        self.claims.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string())
+    }
+
+    pub fn release(&self, key: &str) {
+        self.claims.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+
+    pub fn already_tried(&self, key: &str, fingerprint: &str) -> bool {
+        self.attempted.lock().unwrap_or_else(|e| e.into_inner()).get(key).is_some_and(|f| f == fingerprint)
+    }
+
+    pub fn tried(&self, key: &str, fingerprint: String) {
+        self.attempted.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string(), fingerprint);
+    }
+
+    fn history(dir: &Path) -> PathBuf {
+        dir.join(HISTORY)
+    }
+
+    fn keep_copy(&self, dir: &Path, current: &[NoteFile]) -> Result<String, String> {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let version = format!("{millis}-{}", &uuid::Uuid::new_v4().simple().to_string()[..6]);
+        let target = Memory::history(dir).join(&version);
+        std::fs::create_dir_all(&target).map_err(err)?;
+        for f in current {
+            let name = f.path.file_name().ok_or("note without a file name")?;
+            std::fs::copy(&f.path, target.join(name)).map_err(err)?;
+        }
+        Ok(version)
+    }
+
+    pub fn versions(&self, scope: Scope) -> Vec<String> {
+        let Some(dir) = self.folder(scope, None) else { return Vec::new() };
+        let mut out: Vec<String> = std::fs::read_dir(Memory::history(&dir))
+            .map(|r| r.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        out.sort();
+        out.reverse();
+        out
+    }
+
+    fn lock_all(&self, current: &[NoteFile]) -> Vec<Arc<Mutex<()>>> {
+        let mut paths: Vec<&PathBuf> = current.iter().map(|f| &f.path).collect();
+        paths.sort();
+        paths.into_iter().map(|p| self.lock_for(p)).collect()
+    }
+
+    pub fn replace_all(
+        &self,
+        scope: Scope,
+        expected: &[(String, String)],
+        notes: &[(String, String)],
+    ) -> Result<String, String> {
+        let dir = self.folder(scope, None).ok_or("memory folder unavailable")?;
+        let locks = self.lock_all(&self.files(&dir));
+        let _held: Vec<_> = locks.iter().map(|l| l.lock().unwrap_or_else(|e| e.into_inner())).collect();
+        let current = self.files(&dir);
+        let moved = current.len() != expected.len()
+            || expected.iter().any(|(topic, hash)| {
+                !current.iter().any(|f| &f.topic == topic && &hash_note(&f.body) == hash)
+            });
+        if moved {
+            return Err(format!("{CHANGED}: notes were edited while the compaction ran"));
+        }
+        let version = self.keep_copy(&dir, &current)?;
+        for (topic, body) in notes {
+            let existing = current.iter().find(|f| &f.topic == topic);
+            if existing.is_some_and(|f| f.body.trim() == body.trim()) {
+                continue;
+            }
+            let path = match existing {
+                Some(f) => f.path.clone(),
+                None => self.path_for(&dir, topic),
+            };
+            let tmp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+            std::fs::write(&tmp, render(topic, body)).map_err(err)?;
+            std::fs::rename(&tmp, &path).map_err(err)?;
+        }
+        for f in &current {
+            if !notes.iter().any(|(t, _)| t == &f.topic) {
+                std::fs::remove_file(&f.path).map_err(err)?;
+            }
+        }
+        Ok(version)
+    }
+
+    pub fn restore(&self, scope: Scope, version: &str) -> Result<String, String> {
+        let dir = self.folder(scope, None).ok_or("memory folder unavailable")?;
+        if version.contains(['/', '\\']) || version.starts_with('.') {
+            return Err(format!("no version {version}"));
+        }
+        let source = Memory::history(&dir).join(version);
+        if !source.is_dir() {
+            return Err(format!("no version {version}"));
+        }
+        let locks = self.lock_all(&self.files(&dir));
+        let _held: Vec<_> = locks.iter().map(|l| l.lock().unwrap_or_else(|e| e.into_inner())).collect();
+        let current = self.files(&dir);
+        let kept = self.keep_copy(&dir, &current)?;
+        for f in &current {
+            std::fs::remove_file(&f.path).map_err(err)?;
+        }
+        for entry in std::fs::read_dir(&source).map_err(err)?.flatten() {
+            std::fs::copy(entry.path(), dir.join(entry.file_name())).map_err(err)?;
+        }
+        Ok(kept)
     }
 }
 

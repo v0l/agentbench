@@ -672,7 +672,8 @@ impl App {
             return;
         };
         let pid = *pid;
-        let (mut close, mut restore) = (false, None);
+        let (mut close, mut restore, mut compact) = (false, None, false);
+        let can_compact = self.server_has(pid, agentbench_core::API_MEMORY_COMPACT);
         let m = egui::Modal::new(egui::Id::unique("notes"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -707,8 +708,14 @@ impl App {
                     if ui.add(Key::new("close").outline(VALUE).min_width(100.0)).clicked() {
                         close = true;
                     }
+                    if can_compact && ui.add(Key::new("compact").outline(VALUE).min_width(100.0)).clicked() {
+                        compact = true;
+                    }
                 });
             });
+        if compact && let Some(c) = &mut self.client {
+            c.compact_notes(pid);
+        }
         if let Some(v) = restore {
             if let Some(c) = &mut self.client {
                 c.restore_note(pid, v);
