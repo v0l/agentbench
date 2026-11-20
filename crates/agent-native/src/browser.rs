@@ -573,6 +573,33 @@ pub fn browser_identity(reported: &str) -> String {
 
 const ACCEPT_LANGUAGE: &str = "en-IE,en-GB;q=0.9,en;q=0.8";
 
+const HUMAN_SURFACE: &str = r#"
+(() => {
+  Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true });
+  Object.defineProperty(Navigator.prototype, 'languages', { get: () => ['en-IE', 'en-GB', 'en'], configurable: true });
+  if (!navigator.plugins.length) {
+    const names = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer', 'Microsoft Edge PDF Viewer', 'WebKit built-in PDF'];
+    const plugin = (name) => ({ name, filename: 'internal-pdf-viewer', description: 'Portable Document Format', length: 0 });
+    Object.defineProperty(Navigator.prototype, 'plugins', { get: () => names.map(plugin), configurable: true });
+  }
+  if (!window.chrome) window.chrome = {};
+  if (!window.chrome.runtime) window.chrome.runtime = {};
+  if (!window.chrome.app) window.chrome.app = { isInstalled: false };
+  const maskGpu = (proto) => {
+    const real = proto.getParameter;
+    proto.getParameter = function (p) {
+      if (p === 37445) return 'Google Inc. (Intel)';
+      if (p === 37446) return 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)';
+      return real.call(this, p);
+    };
+  };
+  if (window.WebGLRenderingContext) maskGpu(WebGLRenderingContext.prototype);
+  if (window.WebGL2RenderingContext) maskGpu(WebGL2RenderingContext.prototype);
+  const ask = navigator.permissions && navigator.permissions.query.bind(navigator.permissions);
+  if (ask) navigator.permissions.query = (p) => p && p.name === 'notifications' ? Promise.resolve({ state: Notification.permission === 'default' ? 'prompt' : Notification.permission, onchange: null }) : ask(p);
+})();
+"#;
+
 async fn present_as_browser(cdp: &Cdp, target: &str) -> Result<(), String> {
     let version = cdp.call(None, "Browser.getVersion", json!({})).await?;
     let agent = browser_identity(version["userAgent"].as_str().unwrap_or_default());
@@ -580,6 +607,12 @@ async fn present_as_browser(cdp: &Cdp, target: &str) -> Result<(), String> {
         Some(target),
         "Network.setUserAgentOverride",
         json!({ "userAgent": agent, "acceptLanguage": ACCEPT_LANGUAGE }),
+    )
+    .await?;
+    cdp.call(
+        Some(target),
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({ "source": HUMAN_SURFACE }),
     )
     .await?;
     Ok(())
@@ -597,6 +630,7 @@ async fn start(chrome: &std::path::Path, dir: &std::path::Path) -> Result<Live, 
             "--hide-scrollbars",
             "--mute-audio",
             "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
         ])
         .arg(format!("--user-data-dir={}", dir.display()))
         .arg(format!("--window-size={WIDTH},{HEIGHT}"))
@@ -2019,6 +2053,52 @@ function later() { setTimeout(() => { document.body.insertAdjacentHTML('beforeen
             browser_identity(reported),
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
         );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn the_private_browser_gets_past_a_cloudflare_protected_news_page() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(ws_dir.path()).unwrap();
+        let b = Browsers::default();
+        let url = "https://www.independent.ie/irish-news/courts/former-centra-manager-32-who-stole-over-350k-from-his-employer-jailed/a/164812861.html";
+        let page = act(&b, &ws, json!({"action": "goto", "url": url})).await.unwrap();
+        assert!(!page.contains("Sorry, you have been blocked") && page.contains("Centra"), "{page}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn the_private_browser_passes_a_bot_detection_page() {
+        let ws_dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::open(ws_dir.path()).unwrap();
+        let b = Browsers::default();
+        act(&b, &ws, json!({"action": "goto", "url": "https://bot.sannysoft.com/"})).await.unwrap();
+        let failed = act(
+            &b,
+            &ws,
+            json!({"action": "eval", "js": "[...document.querySelectorAll('td.failed, td[class*=failed]')].map(td => td.parentElement.innerText.replace(/\\s+/g, ' ')).join(' ## ')"}),
+        )
+        .await
+        .unwrap();
+        assert!(failed.trim_matches('"').is_empty(), "{failed}");
+    }
+
+    #[tokio::test]
+    async fn the_private_browser_does_not_announce_automation() {
+        if screenshot::browser().is_none() {
+            return;
+        }
+        let (_dir, ws) = workspace_with(&[("q.html", QUESTIONS)]);
+        let b = Browsers::default();
+        act(&b, &ws, json!({"action": "goto", "url": "q.html"})).await.unwrap();
+        let seen = act(
+            &b,
+            &ws,
+            json!({"action": "eval", "js": "[navigator.webdriver, navigator.plugins.length > 0, typeof window.chrome.runtime].join(',')"}),
+        )
+        .await
+        .unwrap();
+        assert!(seen.contains("false,true,object"), "{seen}");
     }
 
     #[tokio::test]
