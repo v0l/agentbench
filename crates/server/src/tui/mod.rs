@@ -1,10 +1,13 @@
 mod app;
 mod editor;
 mod net;
+mod setup;
+mod solo;
 mod text;
 mod ui;
 
 pub use net::Server;
+pub use setup::Flags;
 
 use agentbench_core::{NewSession, Place, Project, Session, SessionId};
 use app::{App, Cmd, Reply};
@@ -23,6 +26,7 @@ use net::Net;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io::{Stdout, stdout};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -35,6 +39,11 @@ pub struct Options {
     pub project: Option<String>,
     pub resume: bool,
     pub prompt: Option<String>,
+}
+
+pub trait Backend {
+    fn command(&mut self, app: &mut App, cmd: Cmd) -> bool;
+    fn handle(&mut self, app: &mut App, reply: Reply);
 }
 
 fn pick_project(projects: &[Project], wanted: Option<&str>) -> Result<Project, String> {
@@ -149,7 +158,9 @@ impl Loop {
             Ok(Some(Reply::Refreshed(s, m)))
         });
     }
+}
 
+impl Backend for Loop {
     fn command(&mut self, app: &mut App, cmd: Cmd) -> bool {
         let net = self.net.clone();
         match cmd {
@@ -265,7 +276,7 @@ fn restore(enhanced: bool) {
 async fn events(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
-    lp: &mut Loop,
+    lp: &mut dyn Backend,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Reply>,
 ) -> std::io::Result<()> {
     let mut stream = EventStream::new();
@@ -335,6 +346,14 @@ pub async fn run(server: Server, opts: Options) -> Result<(), String> {
     app.report = overview.usage.clone();
     spawn_watch(net, overview.cursor, tx);
 
+    drive(&mut app, &mut lp, rx).await
+}
+
+async fn drive(
+    app: &mut App,
+    backend: &mut dyn Backend,
+    rx: tokio::sync::mpsc::UnboundedReceiver<Reply>,
+) -> Result<(), String> {
     let guard = Guard::enter().map_err(|e| e.to_string())?;
     let previous = std::panic::take_hook();
     let enhanced = guard.enhanced;
@@ -343,9 +362,30 @@ pub async fn run(server: Server, opts: Options) -> Result<(), String> {
         previous(info);
     }));
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout())).map_err(|e| e.to_string())?;
-    let result = events(&mut terminal, &mut app, &mut lp, rx).await;
+    let result = events(&mut terminal, app, backend, rx).await;
     drop(guard);
     result.map_err(|e| e.to_string())
+}
+
+pub async fn run_standalone(
+    home: std::path::PathBuf,
+    flags: Flags,
+    opts: Options,
+) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let loaded = setup::load(&home, &cwd, opts.model.as_deref(), flags)?;
+    let (tx, rx) = unbounded_channel();
+    let mut solo = solo::Solo::new(Arc::new(loaded.native), loaded.context, cwd, tx, flags.save.then(|| setup::transcripts(&home)));
+    let mut app = solo.app();
+    app.model = opts.model.clone();
+    if let Some(prompt) = opts.prompt.filter(|p| !p.trim().is_empty()) {
+        solo.command(&mut app, Cmd::Send(prompt));
+    }
+    let result = drive(&mut app, &mut solo, rx).await;
+    if let Some(path) = solo.saved() {
+        eprintln!("transcript saved to {}", path.display());
+    }
+    result
 }
 
 pub fn local(home: Option<std::path::PathBuf>) -> Result<Server, String> {

@@ -58,15 +58,29 @@ Data lives in `$AGENTBENCH_HOME` (default `~/.local/share/agentbench`):
 ## Chatting in a terminal
 
 ```sh
-agentbench chat                      # a new chat in your home folder
-agentbench chat -c                   # carry on with the latest one
+agentbench chat                      # a standalone chat in this folder
 agentbench chat summarise ~/notes.md # first message given on the command line
-agentbench chat --project snort
+agentbench chat --bare               # no memory notes, skills or MCP servers
+agentbench chat --save               # keep a plain transcript under the data folder
+agentbench chat --server             # a tracked chat on the server
+agentbench chat -c                   # carry on with the latest tracked chat
+agentbench chat --server --project snort
 ```
 
-It starts the server if it is not running, or use `--url` and `--token` (or
-`AGENTBENCH_URL` and `AGENTBENCH_TOKEN`) for one on another machine. It is the same chat as
-in the window, so the two show each other's messages. Enter sends, alt+enter or `\` then enter
+The default is a standalone chat for one-off questions. The agent runs inside the `chat`
+process in the current folder, with the same model, prices and language servers as the
+server (read from `agentbench.toml` and the saved model settings, read-only). It starts no
+server, needs no token, writes nothing to the database and shows nowhere else: the
+conversation lives in memory and goes when you leave, and long chats still fold and compact.
+The tracker and supervisor tools (issues, sessions, `remember`, `recall`, autopilot) are not
+offered. Memory notes, the user instruction files and skills are read-only context; leave them
+out with `--no-memory`, `--no-skills` and `--no-mcp`, or all three with `--bare`. `--save`
+writes `chat-<time>.md` under `chats/` in the data folder when the chat ends.
+
+`--server` (also `--tracked`, `-c`, `--project` and `--agent`) uses the server instead: it starts
+it if it is not running, or use `--url` and `--token` (or `AGENTBENCH_URL` and
+`AGENTBENCH_TOKEN`) for one on another machine. It is the same chat as in the window, so the
+two show each other's messages. Enter sends, alt+enter or `\` then enter
 adds a line, up recalls earlier messages, esc stops the agent, ctrl+o shows tool output
 and thinking, and `/help` lists the rest. Leaving (ctrl+c twice, ctrl+d or `/quit`) does not
 stop the agent.

@@ -420,9 +420,6 @@ fn home_brief(c: &Context) -> String {
 
 impl Context {
     pub fn env(&self) -> Vec<(String, String)> {
-        if self.api_url.is_empty() {
-            return Vec::new();
-        }
         let mut pairs = vec![
             ("URL", self.api_url.clone()),
             ("TOKEN", self.token.clone()),
@@ -432,7 +429,11 @@ impl Context {
         if let Some(i) = self.issue {
             pairs.push(("ISSUE", i.to_string()));
         }
-        pairs.into_iter().map(|(k, v)| (format!("AGENTBENCH_{k}"), v)).collect()
+        pairs
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| (format!("AGENTBENCH_{k}"), v))
+            .collect()
     }
 }
 

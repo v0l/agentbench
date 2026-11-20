@@ -40,7 +40,8 @@ pub enum Command {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Chat with an agent in the terminal.
+    /// Chat with an agent in the terminal. By default the chat runs in this process, in the
+    /// current folder, and is kept nowhere; --server uses the tracked chats of the server.
     Chat {
         /// The first message; starts a chat at once.
         prompt: Vec<String>,
@@ -54,11 +55,29 @@ pub enum Command {
         /// The project to chat in, by name or path; default the home folder.
         #[arg(long)]
         project: Option<String>,
-        /// Use a server on another machine.
+        /// With --server, use a server on another machine.
         #[arg(long, env = "AGENTBENCH_URL")]
         url: Option<String>,
         #[arg(long, env = "AGENTBENCH_TOKEN", hide_env_values = true)]
         token: Option<String>,
+        /// Chat through the agentbench server as a tracked session, starting it if needed.
+        #[arg(long, alias = "tracked")]
+        server: bool,
+        /// Leave out the memory notes and the user's instruction files (standalone chats).
+        #[arg(long)]
+        no_memory: bool,
+        /// Leave out the skills list and the skill tools (standalone chats).
+        #[arg(long)]
+        no_skills: bool,
+        /// Leave out MCP servers (standalone chats).
+        #[arg(long)]
+        no_mcp: bool,
+        /// Same as --no-memory --no-skills --no-mcp.
+        #[arg(long)]
+        bare: bool,
+        /// Write a plain transcript under the data folder when the chat ends (standalone chats).
+        #[arg(long)]
+        save: bool,
     },
 }
 
@@ -88,18 +107,40 @@ pub fn exit(result: Result<(), String>) -> ExitCode {
 
 pub async fn run(cli: Cli) -> Result<(), String> {
     let home = cli.home.unwrap_or_else(home);
-    if let Some(Command::Chat { prompt, resume, agent, model, project, url, token }) = cli.command {
+    if let Some(Command::Chat {
+        prompt,
+        resume,
+        agent,
+        model,
+        project,
+        url,
+        token,
+        server,
+        no_memory,
+        no_skills,
+        no_mcp,
+        bare,
+        save,
+    }) = cli.command
+    {
+        let prompt = Some(prompt.join(" ")).filter(|p| !p.trim().is_empty());
+        let tracked = server || resume || project.is_some() || agent.is_some();
+        let opts = crate::tui::Options { agent, model, project, resume, prompt };
+        if !tracked {
+            let flags = crate::tui::Flags {
+                memory: !(no_memory || bare),
+                skills: !(no_skills || bare),
+                mcp: !(no_mcp || bare),
+                save,
+            };
+            return crate::tui::run_standalone(home, flags, opts).await;
+        }
         let server = match (url, token) {
             (Some(url), Some(token)) => crate::tui::Server { url, token },
             (Some(_), None) => return Err("--url needs --token".into()),
             _ => crate::tui::local(Some(home))?,
         };
-        let prompt = Some(prompt.join(" ")).filter(|p| !p.trim().is_empty());
-        return crate::tui::run(
-            server,
-            crate::tui::Options { agent, model, project, resume, prompt },
-        )
-        .await;
+        return crate::tui::run(server, opts).await;
     }
     let config = Config::load(&home.join("agentbench.toml"))?;
     let store = Store::open_with_memory(&home.join("agentbench.db"), crate::memory::default_root()).map_err(|e| e.0)?;

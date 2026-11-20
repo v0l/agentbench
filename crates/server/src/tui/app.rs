@@ -104,6 +104,7 @@ pub struct App {
     pub lines_stale: bool,
     pub opening: bool,
     pub report: Option<agentbench_core::UsageReport>,
+    pub standalone: bool,
 }
 
 impl App {
@@ -132,6 +133,7 @@ impl App {
             lines_stale: true,
             opening: false,
             report: None,
+            standalone: false,
         }
     }
 
@@ -660,6 +662,10 @@ impl App {
             "new" => {
                 self.new_chat();
                 self.say(Tone::Info, "new chat: the first message starts it");
+                None
+            }
+            "resume" if self.standalone => {
+                self.say(Tone::Error, "standalone chats are not kept; run with --server to resume one");
                 None
             }
             "resume" => {
