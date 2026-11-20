@@ -2765,6 +2765,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn code_x_high_gets_no_check_in_while_code_and_code_high_do() {
+        use crate::agent::native::{Level, Model};
+        let r = rig(LONG);
+        r.ap.runner.quotas.set_base(&Model {
+            model: "code".into(),
+            high: Level { model: "code-x-high".into(), ..Level::default() },
+            medium: Level { model: "code-high".into(), ..Level::default() },
+            ..Model::default()
+        });
+        let (sid, _) = running_worker(&r).await;
+        let due = crate::store::now() + 31 * 60_000;
+        for (model, told) in [(None, 1), (Some("code"), 2), (Some("code-high"), 3), (Some("code-x-high"), 3), (Some("high"), 3)] {
+            r.store.set_model(sid, model).unwrap();
+            r.ap.checks.lock().unwrap().clear();
+            r.ap.tick_at(due);
+            assert_eq!(check_ins(&r).await.len(), told, "{model:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn it_goes_idle_once_when_nothing_is_left() {
         let r = rig(DONE);
         on(&r);
