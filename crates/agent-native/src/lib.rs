@@ -21,7 +21,7 @@ pub mod tree;
 pub mod testing;
 
 pub use async_trait::async_trait;
-pub use native::Native;
+pub use native::{Native, Scope};
 pub use process::{Cli, Launch};
 pub use tokio_util::sync::CancellationToken;
 
@@ -308,6 +308,16 @@ pub fn brief(c: &Context) -> String {
     out
 }
 
+pub fn standalone_brief(c: &Context) -> String {
+    format!(
+        "You are a coding assistant in a terminal chat, working in {path}. This chat is not tracked: there is no issue tracker, \
+         no sessions and no other agents, and nothing said here is kept once the user leaves. Do what the user asks with the tools you have, \
+         and say so plainly when you cannot. Write markdown, and put code in fenced blocks.\n\n{files}",
+        path = c.project_path,
+        files = FILE_TOOLS,
+    )
+}
+
 pub const FILE_TOOLS: &str = "<file_tools>\n\
 Create files with write_file, change files with edit_file (several files and `then` for a test run in one call) or replace_in_files (a regex across files). Use bash only for programs: builds, tests, git. Do not write or edit files with sed -i, cat > or tee heredocs, or inline python or perl.\n\
 </file_tools>";
@@ -410,6 +420,9 @@ fn home_brief(c: &Context) -> String {
 
 impl Context {
     pub fn env(&self) -> Vec<(String, String)> {
+        if self.api_url.is_empty() {
+            return Vec::new();
+        }
         let mut pairs = vec![
             ("URL", self.api_url.clone()),
             ("TOKEN", self.token.clone()),

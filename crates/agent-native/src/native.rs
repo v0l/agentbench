@@ -226,6 +226,39 @@ pub struct Native {
     pub browsers: super::browser::Browsers,
     pub mcp: Arc<Mcp>,
     pub pace: Pace,
+    pub scope: Scope,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scope {
+    pub tracked: bool,
+    pub memory: bool,
+    pub skills: bool,
+    pub mcp: bool,
+}
+
+impl Default for Scope {
+    fn default() -> Self {
+        Scope { tracked: true, memory: true, skills: true, mcp: true }
+    }
+}
+
+impl Scope {
+    pub fn standalone() -> Scope {
+        Scope { tracked: false, ..Scope::default() }
+    }
+
+    pub fn allows(&self, name: &str) -> bool {
+        if !self.tracked
+            && (AGENTBENCH_TOOLS.contains(&name) || matches!(name, "wait_for_session" | "switch_model"))
+        {
+            return false;
+        }
+        if !self.skills && matches!(name, "load_skill" | "find_skills") {
+            return false;
+        }
+        self.mcp || name != agent_core::mcp::NAME
+    }
 }
 
 #[derive(Clone, Default)]
@@ -268,6 +301,7 @@ impl Default for Native {
             browsers: Default::default(),
             mcp: Arc::new(Mcp::new(mcp_settings())),
             pace: Pace::default(),
+            scope: Scope::default(),
         }
     }
 }
@@ -1149,19 +1183,26 @@ fn levels(base: &Model) -> Vec<&'static str> {
     agentbench_core::LEVELS.into_iter().filter(|l| base.level(l).is_some()).collect()
 }
 
+#[cfg(test)]
 fn offered(base: &Model, mcp: bool, supervisor: bool) -> Vec<Spec> {
+    offered_in(base, mcp, supervisor, Scope::default())
+}
+
+fn offered_in(base: &Model, mcp: bool, supervisor: bool, scope: Scope) -> Vec<Spec> {
     let any = !supervisor && !levels(base).is_empty();
-    let mut all: Vec<Spec> =
-        specs().into_iter().filter(|t| any || t.name != "switch_model").collect();
-    if mcp {
+    let mut all: Vec<Spec> = specs()
+        .into_iter()
+        .filter(|t| (any || t.name != "switch_model") && scope.allows(&t.name))
+        .collect();
+    if mcp && scope.mcp {
         all.push(agent_core::mcp::spec());
     }
     all
 }
 
-fn tool_list(base: &Model, mcp: bool, supervisor: bool) -> Value {
+fn tool_list(base: &Model, mcp: bool, supervisor: bool, scope: Scope) -> Value {
     Value::Array(
-        offered(base, mcp, supervisor)
+        offered_in(base, mcp, supervisor, scope)
             .into_iter()
             .map(|t| {
                 json!({
@@ -1201,36 +1242,52 @@ fn instructions(dir: &Path) -> Option<String> {
 }
 
 pub fn system(turn: &Turn, base: &Model, mcp: &Mcp) -> String {
-    let servers = mcp.section(turn.cwd);
-    let skills = skillset::discover(&skillset::roots(turn.cwd), &[]);
+    system_in(turn, base, mcp, Scope::default())
+}
+
+pub fn system_in(turn: &Turn, base: &Model, mcp: &Mcp, scope: Scope) -> String {
+    let servers = if scope.mcp { mcp.section(turn.cwd) } else { None };
+    let skills = if scope.skills {
+        skillset::discover(&skillset::roots(turn.cwd), &[])
+    } else {
+        Vec::new()
+    };
     let mut out = format!("Working directory: {}\n\n", turn.cwd.display());
-    out.push_str(&brief(turn.context));
-    if turn.context.home {
+    if scope.tracked {
+        out.push_str(&brief(turn.context));
+        if turn.context.home {
+            out.push_str("\n\n");
+            out.push_str(super::FILE_TOOLS);
+        }
+        out.push_str("\n\nPrefer the tracker tools to the REST API. Write markdown, and put code in fenced blocks.\n\n");
+    } else {
+        out.push_str(&super::standalone_brief(turn.context));
         out.push_str("\n\n");
-        out.push_str(super::FILE_TOOLS);
     }
-    out.push_str("\n\nPrefer the tracker tools to the REST API. Write markdown, and put code in fenced blocks.\n\n");
-    if !turn.context.global_notes.is_empty() {
+    if scope.memory && !turn.context.global_notes.is_empty() {
         let mut notes = String::new();
         for (topic, note) in &turn.context.global_notes {
             notes.push_str(&format!("- {topic}: {}\n", note.trim().replace('\n', "\n  ")));
         }
         out.push_str(&section("global_notes", &notes));
     }
-    if !turn.context.notes.is_empty() {
+    if scope.memory && !turn.context.notes.is_empty() {
         let mut notes = String::new();
         for (topic, note) in &turn.context.notes {
             notes.push_str(&format!("- {topic}: {}\n", note.trim().replace('\n', "\n  ")));
         }
         out.push_str(&section("project_notes", &notes));
     }
-    if let Some(text) = dirs::home_dir().and_then(|h| instructions(&h.join(".agents"))) {
+    if let Some(text) = dirs::home_dir()
+        .filter(|_| scope.memory)
+        .and_then(|h| instructions(&h.join(".agents")))
+    {
         out.push_str(&section("user_instructions", &text));
     }
     if let Some(text) = instructions(turn.cwd) {
         out.push_str(&section("project_instructions", &text));
     }
-    out.push_str(&tool_section(&offered(base, servers.is_some(), turn.context.supervisor)));
+    out.push_str(&tool_section(&offered_in(base, servers.is_some(), turn.context.supervisor, scope)));
     if !skills.is_empty() {
         out.push_str(&section("skills", &skillset::listing(&skills)));
     }
@@ -1804,7 +1861,7 @@ impl Agent for Native {
             if turn.context.home { Vec::new() } else { self.usable_languages(workspace.root()) };
         let mut messages = Log::new(io, history(turn.history));
         if !messages.first().is_some_and(|m| m["role"] == "system") {
-            let mut prompt = system(turn, &base, &self.mcp);
+            let mut prompt = system_in(turn, &base, &self.mcp, self.scope);
             prompt.push_str(&code_section(&languages));
             if !turn.context.supervisor {
                 prompt.push_str(&model_levels_section(&base, &model));
@@ -1824,8 +1881,12 @@ impl Agent for Native {
         let mut failures = 0usize;
         let mut nudged = false;
         messages.prompt(user_message(turn.prompt, turn.files).await);
-        let tools =
-            tool_list(&base, self.mcp.configured(workspace.root()), turn.context.supervisor);
+        let tools = tool_list(
+            &base,
+            self.mcp.configured(workspace.root()),
+            turn.context.supervisor,
+            self.scope,
+        );
         let mut broken = still_broken(turn.history);
         io.emit(Event::Usage(serving(&model, self.patience.probe).await));
         if !turn.context.home {
@@ -1930,6 +1991,9 @@ impl Agent for Native {
                 };
                 let result = match parsed {
                     Err(e) => Err(e),
+                    Ok(_) if !self.scope.allows(name) => {
+                        Err(format!("{name} is not available in this chat"))
+                    }
                     Ok(args) => tokio::time::timeout(limit, async {
                         let args = self.secrets.fill(&session_key, &args)?;
                         match name {
@@ -3590,6 +3654,60 @@ mod tests {
             high: Level { model: "huge".into(), ..Level::default() },
             ..Model::default()
         }
+    }
+
+    fn scoped_prompt(scope: Scope, dir: &Path) -> String {
+        let mut c = context();
+        c.notes = vec![("style".into(), "plain words".into())];
+        c.global_notes = vec![("rules".into(), "no dashes".into())];
+        let turn = Turn {
+            prompt: "",
+            files: &[],
+            cwd: dir,
+            model: None,
+            effort: None,
+            resume: None,
+            history: &[],
+            context: &c,
+        };
+        let mcp = Mcp::new(agent_core::mcp::Settings { files: Vec::new(), ..mcp_settings() });
+        system_in(&turn, &Model::default(), &mcp, scope)
+    }
+
+    #[test]
+    fn standalone_chats_offer_no_tracker_tools_and_a_brief_without_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let scope = Scope::standalone();
+        let names: Vec<String> =
+            offered_in(&Model::default(), false, false, scope).into_iter().map(|t| t.name).collect();
+        for tracker in ["list_issues", "remember", "recall", "start_session", "autopilot", "wait_for_session"] {
+            assert!(!names.contains(&tracker.to_string()), "{tracker}");
+        }
+        for tool in ["bash", "read_file", "edit_file", "web_fetch", "browser", "ask_user", "todo_write"] {
+            assert!(names.contains(&tool.to_string()), "{tool}");
+        }
+        let prompt = scoped_prompt(scope, dir.path());
+        assert!(!prompt.contains("agentbench REST API is at") && !prompt.contains("Prefer the tracker tools"), "{prompt}");
+        assert!(prompt.contains("not tracked"), "{prompt}");
+        assert!(scoped_prompt(Scope::default(), dir.path()).contains("agentbench REST API is at"));
+    }
+
+    #[test]
+    fn memory_and_skills_are_left_out_of_the_prompt_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join(".agents/skills/zebra");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: zebra\ndescription: stripes\n---\nbody").unwrap();
+        let full = scoped_prompt(Scope::standalone(), dir.path());
+        assert!(full.contains("plain words") && full.contains("no dashes"), "{full}");
+        assert!(full.contains("zebra") && full.contains("load_skill"), "{full}");
+        let bare = Scope { memory: false, skills: false, mcp: false, ..Scope::standalone() };
+        let prompt = scoped_prompt(bare, dir.path());
+        assert!(!prompt.contains("plain words") && !prompt.contains("no dashes"), "{prompt}");
+        assert!(!prompt.contains("<project_notes>") && !prompt.contains("<global_notes>"));
+        assert!(!prompt.contains("zebra") && !prompt.contains("load_skill"), "{prompt}");
+        assert!(!prompt.contains("<user_instructions>"));
+        assert!(!bare.allows("load_skill") && !bare.allows("find_skills") && !bare.allows("mcp"));
     }
 
     #[test]
