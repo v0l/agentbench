@@ -618,8 +618,28 @@ async fn present_as_browser(cdp: &Cdp, target: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn agent_for_version(version_line: &str) -> Option<String> {
+    let major = version_line.split_whitespace().find_map(|w| {
+        let first = w.split('.').next()?;
+        (w.contains('.') && first.chars().all(|c| c.is_ascii_digit()) && !first.is_empty()).then(|| first.to_string())
+    })?;
+    Some(format!(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    ))
+}
+
+async fn normal_agent(chrome: &std::path::Path) -> Option<String> {
+    let out = Command::new(chrome).arg("--version").output().await.ok()?;
+    agent_for_version(&String::from_utf8_lossy(&out.stdout))
+}
+
 async fn start(chrome: &std::path::Path, dir: &std::path::Path) -> Result<Live, String> {
-    let mut child = Command::new(chrome)
+    let agent = normal_agent(chrome).await;
+    let mut command = Command::new(chrome);
+    if let Some(agent) = &agent {
+        command.arg(format!("--user-agent={agent}"));
+    }
+    let mut child = command
         .args([
             "--headless=new",
             "--remote-debugging-port=0",
@@ -2044,6 +2064,15 @@ function later() { setTimeout(() => { document.body.insertAdjacentHTML('beforeen
         .await
         .unwrap();
         assert_eq!(picked, "no");
+    }
+
+    #[test]
+    fn the_launch_agent_is_a_normal_chrome_with_the_installed_major_version() {
+        assert_eq!(
+            agent_for_version("Google Chrome 157.0.8103.38 \n").as_deref(),
+            Some("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36")
+        );
+        assert_eq!(agent_for_version("nothing"), None);
     }
 
     #[test]
