@@ -91,6 +91,7 @@ eframe = { version = "0.37", default-features = false, features = ["android-nati
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.14"
 ndk-sys = { version = "0.6", features = ["media"] }
+ndk = { version = "0.9", default-features = false, features = ["audio", "api-level-28"] }
 jni = "0.22"
 ndk-context = "0.1"
 

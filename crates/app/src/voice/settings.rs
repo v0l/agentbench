@@ -29,6 +29,7 @@ pub struct Settings {
     /// The voice replies are read aloud in, one of the server's voice names (`Hadley`). The
     /// agentbench server speaks them.
     pub reply_voice: String,
+    pub hold_to_talk: bool,
 }
 
 impl Default for Settings {
@@ -45,6 +46,7 @@ impl Default for Settings {
             key: String::new(),
             server_model: String::new(),
             reply_voice: agent_voice::voice::DEFAULT_SPOKEN_VOICE.into(),
+            hold_to_talk: cfg!(target_os = "android"),
         }
     }
 }
@@ -70,6 +72,9 @@ impl Settings {
         // and reads with any of them. This device's Whisper falls back to the default instead.
         if let Some(m) = st.get_string("voice_model").filter(|m| !m.trim().is_empty()) {
             s.model = m;
+        }
+        if let Some(h) = st.get_string("voice_hold") {
+            s.hold_to_talk = h == "1";
         }
         s.url = st.get_string("voice_url").unwrap_or_default();
         s.key = st.get_string("voice_key").unwrap_or_default();
@@ -98,6 +103,7 @@ impl Settings {
         st.set_string("voice_key", self.key.clone());
         st.set_string("voice_server_model", self.server_model.clone());
         st.set_string("voice_reply", self.reply_voice.clone());
+        st.set_string("voice_hold", if self.hold_to_talk { "1" } else { "0" }.into());
     }
 
     /// What is missing before speech can be read, or `None` when it can.
@@ -180,6 +186,16 @@ mod tests {
         let back = Settings::load(Some(&m));
         assert_eq!(back.model, "parakeet-tdt-0.6b");
         assert_eq!(back.reply_voice, "Alfie");
+    }
+
+    #[test]
+    fn hold_to_talk_defaults_to_android_only_and_is_kept() {
+        assert_eq!(Settings::default().hold_to_talk, cfg!(target_os = "android"));
+        let mut m = Mem::default();
+        let flipped =
+            Settings { hold_to_talk: !Settings::default().hold_to_talk, ..Default::default() };
+        flipped.save(&mut m);
+        assert_eq!(Settings::load(Some(&m)).hold_to_talk, flipped.hold_to_talk);
     }
 
     #[test]

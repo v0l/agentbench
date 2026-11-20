@@ -33,7 +33,7 @@ enum State {
 
 /// An open microphone and what it has heard so far.
 struct Take {
-    _stream: cpal::Stream,
+    _stream: Box<dyn std::any::Any>,
     heard: Arc<Mutex<Vec<f32>>>,
     peak: Arc<AtomicU32>,
     rate: u32,
@@ -62,6 +62,7 @@ pub struct Voice {
     pub status: String,
     /// Which take is current, so a late partial from an earlier one is dropped.
     take_id: u64,
+    shown: Option<(f32, f32)>,
 }
 
 impl Default for Voice {
@@ -74,13 +75,23 @@ impl Default for Voice {
             loaded: Default::default(),
             status: String::new(),
             take_id: 0,
+            shown: None,
         }
     }
 }
 
 impl Voice {
     pub fn listening(&self) -> bool {
-        matches!(self.state, State::Listening(_))
+        self.shown.is_some() || matches!(self.state, State::Listening(_))
+    }
+
+    #[doc(hidden)]
+    pub fn show_recording(&mut self, seconds: f32, level: f32) {
+        self.shown = Some((seconds, level));
+    }
+
+    pub fn staged(&self) -> bool {
+        self.shown.is_some()
     }
 
     pub fn reading(&self) -> bool {
@@ -93,6 +104,9 @@ impl Voice {
 
     /// Seconds since the microphone opened.
     pub fn seconds(&self) -> f32 {
+        if let Some((s, _)) = self.shown {
+            return s;
+        }
         match &self.state {
             State::Listening(t) => t.since.elapsed().as_secs_f32(),
             _ => 0.0,
@@ -101,6 +115,9 @@ impl Voice {
 
     /// Loudest recent sample, 0 to 1, for a meter. Reading it resets it.
     pub fn level(&self) -> f32 {
+        if let Some((_, l)) = self.shown {
+            return l;
+        }
         match &self.state {
             State::Listening(t) => f32::from_bits(t.peak.swap(0, Ordering::Relaxed)),
             _ => 0.0,
@@ -109,6 +126,9 @@ impl Voice {
 
     /// What the microphone is, once it is open.
     pub fn device(&self) -> &str {
+        if self.shown.is_some() {
+            return "test microphone";
+        }
         match &self.state {
             State::Listening(t) => &t.device,
             _ => "",
@@ -146,6 +166,7 @@ impl Voice {
             (take.endpoint.feed(&heard), heard.len())
         };
         match heard {
+            Heard::Done | Heard::GaveUp if settings.hold_to_talk => {}
             Heard::Done => self.finish(settings, wake),
             Heard::GaveUp => {
                 self.state = State::Idle;
@@ -318,6 +339,34 @@ fn models_dir() -> std::path::PathBuf {
 
 /// Open the default microphone and start collecting mono samples.
 fn open() -> Result<Take, String> {
+    #[cfg(target_os = "android")]
+    {
+        let heard = Arc::new(Mutex::new(Vec::with_capacity(RATE as usize * 10)));
+        let peak = Arc::new(AtomicU32::new(0));
+        let stream = super::android::open_voice_stream(
+            RATE as usize * MAX_SECONDS,
+            heard.clone(),
+            peak.clone(),
+        )?;
+        let rate = stream.rate;
+        Ok(Take {
+            _stream: Box::new(stream),
+            heard,
+            peak,
+            rate,
+            device: "microphone (voice recognition)".into(),
+            since: Instant::now(),
+            endpoint: Endpoint::new(rate),
+            partial_at: 0,
+            partial_busy: Arc::new(AtomicBool::new(false)),
+        })
+    }
+    #[cfg(not(target_os = "android"))]
+    open_cpal()
+}
+
+#[cfg_attr(target_os = "android", allow(dead_code))]
+fn open_cpal() -> Result<Take, String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -353,7 +402,7 @@ fn open() -> Result<Take, String> {
     .map_err(|e| format!("{name}: {e}"))?;
     stream.play().map_err(|e| format!("{name}: {e}"))?;
     Ok(Take {
-        _stream: stream,
+        _stream: Box::new(stream),
         heard,
         peak,
         rate,
@@ -370,7 +419,7 @@ fn tracing_free_warn(e: &str) {
 }
 
 /// One callback's worth of samples, mixed to mono and appended until the take is as long as allowed.
-fn push<T: cpal::SizedSample>(
+pub(super) fn push<T: cpal::SizedSample>(
     data: &[T],
     channels: usize,
     limit: usize,

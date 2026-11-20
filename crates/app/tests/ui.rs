@@ -1882,6 +1882,72 @@ fn escape_stops_the_agent_working_in_the_open_chat() {
     }
 }
 
+fn hold_harness(size: [f32; 2], url: String) -> Harness<'static, App> {
+    let _build = build_lock();
+    Harness::builder().with_size(size).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
+        let mut storage = Mem::default();
+        storage.0.insert("url".into(), url);
+        storage.0.insert("token".into(), TOKEN.into());
+        storage.0.insert("voice_hold".into(), "1".into());
+        App::new(&cc.egui_ctx, Some(&storage), None)
+    })
+}
+
+#[test]
+fn hold_to_talk_is_a_speech_setting_at_both_sizes() {
+    let rig = rig();
+    for (tag, size) in [("desktop", [1280.0, 800.0]), ("phone", [412.0, 900.0])] {
+        let mut h = hold_harness(size, rig.url.clone());
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_settings_page("speech");
+        h.run_steps(2);
+        until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
+        h.run_steps(4);
+        shot(&mut h, &format!("hold-settings-{tag}"));
+        h.get_by_label("hold to talk");
+    }
+}
+
+#[test]
+fn a_short_tap_on_the_speak_key_says_hold_to_talk_at_both_sizes() {
+    let rig = rig();
+    for (tag, size) in [("desktop", [1280.0, 800.0]), ("phone", [412.0, 900.0])] {
+        let mut h = hold_harness(size, rig.url.clone());
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        open_home_row(&mut h);
+        h.run_steps(3);
+        assert!(h.query_by_label("Hold to talk").is_none());
+        let now = h.ctx.input(|i| i.time);
+        h.state_mut().short_tap_on_speak(now);
+        h.run_steps(3);
+        h.get_by_label("Hold to talk");
+        shot(&mut h, &format!("hold-hint-{tag}"));
+        h.state_mut().blank_chat_in_home();
+        h.run_steps(3);
+    }
+}
+
+#[test]
+fn the_recording_key_shows_time_meter_and_cancel_at_both_sizes() {
+    let rig = rig();
+    for (tag, size) in [("desktop", [1280.0, 800.0]), ("phone", [412.0, 900.0])] {
+        let mut h = hold_harness(size, rig.url.clone());
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        open_home_row(&mut h);
+        h.run_steps(3);
+        h.state_mut().recording_held(7.0, 0.3, false);
+        h.run_steps(3);
+        let key = h.get_by_label("speak");
+        assert!(key.rect().right() <= size[0] && key.rect().bottom() <= size[1]);
+        shot(&mut h, &format!("hold-recording-{tag}"));
+        h.state_mut().recording_held(7.0, 0.3, true);
+        h.run_steps(3);
+        let key = h.get_by_label("speak");
+        assert!(key.rect().right() <= size[0] && key.rect().bottom() <= size[1]);
+        shot(&mut h, &format!("hold-cancel-{tag}"));
+    }
+}
+
 #[test]
 fn the_speak_key_sits_in_the_composer_and_says_what_is_missing() {
     let rig = rig();

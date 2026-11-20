@@ -829,6 +829,21 @@ pub(super) fn speech_section(
                 });
             }
         }
+        row_help(
+            ui,
+            "hold to talk",
+            "Hold the speak button while you talk and let go to send. Slide off the button to cancel. Off: tap to start, and it stops when you go quiet.",
+            |ui| {
+                let on = sp.hold_to_talk;
+                let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
+                t.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "hold to talk")
+                });
+                if t.clicked() {
+                    sp.hold_to_talk = !on;
+                }
+            },
+        );
         if let Some(p) = sp.problem() {
             status(ui, false, p);
         }

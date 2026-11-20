@@ -775,6 +775,8 @@ pub struct App {
     icon_tx: std::sync::mpsc::Sender<(Id, Option<egui::ColorImage>)>,
     icon_rx: std::sync::mpsc::Receiver<(Id, Option<egui::ColorImage>)>,
     voice: crate::voice::Voice,
+    hold: crate::voice::Hold,
+    hint: Option<(f64, &'static str)>,
     speech: crate::voice::Settings,
     /// Reading a reply aloud, and the message being read.
     reader: crate::voice::Reader,
@@ -984,6 +986,8 @@ impl App {
             icon_tx: icon_channel.0,
             icon_rx: icon_channel.1,
             voice: Default::default(),
+            hold: Default::default(),
+            hint: None,
             reader: Default::default(),
             reading: None,
             speech: crate::voice::Settings::load(storage),
@@ -1481,6 +1485,47 @@ impl App {
             }
         }
         self.speaking_in = None;
+    }
+
+    fn release_hold(&mut self, now: f64, wake: impl Fn() + Send + Sync + 'static) {
+        use crate::voice::Release;
+        let seconds = self.voice.seconds();
+        match self.hold.release(seconds) {
+            Release::Finish => self.voice.finish(&self.speech_now(), wake),
+            Release::Cancel => {
+                self.voice.cancel();
+                self.drop_speech();
+            }
+            Release::TooShort => {
+                self.voice.cancel();
+                self.drop_speech();
+                self.hint = Some((now + 2.0, "Hold to talk"));
+            }
+            Release::Nothing => {}
+        }
+    }
+
+    fn hold_hint(&mut self, now: f64) -> Option<&'static str> {
+        match self.hint {
+            Some((until, text)) if now < until => Some(text),
+            _ => {
+                self.hint = None;
+                None
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn recording_held(&mut self, seconds: f32, level: f32, off_button: bool) {
+        self.voice.show_recording(seconds, level);
+        self.hold.press();
+        self.hold.drag(!off_button);
+    }
+
+    #[doc(hidden)]
+    pub fn short_tap_on_speak(&mut self, now: f64) {
+        self.hold.press();
+        self.release_hold(now, || {});
     }
 
     /// Whether `speak` is under way, for tests.

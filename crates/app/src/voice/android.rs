@@ -79,6 +79,40 @@ pub fn ask(permission: &'static str) -> Result<(), String> {
     })
 }
 
+pub struct VoiceStream {
+    _stream: ndk::audio::AudioStream,
+    pub rate: u32,
+}
+
+pub fn open_voice_stream(
+    limit: usize,
+    heard: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+    peak: std::sync::Arc<std::sync::atomic::AtomicU32>,
+) -> Result<VoiceStream, String> {
+    use ndk::audio::{
+        AudioCallbackResult, AudioDirection, AudioFormat, AudioInputPreset, AudioStreamBuilder,
+    };
+    let stream = AudioStreamBuilder::new()
+        .map_err(|e| e.to_string())?
+        .direction(AudioDirection::Input)
+        .format(AudioFormat::PCM_Float)
+        .channel_count(1)
+        .sample_rate(super::RATE as i32)
+        .input_preset(AudioInputPreset::VoiceRecognition)
+        .data_callback(Box::new(move |_, data, frames| {
+            let samples =
+                unsafe { std::slice::from_raw_parts(data as *const f32, frames as usize) };
+            super::native::push(samples, 1, limit, &heard, &peak);
+            AudioCallbackResult::Continue
+        }))
+        .error_callback(Box::new(|_, e| eprintln!("agentbench: microphone stream error: {e}")))
+        .open_stream()
+        .map_err(|e| format!("microphone: {e}"))?;
+    stream.request_start().map_err(|e| format!("microphone: {e}"))?;
+    let rate = stream.sample_rate().max(1) as u32;
+    Ok(VoiceStream { _stream: stream, rate })
+}
+
 pub fn open_file_picker() -> Result<(), String> {
     with_activity(|env, activity| {
         env.call_method(activity, jni_str!("pickFiles"), jni_sig!("()V"), &[])?;

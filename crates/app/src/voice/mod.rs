@@ -74,15 +74,57 @@ pub enum Heard {
     GaveUp,
 }
 
+const RECENT_BLOCKS: usize = 500;
+
+const MIN_BAND: f32 = 0.004;
+
+struct Band {
+    hp: f32,
+    lp: f32,
+    hp_prev_in: f32,
+    hp_out: f32,
+    lp1: f32,
+    lp2: f32,
+}
+
+impl Band {
+    fn new(rate: u32) -> Self {
+        let pole = |hz: f32| (-std::f32::consts::TAU * hz / rate as f32).exp();
+        Band {
+            hp: pole(300.0),
+            lp: 1.0 - pole(3400.0),
+            hp_prev_in: 0.0,
+            hp_out: 0.0,
+            lp1: 0.0,
+            lp2: 0.0,
+        }
+    }
+
+    fn rms(&mut self, chunk: &[f32]) -> f32 {
+        let mut sum = 0.0;
+        for &x in chunk {
+            self.hp_out = self.hp * (self.hp_out + x - self.hp_prev_in);
+            self.hp_prev_in = x;
+            self.lp1 += self.lp * (self.hp_out - self.lp1);
+            self.lp2 += self.lp * (self.lp1 - self.lp2);
+            sum += self.lp2 * self.lp2;
+        }
+        (sum / chunk.len().max(1) as f32).sqrt()
+    }
+}
+
 /// Decides from the samples of a take when the speaker has finished.
 ///
-/// A block of 20 ms is speech when its RMS is well over the quietest block of the last three
-/// seconds, so a fan or a noisy microphone raises the bar instead of keeping the take open for
-/// ever. Three speech blocks in a row count as speaking, which a click does not manage.
+/// Only the 300 to 3400 Hz band counts. A block of 20 ms is speech when its band level is well
+/// over the 20th percentile of the last ten seconds, which follows a changing room with no fixed
+/// cap, and once speech has been heard, over a share of how loud that speech was, so noise that
+/// comes and goes cannot pass for it. Three speech blocks in a row count as speaking, which a
+/// click does not manage.
 pub struct Endpoint {
     rate: u32,
     scanned: usize,
     recent: std::collections::VecDeque<f32>,
+    band: Band,
     run: u32,
     spoke: bool,
     quiet: f32,
@@ -91,10 +133,12 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn new(rate: u32) -> Self {
+        let rate = rate.max(1);
         Endpoint {
-            rate: rate.max(1),
+            rate,
             scanned: 0,
             recent: Default::default(),
+            band: Band::new(rate),
             run: 0,
             spoke: false,
             quiet: 0.0,
@@ -119,13 +163,18 @@ impl Endpoint {
         while self.scanned + block <= pcm.len() {
             let chunk = &pcm[self.scanned..self.scanned + block];
             self.scanned += block;
-            let rms = (chunk.iter().map(|v| v * v).sum::<f32>() / block as f32).sqrt();
-            if self.recent.len() == 150 {
+            let rms = self.band.rms(chunk);
+            if self.recent.len() == RECENT_BLOCKS {
                 self.recent.pop_front();
             }
             self.recent.push_back(rms);
-            let floor = self.recent.iter().copied().fold(f32::INFINITY, f32::min);
-            let loud = rms > (floor * 3.0).clamp(0.01, 0.08);
+            let mut sorted: Vec<f32> = self.recent.iter().copied().collect();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let at = |p: f32| sorted[((sorted.len() - 1) as f32 * p) as usize];
+            let floor = (at(0.2) * 3.0).max(MIN_BAND);
+            let voice = if self.spoke { at(0.95) * 0.35 } else { 0.0 };
+            let bar = floor.max(voice) * if self.spoke && self.run > 0 { 0.8 } else { 1.0 };
+            let loud = rms > bar;
             self.listened += step;
             if loud {
                 self.run += 1;
@@ -146,6 +195,54 @@ impl Endpoint {
             (false, _) => Heard::Waiting,
             (true, false) => Heard::Speaking,
             (true, true) => Heard::Pause,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Release {
+    Nothing,
+    Finish,
+    Cancel,
+    TooShort,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Hold {
+    held: bool,
+    off: bool,
+}
+
+impl Hold {
+    pub fn held(&self) -> bool {
+        self.held
+    }
+
+    pub fn off_button(&self) -> bool {
+        self.held && self.off
+    }
+
+    pub fn press(&mut self) {
+        self.held = true;
+        self.off = false;
+    }
+
+    pub fn drag(&mut self, over_button: bool) {
+        if self.held {
+            self.off = !over_button;
+        }
+    }
+
+    pub fn release(&mut self, seconds: f32) -> Release {
+        if !std::mem::take(&mut self.held) {
+            return Release::Nothing;
+        }
+        if std::mem::take(&mut self.off) {
+            Release::Cancel
+        } else if seconds < MIN_SECONDS {
+            Release::TooShort
+        } else {
+            Release::Finish
         }
     }
 }
@@ -219,6 +316,163 @@ mod tests {
         let take = tone(4.0, 0.02);
         let mut e = Endpoint::new(RATE);
         assert_eq!(e.feed(&take), Heard::Waiting);
+    }
+
+    struct Noise(u64);
+
+    impl Noise {
+        fn next(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            ((self.0 >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+        }
+    }
+
+    fn rms(pcm: &[f32]) -> f32 {
+        (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len().max(1) as f32).sqrt()
+    }
+
+    fn scaled(mut pcm: Vec<f32>, target: f32) -> Vec<f32> {
+        let gain = target / rms(&pcm).max(1e-6);
+        pcm.iter_mut().for_each(|v| *v *= gain);
+        pcm
+    }
+
+    fn lowpass(pcm: &mut [f32], alpha: f32) {
+        let mut y = 0.0;
+        for v in pcm.iter_mut() {
+            y += alpha * (*v - y);
+            *v = y;
+        }
+    }
+
+    fn fan(n: usize, seed: u64) -> Vec<f32> {
+        let mut r = Noise(seed);
+        let mut v: Vec<f32> = (0..n).map(|_| r.next()).collect();
+        lowpass(&mut v, 0.3);
+        for (i, s) in v.iter_mut().enumerate() {
+            let t = i as f32 / RATE as f32;
+            *s = *s * 0.5 + (t * 120.0 * std::f32::consts::TAU).sin() * 0.5;
+        }
+        scaled(v, 0.1)
+    }
+
+    fn babble(n: usize, seed: u64) -> Vec<f32> {
+        let mut out = vec![0.0f32; n];
+        for talker in 0..5u64 {
+            let mut r = Noise(seed + talker * 7919);
+            let mut v: Vec<f32> = (0..n).map(|_| r.next()).collect();
+            lowpass(&mut v, 0.35);
+            let (rate, phase) = (2.5 + talker as f32 * 0.7, talker as f32 * 1.3);
+            for (i, s) in v.iter().enumerate() {
+                let t = i as f32 / RATE as f32;
+                let env = ((t * rate * std::f32::consts::TAU + phase).sin() * 0.5 + 0.5).powi(2);
+                out[i] += s * env;
+            }
+        }
+        scaled(out, 0.06)
+    }
+
+    fn street(n: usize, seed: u64) -> Vec<f32> {
+        let mut r = Noise(seed);
+        let mut v: Vec<f32> = (0..n).map(|_| r.next()).collect();
+        lowpass(&mut v, 0.04);
+        let mut v = scaled(v, 0.1);
+        let mut pass: Vec<f32> = (0..n).map(|_| r.next()).collect();
+        lowpass(&mut pass, 0.2);
+        for (i, s) in pass.iter().enumerate() {
+            let t = i as f32 / RATE as f32;
+            let car = (-((t % 2.7) - 1.0).powi(2) * 3.0).exp();
+            v[i] += s * car * 0.35;
+        }
+        v
+    }
+
+    fn spoken_clip() -> Vec<f32> {
+        let bytes = include_bytes!("../../tests/fixtures/voice/speech.wav");
+        let (pcm, rate) = read_wav(bytes).unwrap();
+        let pcm = to_whisper_rate(&pcm, rate);
+        let end = pcm.iter().rposition(|v| v.abs() > 0.02).unwrap_or(pcm.len());
+        let start = pcm.iter().position(|v| v.abs() > 0.02).unwrap_or(0);
+        scaled(pcm[start..end].to_vec(), 0.1)
+    }
+
+    fn done_after_speech(background: fn(usize, u64) -> Vec<f32>) -> Option<f32> {
+        let speech = spoken_clip();
+        let lead = RATE as usize / 2;
+        let speech_end = lead + speech.len();
+        let total = speech_end + RATE as usize * 6;
+        let noise = background(total, 12345);
+        let mut take = noise.clone();
+        for (i, s) in speech.iter().enumerate() {
+            take[lead + i] += s;
+        }
+        let mut e = Endpoint::new(RATE);
+        let step = RATE as usize / 10;
+        let mut at = step;
+        while at <= take.len() {
+            match e.feed(&take[..at]) {
+                Heard::Done => return Some((at as f32 - speech_end as f32) / RATE as f32),
+                Heard::GaveUp => return None,
+                _ => {}
+            }
+            at += step;
+        }
+        None
+    }
+
+    #[test]
+    fn a_fan_does_not_hold_the_take_open() {
+        let after = done_after_speech(fan).expect("the take never ended");
+        assert!(after < 3.5, "ended {after}s after the speech");
+    }
+
+    #[test]
+    fn babble_does_not_hold_the_take_open() {
+        let after = done_after_speech(babble).expect("the take never ended");
+        assert!(after < 3.5, "ended {after}s after the speech");
+    }
+
+    #[test]
+    fn street_noise_does_not_hold_the_take_open() {
+        let after = done_after_speech(street).expect("the take never ended");
+        assert!(after < 3.5, "ended {after}s after the speech");
+    }
+
+    #[test]
+    fn press_hold_and_release_gives_one_take() {
+        let mut h = Hold::default();
+        h.press();
+        h.drag(true);
+        assert!(h.held() && !h.off_button());
+        assert_eq!(h.release(2.0), Release::Finish);
+        assert_eq!(h.release(2.0), Release::Nothing);
+    }
+
+    #[test]
+    fn a_short_tap_gives_no_take() {
+        let mut h = Hold::default();
+        h.press();
+        assert_eq!(h.release(MIN_SECONDS - 0.1), Release::TooShort);
+    }
+
+    #[test]
+    fn sliding_off_and_releasing_cancels() {
+        let mut h = Hold::default();
+        h.press();
+        h.drag(false);
+        assert!(h.off_button());
+        assert_eq!(h.release(3.0), Release::Cancel);
+    }
+
+    #[test]
+    fn sliding_back_on_keeps_the_take() {
+        let mut h = Hold::default();
+        h.press();
+        h.drag(false);
+        h.drag(true);
+        assert_eq!(h.release(3.0), Release::Finish);
     }
 
     #[test]
