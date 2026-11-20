@@ -48,7 +48,7 @@ fn count_chips(ui: &mut Ui, counts: &[usize; 5], skip_done: bool) {
 
 fn clickable(ui: &mut Ui, id: impl std::fmt::Debug + std::hash::Hash, body: impl FnOnce(&mut Ui)) -> egui::Response {
     let inner = ui.scope(body).response;
-    let r = ui.interact(inner.rect, ui.id().with(id), Sense::click());
+    let r = ui.interact(inner.rect, ui.scope_id().with(id), Sense::click());
     if r.hovered() {
         ui.painter().rect_stroke(inner.rect.expand(2.0), 3.0, Stroke::new(1.0, ETCH), egui::StrokeKind::Outside);
     }
@@ -207,7 +207,7 @@ impl App {
                 });
             });
             r.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("open project {}", row.project.name))
+                egui::WidgetInfo::labeled(egui::Role::Button, true, format!("open project {}", row.project.name))
             });
             if r.clicked() {
                 open = Some(row.project.id);
@@ -276,7 +276,8 @@ impl App {
                         };
                         ui.horizontal_wrapped(|ui| {
                             chip(ui, g.status.as_str(), tint, g.status == GoalStatus::Active);
-                            Line::new().value(&g.id).tint(LEGEND).size(11.0).elided(ui);
+                            let id = Line::new().value(&g.id).tint(LEGEND).size(11.0).elided(ui);
+                            id.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("goal {}", g.id)));
                         });
                         note(ui, &g.text, VALUE);
                         count_chips(ui, &goal_counts(&o.issues, id, &g.id), false);
@@ -316,7 +317,7 @@ impl App {
                     let issue = s.issue_id.map(|i| format!("  issue #{}", crate::hub::untag(i))).unwrap_or_default();
                     Line::new().note(format!("{model}  {branch}{issue}  {}", ago(s.updated_at))).size(10.5).wrapped(ui);
                 });
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("open chat {}", s.title)));
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("open chat {}", s.title)));
                 if r.clicked() {
                     open_chat = Some((s.id, s.project_id));
                 }
@@ -340,7 +341,7 @@ impl App {
             for i in top.iter().take(6) {
                 let r = clickable(ui, ("project-issue", i.id), |ui| {
                     Line::new()
-                        .value(format!("{}", i.state.as_str()))
+                        .value(i.state.as_str())
                         .tint(state_tint(i.state))
                         .size(10.5)
                         .gap(8.0)

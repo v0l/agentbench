@@ -900,7 +900,7 @@ fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
     h.run_steps(3);
     assert!(h.query_by_label("add project").is_none(), "no side panel on a phone");
     shot(&mut h, "phone");
-    h.state_mut().set_tab_projects();
+    h.get_by_label("projects").click();
     h.run_steps(3);
     h.get_by_label("add project");
     shot(&mut h, "phone-drawer");
@@ -911,7 +911,7 @@ fn on_a_phone_the_project_list_is_a_drawer_behind_a_hamburger() {
     assert!(!h.state().drawer_open(), "tapping outside closes it");
     assert!(h.query_by_label("add project").is_none());
     // Picking a chat closes it too, and opens the chat.
-    h.state_mut().set_tab_projects();
+    h.get_by_label("projects").click();
     h.run_steps(3);
     h.get_by_label("chat say hello").click();
     h.run_steps(3);
@@ -941,7 +941,7 @@ fn on_a_phone_the_open_drawer_is_fully_on_screen() {
         h.state().overview().and_then(|o| o.usage.as_ref()).is_some_and(|u| !u.quotas.is_empty())
     });
     h.run_steps(3);
-    h.state_mut().set_tab_projects();
+    h.get_by_label("projects").click();
     h.run_steps(5);
     assert!(h.state().drawer_open());
     shot(&mut h, "phone-drawer-fit");
@@ -987,7 +987,7 @@ fn on_a_phone_the_drawer_holds_real_long_chips_and_titles() {
             h.state().overview().and_then(|o| o.usage.as_ref()).is_some_and(|u| u.quotas.len() >= 2)
         });
         h.run_steps(3);
-        h.state_mut().set_tab_projects();
+        h.get_by_label("projects").click();
         h.run_steps(5);
         assert!(h.state().drawer_open());
         shot(&mut h, &format!("phone-drawer-real-{}x{}-{scale}-{ppp}", size[0], size[1]));
@@ -4241,7 +4241,7 @@ fn the_projects_list_filters_and_sorts() {
 #[test]
 fn clicking_a_project_opens_its_view_with_goals_agents_and_notes() {
     let (rig, id) = project_rig();
-    let mut h = harness(rig.url.clone());
+    let mut h = harness_at(rig.url.clone(), [1280.0, 1400.0]);
     open_projects(&mut h);
     h.get_by_label("open project demo").click();
     h.run_steps(3);
@@ -4250,6 +4250,7 @@ fn clicking_a_project_opens_its_view_with_goals_agents_and_notes() {
     shot(&mut h, "project-view");
     h.get_by_label("A bench for coding agents");
     h.get_by_label("Make the board fast");
+    h.get_by_label("goal g-fast");
     h.get_by_label("open chat say hello");
     h.get_by_label("A hosted service");
     h.get_by_label("TESTS").click();
@@ -4295,4 +4296,34 @@ fn sideways(h: &Harness<'_, App>, size: [f32; 2]) -> Vec<String> {
         .filter(|n| n.rect().left() < -0.5 || n.rect().right() > size[0] + 0.5)
         .map(|n| format!("{:?} {:?} {:?}", n.accesskit_node().role(), n.accesskit_node().label(), n.rect()))
         .collect()
+}
+
+#[test]
+fn the_whole_project_view_renders_tall() {
+    for size in [[1280.0, 2000.0], [412.0, 2400.0], [390.0, 2400.0]] {
+        let (rig, id) = project_rig();
+        for n in 0..2 {
+            rig.store
+                .add_issue(&NewIssue {
+                    project_id: id,
+                    title: format!("Shipped change {n}"),
+                    state: Some(agentbench_core::IssueState::Done),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let mut h = harness_at(rig.url.clone(), size);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_project_view(id);
+        until(&mut h, "the notes", |h| h.state().project_notes_len(id) == 1);
+        shot(&mut h, &format!("project-tall-{}", size[0] as u32));
+        h.get_by_label("TESTS").click();
+        h.run_steps(2);
+        h.get_by_label("run cargo test");
+        shot(&mut h, &format!("project-tall-open-{}", size[0] as u32));
+        if size[0] < 700.0 {
+            let bad = sideways(&h, size);
+            assert!(bad.is_empty(), "tall view at {size:?}: {bad:?}");
+        }
+    }
 }
