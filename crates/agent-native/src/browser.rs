@@ -21,6 +21,9 @@ const OUTPUT_CHARS: usize = 12_000;
 const EVAL_CHARS: usize = 8_000;
 const IDLE: Duration = Duration::from_secs(20 * 60);
 const REPLY_WAIT: Duration = Duration::from_secs(30);
+const DIRECT_SESSION: &str = "\u{0}direct";
+const DIRECT_LIMIT: Duration = Duration::from_secs(60);
+const CHALLENGE_WAIT: Duration = Duration::from_secs(15);
 const LAUNCH_WAIT: Duration = Duration::from_secs(20);
 const ROW_SLACK: f64 = 9.0;
 const PARAGRAPH_GAP: f64 = 36.0;
@@ -576,6 +579,8 @@ const ACCEPT_LANGUAGE: &str = "en-IE,en-GB;q=0.9,en;q=0.8";
 const HUMAN_SURFACE: &str = r#"
 (() => {
   Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => false, configurable: true });
+  Object.defineProperty(Screen.prototype, 'availHeight', { get: () => Math.max(screen.height - 40, 0), configurable: true });
+  Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 8, configurable: true });
   Object.defineProperty(Navigator.prototype, 'languages', { get: () => ['en-IE', 'en-GB', 'en'], configurable: true });
   if (!navigator.plugins.length) {
     const names = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer', 'Microsoft Edge PDF Viewer', 'WebKit built-in PDF'];
@@ -603,10 +608,34 @@ const HUMAN_SURFACE: &str = r#"
 async fn present_as_browser(cdp: &Cdp, target: &str) -> Result<(), String> {
     let version = cdp.call(None, "Browser.getVersion", json!({})).await?;
     let agent = browser_identity(version["userAgent"].as_str().unwrap_or_default());
+    let major = agent.split("Chrome/").nth(1).and_then(|v| v.split('.').next()).unwrap_or("130").to_string();
     cdp.call(
         Some(target),
         "Network.setUserAgentOverride",
-        json!({ "userAgent": agent, "acceptLanguage": ACCEPT_LANGUAGE }),
+        json!({
+            "userAgent": agent,
+            "acceptLanguage": ACCEPT_LANGUAGE,
+            "platform": "Linux x86_64",
+            "userAgentMetadata": {
+                "brands": [
+                    { "brand": "Not.A/Brand", "version": "8" },
+                    { "brand": "Chromium", "version": major },
+                    { "brand": "Google Chrome", "version": major },
+                ],
+                "fullVersionList": [
+                    { "brand": "Not.A/Brand", "version": "8.0.0.0" },
+                    { "brand": "Chromium", "version": format!("{major}.0.0.0") },
+                    { "brand": "Google Chrome", "version": format!("{major}.0.0.0") },
+                ],
+                "platform": "Linux",
+                "platformVersion": "6.8.0",
+                "architecture": "x86",
+                "model": "",
+                "mobile": false,
+                "bitness": "64",
+                "wow64": false,
+            },
+        }),
     )
     .await?;
     cdp.call(
@@ -682,7 +711,7 @@ async fn start(chrome: &std::path::Path, dir: &std::path::Path) -> Result<Live, 
     cdp.call(
         Some(&target),
         "Emulation.setDeviceMetricsOverride",
-        json!({ "width": WIDTH, "height": HEIGHT, "deviceScaleFactor": 1, "mobile": false }),
+        json!({ "width": WIDTH, "height": HEIGHT, "deviceScaleFactor": 1, "mobile": false, "screenWidth": 1920, "screenHeight": 1080 }),
     )
     .await?;
     present_as_browser(&cdp, &target).await?;
@@ -698,7 +727,43 @@ async fn start(chrome: &std::path::Path, dir: &std::path::Path) -> Result<Live, 
     })
 }
 
+pub fn looks_like_challenge(title: &str, body: &str) -> bool {
+    let title = title.to_ascii_lowercase();
+    let head: String = body.chars().take(600).collect::<String>().to_ascii_lowercase();
+    ["just a moment", "attention required", "verifying", "checking your browser", "one more step"]
+        .iter()
+        .any(|m| title.contains(m) || (head.len() < 600 && head.contains(m)))
+}
+
 impl Live {
+    async fn page_html(&self, url: &str) -> Result<String, String> {
+        self.goto(url).await?;
+        let deadline = Instant::now() + CHALLENGE_WAIT;
+        loop {
+            let seen = self
+                .eval("document.title + '\\u0001' + (document.body ? document.body.innerText.slice(0, 600) : '')")
+                .await?;
+            let seen = seen.as_str().unwrap_or_default();
+            let (title, body) = seen.split_once('\u{1}').unwrap_or((seen, ""));
+            if !looks_like_challenge(title, body) || Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let html = self.eval("document.documentElement.outerHTML").await?;
+        Ok(html.as_str().unwrap_or_default().to_string())
+    }
+
+    async fn raw_body(&self, url: &url::Url) -> Result<String, String> {
+        let origin = url.origin().ascii_serialization();
+        self.page_html(&origin).await?;
+        let wanted = serde_json::to_string(url.as_str()).map_err(|e| e.to_string())?;
+        let body = self
+            .eval(&format!("fetch({wanted}, {{ credentials: 'include' }}).then(r => r.text())"))
+            .await?;
+        Ok(body.as_str().unwrap_or_default().to_string())
+    }
+
     async fn reopen(&mut self) -> Result<(), String> {
         let tabs = self.cdp.call(None, "Target.getTargets", json!({})).await?;
         let alive = tabs["targetInfos"]
@@ -721,7 +786,7 @@ impl Live {
         if self.dir.is_some() {
             self.send(
                 "Emulation.setDeviceMetricsOverride",
-                json!({ "width": WIDTH, "height": HEIGHT, "deviceScaleFactor": 1, "mobile": false }),
+                json!({ "width": WIDTH, "height": HEIGHT, "deviceScaleFactor": 1, "mobile": false, "screenWidth": 1920, "screenHeight": 1080 }),
             )
             .await?;
             present_as_browser(&self.cdp, &self.target).await?;
@@ -1325,6 +1390,44 @@ impl Browsers {
                     .map_or(true, |l| l.as_ref().is_some_and(|l| l.used.elapsed() < IDLE))
         });
         all.entry(session.to_string()).or_default().clone()
+    }
+
+    pub async fn page_html(&self, url: &str) -> Result<String, String> {
+        self.direct(url, false).await
+    }
+
+    pub async fn raw_body(&self, url: &str) -> Result<String, String> {
+        self.direct(url, true).await
+    }
+
+    async fn direct(&self, url: &str, raw: bool) -> Result<String, String> {
+        let parsed = url::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("only http and https addresses can be fetched".into());
+        }
+        let slot = self.slot(DIRECT_SESSION);
+        let mut guard = slot.lock().await;
+        if guard.as_ref().is_some_and(|l| l.cdp.closed.load(Ordering::SeqCst)) {
+            *guard = None;
+        }
+        let done = tokio::time::timeout(DIRECT_LIMIT, async {
+            if guard.is_none() {
+                *guard = Some(start_own().await?);
+            }
+            let live = guard.as_mut().ok_or("no browser")?;
+            live.used = Instant::now();
+            if raw {
+                live.raw_body(&parsed).await
+            } else {
+                live.page_html(url).await
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err("the browser took too long".to_string()));
+        if done.is_err() {
+            *guard = None;
+        }
+        done
     }
 
     pub async fn act(
