@@ -265,10 +265,12 @@ impl App {
                 }
             }
         } else {
-            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            if let Some(p) = ui.input(|i| i.pointer.interact_pos())
+                && !self.voice.staged()
+            {
                 self.hold.drag(key.rect.expand(4.0).contains(p));
             }
-            if !ui.input(|i| i.pointer.any_down()) {
+            if !ui.input(|i| i.pointer.any_down()) && !self.voice.staged() {
                 self.release_hold(now, wake);
             }
             ui.ctx().request_repaint();

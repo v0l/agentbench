@@ -1928,6 +1928,27 @@ fn a_short_tap_on_the_speak_key_says_hold_to_talk_at_both_sizes() {
 }
 
 #[test]
+fn the_recording_key_shows_time_meter_and_cancel_at_both_sizes() {
+    let rig = rig();
+    for (tag, size) in [("desktop", [1280.0, 800.0]), ("phone", [412.0, 900.0])] {
+        let mut h = hold_harness(size, rig.url.clone());
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        open_home_row(&mut h);
+        h.run_steps(3);
+        h.state_mut().recording_held(7.0, 0.3, false);
+        h.run_steps(3);
+        let key = h.get_by_label("speak");
+        assert!(key.rect().right() <= size[0] && key.rect().bottom() <= size[1]);
+        shot(&mut h, &format!("hold-recording-{tag}"));
+        h.state_mut().recording_held(7.0, 0.3, true);
+        h.run_steps(3);
+        let key = h.get_by_label("speak");
+        assert!(key.rect().right() <= size[0] && key.rect().bottom() <= size[1]);
+        shot(&mut h, &format!("hold-cancel-{tag}"));
+    }
+}
+
+#[test]
 fn the_speak_key_sits_in_the_composer_and_says_what_is_missing() {
     let rig = rig();
     // A speech server with no address, so pressing the key never opens a real microphone.

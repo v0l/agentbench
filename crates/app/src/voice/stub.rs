@@ -23,6 +23,11 @@ impl Voice {
     pub fn level(&self) -> f32 {
         0.0
     }
+    #[doc(hidden)]
+    pub fn show_recording(&mut self, _: f32, _: f32) {}
+    pub fn staged(&self) -> bool {
+        false
+    }
     pub fn device(&self) -> &str {
         ""
     }

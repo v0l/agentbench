@@ -1510,6 +1510,13 @@ impl App {
     }
 
     #[doc(hidden)]
+    pub fn recording_held(&mut self, seconds: f32, level: f32, off_button: bool) {
+        self.voice.show_recording(seconds, level);
+        self.hold.press();
+        self.hold.drag(!off_button);
+    }
+
+    #[doc(hidden)]
     pub fn short_tap_on_speak(&mut self, now: f64) {
         self.hold.press();
         self.release_hold(now, || {});

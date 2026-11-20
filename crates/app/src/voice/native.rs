@@ -62,6 +62,7 @@ pub struct Voice {
     pub status: String,
     /// Which take is current, so a late partial from an earlier one is dropped.
     take_id: u64,
+    shown: Option<(f32, f32)>,
 }
 
 impl Default for Voice {
@@ -74,13 +75,23 @@ impl Default for Voice {
             loaded: Default::default(),
             status: String::new(),
             take_id: 0,
+            shown: None,
         }
     }
 }
 
 impl Voice {
     pub fn listening(&self) -> bool {
-        matches!(self.state, State::Listening(_))
+        self.shown.is_some() || matches!(self.state, State::Listening(_))
+    }
+
+    #[doc(hidden)]
+    pub fn show_recording(&mut self, seconds: f32, level: f32) {
+        self.shown = Some((seconds, level));
+    }
+
+    pub fn staged(&self) -> bool {
+        self.shown.is_some()
     }
 
     pub fn reading(&self) -> bool {
@@ -93,6 +104,9 @@ impl Voice {
 
     /// Seconds since the microphone opened.
     pub fn seconds(&self) -> f32 {
+        if let Some((s, _)) = self.shown {
+            return s;
+        }
         match &self.state {
             State::Listening(t) => t.since.elapsed().as_secs_f32(),
             _ => 0.0,
@@ -101,6 +115,9 @@ impl Voice {
 
     /// Loudest recent sample, 0 to 1, for a meter. Reading it resets it.
     pub fn level(&self) -> f32 {
+        if let Some((_, l)) = self.shown {
+            return l;
+        }
         match &self.state {
             State::Listening(t) => f32::from_bits(t.peak.swap(0, Ordering::Relaxed)),
             _ => 0.0,
@@ -109,6 +126,9 @@ impl Voice {
 
     /// What the microphone is, once it is open.
     pub fn device(&self) -> &str {
+        if self.shown.is_some() {
+            return "test microphone";
+        }
         match &self.state {
             State::Listening(t) => &t.device,
             _ => "",
@@ -329,7 +349,7 @@ fn open() -> Result<Take, String> {
             peak.clone(),
         )?;
         let rate = stream.rate;
-        return Ok(Take {
+        Ok(Take {
             _stream: Box::new(stream),
             heard,
             peak,
@@ -339,7 +359,7 @@ fn open() -> Result<Take, String> {
             endpoint: Endpoint::new(rate),
             partial_at: 0,
             partial_busy: Arc::new(AtomicBool::new(false)),
-        });
+        })
     }
     #[cfg(not(target_os = "android"))]
     open_cpal()
