@@ -22,6 +22,9 @@ pub(crate) const AUTO_ESCALATE: &str = "autopilot_auto_escalate";
 pub(crate) const STUCK_FAILED_RUNS: &str = "autopilot_stuck_failed_runs";
 pub(crate) const STUCK_COMPACTIONS: &str = "autopilot_stuck_compactions";
 pub(crate) const STUCK_NO_COMMIT_MINUTES: &str = "autopilot_stuck_no_commit_minutes";
+pub(crate) const GROOM: &str = "autopilot_groom";
+pub(crate) const GROOM_HOURS: &str = "autopilot_groom_hours";
+pub const DEFAULT_GROOM_HOURS: u64 = 24;
 pub const DEFAULT_CHECK_IN_MINUTES: u64 = 30;
 pub const DEFAULT_STUCK_FAILED_RUNS: u32 = 3;
 pub const DEFAULT_STUCK_COMPACTIONS: u32 = 2;
@@ -189,6 +192,8 @@ pub fn state(store: &Store) -> AutopilotState {
         stuck_failed_runs: number(store, STUCK_FAILED_RUNS, DEFAULT_STUCK_FAILED_RUNS),
         stuck_compactions: number(store, STUCK_COMPACTIONS, DEFAULT_STUCK_COMPACTIONS),
         stuck_no_commit_minutes: number(store, STUCK_NO_COMMIT_MINUTES, DEFAULT_STUCK_NO_COMMIT_MINUTES),
+        groom: crate::groom::groom_on(store),
+        groom_hours: crate::groom::groom_hours(store),
         workers: workers.iter().filter(|w| is_active(&w.state)).count() as u32,
         activity: store.autopilot_log(30).unwrap_or_default(),
     }
@@ -223,6 +228,13 @@ pub fn apply(store: &Store, patch: &AutopilotPatch) -> Result<AutopilotState, St
     }
     if let Some(n) = patch.stuck_no_commit_minutes {
         store.set_setting(STUCK_NO_COMMIT_MINUTES, &n.to_string())?;
+    }
+    if let Some(n) = patch.groom_hours {
+        store.set_setting(GROOM_HOURS, &n.to_string())?;
+    }
+    if let Some(on) = patch.groom {
+        store.set_setting(GROOM, if on { "1" } else { "0" })?;
+        store.log_autopilot(None, None, if on { "grooming empty queues is on" } else { "grooming empty queues is off" })?;
     }
     if let Some(on) = patch.check_in_all {
         store.set_setting(CHECK_IN_ALL, if on { "1" } else { "0" })?;
@@ -305,7 +317,7 @@ pub fn visions(store: &Store) -> String {
     out
 }
 
-fn is_active(state: &str) -> bool {
+pub(crate) fn is_active(state: &str) -> bool {
     matches!(state, "working" | "asking")
 }
 
@@ -678,6 +690,9 @@ impl Autopilot {
         }
         self.sweep(now);
         self.start_more();
+        if flag(store, ENABLED) {
+            self.groom(now);
+        }
     }
 
     fn sweep(&self, now: i64) {
@@ -2796,5 +2811,117 @@ mod tests {
         todo(&r, "new", 0, &[]);
         r.ap.tick();
         assert!(!state(&r.store).idle);
+    }
+
+    fn backlog(r: &Rig, title: &str) -> Id {
+        r.store
+            .add_issue(&agentbench_core::NewIssue { project_id: r.project, title: title.into(), state: Some(IssueState::Backlog), ..Default::default() })
+            .unwrap()
+            .id
+    }
+
+    async fn grooms(r: &Rig) -> Vec<String> {
+        idle(r, r.boss.unwrap()).await;
+        said_to_boss(r)
+            .iter()
+            .flat_map(|t| t.split("UTC] groom ").skip(1).map(|p| format!("groom {p}")).collect::<Vec<_>>())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_empty_todo_queue_with_a_backlog_gets_one_groom_message() {
+        let r = rig(DONE);
+        on(&r);
+        with_vision(&r);
+        let a = backlog(&r, "old idea");
+        r.ap.tick();
+        let told = grooms(&r).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].starts_with("groom demo:") && told[0].contains(&format!("#{a} old idea")), "{}", told[0]);
+        assert!(told[0].contains("g1: ship") && told[0].contains("groom_done"), "{}", told[0]);
+        assert!(feed(&r).iter().any(|l| l == "groom requested for demo"));
+        r.ap.tick();
+        assert_eq!(grooms(&r).await.len(), 1, "not again on the next tick");
+    }
+
+    #[tokio::test]
+    async fn no_groom_with_todo_issues_a_running_worker_an_empty_backlog_or_a_low_level() {
+        let r = rig(LONG);
+        on(&r);
+        backlog(&r, "idea");
+        let t = todo(&r, "queued", 0, &[]);
+        r.ap.groom(crate::store::now());
+        assert!(grooms(&r).await.is_empty(), "todo issue");
+
+        r.ap.tick();
+        r.store.update_issue(t, &IssuePatch { state: Some(IssueState::Doing), ..Default::default() }).unwrap();
+        assert!(!r.store.workers().unwrap().is_empty());
+        r.ap.groom(crate::store::now());
+        assert!(grooms(&r).await.is_empty(), "running worker");
+
+        let empty = rig(DONE);
+        on(&empty);
+        empty.ap.tick();
+        assert!(grooms(&empty).await.is_empty(), "empty backlog");
+
+        let low = rig(DONE);
+        on(&low);
+        set_level(&low.store, low.project, Some(Automation::Assist));
+        backlog(&low, "idea");
+        low.ap.tick();
+        assert!(grooms(&low).await.is_empty(), "level below autowork");
+    }
+
+    #[tokio::test]
+    async fn a_groom_waits_groom_hours_and_a_backlog_change() {
+        let r = rig(DONE);
+        on(&r);
+        backlog(&r, "idea");
+        let now = crate::store::now();
+        r.ap.groom(now);
+        assert_eq!(grooms(&r).await.len(), 1);
+        let later = now + 25 * 3_600_000;
+        r.ap.groom(later);
+        assert_eq!(grooms(&r).await.len(), 1, "unchanged backlog");
+        backlog(&r, "another");
+        r.ap.groom(now + 3_600_000);
+        assert_eq!(grooms(&r).await.len(), 1, "changed but inside groom_hours");
+        r.ap.groom(later);
+        assert_eq!(grooms(&r).await.len(), 2, "changed and past groom_hours");
+        r.store.set_setting(crate::autopilot::GROOM, "0").unwrap();
+        backlog(&r, "third");
+        r.ap.groom(later + 48 * 3_600_000);
+        assert_eq!(grooms(&r).await.len(), 2, "switched off");
+    }
+
+    #[tokio::test]
+    async fn groom_done_writes_the_feed_line_and_resets_the_debounce() {
+        let r = rig(DONE);
+        on(&r);
+        backlog(&r, "idea");
+        let now = crate::store::now();
+        r.ap.groom(now);
+        assert_eq!(grooms(&r).await.len(), 1);
+        let out = r
+            .ap
+            .runner
+            .tools()
+            .call("groom_done", &serde_json::json!({"project": "demo", "summary": "closed 1 stale"}), r.boss.unwrap())
+            .unwrap();
+        assert_eq!(out["groomed"], "demo");
+        assert!(feed(&r).iter().any(|l| l == "groomed demo: closed 1 stale"), "{:?}", feed(&r));
+        backlog(&r, "new");
+        r.ap.groom(now + 3_600_000);
+        assert_eq!(grooms(&r).await.len(), 1, "inside groom_hours of groom_done");
+    }
+
+    #[tokio::test]
+    async fn a_project_without_a_vision_is_told_to_ask_the_user_for_one() {
+        let r = rig(DONE);
+        on(&r);
+        backlog(&r, "idea");
+        r.ap.groom(crate::store::now());
+        let told = grooms(&r).await;
+        assert!(told[0].contains("no vision") && told[0].contains("Ask the user for one"), "{}", told[0]);
     }
 }
