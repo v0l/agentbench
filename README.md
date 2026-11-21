@@ -280,6 +280,29 @@ files of 20 MB each go with a message and are kept with the chat. The agentbench
 agent is shown pictures, sound and video directly; CLI agents added in the
 config are told where each file was written so they can read it.
 
+## Prompt templates
+
+A Markdown file in a prompts folder becomes a `/name` command in the app composer,
+the terminal chat, the REST send endpoint and the supervisor's `start_session` and
+`send_message` prompts. The text is expanded before the agent sees it, and the chat
+shows a notice with the template name. An unknown `/name` is sent as written.
+
+Folders, later ones override earlier ones with the same name: `~/.pi/agent/prompts`,
+`~/.agents/prompts`, then `<repo>/.agents/prompts`. Files are re-read on use.
+
+```markdown
+---
+description: Review staged git changes
+argument-hint: "[focus]"
+---
+Review the staged changes. Focus on ${1:-correctness, security and error handling}.
+```
+
+`/review concurrency` runs it with `concurrency`. The syntax is pi's: `$1`, `$@`,
+`$ARGUMENTS`, `${1:-default}`, `${@:-default}`, `${@:N}`, `${@:N:L}`. Arguments use
+shell-like quotes (`"two words"`), an apostrophe inside a word is plain text, and
+`\"` inside double quotes is a quote. `GET /api/projects/{id}/prompts` lists them.
+
 ## Chat titles
 
 A new chat is named from the start of your first message. Once the agent has

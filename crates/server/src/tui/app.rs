@@ -9,23 +9,27 @@ pub const FLASH_FOR: Duration = Duration::from_secs(6);
 pub const QUIT_WITHIN: Duration = Duration::from_secs(2);
 const WHEEL: usize = 3;
 
+#[derive(Clone)]
 pub struct Command {
-    pub name: &'static str,
-    pub args: &'static str,
-    pub about: &'static str,
+    pub name: String,
+    pub args: String,
+    pub about: String,
 }
 
-const CLIENT: [Command; 4] = [
-    Command { name: "resume", args: "", about: "pick an earlier chat to carry on" },
-    Command { name: "agent", args: "<name>", about: "use another agent for the next new chat" },
-    Command { name: "help", args: "", about: "keys and commands" },
-    Command { name: "quit", args: "", about: "leave; the agent keeps working" },
+const CLIENT: [(&str, &str, &str); 4] = [
+    ("resume", "", "pick an earlier chat to carry on"),
+    ("agent", "<name>", "use another agent for the next new chat"),
+    ("help", "", "keys and commands"),
+    ("quit", "", "leave; the agent keeps working"),
 ];
 
+fn command(name: &str, args: &str, about: &str) -> Command {
+    Command { name: name.into(), args: args.into(), about: about.into() }
+}
+
 pub fn commands() -> Vec<Command> {
-    let mut all: Vec<Command> =
-        SLASH.iter().map(|s| Command { name: s.name, args: s.args, about: s.about }).collect();
-    all.extend(CLIENT);
+    let mut all: Vec<Command> = SLASH.iter().map(|s| command(s.name, s.args, s.about)).collect();
+    all.extend(CLIENT.iter().map(|(n, a, b)| command(n, a, b)));
     all
 }
 
@@ -105,9 +109,32 @@ pub struct App {
     pub opening: bool,
     pub report: Option<agentbench_core::UsageReport>,
     pub standalone: bool,
+    prompts: std::cell::RefCell<Option<(Instant, Vec<agentbench_core::prompts::Template>)>>,
 }
 
 impl App {
+    fn templates(&self) -> Vec<agentbench_core::prompts::Template> {
+        let mut cache = self.prompts.borrow_mut();
+        let fresh = cache.as_ref().is_some_and(|(t, _)| t.elapsed() < Duration::from_secs(2));
+        if !fresh {
+            let home = dirs::home_dir().unwrap_or_default();
+            let list =
+                agentbench_core::prompts::load(&home, Some(std::path::Path::new(&self.project.path)));
+            *cache = Some((Instant::now(), list));
+        }
+        cache.as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
+    }
+
+    fn all_commands(&self) -> Vec<Command> {
+        let mut all = commands();
+        for t in self.templates() {
+            if all.iter().all(|c| c.name != t.name) {
+                all.push(Command { name: t.name, args: t.argument_hint, about: t.description });
+            }
+        }
+        all
+    }
+
     pub fn new(project: Project, agents: Vec<AgentInfo>, agent: String) -> App {
         App {
             project,
@@ -133,6 +160,7 @@ impl App {
             lines_stale: true,
             opening: false,
             report: None,
+            prompts: std::cell::RefCell::new(None),
             standalone: false,
         }
     }
@@ -307,7 +335,7 @@ impl App {
             return Vec::new();
         }
         let typed = &text[1..];
-        commands().into_iter().filter(|c| c.name.starts_with(typed)).collect()
+        self.all_commands().into_iter().filter(|c| c.name.starts_with(typed)).collect()
     }
 
     pub fn mouse(&mut self, m: MouseEvent) {
@@ -941,7 +969,7 @@ pub mod tests {
     fn the_slash_menu_filters_and_tab_completes() {
         let mut a = app();
         type_text(&mut a, "/mo");
-        let names: Vec<&str> = a.slash_menu().iter().map(|c| c.name).collect();
+        let names: Vec<String> = a.slash_menu().iter().map(|c| c.name.clone()).collect();
         assert_eq!(names, ["model"]);
         a.key(press(KeyCode::Tab), 10);
         assert_eq!(a.editor.text(), "/model ");

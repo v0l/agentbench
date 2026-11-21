@@ -3,6 +3,13 @@
 use super::*;
 use agent_ui::composer::{copy_pressed, nothing_selected};
 
+#[derive(Clone)]
+pub(super) struct SlashEntry {
+    pub name: String,
+    pub args: String,
+    pub about: String,
+}
+
 impl App {
     pub(super) fn slash_menu(&mut self, ui: &mut Ui, field: egui::Rect) {
         let typed = self.draft.trim_start();
@@ -10,9 +17,14 @@ impl App {
             return;
         }
         let typed = typed.trim_start_matches('/').to_string();
-        let matches: Vec<&agentbench_core::Slash> =
-            agentbench_core::SLASH.iter().filter(|c| c.name.starts_with(&typed)).collect();
+        let matches = self.slash_entries(&typed);
         if matches.is_empty() {
+            return;
+        }
+        let tab = ui.memory(|m| m.has_focus(agent_ui::composer::field_id(self.drawing)))
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+        if tab {
+            self.fill_slash(&matches[0]);
             return;
         }
         let height = matches.len() as f32 * 24.0 + 10.0;
@@ -37,11 +49,11 @@ impl App {
                                         .set(format!("/{}", c.name))
                                         .size(12.0)
                                         .gap(6.0)
-                                        .value(c.args)
+                                        .value(&c.args)
                                         .size(11.0)
                                         .tint(LEGEND)
                                         .gap(12.0)
-                                        .note(c.about)
+                                        .note(&c.about)
                                         .size(11.0)
                                         .elided(ui);
                                 })
@@ -51,14 +63,51 @@ impl App {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                             }
                             if r.clicked() {
-                                picked = Some(c);
+                                picked = Some(c.clone());
                             }
                         }
                     });
             });
         if let Some(c) = picked {
-            self.draft = format!("/{}{}", c.name, if c.args.is_empty() { "" } else { " " });
+            self.fill_slash(&c);
         }
+    }
+
+    fn fill_slash(&mut self, c: &SlashEntry) {
+        self.draft = format!("/{}{}", c.name, if c.args.is_empty() { "" } else { " " });
+    }
+
+    pub(super) fn slash_entries(&mut self, typed: &str) -> Vec<SlashEntry> {
+        let mut all: Vec<SlashEntry> = agentbench_core::SLASH
+            .iter()
+            .map(|c| SlashEntry {
+                name: c.name.to_string(),
+                args: c.args.to_string(),
+                about: c.about.to_string(),
+            })
+            .collect();
+        if let Some(pid) = self.project
+            && self.server_has(pid, agentbench_core::API_PROMPTS)
+        {
+            let stale = self.prompts_asked.get(&pid).is_none_or(|t| t.elapsed() > Duration::from_secs(5));
+            if stale {
+                self.prompts_asked.insert(pid, Instant::now());
+                if let Some(c) = &mut self.client {
+                    c.prompts(pid);
+                }
+            }
+            for t in self.prompts.get(&pid).into_iter().flatten() {
+                if all.iter().all(|c| c.name != t.name) {
+                    all.push(SlashEntry {
+                        name: t.name.clone(),
+                        args: t.argument_hint.clone(),
+                        about: t.description.clone(),
+                    });
+                }
+            }
+        }
+        all.retain(|c| c.name.starts_with(typed));
+        all
     }
 
     /// Files dropped on the window go to the composer when it is on screen.

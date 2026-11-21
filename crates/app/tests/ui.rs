@@ -1353,6 +1353,37 @@ fn close_stops_and_deletes_the_chat() {
 }
 
 #[test]
+fn slash_lists_prompt_templates_with_their_description() {
+    let rig = rig();
+    let session =
+        rig.store.sessions().unwrap().into_iter().find(|s| s.title == "say hello").unwrap();
+    let project = rig.store.project(session.project_id).unwrap();
+    let dir = std::path::Path::new(&project.path).join(".agents/prompts");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("zzbrief.md"),
+        "---\ndescription: Brief the team\nargument-hint: \"<topic>\"\n---\nBrief on $1\n",
+    )
+    .unwrap();
+    let mut h = harness(rig.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_session(session.id, session.project_id);
+    until(&mut h, "the transcript", |h| h.state().transcript_len(session.id) == 3);
+    click(&mut h, 800.0, 730.0);
+    h.event(egui::Event::Text("/zzb".into()));
+    let mut seen = false;
+    for _ in 0..100 {
+        h.run_steps(2);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if h.state().prompt_names(session.project_id).contains(&"zzbrief".to_string()) {
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "the template shows in the slash menu");
+}
+
+#[test]
 fn slash_shows_the_commands_and_new_opens_a_fresh_chat() {
     let rig = rig();
     let session =

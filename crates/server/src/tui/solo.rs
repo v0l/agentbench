@@ -661,6 +661,8 @@ impl Backend for Solo {
                     self.inner.publish();
                 } else {
                     drop(chat);
+                    let text = crate::runner::expand_prompt(&self.cwd.to_string_lossy(), &text)
+                        .map_or(text, |e| e.text);
                     self.start(text);
                 }
             }

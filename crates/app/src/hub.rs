@@ -416,6 +416,7 @@ impl Hub {
                         out.push(Reply::Comments(tag(slot, id), list));
                     }
                     Reply::Notes(id, n) => out.push(Reply::Notes(tag(slot, id), n)),
+                    Reply::Prompts(id, p) => out.push(Reply::Prompts(tag(slot, id), p)),
                     Reply::VisionVersions(id, mut list) => {
                         for v in &mut list {
                             v.id = tag(slot, v.id);
@@ -516,6 +517,11 @@ impl Hub {
     pub fn notes(&mut self, project: Id) {
         let (c, id) = self.by_id(project);
         c.notes(id);
+    }
+
+    pub fn prompts(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.prompts(id);
     }
 
     pub fn restore_note(&mut self, project: Id, version: Id) {
