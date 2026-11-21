@@ -245,7 +245,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("grants-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+        dunce::canonicalize(&dir).unwrap()
     }
 
     #[test]
