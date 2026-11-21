@@ -29,6 +29,13 @@ struct Live {
     questions: Waiting,
 }
 
+pub fn expand_prompt(cwd: &str, text: &str) -> Option<agentbench_core::prompts::Expanded> {
+    agentbench_core::prompts::command_name(text)?;
+    let home = dirs::home_dir()?;
+    let templates = agentbench_core::prompts::load(&home, Some(std::path::Path::new(cwd)));
+    agentbench_core::prompts::expand_command(text, &templates)
+}
+
 /// What the user sent: the words, and the files kept with them. `from` names the sources of a
 /// message the system sent instead.
 #[derive(Clone, Debug, Default)]
@@ -353,6 +360,17 @@ impl Runner {
         let prompt = new.prompt.clone().filter(|p| !p.trim().is_empty()).or_else(|| {
             issue.as_ref().map(|i| issue_prompt(i, &store.comments(i.id).unwrap_or_default()))
         });
+        let prompt = match prompt.map(|p| (expand_prompt(&worktree.path, &p), p)) {
+            Some((Some(e), _)) => {
+                store.add_message(
+                    session.id,
+                    &Entry::Notice { text: format!("/{} expanded from a prompt template", e.name) },
+                )?;
+                Some(e.text)
+            }
+            Some((None, p)) => Some(p),
+            None => None,
+        };
         let prompt = match (prompt, new.parent) {
             (Some(p), Some(parent)) if !p.contains("PARENT=") => Some(format!("{p}\n\nPARENT={parent}")),
             (p, _) => p,
@@ -610,6 +628,14 @@ impl Runner {
         {
             return self.command(session, cmd.name, arg);
         }
+        let expanded = expand_prompt(&session.cwd, text);
+        if let Some(e) = &expanded {
+            self.store.add_message(
+                session.id,
+                &Entry::Notice { text: format!("/{} expanded from a prompt template", e.name) },
+            )?;
+        }
+        let text = expanded.as_ref().map_or(text, |e| e.text.trim());
         if uploads.len() > agentbench_core::ATTACHMENTS_MAX {
             return Err(StoreError(format!(
                 "at most {} files go with one message",

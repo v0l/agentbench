@@ -421,7 +421,7 @@ fn menu_rows(app: &App, width: usize) -> Vec<Line<'static>> {
             let name = format!("/{} {}", c.name, c.args);
             let style = if on { Style::default().fg(ACCENT) } else { Style::default() };
             let pad = " ".repeat(28usize.saturating_sub(cols(&name)).max(1));
-            let about = truncate(c.about, width.saturating_sub(cols(&name) + pad.len() + 2));
+            let about = truncate(&c.about, width.saturating_sub(cols(&name) + pad.len() + 2));
             line(vec![
                 ((if on { "❯ " } else { "  " }).into(), style),
                 (name, style),
@@ -458,7 +458,7 @@ fn overlay_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 let name = format!("/{} {}", c.name, c.args);
                 rows.push(line(vec![
                     (format!("  {name:<28}"), Style::default().fg(ACCENT)),
-                    (truncate(c.about, width.saturating_sub(32)), dim()),
+                    (truncate(&c.about, width.saturating_sub(32)), dim()),
                 ]));
             }
             rows.push(Line::default());

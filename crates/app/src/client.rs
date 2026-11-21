@@ -56,6 +56,7 @@ pub enum Reply {
     Screen(SessionId, agentbench_core::Screen),
     Comments(Id, Vec<Comment>),
     Notes(Id, Vec<agentbench_core::NoteHistory>),
+    Prompts(Id, Vec<agentbench_core::prompts::Template>),
     VisionVersions(Id, Vec<agentbench_core::Vision>),
     Done(String),
     Failed(String),
@@ -330,6 +331,11 @@ impl Client {
     pub fn notes(&mut self, project: Id) {
         let req = self.request(Method::GET, &format!("/api/projects/{project}/notes"), None);
         self.send(req, move |n| Reply::Notes(project, n));
+    }
+
+    pub fn prompts(&mut self, project: Id) {
+        let req = self.request(Method::GET, &format!("/api/projects/{project}/prompts"), None);
+        self.send(req, move |p| Reply::Prompts(project, p));
     }
 
     pub fn restore_note(&mut self, project: Id, version: Id) {

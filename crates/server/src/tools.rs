@@ -1046,6 +1046,7 @@ impl Api for StoreApi {
                     return Ok(json!({ "sent": null, "note": "not delivered: your parent is told when your turn ends, with your reply, the diff and your test runs, so a DONE line is the end of your reply" }));
                 }
                 // The prefix also keeps a message that starts with a slash from running as a command.
+                let body = crate::runner::expand_prompt(&other.cwd, &body).map_or(body, |e| e.text);
                 let line =
                     format!("Message from session {session} ({}): {}", me.agent, body.trim());
                 let urgent = body.trim_start().starts_with("BLOCKED");

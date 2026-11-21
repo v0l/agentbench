@@ -1,4 +1,5 @@
 pub mod pairing;
+pub mod prompts;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -2039,7 +2040,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 4;
+pub const API_VERSION: u32 = 5;
+pub const API_PROMPTS: u32 = 5;
 pub const API_ISSUE_DEPS: u32 = 2;
 pub const API_ATTENTION_FEED: u32 = 3;
 pub const API_MEMORY_COMPACT: u32 = 4;

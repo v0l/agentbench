@@ -716,6 +716,8 @@ pub struct App {
     project_sort: ProjectSort,
     project_view: Option<Id>,
     project_notes: HashMap<Id, Vec<agentbench_core::NoteHistory>>,
+    prompts: HashMap<Id, Vec<agentbench_core::prompts::Template>>,
+    prompts_asked: HashMap<Id, Instant>,
     tag_filter: String,
     edit_tags: Option<(Id, String)>,
     notes_view: Option<(Id, Vec<agentbench_core::NoteHistory>)>,
@@ -922,6 +924,8 @@ impl App {
             project_sort: ProjectSort::Name,
             project_view: None,
             project_notes: HashMap::new(),
+            prompts: HashMap::new(),
+            prompts_asked: HashMap::new(),
             tag_filter: String::new(),
             edit_tags: None,
             notes_view: None,
@@ -1680,6 +1684,10 @@ impl App {
         self.transcripts.get(&session).map_or(0, |t| t.rebuilds)
     }
 
+    pub fn prompt_names(&self, project: Id) -> Vec<String> {
+        self.prompts.get(&project).map_or_else(Vec::new, |p| p.iter().map(|t| t.name.clone()).collect())
+    }
+
     pub fn transcript_len(&self, session: SessionId) -> usize {
         self.transcripts.get(&session).map_or(0, |t| t.messages.len())
     }
@@ -2180,6 +2188,9 @@ impl App {
                 if let Some(e) = self.vision_edit.as_mut().filter(|e| e.project == pid) {
                     e.versions = v;
                 }
+            }
+            Reply::Prompts(pid, p) => {
+                self.prompts.insert(pid, p);
             }
             Reply::Notes(pid, n) => {
                 self.project_notes.insert(pid, n.clone());

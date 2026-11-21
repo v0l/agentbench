@@ -146,6 +146,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects/{id}", delete(delete_project).patch(update_project))
         .route("/api/projects/{id}/sync", post(sync_project))
         .route("/api/projects/{id}/notes", get(list_notes))
+        .route("/api/projects/{id}/prompts", get(list_prompts))
         .route("/api/projects/{id}/notes/restore", post(restore_note))
         .route("/api/memory/compact", post(compact_memory))
         .route("/api/memory/restore", post(restore_memory))
@@ -879,6 +880,15 @@ async fn restore_note(
     api.runner.store().restore_note(id, req.version)?;
     changed(&api);
     Ok(Json(()))
+}
+
+async fn list_prompts(
+    State(api): State<Api>,
+    Path(id): Path<Id>,
+) -> Reply<Vec<agentbench_core::prompts::Template>> {
+    let project = api.runner.store().project(id)?;
+    let home = dirs::home_dir().unwrap_or_default();
+    Ok(Json(agentbench_core::prompts::load(&home, Some(std::path::Path::new(&project.path)))))
 }
 
 async fn compact_memory(
@@ -1858,6 +1868,40 @@ mod tests {
         let (s, _) = call(&f.app, "DELETE", &format!("/api/sessions/{id}"), None, T).await;
         assert_eq!(s, StatusCode::NO_CONTENT);
         assert!(!path.parent().unwrap().exists(), "deleting the session removes its files");
+    }
+
+    #[tokio::test]
+    async fn a_slash_template_is_stored_expanded() {
+        let f = fixture();
+        let dir = f.repo.join(".agents/prompts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("zz-greet.md"), "---\ndescription: Greet\n---\nHello ${1:-world} and $2\n").unwrap();
+        let pid = project(&f).await;
+        let (_, listed) = call(&f.app, "GET", &format!("/api/projects/{pid}/prompts"), None, T).await;
+        assert!(listed.as_array().unwrap().iter().any(|t| t["name"] == "zz-greet" && t["description"] == "Greet"), "{listed}");
+        let (_, session) = call(
+            &f.app,
+            "POST",
+            "/api/sessions",
+            Some(json!({"project_id": pid, "agent": "echo", "place": {"kind": "main"}})),
+            T,
+        )
+        .await;
+        let id = sid(&session);
+        let (s, e) = call(
+            &f.app,
+            "POST",
+            &format!("/api/sessions/{id}/messages"),
+            Some(json!({"text": "/zz-greet \"big team\" now"})),
+            T,
+        )
+        .await;
+        assert_eq!(s, StatusCode::ACCEPTED, "{e}");
+        settle(&f.api, id).await;
+        let (_, msgs) = call(&f.app, "GET", &format!("/api/sessions/{id}/messages"), None, T).await;
+        let text = msgs.to_string();
+        assert!(text.contains("Hello big team and now"), "{text}");
+        assert!(!text.contains("/zz-greet \\\"big"), "{text}");
     }
 
     #[tokio::test]
