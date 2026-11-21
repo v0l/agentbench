@@ -277,6 +277,19 @@ pub fn dirty_count(path: &Path) -> Result<usize, String> {
     Ok(git(path, &["status", "--porcelain"])?.lines().count())
 }
 
+pub fn newest_dirty_edit(path: &Path) -> i64 {
+    let Ok(out) = git(path, &["status", "--porcelain", "-uall"]) else { return 0 };
+    out.lines()
+        .take(5000)
+        .filter_map(|l| l.get(3..))
+        .map(|p| p.rsplit(" -> ").next().unwrap_or(p).trim_matches('"'))
+        .filter_map(|p| std::fs::metadata(path.join(p)).and_then(|m| m.modified()).ok())
+        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .max()
+        .unwrap_or(0)
+}
+
 pub fn commit_times(path: &Path, limit: usize) -> Vec<i64> {
     let n = format!("-{limit}");
     git(path, &["log", &n, "--format=%ct"])

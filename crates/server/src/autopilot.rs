@@ -2942,16 +2942,59 @@ mod tests {
         assert!(told[0].contains("passed earlier in this session and now fails"), "{}", told[0]);
     }
 
+    fn write_files(path: &str, from: usize, to: usize, modified_at: std::time::SystemTime) {
+        for i in from..to {
+            let f = std::fs::File::create(std::path::Path::new(path).join(format!("f{i}.txt"))).unwrap();
+            f.set_modified(modified_at).unwrap();
+        }
+    }
+
+    fn ms(t: i64) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_millis(t as u64)
+    }
+
     #[tokio::test]
-    async fn one_extra_dirty_file_is_not_a_no_commit_signal() {
+    async fn a_worker_with_45_dirty_files_edited_minutes_ago_is_not_stuck() {
         let r = rig(LONG);
         let (sid, path) = running_worker(&r).await;
         let now = crate::store::now();
-        std::fs::write(std::path::Path::new(&path).join("a.txt"), "1").unwrap();
+        write_files(&path, 0, 1, ms(now));
         r.ap.tick_at(now + 1000);
-        std::fs::write(std::path::Path::new(&path).join("b.txt"), "1").unwrap();
+        write_files(&path, 1, 45, ms(now + 44 * 60_000));
         r.ap.tick_at(now + 46 * 60_000);
         assert!(!crate::checkin::is_stuck(&r.store, sid));
+        assert!(check_ins(&r).await.iter().all(|t| !t.contains("STUCK")));
+    }
+
+    #[tokio::test]
+    async fn a_worker_with_45_dirty_files_and_no_edits_or_tool_calls_for_the_limit_is_stuck() {
+        let r = rig(LONG);
+        let (sid, path) = running_worker(&r).await;
+        let now = crate::store::now();
+        write_files(&path, 0, 1, ms(now));
+        r.ap.tick_at(now + 1000);
+        write_files(&path, 1, 45, ms(now));
+        r.ap.tick_at(now + 46 * 60_000);
+        assert!(crate::checkin::is_stuck(&r.store, sid));
+        let told = check_ins(&r).await;
+        assert!(told[0].contains("Dirty files: 45") && told[0].contains("no file edited or tool run"), "{}", told[0]);
+    }
+
+    #[tokio::test]
+    async fn recent_tool_calls_keep_a_big_dirty_tree_from_being_stuck() {
+        let r = rig(LONG);
+        r.store.set_setting(STUCK_NO_COMMIT_MINUTES, "1").unwrap();
+        let (sid, path) = running_worker(&r).await;
+        let now = crate::store::now();
+        let old = ms(now - 3_600_000);
+        write_files(&path, 0, 1, old);
+        r.ap.tick_at(now + 1000);
+        write_files(&path, 1, 45, old);
+        ran(&r, sid, "ls", "", false);
+        r.ap.tick_at(now + 50_000);
+        assert!(!crate::checkin::is_stuck(&r.store, sid), "a tool call 50s ago with a 1 minute limit");
+        r.ap.tick_at(now + 130_000);
+        assert!(crate::checkin::is_stuck(&r.store, sid), "no tool call or edit for the limit");
     }
 
     #[tokio::test]

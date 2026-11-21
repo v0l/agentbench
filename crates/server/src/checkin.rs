@@ -3,8 +3,6 @@ use crate::runner::{Origin, Runner};
 use crate::store::{StoreError, Worker};
 use agentbench_core::{Entry, Id, Message, NewSession, Place, Session, SessionId, clock_hm, span};
 use std::collections::HashSet;
-
-const MIN_DIRTY_GROWTH: usize = 2;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -21,6 +19,7 @@ pub struct Transcript {
     pub turn_started: i64,
     pub runs: Vec<Run>,
     pub compactions: u32,
+    pub last_tool_at: i64,
 }
 
 fn key(command: &str) -> String {
@@ -62,9 +61,11 @@ pub fn read(messages: &[Message], fallback: i64) -> Transcript {
     let turn_started = turn_at.map(|i| messages[i].created_at).unwrap_or(fallback);
     let mut runs = Vec::new();
     let mut compactions = 0;
+    let mut last_tool_at = 0;
     for (i, m) in messages.iter().enumerate() {
         match &m.entry {
             Entry::Tool { name, input, output, error, .. } if name.eq_ignore_ascii_case("bash") => {
+                last_tool_at = last_tool_at.max(m.created_at);
                 if output.is_some()
                     && let Some(run) = run_of(input, output.as_deref(), *error)
                 {
@@ -77,7 +78,7 @@ pub fn read(messages: &[Message], fallback: i64) -> Transcript {
             _ => {}
         }
     }
-    Transcript { turn_started, runs, compactions }
+    Transcript { turn_started, runs, compactions, last_tool_at }
 }
 
 impl Transcript {
@@ -141,6 +142,7 @@ struct Facts {
     commits_this_turn: usize,
     last_commit: i64,
     dirty: usize,
+    last_edit: i64,
 }
 
 fn facts(path: &Path, turn_started: i64) -> Facts {
@@ -149,6 +151,7 @@ fn facts(path: &Path, turn_started: i64) -> Facts {
         commits_this_turn: commits.iter().filter(|t| **t + 1000 > turn_started).count(),
         last_commit: commits.first().copied().unwrap_or(0),
         dirty: crate::git::dirty_count(path).unwrap_or(0),
+        last_edit: crate::git::newest_dirty_edit(path),
     }
 }
 
@@ -292,9 +295,11 @@ impl Autopilot {
             if c.baseline.is_none_or(|b| b.0 != f.last_commit) {
                 c.baseline = Some((f.last_commit, f.dirty));
             }
-            let grown = c.baseline.is_some_and(|b| f.dirty >= b.1 + MIN_DIRTY_GROWTH);
-            if quiet_limit > 0 && grown && now - f.last_commit.max(t.turn_started) >= quiet_limit {
-                signals.push(("no_commit", format!("no commit for {} while the dirty files grew to {}", span(now - f.last_commit.max(t.turn_started)), f.dirty)));
+            let grown = c.baseline.is_some_and(|b| f.dirty > b.1);
+            let quiet_since = f.last_commit.max(t.turn_started);
+            let active_at = quiet_since.max(f.last_edit).max(t.last_tool_at);
+            if quiet_limit > 0 && grown && now - active_at >= quiet_limit {
+                signals.push(("no_commit", format!("no commit for {} and no file edited or tool run for {} while the dirty files grew to {}", span(now - quiet_since), span(now - active_at), f.dirty)));
             }
             let due = interval > 0 && now >= c.next_at;
             if due {
