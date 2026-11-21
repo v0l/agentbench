@@ -689,6 +689,7 @@ impl Autopilot {
             self.reconcile(w, now);
         }
         self.sweep(now);
+        self.ship_untracked();
         self.start_more();
         if flag(store, ENABLED) {
             self.groom(now);
@@ -734,6 +735,71 @@ impl Autopilot {
             self.close_finished(s, &format!("{why}; {}", verdict_line(&v)));
         }
     }
+    fn ship_untracked(&self) {
+        let store = self.store();
+        if !flag(store, ENABLED) {
+            return;
+        }
+        let supervisor = store.supervisor_project().ok().flatten().map(|p| p.id);
+        let tracked: HashSet<_> = store.workers().unwrap_or_default().iter().map(|w| w.session).collect();
+        for s in &store.sessions().unwrap_or_default() {
+            if Some(s.project_id) == supervisor
+                || s.parent.is_none()
+                || tracked.contains(&s.id)
+                || self.runner.is_running(s.id)
+                || level(store, s.project_id) < Automation::Ship
+            {
+                continue;
+            }
+            let Some(v) = current_verdict(store, s)
+                .filter(|v| v.verdict == Verdict::ConcludedPass.as_str() && !v.acted)
+            else {
+                continue;
+            };
+            let name = s.issue_id.map(|i| format!("#{i}")).unwrap_or_else(|| format!("session {}", s.id));
+            let line = verdict_line(&v);
+            match ship(store, s) {
+                Ok(shipped) if matches!(shipped.pushed, Some(Err(_))) => {
+                    self.log_once(
+                        Some(s.project_id),
+                        s.issue_id,
+                        &format!("{name} not merged: {}", clip(&shipped.describe(), 200)),
+                    );
+                }
+                Ok(shipped) => {
+                    let _ = store.settle_verdicts(s.id);
+                    if let Some(i) = s.issue_id {
+                        self.set_state(i, IssueState::Done);
+                        self.comment(i, &format!("autopilot: {}; {line}.", shipped.describe()));
+                    }
+                    self.log(Some(s.project_id), s.issue_id, &format!("{name} {}; {line}", shipped.describe()));
+                    if auto_close_on(store) {
+                        self.close_finished(s, &format!("merged; {line}"));
+                    }
+                }
+                Err(Unshipped::NoBranch) => {}
+                Err(Unshipped::Conflict(files)) => {
+                    let _ = store.settle_verdicts(s.id);
+                    self.log(
+                        Some(s.project_id),
+                        s.issue_id,
+                        &format!("{name} not merged: {}; asked the worker to rebase", conflict_line(&files)),
+                    );
+                    if let Err(e) = self.runner.tell(s, &rebase_request(&files), Origin::new("autopilot", Some(s.id))) {
+                        self.log(Some(s.project_id), s.issue_id, &format!("{name}: could not ask for a rebase: {}", clip(&e.0, 160)));
+                    }
+                }
+                Err(Unshipped::Failed(why)) => {
+                    self.log_once(
+                        Some(s.project_id),
+                        s.issue_id,
+                        &format!("{name} not merged: {}", clip(&why, 200)),
+                    );
+                }
+            }
+        }
+    }
+
     fn branch_is_merged(&self, s: &Session) -> bool {
         let store = self.store();
         let (Ok(project), Ok(tree)) = (store.project(s.project_id), store.worktree(s.worktree_id)) else {
@@ -852,7 +918,19 @@ impl Autopilot {
             "ready" => {
                 if issue.state == IssueState::Done {
                     let _ = store.remove_worker(w.session);
-                } else if w.green && flag(store, ENABLED) && level(store, w.project) >= Automation::Ship {
+                } else if w.green && !flag(store, ENABLED) {
+                    self.log_once(
+                        Some(w.project),
+                        Some(w.issue),
+                        &format!("#{} not merged: the autopilot is switched off", w.issue),
+                    );
+                } else if w.green && level(store, w.project) < Automation::Ship {
+                    self.log_once(
+                        Some(w.project),
+                        Some(w.issue),
+                        &format!("#{} not merged: the project is below ship level", w.issue),
+                    );
+                } else if w.green {
                     match current_verdict(store, &session) {
                         Some(v) if v.verdict == Verdict::ConcludedPass.as_str() => self.merge(w, &session, &v),
                         _ => {
@@ -1078,6 +1156,11 @@ impl Autopilot {
             Err(Unshipped::NoBranch) => {
                 self.log_once(Some(w.project), Some(w.issue), &format!("#{} has no branch to merge", w.issue));
             }
+            Err(Unshipped::Conflict(files)) => {
+                let text = rebase_request(&files);
+                self.comment(w.issue, &format!("autopilot: not merged: {}", conflict_line(&files)));
+                self.rework(w, session, &text, &format!("not merged: {}", conflict_line(&files)));
+            }
             Err(Unshipped::Failed(why)) => {
                 let _ = store.set_worker(w.session, "merge_failed", true);
                 self.comment(w.issue, &format!("autopilot: merge failed: {why}"));
@@ -1216,8 +1299,24 @@ impl Autopilot {
     }
 }
 
+fn conflict_line(files: &str) -> String {
+    if files.is_empty() {
+        "the branch conflicts with the main branch".into()
+    } else {
+        format!("the branch conflicts with the main branch in {}", clip(files, 160))
+    }
+}
+
+fn rebase_request(files: &str) -> String {
+    format!(
+        "Your branch was judged concluded_pass but could not be merged: {}. Rebase it onto the main branch, resolve the conflicts, run the tests again and finish with a conclusion.",
+        conflict_line(files)
+    )
+}
+
 pub enum Unshipped {
     NoBranch,
+    Conflict(String),
     Failed(String),
 }
 
@@ -1266,6 +1365,9 @@ pub fn ship(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
     }
     if crate::git::is_dirty(Path::new(&tree.path)).unwrap_or(false) {
         return Err(fail(format!("{branch} has uncommitted changes")));
+    }
+    if let Some(files) = crate::git::conflicts_with(main, &branch) {
+        return Err(Unshipped::Conflict(files));
     }
     crate::git::merge_branch(main, &branch).map_err(fail)?;
     if !crate::git::is_merged(main, &branch) {
@@ -2443,6 +2545,65 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(!r.ap.runner.is_running(sid));
+    }
+
+    #[tokio::test]
+    async fn a_passed_branch_merges_in_a_project_with_no_remote() {
+        let r = rig(DONE);
+        let (a, sid) = worked_on(&r).await;
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        passed(&r, sid).await;
+        r.ap.tick();
+        assert!(r.repo.join("feature.txt").exists());
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(feed(&r).iter().any(|l| l.contains("merged") && l.contains("no remote to push to")), "{:?}", feed(&r));
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_passed_branch_is_not_merged_and_the_worker_is_asked_to_rebase() {
+        let r = rig(DONE);
+        let (a, sid) = worked_on(&r).await;
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        std::fs::write(r.repo.join("feature.txt"), "other").unwrap();
+        for args in [vec!["add", "."], vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "main work"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&r.repo).args(&args).status().unwrap().success());
+        }
+        passed(&r, sid).await;
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        assert_eq!(r.store.workers().unwrap()[0].state, "working");
+        assert_eq!(std::fs::read_to_string(r.repo.join("feature.txt")).unwrap(), "other");
+        assert!(feed(&r).iter().any(|l| l.contains("not merged") && l.contains("feature.txt") && l.contains("conflicts")), "{:?}", feed(&r));
+        settle(&r).await;
+        let told = r.store.messages(sid, 0).unwrap();
+        assert!(told.iter().any(|m| matches!(&m.entry, Entry::User { text, .. } if text.contains("Rebase it onto the main branch"))));
+    }
+
+    #[tokio::test]
+    async fn a_passed_supervisor_session_with_no_worker_row_is_merged_and_logged() {
+        let r = rig(DONE);
+        on(&r);
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        let s = r
+            .ap
+            .runner
+            .start_session(NewSession {
+                parent: r.boss,
+                project_id: r.project,
+                agent: "echo".into(),
+                place: Place::New { branch: "loose-work".into() },
+                prompt: Some("go".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        idle(&r, s.id).await;
+        let tree = r.store.worktree(r.store.session(s.id).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        judge(&r, s.id, "concluded_pass", None).unwrap();
+        assert!(r.store.workers().unwrap().is_empty());
+        r.ap.tick();
+        assert!(r.repo.join("feature.txt").exists());
+        assert!(feed(&r).iter().any(|l| l.contains("merged") && l.contains("judged concluded_pass")), "{:?}", feed(&r));
     }
 
     #[tokio::test]

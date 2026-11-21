@@ -196,6 +196,23 @@ pub fn merge_branch(main: &Path, branch: &str) -> Result<(), String> {
     }
 }
 
+pub fn conflicts_with(main: &Path, branch: &str) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(main)
+        .args(["merge-tree", "--write-tree", "--name-only", "--no-messages", "HEAD", branch])
+        .output()
+        .ok()?;
+    match out.status.code() {
+        Some(1) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let files: Vec<&str> = text.lines().skip(1).filter(|l| !l.trim().is_empty()).collect();
+            Some(files.join(", "))
+        }
+        _ => None,
+    }
+}
+
 pub fn is_merged(main: &Path, branch: &str) -> bool {
     git(main, &["merge-base", "--is-ancestor", branch, "HEAD"]).is_ok()
 }
