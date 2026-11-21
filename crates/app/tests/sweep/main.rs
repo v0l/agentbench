@@ -194,6 +194,9 @@ fn render_the_sheets() {
 }
 
 fn the_scenes_fit(name: &str, size: Size) {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    common::share_one_device();
     let report = run(scenes::rich(), size, &only_from_env(), None);
     let bad: Vec<&str> = report.lines().collect();
     assert!(bad.is_empty(), "{name}: {} problems\n{}", bad.len(), bad.join("\n"));

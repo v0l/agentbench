@@ -4,6 +4,16 @@ use super::*;
 
 const ICON: f32 = 24.0;
 
+fn needs_you_row(ui: &mut Ui, label: &str) -> egui::Response {
+    let tall = if agent_ui::key::phone(ui.ctx()) { agent_ui::key::TAP } else { 0.0 };
+    let galley = ui.painter().layout(label.to_string(), egui::FontId::proportional(11.0), VALUE, ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), galley.size().y.max(tall)), Sense::hover());
+    let resp = ui.interact(rect, ui.id().with(("needs-you", label)), Sense::click());
+    let y = rect.center().y - galley.size().y / 2.0;
+    ui.painter().galley(egui::pos2(rect.left(), y), galley, VALUE);
+    resp
+}
+
 impl App {
     pub(super) fn side(&mut self, ui: &mut Ui) {
         let Some(o) = &self.overview else {
@@ -114,7 +124,7 @@ impl App {
             Line::new().legend("needs you").size(10.0).tint(READOUT).elided(ui);
             for (slot, name, id, title, sup) in &rows {
                 let label = format!("[{name}] {}", if *sup { format!("supervisor: {title}") } else { title.clone() });
-                let r = ui.add(egui::Label::new(egui::RichText::new(&label).size(11.0).color(VALUE)).sense(Sense::click()));
+                let r = needs_you_row(ui, &label);
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("needs you {label}")));
                 if r.clicked() {
                     open = Some((*slot, *id, *sup));
@@ -122,7 +132,7 @@ impl App {
             }
             for (slot, name, summary) in &cards {
                 let label = format!("[{name}] proposal: {summary}");
-                let r = ui.add(egui::Label::new(egui::RichText::new(&label).size(11.0).color(VALUE)).sense(Sense::click()));
+                let r = needs_you_row(ui, &label);
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("needs you {label}")));
                 if r.clicked() {
                     review = Some(*slot);
