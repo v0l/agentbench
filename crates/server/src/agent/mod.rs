@@ -53,6 +53,26 @@ mod gate_tests {
     }
 
     #[tokio::test]
+    async fn a_global_note_from_the_supervisor_is_written_after_the_user_says_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = crate::store::Store::memory().unwrap();
+        let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
+        let boss = s.add_session(s.main_worktree(sup.id).unwrap().id, "native", "boss", None, None).unwrap();
+        let mut c = context();
+        c.session = boss.id;
+        let api = Arc::new(crate::tools::StoreApi::new(s.clone()));
+        let note = json!({"scope": "global", "topic": "style", "note": "plain words"});
+        let io = TestIo::new(api.clone());
+        io.answers.lock().unwrap().push("No".into());
+        assert!(gated("remember", &note, &c, &io).await.is_err());
+        assert!(s.global_notes().unwrap().is_empty());
+        let io = TestIo::new(api.clone());
+        io.answers.lock().unwrap().push("Do it this once".into());
+        gated("remember", &note, &c, &io).await.unwrap();
+        assert_eq!(s.global_notes().unwrap(), [("style".to_string(), "plain words".to_string())]);
+    }
+
+    #[tokio::test]
     async fn another_project_is_entered_only_after_the_user_says_so() {
         let s = crate::store::Store::memory().unwrap();
         let (_, main) = crate::store::testing::project(&s, "/a");
