@@ -574,8 +574,11 @@ mod tests {
 
     #[test]
     fn resolve_finds_programs_on_path_and_by_path() {
-        assert!(resolve(Path::new("sh")).is_some());
-        assert!(resolve(Path::new("/bin/sh")).is_some());
+        #[cfg(unix)]
+        {
+            assert!(resolve(Path::new("sh")).is_some());
+            assert!(resolve(Path::new("/bin/sh")).is_some());
+        }
         assert!(resolve(Path::new("definitely-not-a-real-binary-xyz")).is_none());
     }
 
