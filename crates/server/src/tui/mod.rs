@@ -1,4 +1,5 @@
 mod app;
+mod clipboard;
 mod editor;
 mod net;
 mod setup;
@@ -293,7 +294,15 @@ async fn events(
             ev = stream.next() => match ev {
                 Some(Ok(Event::Key(k))) => app.key(k, page),
                 Some(Ok(Event::Paste(p))) => { app.paste(&p); None }
-                Some(Ok(Event::Mouse(m))) => { app.mouse(m); app.dirty = true; None }
+                Some(Ok(Event::Mouse(m))) => {
+                    if let Some(text) = view.mouse(m) {
+                        clipboard::copy(&text);
+                        app.say(app::Tone::Info, "copied selection");
+                    }
+                    app.mouse(m);
+                    app.dirty = true;
+                    None
+                }
                 Some(Ok(Event::Resize(..))) => { app.dirty = true; app.lines_stale = true; None }
                 Some(Err(e)) => return Err(e),
                 None => return Ok(()),

@@ -18,6 +18,116 @@ pub struct View {
     width: usize,
     expanded: bool,
     lines: Vec<Line<'static>>,
+    top: u16,
+    height: usize,
+    start: usize,
+    pad: usize,
+    anchor: Option<(usize, usize)>,
+    head: Option<(usize, usize)>,
+    dragging: bool,
+}
+
+fn line_text(l: &Line<'_>) -> String {
+    l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+fn slice_cols(text: &str, from: usize, to: usize) -> String {
+    let mut out = String::new();
+    let mut at = 0;
+    for c in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if at + w > from && at < to {
+            out.push(c);
+        }
+        at += w;
+    }
+    out
+}
+
+impl View {
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+        self.head = None;
+        self.dragging = false;
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.anchor.is_some()
+    }
+
+    fn position(&self, row: u16, col: u16) -> Option<(usize, usize)> {
+        let r = row.checked_sub(self.top)? as usize;
+        if r >= self.height {
+            return None;
+        }
+        let line = (self.start + r).checked_sub(self.pad)?;
+        (line < self.lines.len()).then_some((line, col as usize))
+    }
+
+    fn ordered(&self) -> Option<((usize, usize), (usize, usize))> {
+        let (a, h) = (self.anchor?, self.head?);
+        Some(if a <= h { (a, h) } else { (h, a) })
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        let (a, h) = self.ordered()?;
+        if a == h {
+            return None;
+        }
+        let mut rows = Vec::new();
+        for i in a.0..=h.0.min(self.lines.len().saturating_sub(1)) {
+            let text = line_text(&self.lines[i]);
+            let from = if i == a.0 { a.1 } else { 0 };
+            let to = if i == h.0 { h.1 + 1 } else { usize::MAX };
+            rows.push(slice_cols(&text, from, to).trim_end().to_string());
+        }
+        Some(rows.join("\n"))
+    }
+
+    pub fn mouse(&mut self, m: crossterm::event::MouseEvent) -> Option<String> {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.clear_selection();
+                if let Some(p) = self.position(m.row, m.column) {
+                    self.anchor = Some(p);
+                    self.head = Some(p);
+                    self.dragging = true;
+                }
+                None
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
+                let row = m.row.clamp(self.top, self.top + self.height.saturating_sub(1) as u16);
+                if let Some(p) = self.position(row, m.column) {
+                    self.head = Some(p);
+                }
+                None
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.dragging => {
+                self.dragging = false;
+                self.selected_text()
+            }
+            _ => None,
+        }
+    }
+
+    fn highlight(&self, buf: &mut ratatui::buffer::Buffer, body: Rect) {
+        let Some((a, h)) = self.ordered() else { return };
+        for r in 0..body.height as usize {
+            let Some(i) = (self.start + r).checked_sub(self.pad) else { continue };
+            if i < a.0 || i > h.0 {
+                continue;
+            }
+            let from = if i == a.0 { a.1 } else { 0 };
+            let to = if i == h.0 { h.1 + 1 } else { body.width as usize };
+            let from = from.min(body.width as usize);
+            let to = to.min(body.width as usize);
+            if to > from {
+                let rect = Rect::new(body.x + from as u16, body.y + r as u16, (to - from) as u16, 1);
+                buf.set_style(rect, Style::default().add_modifier(Modifier::REVERSED));
+            }
+        }
+    }
 }
 
 fn dim() -> Style {
@@ -537,14 +647,21 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &mut View) {
     let end = total - app.scroll;
     let start = end.saturating_sub(height);
     let mut visible: Vec<Line<'static>> = view.lines[start..end].to_vec();
+    view.top = body.y;
+    view.height = height;
+    view.start = start;
+    view.pad = 0;
     if session_ready(&app.session) || total > 0 {
+        view.pad = height.saturating_sub(visible.len());
         while visible.len() < height {
             visible.insert(0, Line::default());
         }
     } else {
         visible = welcome(app, height);
+        view.height = 0;
     }
     f.render_widget(Paragraph::new(visible), body);
+    view.highlight(f.buffer_mut(), body);
     if app.scroll > 0 {
         let tag = format!(" ↓ {} more lines ", app.scroll);
         let w = cols(&tag) as u16;
@@ -650,6 +767,28 @@ mod tests {
 
     fn joined(rows: &[String]) -> String {
         rows.join("\n")
+    }
+
+    #[test]
+    fn dragging_over_the_transcript_selects_text_to_copy() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut a = app();
+        a.open(
+            session(SessionStatus::Idle),
+            vec![msg(1, Entry::Assistant { text: "secret-token-123 here".into() })],
+        );
+        let mut term = Terminal::new(TestBackend::new(50, 12)).unwrap();
+        let mut view = View::default();
+        term.draw(|f| draw(f, &mut a, &mut view)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let row = (0..12u16)
+            .find(|&y| (0..50u16).map(|x| buf[(x, y)].symbol()).collect::<String>().contains("secret"))
+            .unwrap();
+        let ev = |kind, column| MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE };
+        assert_eq!(view.mouse(ev(MouseEventKind::Down(MouseButton::Left), 0)), None);
+        assert_eq!(view.mouse(ev(MouseEventKind::Drag(MouseButton::Left), 16)), None);
+        let got = view.mouse(ev(MouseEventKind::Up(MouseButton::Left), 16));
+        assert_eq!(got.as_deref(), Some("secret-token-123"));
     }
 
     #[test]
