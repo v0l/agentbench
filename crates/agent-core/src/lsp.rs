@@ -802,8 +802,9 @@ mod tests {
 
     #[test]
     fn file_addresses_round_trip() {
-        let p = Path::new("/tmp/some dir/a.rs");
-        let u = uri_of(p).unwrap();
+        let p = std::env::temp_dir().join("some dir").join("a.rs");
+        let u = uri_of(&p).unwrap();
+        assert!(u.starts_with("file:///") && u.contains("some%20dir"));
         assert_eq!(path_of(&u).unwrap(), p);
         assert!(uri_of(Path::new("relative.rs")).is_err());
     }

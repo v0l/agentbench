@@ -268,7 +268,7 @@ mod tests {
         Rig {
             cx: Cx::new(ws.clone(), desk),
             ws,
-            elsewhere: base.join("elsewhere").canonicalize().unwrap(),
+            elsewhere: dunce::canonicalize(base.join("elsewhere")).unwrap(),
             base,
         }
     }

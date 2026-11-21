@@ -173,7 +173,7 @@ pub fn vet(
     app_config: Option<&Path>,
     workspace: &Path,
 ) -> Result<PathBuf, String> {
-    let home = dirs::home_dir().and_then(|h| h.canonicalize().ok());
+    let home = dirs::home_dir().and_then(|h| dunce::canonicalize(&h).ok());
     vet_with(given, write, workspace, home.as_deref(), app_config)
 }
 
@@ -195,7 +195,7 @@ pub fn vet_with(
         _ => PathBuf::from(text),
     };
     let absolute = if expanded.is_absolute() { expanded } else { workspace.join(expanded) };
-    let real = absolute.canonicalize().map_err(|e| format!("{text}: {e}"))?;
+    let real = dunce::canonicalize(&absolute).map_err(|e| format!("{text}: {e}"))?;
     if real.parent().is_none() {
         return Err(format!("{} is the top of a drive and too broad to share", tidy(&real)));
     }
@@ -204,7 +204,7 @@ pub fn vet_with(
         secrets.extend(SECRETS.iter().map(|s| home.join(s)));
     }
     if let Some(config) = app_config {
-        secrets.push(config.canonicalize().unwrap_or_else(|_| config.to_path_buf()));
+        secrets.push(dunce::canonicalize(config).unwrap_or_else(|_| config.to_path_buf()));
     }
     for secret in &secrets {
         if secret.starts_with(&real) || real.starts_with(secret) {

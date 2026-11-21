@@ -581,5 +581,5 @@ pub fn tool(mcp: Arc<Mcp>) -> super::toolkit::Tool {
     .summarised_by(summary)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
