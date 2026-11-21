@@ -352,17 +352,6 @@ pub fn repeated(store: &Store, session: &Session, key: &str, category: &str, tit
     (tally(session.id, key) == REPEATS).then(|| capture(store, Some(session), key, category, title, what)).flatten()
 }
 
-pub fn undelivered(store: &Store, session: &Session, to: SessionId) -> Option<Filed> {
-    capture(
-        store,
-        Some(session),
-        "send-message-undelivered",
-        "harness_bug",
-        "Final send_message to the parent comes back not delivered",
-        &format!("A send_message from {} to its parent {to} starting with DONE came back \"not delivered\"; the worker had to put it in its reply instead.", session.id),
-    )
-}
-
 pub fn restarted(store: &Store, sessions: usize) -> Option<Filed> {
     (sessions > 0)
         .then(|| {

@@ -1215,6 +1215,9 @@ impl Runner {
         let Ok(prompt_row) = self.store.add_message(session.id, &entry) else {
             return SessionStatus::Failed;
         };
+        if mode == Mode::Chat {
+            crate::autopilot::clear_final_message(&self.store, session.id);
+        }
         let summary = history.iter().rev().find_map(|e| match e {
             Entry::Summary { text } => Some(text.clone()),
             _ => None,
@@ -4719,19 +4722,25 @@ mod deferred_tests {
     }
 
     #[tokio::test]
-    async fn a_done_line_to_the_parent_is_not_delivered_on_top_of_the_turn_end_report() {
+    async fn a_final_done_line_to_the_parent_is_reported_delivered_and_reaches_it_once() {
         let r = rig();
-        let args = serde_json::json!({"id": r.boss.id.to_string(), "text": "DONE #1 branch tests:pass ok"});
+        let line = "DONE #1 branch tests:pass ok";
+        let args = serde_json::json!({"id": r.boss.id.to_string(), "text": line});
         let out = r.runner.api.call("send_message", &args, r.worker.id).unwrap();
-        assert!(out["sent"].is_null(), "{out}");
-        assert!(said_to(&r, r.boss.id).is_empty());
-        assert_eq!(r.store.deferred_count(r.boss.id).unwrap(), 0);
-        let filed: Vec<_> = r.store.issues().unwrap().into_iter().filter(|i| i.labels.contains(&crate::process::LABEL.to_string())).collect();
-        assert_eq!(filed.len(), 1, "an undelivered message files one process report");
-        assert!(filed[0].body.contains(&r.worker.id.to_string()), "{}", filed[0].body);
-        r.runner.api.call("send_message", &args, r.worker.id).unwrap();
-        let again = r.store.issue(filed[0].id).unwrap();
-        assert!(again.title.ends_with("(x2)"), "{}", again.title);
+        assert_eq!(out["sent"], r.boss.id.to_string(), "{out}");
+        assert!(!out.to_string().contains("not delivered"), "{out}");
+        assert!(said_to(&r, r.boss.id).is_empty(), "not on top of the turn-end report");
+        let filed = r.store.issues().unwrap().into_iter().filter(|i| i.labels.contains(&crate::process::LABEL.to_string())).count();
+        assert_eq!(filed, 0, "a delivered message files no process report");
+        r.store.set_status(r.worker.id, SessionStatus::Idle).unwrap();
+        r.runner.tell_watchers(r.worker.id);
+        idle(&r.runner, r.boss.id).await;
+        let told = said_to(&r, r.boss.id);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].0.matches(line).count(), 1, "{}", told[0].0);
+        r.runner.send(&r.store.session(r.worker.id).unwrap(), "one more thing").unwrap();
+        idle(&r.runner, r.worker.id).await;
+        assert!(!crate::autopilot::last_reply(&r.store, r.worker.id).contains(line), "a new turn starts without the old line");
     }
 
     #[tokio::test]

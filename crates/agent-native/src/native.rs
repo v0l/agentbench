@@ -691,15 +691,16 @@ fn agentbench_specs() -> Vec<Spec> {
         Spec::new(
             "remember",
             "Keep a note about this project that survives across sessions: how to run the tests, a convention, a gotcha. \
-             One note per topic; saving a topic again replaces it, and an empty note forgets it. Replacing needs `based_on`, the hash recall gave for the version you read; if the note changed since, the write is refused, so recall again and retry. Every version is kept. Notes are shown to every session at its start, so keep them short and true.",
+             One note per topic; saving a topic again replaces it, and an empty note forgets it. Replacing needs `based_on`, the hash recall gave for the version you read; if the note changed since, the write is refused, so recall again and retry. Every version is kept. Notes are shown to every session at its start, so keep them short and true. \
+             From the supervisor chat, leaving out `project` writes the supervisor's own notes; pass scope `global` for a note every project sees, which the user confirms first.",
             object(
-                json!({ "project": string("Supervisor chat only: the project by name or id"), "topic": string("A short name, like `tests` or `style`"), "note": string("The note; empty to forget the topic"), "based_on": string("Hash of the note version you read, from recall; required when the topic already exists") }),
+                json!({ "project": string("Supervisor chat only: the project by name or id"), "scope": string("Supervisor chat only: `global` for a note shared by every project, confirmed by the user"), "topic": string("A short name, like `tests` or `style`"), "note": string("The note; empty to forget the topic"), "based_on": string("Hash of the note version you read, from recall; required when the topic already exists") }),
                 &["topic"],
             ),
         ),
         Spec::new(
             "recall",
-            "Read the notes kept for this project with remember, optionally only those matching a word. Pass scope `global` to read the global notes, which are read-only to you.",
+            "Read the notes kept for this project with remember, optionally only those matching a word. Pass scope `global` to read the global notes, which only the supervisor chat writes, with the user's yes.",
             object(
                 json!({ "project": string("Supervisor chat only: the project by name or id"), "scope": string("`global` for the notes shared by all projects"), "topic": string("Only notes whose topic or text has this word") }),
                 &[],

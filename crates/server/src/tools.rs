@@ -493,6 +493,59 @@ impl StoreApi {
     }
 }
 
+impl StoreApi {
+    fn remember_global(&self, me: &agentbench_core::Session, sup: bool, topic: &str, note: &str) -> Result<Value, String> {
+        if !sup {
+            return Err("global notes are written only from the supervisor chat, with the user's yes. Ask your parent or the user to keep it there; `remember` without `scope` writes this project's notes.".into());
+        }
+        if !self.take_approval(me.id, 0, REMEMBER_GLOBAL) {
+            let what = format!("keep the global note `{topic}`: {}", clip(note.trim(), 300));
+            let default = crate::autopilot::default_level(&self.store);
+            return Err(proposal(&what, REMEMBER_GLOBAL, None, "the user's confirmation", default));
+        }
+        self.store.set_global_note(topic, note).map_err(|e| e.0)?;
+        if let Ok(runner) = self.runner.get() {
+            crate::compact::after_write(&runner, crate::memory::Scope::Global);
+        }
+        Ok(if note.trim().is_empty() { json!({ "forgot": topic, "scope": "global" }) } else { json!({ "remembered": topic, "scope": "global" }) })
+    }
+}
+
+const REMEMBER_GLOBAL: &str = "remember:global";
+
+impl StoreApi {
+    fn restart_hit(&self, me: &agentbench_core::Session, tool: &str, args: &Value) -> Option<crate::guards::Hit> {
+        let command = args.get("command").and_then(Value::as_str)?;
+        if tool != "bash" || !RESTART.is_match(command) {
+            return None;
+        }
+        let busy: Vec<String> = self
+            .store
+            .sessions()
+            .ok()?
+            .into_iter()
+            .filter(|o| o.id != me.id && matches!(o.status, agentbench_core::SessionStatus::Running | agentbench_core::SessionStatus::Waiting))
+            .map(|o| format!("{} \"{}\"", o.id, o.title))
+            .collect();
+        if busy.is_empty() {
+            return None;
+        }
+        Some(crate::guards::Hit {
+            id: "restart-drains-turns".into(),
+            ask: true,
+            message: format!(
+                "stopping or restarting agentbench now cuts off {} running turn(s): {}. Wait until list_sessions shows them idle, then restart.",
+                busy.len(),
+                busy.join(", ")
+            ),
+        })
+    }
+}
+
+static RESTART: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\bsystemctl\b[^\n;&|]*\b(restart|stop|kill|try-restart|reload-or-restart)\b[^\n;&|]*\bagentbench\b|\b(pkill|killall)\b[^\n;&|]*\bagentbench").unwrap()
+});
+
 fn describe(tool: &str, args: &Value) -> String {
     let verb = match tool {
         "file_issue" => "file an issue",
@@ -658,7 +711,7 @@ impl Api for StoreApi {
                 if let Value::Object(m) = &mut call {
                     m.insert("_brief".into(), json!(self.brief_of(&me)));
                 }
-                match crate::guards::hit(s, &tool, &call) {
+                match crate::guards::hit(s, &tool, &call).or_else(|| self.restart_hit(&me, &tool, &call)) {
                     Some(h) => json!({ "hit": h.id, "ask": h.ask, "message": h.message }),
                     None => json!({ "hit": null }),
                 }
@@ -1047,8 +1100,8 @@ impl Api for StoreApi {
                     return Err(format!("{} no longer exists", other.cwd));
                 }
                 if me.parent == Some(other.id) && body.trim_start().starts_with("DONE") {
-                    crate::process::undelivered(s, &me, other.id);
-                    return Ok(json!({ "sent": null, "note": "not delivered: your parent is told when your turn ends, with your reply, the diff and your test runs, so a DONE line is the end of your reply" }));
+                    crate::autopilot::keep_final_message(s, me.id, &body).map_err(|e| e.0)?;
+                    return Ok(json!({ "sent": other.id, "delivered": "with your turn-end report", "note": "delivered: your parent gets this line with your reply, diff and test runs when your turn ends. End your turn now." }));
                 }
                 // The prefix also keeps a message that starts with a slash from running as a command.
                 let line =
@@ -1228,7 +1281,7 @@ impl Api for StoreApi {
                 let note = text(args, "note").unwrap_or_default();
                 let based_on = text(args, "based_on");
                 if text(args, "scope").is_some_and(|s| s.trim().eq_ignore_ascii_case("global")) {
-                    return Err("global notes are read-only to agents: only the user, or a triage proposal the user accepted, can change them. Propose the note to the user in your reply instead.".into());
+                    return self.remember_global(&me, sup, &topic, &note);
                 }
                 s.set_note(project, &topic, &note, "agent", Some(me.id), based_on.as_deref())
                     .map_err(|e| e.0)?;
@@ -1237,6 +1290,8 @@ impl Api for StoreApi {
                 }
                 if note.trim().is_empty() {
                     json!({ "forgot": topic })
+                } else if sup && everywhere {
+                    json!({ "remembered": topic, "scope": "supervisor", "note": "kept in the supervisor chat's own notes; a note for every project needs scope `global`, and one for a single project needs `project`" })
                 } else {
                     json!({ "remembered": topic })
                 }
@@ -1615,6 +1670,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn restarting_agentbench_with_a_turn_running_is_held_and_names_the_turn() {
+        let b = boss();
+        let restart = json!({"tool": "bash", "args": {"command": "cargo install --path crates/server --locked && systemctl --user restart agentbench"}});
+        assert!(b.api.call("check_guard", &restart, b.boss).unwrap()["hit"].is_null(), "nothing running");
+        b.s.set_status(b.worker, agentbench_core::SessionStatus::Running).unwrap();
+        let held = b.api.call("check_guard", &restart, b.boss).unwrap();
+        assert_eq!(held["hit"], "restart-drains-turns", "{held}");
+        assert_eq!(held["ask"], true);
+        assert!(held["message"].as_str().unwrap().contains(&b.worker.to_string()), "{held}");
+        let stop = json!({"tool": "bash", "args": {"command": "pkill -f agentbench-server"}});
+        assert_eq!(b.api.call("check_guard", &stop, b.boss).unwrap()["hit"], "restart-drains-turns");
+        let status = json!({"tool": "bash", "args": {"command": "systemctl --user status agentbench"}});
+        assert!(b.api.call("check_guard", &status, b.boss).unwrap()["hit"].is_null());
+        b.s.set_status(b.worker, agentbench_core::SessionStatus::Running).unwrap();
+        assert!(b.api.call("check_guard", &restart, b.worker).unwrap()["hit"].is_null(), "its own turn is not counted");
+        let stale = b.s.reset_running().unwrap();
+        assert_eq!(stale, [b.worker], "a turn cut off anyway is kept for resume");
     }
 
     #[test]
@@ -2228,13 +2303,32 @@ mod tests {
         s.set_global_note("style", "no em dashes").unwrap();
         let api = StoreApi::new(s.clone());
         let refused = api.call("remember", &json!({"scope": "global", "topic": "style", "note": "x"}), me.id);
-        assert!(refused.unwrap_err().contains("read-only"));
+        assert!(refused.unwrap_err().contains("only from the supervisor chat"));
         assert_eq!(s.global_notes().unwrap(), [("style".to_string(), "no em dashes".to_string())]);
         for id in [me.id, them.id] {
             let seen = api.call("recall", &json!({"scope": "global"}), id).unwrap();
             assert_eq!(seen[0]["note"], "no em dashes");
         }
         assert_eq!(api.call("recall", &json!({}), me.id).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn the_supervisor_writes_a_global_note_once_the_user_says_yes() {
+        let b = boss();
+        let note = json!({"scope": "global", "topic": "style", "note": "plain words"});
+        let asked = b.api.call("remember", &note, b.boss);
+        assert!(proposed(&asked), "{asked:?}");
+        assert!(b.s.global_notes().unwrap().is_empty());
+        let sup = b.s.session(b.boss).unwrap().project_id;
+        assert!(b.s.notes(sup).unwrap().is_empty(), "nothing lands in the supervisor folder");
+        b.api.call("approve_action", &json!({"tool": "remember:global", "scope": "once"}), b.boss).unwrap();
+        let out = b.api.call("remember", &note, b.boss).unwrap();
+        assert_eq!(out["scope"], "global");
+        assert_eq!(b.s.global_notes().unwrap(), [("style".to_string(), "plain words".to_string())]);
+        assert!(b.s.notes(sup).unwrap().is_empty());
+        assert!(proposed(&b.api.call("remember", &note, b.boss)), "once is once");
+        let own = b.api.call("remember", &json!({"topic": "queue", "note": "3 workers"}), b.boss).unwrap();
+        assert!(own["note"].as_str().unwrap().contains("scope `global`"), "{own}");
     }
 
     #[test]

@@ -538,6 +538,30 @@ fn worker_prompt(issue: &Issue, comments: &[agentbench_core::Comment]) -> String
 }
 
 pub fn last_reply(store: &Store, session: agentbench_core::SessionId) -> String {
+    let reply = shown_reply(store, session);
+    match final_message(store, session) {
+        Some(line) if !reply.contains(line.trim()) => format!("Its final message to you: {}\n\n{}", line.trim(), reply.trim()).trim_end().to_string(),
+        _ => reply,
+    }
+}
+
+fn final_message_key(session: agentbench_core::SessionId) -> String {
+    format!("final_message_{session}")
+}
+
+pub fn final_message(store: &Store, session: agentbench_core::SessionId) -> Option<String> {
+    store.setting(&final_message_key(session)).ok().flatten().filter(|l| !l.trim().is_empty())
+}
+
+pub fn keep_final_message(store: &Store, session: agentbench_core::SessionId, line: &str) -> crate::store::Result<()> {
+    store.set_setting(&final_message_key(session), line.trim())
+}
+
+pub fn clear_final_message(store: &Store, session: agentbench_core::SessionId) {
+    let _ = store.delete_setting(&final_message_key(session));
+}
+
+fn shown_reply(store: &Store, session: agentbench_core::SessionId) -> String {
     agentbench_core::shown(&store.messages(session, 0).unwrap_or_default())
         .into_iter()
         .rev()
