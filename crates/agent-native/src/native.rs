@@ -3323,7 +3323,8 @@ async fn wait_for_session(
 /// on files elsewhere on the machine, so the whole filesystem is granted up front.
 fn open_workspace(cwd: &Path) -> Result<Workspace, String> {
     let workspace = Workspace::open(cwd)?;
-    workspace.grants().grant(std::path::PathBuf::from(std::path::MAIN_SEPARATOR_STR), true);
+    let everywhere = workspace.root().ancestors().last().map(Path::to_path_buf).unwrap_or_default();
+    workspace.grants().grant(everywhere, true);
     Ok(workspace)
 }
 
