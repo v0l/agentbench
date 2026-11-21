@@ -1007,10 +1007,15 @@ impl Api for StoreApi {
                     prompt,
                     attachments: Vec::new(),
                 };
-                let started = runner.start_session(new).map_err(|e| e.0)?;
-                if let Some(i) = issue {
-                    s.add_worker(started.id, i, project).map_err(|e| e.0)?;
-                }
+                let started = match runner.start_worker(new, args.get("force").and_then(Value::as_bool).unwrap_or(false)).map_err(|e| e.0)? {
+                    crate::runner::Claim::Started(s) => s,
+                    crate::runner::Claim::Taken(other) => {
+                        return Err(format!(
+                            "issue #{} already has a worker, session {other}; send_message to it, or pass force: true to start a second one",
+                            issue.unwrap_or_default()
+                        ));
+                    }
+                };
                 if let Some(i) = issue
                     && own(i)?.state != IssueState::Doing
                 {

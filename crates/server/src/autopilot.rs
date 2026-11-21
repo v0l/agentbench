@@ -1172,11 +1172,17 @@ impl Autopilot {
                 prompt: Some(worker_prompt(issue, &comments)),
                 ..Default::default()
             };
-            match self.runner.start_session(new) {
-                Ok(s) => {
+            match self.runner.start_worker(new, false) {
+                Ok(crate::runner::Claim::Taken(other)) => {
+                    self.log_once(
+                        Some(issue.project_id),
+                        Some(issue.id),
+                        &format!("skipped #{}: session {other} already works on it", issue.id),
+                    );
+                }
+                Ok(crate::runner::Claim::Started(_)) => {
                     started += 1;
                     self.set_state(issue.id, IssueState::Doing);
-                    let _ = store.add_worker(s.id, issue.id, issue.project_id);
                     self.log(
                         Some(issue.project_id),
                         Some(issue.id),
@@ -2472,6 +2478,64 @@ mod tests {
         assert_eq!(workers.len(), 1, "{workers:?}");
         assert_eq!((workers[0].session, workers[0].issue), (sid, a));
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing);
+    }
+
+    #[tokio::test]
+    async fn start_session_on_an_issue_the_autopilot_already_took_names_that_worker() {
+        let r = rig(r#"read p; sleep 30"#);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        r.ap.tick();
+        let taken = r.store.workers().unwrap()[0].session;
+        let args = serde_json::json!({"project": r.project, "issue": a, "agent": "echo"});
+        let e = r.ap.runner.tools().call("start_session", &args, r.boss.unwrap()).unwrap_err();
+        assert!(e.contains(&taken.to_string()), "{e}");
+        assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.issue_id == Some(a)).count(), 1);
+        let forced = serde_json::json!({"project": r.project, "issue": a, "agent": "echo", "branch": "second", "force": true});
+        r.ap.runner.tools().call("start_session", &forced, r.boss.unwrap()).unwrap();
+        assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.issue_id == Some(a)).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_autopilot_does_not_start_a_second_worker_on_an_issue_the_supervisor_took() {
+        let r = rig(r#"read p; sleep 30"#);
+        let a = todo(&r, "a", 0, &[]);
+        let sid = started_by_boss(&r, a).await;
+        r.store.update_issue(a, &agentbench_core::IssuePatch { state: Some(IssueState::Todo), ..Default::default() }).unwrap();
+        r.ap.tick();
+        let late = NewSession {
+            project_id: r.project,
+            agent: "echo".into(),
+            place: Place::New { branch: String::new() },
+            issue_id: Some(a),
+            prompt: Some("go".into()),
+            ..Default::default()
+        };
+        assert!(matches!(r.ap.runner.start_worker(late, false).unwrap(), crate::runner::Claim::Taken(s) if s == sid));
+        assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.issue_id == Some(a)).count(), 1);
+        assert_eq!(r.store.workers().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_autopilot_does_not_start_a_worker_beside_a_user_session_on_the_issue() {
+        let r = rig(r#"read p; sleep 30"#);
+        let a = todo(&r, "a", 0, &[]);
+        let mine = r
+            .ap
+            .runner
+            .start_session(NewSession {
+                project_id: r.project,
+                agent: "echo".into(),
+                place: Place::New { branch: String::new() },
+                issue_id: Some(a),
+                prompt: Some("go".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        on(&r);
+        r.ap.tick();
+        assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.issue_id == Some(a)).map(|s| s.id).collect::<Vec<_>>(), [mine.id]);
+        assert!(r.store.workers().unwrap().is_empty());
     }
 
     #[tokio::test]

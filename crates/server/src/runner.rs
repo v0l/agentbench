@@ -91,6 +91,12 @@ pub struct Runner {
     pub quotas: crate::quota::Quotas,
     /// This runner, as the tracker tools see it, for starting and messaging sessions.
     me: crate::tools::Handle,
+    claims: Arc<Mutex<()>>,
+}
+
+pub enum Claim {
+    Started(Session),
+    Taken(SessionId),
 }
 
 const SUPERVISOR_PATIENCE_SETTING: &str = "supervisor_answer_secs";
@@ -141,6 +147,7 @@ impl Runner {
             terminals: Default::default(),
             quotas: Default::default(),
             me,
+            claims: Default::default(),
         };
         runner.me.set(runner.clone());
         runner
@@ -362,6 +369,38 @@ impl Runner {
         }
         self.changed.notify_waiters();
         store.session(session.id)
+    }
+
+    pub fn issue_worker(&self, issue: Id) -> Option<SessionId> {
+        let sessions = self.store.sessions().unwrap_or_default();
+        let exists = |id: SessionId| sessions.iter().any(|s| s.id == id);
+        let registered = self
+            .store
+            .workers()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|w| w.issue == issue && exists(w.session))
+            .map(|w| w.session);
+        registered.or_else(|| {
+            sessions
+                .iter()
+                .find(|s| s.issue_id == Some(issue) && self.is_running(s.id))
+                .map(|s| s.id)
+        })
+    }
+
+    pub fn start_worker(&self, new: NewSession, force: bool) -> Result<Claim, StoreError> {
+        let Some(issue) = new.issue_id else {
+            return self.start_session(new).map(Claim::Started);
+        };
+        let _claim = self.claims.lock().unwrap_or_else(|e| e.into_inner());
+        if !force && let Some(other) = self.issue_worker(issue) {
+            return Ok(Claim::Taken(other));
+        }
+        let project = new.project_id;
+        let started = self.start_session(new)?;
+        self.store.add_worker(started.id, issue, project)?;
+        Ok(Claim::Started(started))
     }
 
     pub fn supervisor_session(&self) -> Option<Session> {

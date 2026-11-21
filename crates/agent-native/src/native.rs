@@ -626,6 +626,7 @@ fn agentbench_specs() -> Vec<Spec> {
                     "worktree": id("Work in this existing worktree instead, as list_worktrees gives its id"),
                     "model": string("A model or level for it"),
                     "title": string("A title for the chat"),
+                    "force": json!({"type": "boolean", "description": "Start it even when the issue already has a worker session"}),
                 }),
                 &[],
             ),
