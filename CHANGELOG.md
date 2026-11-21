@@ -6,6 +6,9 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The context window is read from a server that lists the model under another name (a provider prefix, other case, or the only model served), and a web page at `/props` no longer counts as an answer. A server that says nothing now gets a 1M window instead of 128k, so compaction stops firing early.
+
 ## [0.9.2] - 2026-11-20
 
 ### Fixed

@@ -2424,6 +2424,22 @@ fn ollama_window(v: &Value) -> Option<u64> {
         .and_then(|(_, n)| n.as_u64())
 }
 
+fn served_entry<'a>(entries: &'a [Value], model: &str) -> Option<&'a Value> {
+    fn id(m: &Value) -> Option<&str> {
+        m.get("id").or_else(|| m.get("name")).and_then(Value::as_str)
+    }
+    let last = |s: &str| s.rsplit('/').next().unwrap_or(s).to_lowercase();
+    entries
+        .iter()
+        .find(|m| id(m) == Some(model))
+        .or_else(|| entries.iter().find(|m| id(m).is_some_and(|i| i.eq_ignore_ascii_case(model))))
+        .or_else(|| entries.iter().find(|m| id(m).is_some_and(|i| last(i) == last(model))))
+        .or_else(|| match entries {
+            [only] => Some(only),
+            _ => None,
+        })
+}
+
 /// Ask the server how big the model's window is. Servers that follow the OpenAI listing say
 /// so in `/models`; llama.cpp says it in `/props` and Ollama in `/api/show`.
 async fn ask_window(url: &str, key: &str, model: &str) -> Option<u64> {
@@ -2438,16 +2454,20 @@ async fn ask_window(url: &str, key: &str, model: &str) -> Option<u64> {
         }
         async move {
             let resp = req.send().await.ok()?.error_for_status().ok()?;
+            let html = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.to_ascii_lowercase().contains("html"));
+            if html {
+                return None;
+            }
             resp.json::<Value>().await.ok()
         }
     };
     if let Some(list) = get(format!("{base}/models")).await {
         let entries = list.get("data").or_else(|| list.get("models")).and_then(Value::as_array);
-        let mine = entries.and_then(|a| {
-            a.iter().find(|m| {
-                m.get("id").or_else(|| m.get("name")).and_then(Value::as_str) == Some(model)
-            })
-        });
+        let mine = entries.and_then(|a| served_entry(a, model));
         // Only the model's own entry: another model's window is not this one's.
         if let Some(n) = mine.and_then(window_in) {
             return Some(n);
@@ -5021,7 +5041,7 @@ for line in sys.stdin:
 
     fn crowded(call: Value) -> Value {
         let mut v = call;
-        v["usage"] = json!({"prompt_tokens": 120_000, "completion_tokens": 5});
+        v["usage"] = json!({"prompt_tokens": 900_000, "completion_tokens": 5});
         v
     }
 
@@ -5432,9 +5452,10 @@ for line in sys.stdin:
                     .iter()
                     .find(|(p, _)| *p == path)
                     .map_or(("404 Not Found", "{}"), |(_, b)| ("200 OK", *b));
+                let kind = if body.starts_with('<') { "text/html" } else { "application/json" };
                 let _ = s.write_all(
                     format!(
-                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     )
                     .as_bytes(),
@@ -5479,6 +5500,45 @@ for line in sys.stdin:
         let got =
             window_of(&serving_at("http://127.0.0.1:1/v1".into(), "gone"), Duration::from_secs(5))
                 .await;
+        assert_eq!(got, agentbench_core::DEFAULT_CONTEXT);
+    }
+
+    #[test]
+    fn the_default_window_is_a_million() {
+        assert_eq!(agentbench_core::DEFAULT_CONTEXT, 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn a_server_serving_one_model_under_another_name_gives_its_window() {
+        let url = json_server(vec![(
+            "/v1/models",
+            r#"{"data":[{"id":"orcarouter/Qwen3.8-27B-Uncensored-NVFP4","context_length":512000}]}"#,
+        )]);
+        let got = window_of(&serving_at(url, "qwen3.8-27b"), Duration::from_secs(5)).await;
+        assert_eq!(got, 512000);
+    }
+
+    #[tokio::test]
+    async fn the_model_is_matched_ignoring_case_and_its_provider_prefix() {
+        let probe = Duration::from_secs(5);
+        let list = r#"{"data":[{"id":"other","context_length":1000},{"id":"orcarouter/Qwen3-32B","context_length":262144}]}"#;
+        let url = json_server(vec![("/v1/models", list)]);
+        assert_eq!(window_of(&serving_at(url, "ORCAROUTER/qwen3-32b"), probe).await, 262144);
+        let url = json_server(vec![("/v1/models", list)]);
+        assert_eq!(window_of(&serving_at(url, "qwen3-32b"), probe).await, 262144);
+        let url = json_server(vec![("/v1/models", list)]);
+        let got = window_of(&serving_at(url, "qwen"), probe).await;
+        assert_eq!(got, agentbench_core::DEFAULT_CONTEXT);
+    }
+
+    #[tokio::test]
+    async fn a_web_page_at_props_is_not_engine_properties() {
+        let url = json_server(vec![
+            ("/v1/models", r#"{"data":[{"id":"a"},{"id":"b"}]}"#),
+            ("/props", "<!doctype html><html><body>app</body></html>"),
+            ("/api/show", "<!doctype html><html><body>app</body></html>"),
+        ]);
+        let got = window_of(&serving_at(url, "c"), Duration::from_secs(5)).await;
         assert_eq!(got, agentbench_core::DEFAULT_CONTEXT);
     }
 

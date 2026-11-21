@@ -1211,7 +1211,7 @@ pub fn host_of(url: &str) -> String {
 }
 
 /// The window assumed for a model whose server does not say.
-pub const DEFAULT_CONTEXT: u64 = 128_000;
+pub const DEFAULT_CONTEXT: u64 = 1_000_000;
 pub const DEFAULT_COMPACT_AT: u64 = 80;
 pub const DEFAULT_FOLD_IDLE_SECS: u64 = 240;
 pub const DEFAULT_FOLD_AT: u64 = 50;
