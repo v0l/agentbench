@@ -2943,6 +2943,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_extra_dirty_file_is_not_a_no_commit_signal() {
+        let r = rig(LONG);
+        let (sid, path) = running_worker(&r).await;
+        let now = crate::store::now();
+        std::fs::write(std::path::Path::new(&path).join("a.txt"), "1").unwrap();
+        r.ap.tick_at(now + 1000);
+        std::fs::write(std::path::Path::new(&path).join("b.txt"), "1").unwrap();
+        r.ap.tick_at(now + 46 * 60_000);
+        assert!(!crate::checkin::is_stuck(&r.store, sid));
+    }
+
+    #[tokio::test]
     async fn a_new_commit_shows_in_the_next_check_in_and_clears_the_no_commit_signal() {
         let r = rig(LONG);
         let (sid, path) = running_worker(&r).await;

@@ -3,6 +3,8 @@ use crate::runner::{Origin, Runner};
 use crate::store::{StoreError, Worker};
 use agentbench_core::{Entry, Id, Message, NewSession, Place, Session, SessionId, clock_hm, span};
 use std::collections::HashSet;
+
+const MIN_DIRTY_GROWTH: usize = 2;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -290,7 +292,7 @@ impl Autopilot {
             if c.baseline.is_none_or(|b| b.0 != f.last_commit) {
                 c.baseline = Some((f.last_commit, f.dirty));
             }
-            let grown = c.baseline.is_some_and(|b| f.dirty > b.1);
+            let grown = c.baseline.is_some_and(|b| f.dirty >= b.1 + MIN_DIRTY_GROWTH);
             if quiet_limit > 0 && grown && now - f.last_commit.max(t.turn_started) >= quiet_limit {
                 signals.push(("no_commit", format!("no commit for {} while the dirty files grew to {}", span(now - f.last_commit.max(t.turn_started)), f.dirty)));
             }
