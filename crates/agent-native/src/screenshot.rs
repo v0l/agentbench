@@ -63,8 +63,9 @@ pub(super) fn address(ws: &Workspace, target: &str) -> Result<String, String> {
     if !file.is_file() {
         return Err(format!("{} is not a file", ws.shown(&file)));
     }
-    let abs = file.canonicalize().map_err(|e| format!("{target}: {e}"))?;
-    Ok(format!("file://{}", abs.display()))
+    let abs = dunce::canonicalize(&file).map_err(|e| format!("{target}: {e}"))?;
+    Ok(url::Url::from_file_path(&abs)
+        .map_or_else(|_| format!("file://{}", abs.display()), String::from))
 }
 
 fn size(args: &Value, key: &str, default: u32) -> u32 {

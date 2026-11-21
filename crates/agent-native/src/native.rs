@@ -4500,6 +4500,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_later_turn_resends_the_first_turn_byte_for_byte() {
         let dir = tempfile::tempdir().unwrap();
@@ -4623,6 +4624,7 @@ mod tests {
         assert_eq!(instructions(dir.path()).as_deref(), Some("Test on the Mac."));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_mcp_server_in_the_worktree_is_offered_called_and_its_picture_shown() {
         let dir = tempfile::tempdir().unwrap();
@@ -5288,6 +5290,7 @@ for line in sys.stdin:
         assert_eq!(history(&all)[..sent.len()], sent[..], "the system row comes first on replay");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_edit_shaped_bash_command_still_runs_and_gets_a_note() {
         let dir = tempfile::tempdir().unwrap();
@@ -5359,6 +5362,7 @@ for line in sys.stdin:
         assert!(bad.contains("until"), "{bad}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn edit_file_runs_then_only_after_a_good_edit() {
         let dir = tempfile::tempdir().unwrap();
@@ -5394,6 +5398,7 @@ for line in sys.stdin:
         assert!(io.events().iter().any(|e| matches!(e, Event::Usage(u) if u.file_edits == 1)));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_runs_in_the_worktree_and_reports_failures() {
         let dir = tempfile::tempdir().unwrap();
@@ -5401,7 +5406,7 @@ for line in sys.stdin:
         let c = context();
         let ok = bash(dir.path(), "pwd; echo $AGENTBENCH_SESSION", None, Default::default(), &c, &io).await.unwrap();
         assert!(
-            ok.contains(&dir.path().canonicalize().unwrap().display().to_string())
+            ok.contains(&dunce::canonicalize(dir.path()).unwrap().display().to_string())
                 || ok.contains(&dir.path().display().to_string())
         );
         assert!(ok.contains(&format!("\n{}\n", crate::test_session())));
@@ -5411,6 +5416,7 @@ for line in sys.stdin:
         assert!(slow.contains("killed after 1s"), "{slow}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_returns_when_a_background_job_keeps_the_pipes_open() {
         let dir = tempfile::tempdir().unwrap();

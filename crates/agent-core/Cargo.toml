@@ -19,6 +19,7 @@ nono = { version = "0.80", default-features = false, optional = true }
 [dependencies]
 async-trait = "0.1"
 base64 = "0.23"
+dunce = "1"
 dirs = "6"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 ignore = "0.4"

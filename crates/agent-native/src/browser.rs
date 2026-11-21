@@ -1216,7 +1216,7 @@ fn upload_files(
             if !path.is_file() {
                 return Err(format!("{name} is not a file"));
             }
-            path.canonicalize().map_err(|e| format!("{name}: {e}"))
+            dunce::canonicalize(&path).map_err(|e| format!("{name}: {e}"))
         })
         .collect()
 }

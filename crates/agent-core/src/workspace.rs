@@ -18,7 +18,7 @@ pub struct Workspace {
 impl Workspace {
     pub fn open(root: &Path) -> Result<Self, String> {
         fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
-        let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
+        let root = dunce::canonicalize(&root).map_err(|e| format!("{}: {e}", root.display()))?;
         Ok(Self { root, grants: Grants::default() })
     }
 
@@ -62,7 +62,7 @@ impl Workspace {
         }
         let mut probe = out.clone();
         while !probe.exists() && probe.pop() {}
-        let real = probe.canonicalize().map_err(|e| format!("{path}: {e}"))?;
+        let real = dunce::canonicalize(&probe).map_err(|e| format!("{path}: {e}"))?;
         let write = access == Access::Write;
         let inside = out.starts_with(&self.root) && real.starts_with(&self.root);
         if inside || (granted && self.grants.covers(&real, write)) {
@@ -304,7 +304,7 @@ mod tests {
         let _ = fs::remove_dir_all(&elsewhere);
         fs::create_dir_all(&elsewhere).unwrap();
         fs::write(elsewhere.join("part.gcad"), "rect 1 1\n").unwrap();
-        (ws, elsewhere.canonicalize().unwrap())
+        (ws, dunce::canonicalize(&elsewhere).unwrap())
     }
 
     #[test]
