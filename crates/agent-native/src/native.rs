@@ -25,6 +25,7 @@ const BASH_DEFAULT: u64 = 120;
 const BASH_MAX: u64 = 600;
 /// The longest any one tool call may run before it is given up on.
 const TOOL_LIMIT: Duration = Duration::from_secs(600);
+const PROBE: Duration = Duration::from_secs(15);
 const OUTPUT_MAX: usize = 30_000;
 /// How long output is read after the shell exits. A background job that keeps the pipes open
 /// (a dev server) would otherwise hold the call until it died.
@@ -281,7 +282,7 @@ pub struct Patience {
 impl Default for Patience {
     fn default() -> Self {
         // The stub servers in tests answer one request per reply, so they are not probed.
-        let probe = if cfg!(any(test, feature = "testing")) { Duration::ZERO } else { Duration::from_secs(4) };
+        let probe = if cfg!(any(test, feature = "testing")) { Duration::ZERO } else { PROBE };
         Patience { headers: HEADERS, stall: STALL, probe, tool: TOOL_LIMIT }
     }
 }
@@ -5501,6 +5502,29 @@ for line in sys.stdin:
             window_of(&serving_at("http://127.0.0.1:1/v1".into(), "gone"), Duration::from_secs(5))
                 .await;
         assert_eq!(got, agentbench_core::DEFAULT_CONTEXT);
+    }
+
+    #[tokio::test]
+    async fn a_slow_model_list_is_still_read() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { return };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                std::thread::sleep(Duration::from_millis(4500));
+                let body = r#"{"data":[{"id":"code","context_length":1048576}]}"#;
+                let _ = s.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        assert_eq!(window_of(&serving_at(url, "code"), PROBE).await, 1048576);
     }
 
     #[test]
