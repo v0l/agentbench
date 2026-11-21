@@ -4,3 +4,4 @@
 # later card at first load. Override with the environment variable to build for one card only.
 [env]
 CUDA_COMPUTE_CAP = "80"
+RUST_TEST_THREADS = { value = "8", force = false }

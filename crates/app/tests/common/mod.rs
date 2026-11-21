@@ -201,12 +201,53 @@ pub fn rig_model(
     Rig { url: addr.to_string(), store, _dir: dir, _rt: rt }
 }
 
+fn hold_gpu_lock() {
+    static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| {
+        let path = std::env::temp_dir().join("agentbench-ui-tests.lock");
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).expect("open gpu lock");
+        file.lock().expect("take gpu lock");
+        file
+    });
+}
+
+pub fn share_one_device() {
+    SHARE_ONE_DEVICE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+static SHARE_ONE_DEVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn gpu_setup() -> eframe::egui_wgpu::WgpuSetup {
+    if SHARE_ONE_DEVICE.load(std::sync::atomic::Ordering::SeqCst) {
+        return shared_gpu_setup();
+    }
+    hold_gpu_lock();
     let mut setup = egui_kittest::wgpu::default_wgpu_setup();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
         new.instance_descriptor.flags = eframe::egui_wgpu::wgpu::InstanceFlags::empty();
     }
     setup
+}
+
+fn shared_gpu_setup() -> eframe::egui_wgpu::WgpuSetup {
+    hold_gpu_lock();
+    static SHARED: std::sync::OnceLock<eframe::egui_wgpu::WgpuSetupExisting> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            let mut setup = egui_kittest::wgpu::default_wgpu_setup();
+            if let eframe::egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
+                new.instance_descriptor.flags = eframe::egui_wgpu::wgpu::InstanceFlags::empty();
+            }
+            let state = egui_kittest::wgpu::create_render_state(setup, eframe::egui_wgpu::RendererOptions::PREDICTABLE);
+            eframe::egui_wgpu::WgpuSetupExisting {
+                instance: state.instance.clone(),
+                adapter: state.adapter.clone(),
+                device: state.device.clone(),
+                queue: state.queue.clone(),
+            }
+        })
+        .clone()
+        .into()
 }
 
 pub fn build_lock() -> std::sync::MutexGuard<'static, ()> {
