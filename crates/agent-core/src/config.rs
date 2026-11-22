@@ -47,6 +47,7 @@ pub struct Config {
     pub brief: String,
     pub workspace: String,
     pub sampling: Sampling,
+    pub thinking: Option<bool>,
     pub rest: Vec<(String, String)>,
 }
 
@@ -60,12 +61,25 @@ impl Default for Config {
             brief: String::new(),
             workspace: String::new(),
             sampling: Sampling::default(),
+            thinking: None,
             rest: Vec::new(),
         }
     }
 }
 
+fn parse_thinking(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" => Some(true),
+        "off" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 impl Config {
+    pub fn chat_template_kwargs(&self) -> Option<serde_json::Value> {
+        self.thinking.map(|on| serde_json::json!({ "enable_thinking": on }))
+    }
+
     pub fn path(dir: Option<&Path>) -> Option<PathBuf> {
         Some(dir?.join("agent"))
     }
@@ -111,6 +125,7 @@ impl Config {
                 "top_p" => c.sampling.top_p = value.parse().ok(),
                 "top_k" => c.sampling.top_k = value.parse().ok(),
                 "max_tokens" => c.sampling.max_tokens = value.parse().ok(),
+                "thinking" => c.thinking = parse_thinking(value),
                 other => c.rest.push((other.to_string(), value.to_string())),
             }
         }
@@ -129,13 +144,17 @@ impl Config {
         .filter_map(|(k, v)| Some(format!("{k} = {}\n", v?)))
         .collect();
         format!(
-            "url = {}\nmodel = {}\nkey = {}\nsteps = {}\nbrief = {}\nworkspace = {}\n{sampling}{}",
+            "url = {}\nmodel = {}\nkey = {}\nsteps = {}\nbrief = {}\nworkspace = {}\n{sampling}{}{}",
             self.url,
             self.model,
             self.key,
             self.steps,
             self.brief.replace('\n', "\\n"),
             self.workspace,
+            match self.thinking {
+                Some(on) => format!("thinking = {}\n", if on { "on" } else { "off" }),
+                None => String::new(),
+            },
             self.rest.iter().map(|(k, v)| format!("{k} = {v}\n")).collect::<String>()
         )
     }
@@ -184,6 +203,7 @@ mod tests {
                 top_k: Some(20),
                 max_tokens: Some(4096),
             },
+            thinking: Some(false),
             rest: vec![("wake".into(), "shark".into())],
         };
         assert_eq!(Config::parse(&c.render()), c);
@@ -211,6 +231,18 @@ mod tests {
         assert_eq!(body["temperature"], 0.2);
         assert_eq!(body["top_k"], 40);
         assert!(body.get("top_p").is_none() && body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn thinking_is_left_to_the_server_until_set() {
+        assert_eq!(Config::default().chat_template_kwargs(), None);
+        assert!(!Config::default().render().contains("thinking"));
+        let on = Config::parse("thinking = on\n");
+        assert_eq!(on.thinking, Some(true));
+        assert_eq!(on.chat_template_kwargs().unwrap()["enable_thinking"], true);
+        let off = Config::parse(&Config { thinking: Some(false), ..Config::default() }.render());
+        assert_eq!(off.chat_template_kwargs().unwrap()["enable_thinking"], false);
+        assert!(off.rest.is_empty());
     }
 
     #[test]

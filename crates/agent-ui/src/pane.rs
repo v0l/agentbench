@@ -204,6 +204,14 @@ fn head<H>(ui: &mut Ui, agent: &mut Agent<H>, busy: bool, mut on_model: Option<&
                 None => agent.settings = Some(agent.chat.config.clone()),
             }
         }
+        let thinking = agent.chat.config.thinking;
+        if toggle(ui, "think", thinking == Some(true))
+            .on_hover_text("ask the model to think before it answers")
+            .clicked()
+        {
+            agent.chat.config.thinking = Some(thinking != Some(true));
+            let _ = agent.chat.config.save(agent.chat.backend.config_dir().as_deref());
+        }
         let can_clear = !agent.chat.turns.is_empty() && !busy;
         if ui.add(Key::new("clear").outline(VALUE).enabled(can_clear)).clicked() {
             agent.chat.clear();

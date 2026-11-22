@@ -484,6 +484,9 @@ impl Worker {
             "stream": true,
         });
         self.config.sampling.over(self.backend.sampling()).add_to(&mut body);
+        if let Some(kwargs) = self.config.chat_template_kwargs() {
+            body["chat_template_kwargs"] = kwargs;
+        }
         let mut req = super::http::client()
             .post(self.config.endpoint())
             .header("content-type", "application/json")
@@ -691,6 +694,19 @@ mod tests {
             }
         });
         (url, asked)
+    }
+
+    #[test]
+    fn the_thinking_choice_is_sent_as_a_template_kwarg() {
+        for (thinking, expect) in [(None, None), (Some(false), Some(false)), (Some(true), Some(true))] {
+            let (url, seen) = stub_server(vec![vec![json!({"choices":[{"delta":{"content":"hi"}}]})]]);
+            let (mut w, _updates, _asks) = worker(url);
+            w.config.thinking = thinking;
+            super::super::runtime().block_on(w.run());
+            let body = seen.try_iter().next().expect("a request");
+            let sent = body.get("chat_template_kwargs").map(|k| k["enable_thinking"].as_bool().unwrap());
+            assert_eq!(sent, expect);
+        }
     }
 
     #[test]
