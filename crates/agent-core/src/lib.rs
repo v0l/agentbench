@@ -161,6 +161,10 @@ pub trait Backend: Send + Sync + 'static {
         format!("{}/{}", self.app(), env!("CARGO_PKG_VERSION"))
     }
 
+    fn sampling(&self) -> config::Sampling {
+        config::Sampling::default()
+    }
+
     fn brief(&self, workspace: &Path, skills: &[Skill]) -> String;
 
     fn welcome(&self) -> Welcome;

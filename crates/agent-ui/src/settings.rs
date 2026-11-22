@@ -44,6 +44,13 @@ pub fn show(ui: &mut Ui, draft: &mut Config, app: &str, dir: Option<&Path>) -> O
          leave this folder. Empty means the default shown.",
     );
     ui.add_space(6.0);
+    ui.label(legend("sampling"));
+    optional(ui, "temperature", &mut draft.sampling.temperature);
+    optional(ui, "top_p", &mut draft.sampling.top_p);
+    optional(ui, "top_k", &mut draft.sampling.top_k);
+    optional(ui, "max_tokens", &mut draft.sampling.max_tokens);
+    hint(ui, "Leave empty to use the server's own default.");
+    ui.add_space(6.0);
     ui.label(legend("extra instructions"));
     prose(ui, &mut draft.brief, "anything to add to what the model is told", 3);
     ui.add_space(12.0);
@@ -58,6 +65,23 @@ pub fn show(ui: &mut Ui, draft: &mut Config, app: &str, dir: Option<&Path>) -> O
         }
     });
     done
+}
+
+fn optional<T: std::str::FromStr + ToString>(ui: &mut Ui, name: &str, value: &mut Option<T>) {
+    let id = ui.id().with(("sampling", name));
+    let shown = value.as_ref().map(T::to_string).unwrap_or_default();
+    let mut text = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| shown.clone());
+    if text.trim().parse::<T>().ok().map(|v| v.to_string()) != value.as_ref().map(T::to_string)
+        && !(text.trim().is_empty() && value.is_none())
+    {
+        text = shown;
+    }
+    ui.horizontal(|ui| {
+        ui.label(name);
+        field(ui, &mut text, "default");
+    });
+    *value = text.trim().parse().ok();
+    ui.data_mut(|d| d.insert_temp(id, text));
 }
 
 fn where_saved(dir: Option<&Path>) -> String {

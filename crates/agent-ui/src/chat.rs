@@ -477,12 +477,13 @@ impl Worker {
     async fn complete(&self, tools: &Value) -> Result<Completion, String> {
         let mut messages = vec![json!({ "role": "system", "content": self.brief() })];
         messages.extend(self.history.iter().cloned());
-        let body = json!({
+        let mut body = json!({
             "model": self.config.model,
             "messages": messages,
             "tools": tools,
             "stream": true,
         });
+        self.config.sampling.over(self.backend.sampling()).add_to(&mut body);
         let mut req = super::http::client()
             .post(self.config.endpoint())
             .header("content-type", "application/json")
@@ -593,6 +594,14 @@ mod tests {
     impl Backend for Test {
         fn app(&self) -> &'static str {
             "egui-bench-test"
+        }
+
+        fn sampling(&self) -> super::super::config::Sampling {
+            super::super::config::Sampling {
+                temperature: Some(1.0),
+                top_k: Some(40),
+                ..Default::default()
+            }
         }
 
         fn brief(&self, workspace: &std::path::Path, skills: &[skillset::Skill]) -> String {
@@ -753,6 +762,18 @@ mod tests {
         chat.poll();
         let said: Vec<&str> = chat.history.iter().filter_map(|m| m["content"].as_str()).collect();
         assert_eq!(said, ["one", "first", "two", "second"]);
+    }
+
+    #[test]
+    fn sampling_reaches_the_request_with_the_backend_filling_gaps() {
+        let (url, asked) = stub_server(vec![vec![json!({"choices":[{"delta":{"content":"ok"}}]})]]);
+        let (mut w, _updates, _asks) = worker(url);
+        w.config.sampling.temperature = Some(0.3);
+        super::super::runtime().block_on(w.run());
+        let sent = asked.recv().expect("a request");
+        assert_eq!(sent["temperature"], 0.3);
+        assert_eq!(sent["top_k"], 40);
+        assert!(sent.get("top_p").is_none());
     }
 
     #[test]

@@ -3,6 +3,41 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_URL: &str = "http://127.0.0.1:11434/v1";
 pub const DEFAULT_STEPS: usize = 20;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Sampling {
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<u32>,
+    pub max_tokens: Option<u32>,
+}
+
+impl Sampling {
+    pub fn over(self, base: Sampling) -> Sampling {
+        Sampling {
+            temperature: self.temperature.or(base.temperature),
+            top_p: self.top_p.or(base.top_p),
+            top_k: self.top_k.or(base.top_k),
+            max_tokens: self.max_tokens.or(base.max_tokens),
+        }
+    }
+
+    pub fn add_to(&self, body: &mut serde_json::Value) {
+        let Some(map) = body.as_object_mut() else { return };
+        if let Some(v) = self.temperature {
+            map.insert("temperature".into(), v.into());
+        }
+        if let Some(v) = self.top_p {
+            map.insert("top_p".into(), v.into());
+        }
+        if let Some(v) = self.top_k {
+            map.insert("top_k".into(), v.into());
+        }
+        if let Some(v) = self.max_tokens {
+            map.insert("max_tokens".into(), v.into());
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub url: String,
@@ -11,6 +46,7 @@ pub struct Config {
     pub steps: usize,
     pub brief: String,
     pub workspace: String,
+    pub sampling: Sampling,
     pub rest: Vec<(String, String)>,
 }
 
@@ -23,6 +59,7 @@ impl Default for Config {
             steps: DEFAULT_STEPS,
             brief: String::new(),
             workspace: String::new(),
+            sampling: Sampling::default(),
             rest: Vec::new(),
         }
     }
@@ -70,6 +107,10 @@ impl Config {
                 "steps" => c.steps = value.parse().unwrap_or(DEFAULT_STEPS),
                 "brief" => c.brief = value.replace("\\n", "\n"),
                 "workspace" => c.workspace = value.to_string(),
+                "temperature" => c.sampling.temperature = value.parse().ok(),
+                "top_p" => c.sampling.top_p = value.parse().ok(),
+                "top_k" => c.sampling.top_k = value.parse().ok(),
+                "max_tokens" => c.sampling.max_tokens = value.parse().ok(),
                 other => c.rest.push((other.to_string(), value.to_string())),
             }
         }
@@ -77,8 +118,18 @@ impl Config {
     }
 
     pub fn render(&self) -> String {
+        let s = &self.sampling;
+        let sampling: String = [
+            ("temperature", s.temperature.map(|v| v.to_string())),
+            ("top_p", s.top_p.map(|v| v.to_string())),
+            ("top_k", s.top_k.map(|v| v.to_string())),
+            ("max_tokens", s.max_tokens.map(|v| v.to_string())),
+        ]
+        .into_iter()
+        .filter_map(|(k, v)| Some(format!("{k} = {}\n", v?)))
+        .collect();
         format!(
-            "url = {}\nmodel = {}\nkey = {}\nsteps = {}\nbrief = {}\nworkspace = {}\n{}",
+            "url = {}\nmodel = {}\nkey = {}\nsteps = {}\nbrief = {}\nworkspace = {}\n{sampling}{}",
             self.url,
             self.model,
             self.key,
@@ -127,6 +178,12 @@ mod tests {
             steps: 7,
             brief: "two\nlines".into(),
             workspace: "/work/parts".into(),
+            sampling: Sampling {
+                temperature: Some(0.6),
+                top_p: Some(0.95),
+                top_k: Some(20),
+                max_tokens: Some(4096),
+            },
             rest: vec![("wake".into(), "shark".into())],
         };
         assert_eq!(Config::parse(&c.render()), c);
@@ -141,6 +198,19 @@ mod tests {
         assert_eq!(again.rest, c.rest);
         assert_eq!(again.model, "m");
         assert!(c.render().contains("wake = shark"));
+    }
+
+    #[test]
+    fn sampling_set_in_config_beats_the_backend_default() {
+        let set = Sampling { temperature: Some(0.2), ..Sampling::default() };
+        let backend = Sampling { temperature: Some(1.0), top_k: Some(40), ..Sampling::default() };
+        let got = set.over(backend);
+        assert_eq!((got.temperature, got.top_k, got.top_p), (Some(0.2), Some(40), None));
+        let mut body = serde_json::json!({ "model": "m" });
+        got.add_to(&mut body);
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["top_k"], 40);
+        assert!(body.get("top_p").is_none() && body.get("max_tokens").is_none());
     }
 
     #[test]
