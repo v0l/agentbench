@@ -526,6 +526,25 @@ pub fn give_usage(rig: &Rig) -> agentbench_core::Session {
 }
 
 
+pub fn click_settled(h: &mut Harness<'_, App>, label: &str) {
+    let start = Instant::now();
+    let mut last = None;
+    let mut still = 0;
+    while still < 5 {
+        assert!(start.elapsed() < Duration::from_secs(60), "{label} never held still");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+        let now = h.query_by_label(label).map(|n| n.rect());
+        if now.is_some() && now == last {
+            still += 1;
+        } else {
+            still = 0;
+        }
+        last = now;
+    }
+    click_label(h, label);
+}
+
 pub fn click_label(h: &mut Harness<'_, App>, label: &str) {
     h.get_by_label(label).click();
     h.run_steps(3);

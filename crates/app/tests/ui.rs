@@ -3147,20 +3147,22 @@ fn chat_server(chat_status: u16, chat_body: &'static str) -> String {
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         for stream in listener.incoming().flatten() {
-            let mut stream = stream;
-            let mut buf = [0u8; 8192];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let head = String::from_utf8_lossy(&buf[..n]).to_string();
-            let (code, body) = if head.starts_with("GET /v1/models") {
-                (200, r#"{"data":[{"id":"alpha-1"},{"id":"beta-2"}]}"#)
-            } else {
-                (chat_status, chat_body)
-            };
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (code, body) = if head.starts_with("GET /v1/models") {
+                    (200, r#"{"data":[{"id":"alpha-1"},{"id":"beta-2"}]}"#)
+                } else {
+                    (chat_status, chat_body)
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
         }
     });
     format!("http://{addr}/v1")
@@ -3258,10 +3260,8 @@ fn completing_the_onboarding_writes_a_working_default_and_does_not_show_again() 
     let mut h = harness(rig.url.clone());
     until(&mut h, "the onboarding", |h| h.state().onboarding_open());
 
-    click_label(&mut h, "set up OpenAI compatible endpoint");
-    until(&mut h, "the address field", |h| {
-        h.query_all_by_role(egui::accesskit::Role::TextInput).count() >= 2
-    });
+    click_settled(&mut h, "set up OpenAI compatible endpoint");
+    until(&mut h, "the address field", |h| h.query_by_label("test connection").is_some());
     type_into_field(&mut h, 0, &up);
     click_label(&mut h, "test connection");
     until(&mut h, "the test to pass", |h| h.query_by_label_contains("answered").is_some());
@@ -3355,9 +3355,9 @@ fn a_failed_test_call_shows_the_servers_own_error() {
     let rig = onboarding_rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the onboarding", |h| h.state().onboarding_open());
-    click_label(&mut h, "set up OpenAI compatible endpoint");
+    click_settled(&mut h, "set up OpenAI compatible endpoint");
     until(&mut h, "the address field", |h| {
-        h.query_all_by_role(egui::accesskit::Role::TextInput).count() >= 2
+        h.query_by_label("test connection").is_some()
     });
     type_into_field(&mut h, 0, &down);
     click_label(&mut h, "test connection");
