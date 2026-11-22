@@ -2922,21 +2922,24 @@ mod tests {
         let r = rig(DONE);
         let (a, sid) = worked_on(&r).await;
         set_level(&r.store, r.project, Some(Automation::Ship));
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        std::fs::write(std::path::Path::new(&tree.path).join("blob.bin"), [0u8, 1, 2, 255, 0]).unwrap();
+        git_in(std::path::Path::new(&tree.path), &["add", "blob.bin"]);
+        git_in(std::path::Path::new(&tree.path), &["commit", "-qm", "add blob"]);
         std::fs::write(r.repo.join("other.txt"), "o").unwrap();
         git_in(&r.repo, &["add", "."]);
         git_in(&r.repo, &["commit", "-qm", "main work"]);
-        let hook = r.repo.join(".git/hooks/pre-merge-commit");
-        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-        std::fs::write(&hook, "#!/bin/sh\necho 'binary file blob.bin differs' >&2\nexit 1\n").unwrap();
-        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(r.repo.join(".git/info/attributes"), "*.bin filter=blobs\n").unwrap();
+        git_in(&r.repo, &["config", "filter.blobs.clean", "cat"]);
+        git_in(&r.repo, &["config", "filter.blobs.smudge", "false"]);
+        git_in(&r.repo, &["config", "filter.blobs.required", "true"]);
+        assert!(crate::git::conflicts_with(&r.repo, &r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap().branch.unwrap()).is_none(), "merge-tree reports it clean");
         passed(&r, sid).await;
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
         settle(&r).await;
         let msg = told(&r, sid).join("\n");
-        assert!(msg.contains("blob.bin differs") && msg.contains("run `git merge"), "{msg}");
-        assert!(!r.repo.join(".git/MERGE_HEAD").exists());
-        assert!(!crate::git::is_dirty(&r.repo).unwrap());
+        assert!(msg.contains("blob.bin") && msg.contains("smudge filter blobs failed") && msg.contains("run `git merge"), "{msg}");
         assert!(!r.repo.join(".git/MERGE_HEAD").exists());
         assert!(!crate::git::is_dirty(&r.repo).unwrap());
     }
@@ -3019,6 +3022,272 @@ mod tests {
         assert!(!r.ap.notify_capped(1, "x", t + 59 * 60_000));
         assert!(r.ap.notify_capped(2, "x", t));
         assert!(r.ap.notify_capped(1, "x", t + 61 * 60_000));
+    }
+
+    async fn dirty_reports(r: &Rig) -> Vec<String> {
+        idle(r, r.boss.unwrap()).await;
+        said_to_boss(r)
+            .into_iter()
+            .flat_map(|t| t.split("Dirty main checkout:").skip(1).map(str::to_string).collect::<Vec<_>>())
+            .collect()
+    }
+
+    fn notices(r: &Rig) -> Vec<String> {
+        r.store
+            .messages(r.boss.unwrap(), 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::Notice { text } => Some(text),
+                _ => None,
+            })
+            .filter(|t| t.contains("has been dirty"))
+            .collect()
+    }
+
+    async fn blocked_by_dirty_main(file: &str) -> (Rig, Id, agentbench_core::SessionId) {
+        let (r, a, sid) = finished_worker(DONE).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        std::fs::write(r.repo.join(file), "x").unwrap();
+        r.ap.tick();
+        idle(&r, r.boss.unwrap()).await;
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        (r, a, sid)
+    }
+
+    fn main_checkout(r: &Rig, args: serde_json::Value) -> Result<serde_json::Value, String> {
+        let mut args = args;
+        args["project"] = serde_json::json!(r.project);
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        r.ap.runner.tools().call("main_checkout", &args, r.boss.unwrap())
+    }
+
+    #[tokio::test]
+    async fn untracked_screenshots_in_main_give_one_message_recommending_reset() {
+        let (r, _, _) = blocked_by_dirty_main("shot.png").await;
+        let t = crate::store::now();
+        r.ap.tick_at(t);
+        r.ap.tick_at(t + 1000);
+        let reports = dirty_reports(&r).await;
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let m = &reports[0];
+        assert!(m.contains("Recommendation: reset"), "{m}");
+        assert!(m.contains("shot.png") && m.contains("git clean -n") && m.contains("Would remove shot.png"), "{m}");
+        assert!(m.contains(&r.repo.to_string_lossy().to_string()) && m.contains("Stashes already there: 0"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn a_session_working_in_main_gives_one_message_recommending_it_commits() {
+        let (r, _, _) = blocked_by_dirty_main("lib.rs").await;
+        let s = r
+            .ap
+            .runner
+            .start_session(NewSession {
+                parent: r.boss,
+                project_id: r.project,
+                agent: "echo".into(),
+                place: Place::Main,
+                title: Some("editing lib".into()),
+                prompt: Some("go".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        idle(&r, s.id).await;
+        let t = crate::store::now();
+        r.ap.tick_at(t);
+        r.ap.tick_at(t + 1000);
+        let reports = dirty_reports(&r).await;
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        let m = &reports[0];
+        assert!(m.contains("ask that session to commit") && m.contains(&s.id.to_string()) && m.contains("read_session"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn unowned_source_edits_give_one_message_recommending_a_named_stash() {
+        let (r, _, _) = blocked_by_dirty_main("lib.rs").await;
+        let t = crate::store::now();
+        r.ap.tick_at(t);
+        r.ap.tick_at(t + 1000);
+        let reports = dirty_reports(&r).await;
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(reports[0].contains("Recommendation: stash with a named message"), "{}", reports[0]);
+    }
+
+    #[tokio::test]
+    async fn the_dirty_main_message_repeats_only_every_15_minutes() {
+        let (r, _, _) = blocked_by_dirty_main("lib.rs").await;
+        let t = crate::store::now();
+        r.ap.tick_at(t);
+        r.ap.tick_at(t);
+        r.ap.tick_at(t + 14 * 60_000);
+        assert_eq!(dirty_reports(&r).await.len(), 1);
+        r.ap.tick_at(t + 16 * 60_000);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(dirty_reports(&r).await.len(), 2, "{:?} {:?}", feed(&r), said_to_boss(&r));
+    }
+
+    #[tokio::test]
+    async fn the_user_is_told_only_when_nobody_acts_within_30_minutes() {
+        let (r, _, _) = blocked_by_dirty_main("lib.rs").await;
+        let t = crate::store::now();
+        r.ap.tick_at(t);
+        r.ap.tick_at(t + 29 * 60_000);
+        assert!(notices(&r).is_empty());
+        r.ap.tick_at(t + 31 * 60_000);
+        assert_eq!(notices(&r).len(), 1, "{:?}", notices(&r));
+        r.ap.tick_at(t + 45 * 60_000);
+        assert_eq!(notices(&r).len(), 1, "once");
+    }
+
+    #[tokio::test]
+    async fn acting_on_a_dirty_main_restarts_the_30_minute_wait() {
+        let (r, _, _) = blocked_by_dirty_main("lib.rs").await;
+        let t = crate::store::now();
+        r.ap.tick_at(t);
+        main_checkout(&r, serde_json::json!({"action": "stash"})).unwrap();
+        r.ap.tick_at(t + 20 * 60_000);
+        std::fs::write(r.repo.join("again.rs"), "x").unwrap();
+        r.ap.tick_at(t + 40 * 60_000);
+        assert!(notices(&r).is_empty(), "{:?}", notices(&r));
+    }
+
+    #[tokio::test]
+    async fn stash_names_the_issue_and_the_date_and_the_merge_goes_through_on_the_next_tick() {
+        let (r, a, _) = blocked_by_dirty_main("lib.rs").await;
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        let out = main_checkout(&r, serde_json::json!({"action": "stash"})).unwrap();
+        let msg = out["stashed"].as_str().unwrap();
+        assert!(msg.starts_with(&format!("autopilot: dirty main before merging #{a}, ")), "{msg}");
+        assert!(msg.ends_with(&crate::maindirty::date_of(crate::store::now())), "{msg}");
+        assert!(!crate::git::is_dirty(&r.repo).unwrap());
+        assert!(!r.repo.join("lib.rs").exists());
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.repo.join("feature.txt").exists());
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("main_checkout stash")));
+        assert!(feed(&r).iter().any(|l| l.contains("main_checkout stash")), "{:?}", feed(&r));
+    }
+
+    #[tokio::test]
+    async fn reset_paths_lists_first_and_the_merge_goes_through_on_the_next_tick() {
+        let (r, a, _) = blocked_by_dirty_main("shot.png").await;
+        r.ap.tick();
+        let dry = main_checkout(&r, serde_json::json!({"action": "reset_paths", "paths": ["shot.png"], "dry_run": true})).unwrap();
+        assert_eq!(dry["would_reset"]["untracked"], serde_json::json!(["shot.png"]));
+        assert!(dry["would_reset"]["git_clean_dry_run"].as_str().unwrap().contains("shot.png"));
+        assert!(r.repo.join("shot.png").exists(), "a dry run removes nothing");
+        main_checkout(&r, serde_json::json!({"action": "reset_paths", "paths": ["shot.png"]})).unwrap();
+        assert!(!r.repo.join("shot.png").exists());
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(feed(&r).iter().any(|l| l.contains("main_checkout reset_paths")), "{:?}", feed(&r));
+    }
+
+    #[tokio::test]
+    async fn reset_paths_refuses_a_tracked_modified_file_unless_forced() {
+        let r = rig(DONE);
+        std::fs::write(r.repo.join("keep.rs"), "one").unwrap();
+        git_in(&r.repo, &["add", "."]);
+        git_in(&r.repo, &["commit", "-qm", "keep"]);
+        std::fs::write(r.repo.join("keep.rs"), "two").unwrap();
+        let e = main_checkout(&r, serde_json::json!({"action": "reset_paths", "paths": ["keep.rs"]})).unwrap_err();
+        assert!(e.contains("tracked and modified") && e.contains("force"), "{e}");
+        assert_eq!(std::fs::read_to_string(r.repo.join("keep.rs")).unwrap(), "two");
+        main_checkout(&r, serde_json::json!({"action": "reset_paths", "paths": ["keep.rs"], "force": true})).unwrap();
+        assert_eq!(std::fs::read_to_string(r.repo.join("keep.rs")).unwrap(), "one");
+    }
+
+    #[tokio::test]
+    async fn reset_paths_refuses_a_path_outside_the_repo() {
+        let r = rig(DONE);
+        let outside = r._dir.path().join("elsewhere.txt");
+        std::fs::write(&outside, "x").unwrap();
+        for p in ["../elsewhere.txt", &outside.to_string_lossy(), "/etc/passwd"] {
+            let e = main_checkout(&r, serde_json::json!({"action": "reset_paths", "paths": [p]})).unwrap_err();
+            assert!(e.contains("outside the repo"), "{p}: {e}");
+        }
+        assert!(outside.exists());
+    }
+
+    #[tokio::test]
+    async fn commit_needs_a_message_and_the_main_branch() {
+        let r = rig(DONE);
+        std::fs::write(r.repo.join("lib.rs"), "x").unwrap();
+        let e = main_checkout(&r, serde_json::json!({"action": "commit"})).unwrap_err();
+        assert!(e.contains("message"), "{e}");
+        let e = main_checkout(&r, serde_json::json!({"action": "commit", "message": "  "})).unwrap_err();
+        assert!(e.contains("message"), "{e}");
+        assert!(crate::git::is_dirty(&r.repo).unwrap());
+        git_in(&r.repo, &["checkout", "-q", "-b", "side"]);
+        let e = main_checkout(&r, serde_json::json!({"action": "commit", "message": "work"})).unwrap_err();
+        assert!(e.contains("main branch"), "{e}");
+        git_in(&r.repo, &["checkout", "-q", "main"]);
+        let out = main_checkout(&r, serde_json::json!({"action": "commit", "message": "Add lib"})).unwrap();
+        assert_eq!(out["committed"], serde_json::json!(crate::git::head(&r.repo).unwrap()));
+        assert!(!crate::git::is_dirty(&r.repo).unwrap());
+    }
+
+    #[tokio::test]
+    async fn every_action_is_refused_while_a_merge_or_rebase_is_in_progress() {
+        let r = rig(DONE);
+        std::fs::write(r.repo.join("lib.rs"), "x").unwrap();
+        for (marker, what) in [("MERGE_HEAD", "merge"), ("rebase-merge", "rebase")] {
+            let path = r.repo.join(".git").join(marker);
+            if marker == "MERGE_HEAD" {
+                std::fs::write(&path, crate::git::head(&r.repo).unwrap()).unwrap();
+            } else {
+                std::fs::create_dir(&path).unwrap();
+            }
+            for args in [
+                serde_json::json!({"action": "stash"}),
+                serde_json::json!({"action": "commit", "message": "m"}),
+                serde_json::json!({"action": "reset_paths", "paths": ["lib.rs"]}),
+                serde_json::json!({"action": "ask_session", "id": r.boss.unwrap().to_string()}),
+            ] {
+                let e = main_checkout(&r, args.clone()).unwrap_err();
+                assert!(e.contains(&format!("{what} in progress")), "{args}: {e}");
+            }
+            if marker == "MERGE_HEAD" {
+                std::fs::remove_file(&path).unwrap();
+            } else {
+                std::fs::remove_dir(&path).unwrap();
+            }
+        }
+        assert!(r.repo.join("lib.rs").exists());
+    }
+
+    #[tokio::test]
+    async fn only_the_supervisor_can_use_main_checkout() {
+        let (r, _, sid) = finished_worker(DONE).await;
+        let e = r.ap.runner.tools().call("main_checkout", &serde_json::json!({"action": "stash"}), sid).unwrap_err();
+        assert!(e.contains("only the supervisor"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn ask_session_sends_the_session_in_main_the_file_list() {
+        let r = rig(DONE);
+        std::fs::write(r.repo.join("lib.rs"), "x").unwrap();
+        let s = r
+            .ap
+            .runner
+            .start_session(NewSession {
+                parent: r.boss,
+                project_id: r.project,
+                agent: "echo".into(),
+                place: Place::Main,
+                prompt: Some("go".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        idle(&r, s.id).await;
+        let out = main_checkout(&r, serde_json::json!({"action": "ask_session", "id": s.id.to_string(), "request": "commit"})).unwrap();
+        assert_eq!(out["asked"], serde_json::json!(s.id));
+        idle(&r, s.id).await;
+        assert!(told(&r, s.id).iter().any(|m| m.contains("lib.rs") && m.contains("commit")), "{:?}", told(&r, s.id));
+        let e = main_checkout(&r, serde_json::json!({"action": "ask_session", "id": r.boss.unwrap().to_string()})).unwrap_err();
+        assert!(e.contains("does not work in the main checkout"), "{e}");
     }
 
     #[tokio::test]
