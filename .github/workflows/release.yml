@@ -304,10 +304,12 @@ jobs:
           merge-multiple: true
 
       - name: Source archive
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           mkdir -p dist
-          name=agentbench-${GITHUB_REF_NAME}-source.tar.gz
-          git ls-files --recurse-submodules -z | tar --null -T - --transform "s,^,agentbench-${GITHUB_REF_NAME}/," -czf "dist/$name"
+          name=agentbench-${TAG}-source.tar.gz
+          git ls-files --recurse-submodules -z | tar --null -T - --transform "s,^,agentbench-${TAG}/," -czf "dist/$name"
           (cd dist && sha256sum "$name" > "$name.sha256")
 
       - name: Checksums
