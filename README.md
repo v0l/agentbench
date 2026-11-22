@@ -360,13 +360,18 @@ branch, the head and the git error, and the autopilot retries on its own with a
 backoff of 30 s, 2 min, 10 min, then every 30 min. A notice goes out at most
 once an hour per project.
 
+For a dirty main checkout the supervisor carries the choice out with the
+`main_checkout` tool (ship level): `stash`, `commit` (needs `message`, main
+branch only), `reset_paths` (`dry_run` first; a tracked modified file needs
+`force`) and `ask_session`. All are refused during a merge or rebase.
+
 | Cause | The session is told | Retries |
 |---|---|---|
 | Conflict found before merging | rebase onto main, the files | after the worker finishes again, 3 follow-ups per head, then `merge-blocked` |
 | `git merge` failed, or the branch is not in main afterwards | the git error, run `git merge <main>` and resolve | same |
 | Branch missing or moved since the verdict | the reason | same |
 | The worker's worktree has uncommitted changes | commit or discard them | same |
-| The main checkout has uncommitted changes | nothing, the user is notified | every tick once clean |
+| The main checkout has uncommitted changes | nothing; the supervisor gets a report with a reset, commit or stash recommendation (once per 15 minutes), the user only after 30 minutes unhandled | every tick once clean |
 | The main checkout is on the wrong branch | nothing, the user is notified | every tick once fixed |
 | Push failed after a local merge | nothing, the user is notified | the push is retried, never a second merge |
 

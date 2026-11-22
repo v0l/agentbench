@@ -3053,6 +3053,7 @@ mod tests {
         r.ap.tick();
         idle(&r, r.boss.unwrap()).await;
         judge(&r, sid, "concluded_pass", None).unwrap();
+        r.ap.tick();
         (r, a, sid)
     }
 
