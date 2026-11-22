@@ -289,6 +289,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          submodules: recursive
       - name: Release notes
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -299,6 +302,13 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      - name: Source archive
+        run: |
+          mkdir -p dist
+          name=agentbench-${GITHUB_REF_NAME}-source.tar.gz
+          git ls-files --recurse-submodules -z | tar --null -T - --transform "s,^,agentbench-${GITHUB_REF_NAME}/," -czf "dist/$name"
+          (cd dist && sha256sum "$name" > "$name.sha256")
 
       - name: Checksums
         run: |
