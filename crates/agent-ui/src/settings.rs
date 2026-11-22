@@ -162,25 +162,6 @@ mod tests {
         assert_eq!(saved.sampling.temperature, Some(0.7));
     }
 
-    #[test]
-    fn shots_tmp() {
-        for (name, size) in [("desktop", [1280.0, 900.0]), ("phone", [390.0, 844.0])] {
-            let mut setup = egui_kittest::wgpu::default_wgpu_setup();
-            if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
-                new.instance_descriptor.flags = egui_wgpu::wgpu::InstanceFlags::empty();
-            }
-            let mut h = Harness::builder().with_size(size).wgpu_setup(setup).build_ui_state(
-                |ui, draft: &mut Config| {
-                    egui_bench::theme::install(ui.ctx());
-                    show(ui, draft, "test", None);
-                },
-                Config::default(),
-            );
-            h.run_steps(4);
-            h.render().unwrap().save(format!("/tmp/settings-{name}.png")).unwrap();
-        }
-    }
-
     fn typed(h: &mut Harness<'_, Config>, label: &str, text: &str) {
         for c in text.chars() {
             h.get_by_label(label).click();
