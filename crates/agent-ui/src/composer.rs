@@ -112,6 +112,12 @@ pub fn send_key(ui: &mut Ui, label: &str, can: bool, width: f32) -> bool {
     key.clicked()
 }
 
+pub fn attach_key(ui: &mut Ui) -> bool {
+    let key = ui.add(Key::new("attach").outline(VALUE));
+    key.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "attach"));
+    key.clicked()
+}
+
 pub fn stop_key(ui: &mut Ui) -> bool {
     let key = ui.add(Key::new("stop").outline(FAULT));
     key.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "stop"));

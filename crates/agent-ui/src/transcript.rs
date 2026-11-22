@@ -48,6 +48,7 @@ pub enum Check {
 pub enum Item<'a> {
     You { text: &'a str, files: &'a [File<'a>], from: &'a [String], at: Option<i64>, queued: bool },
     Said { text: &'a str },
+    Speed { text: &'a str },
     Thinking { text: &'a str },
     Tool {
         name: &'a str,
@@ -130,6 +131,13 @@ pub fn entry(ui: &mut Ui, show: &mut Show, id: i64, item: &Item) -> Option<Actio
                     }
                 });
             read.then_some(Action::Read)
+        }
+        Item::Speed { text } => {
+            ui.horizontal(|ui| {
+                ui.add_space(13.0);
+                Line::new().note(text.to_string()).size(10.0).wrapped(ui);
+            });
+            None
         }
         Item::Thinking { text } => {
             if show.thinking {
@@ -386,7 +394,11 @@ pub fn attached(ui: &mut Ui, fetch: &mut dyn Files, files: &[File]) {
                     Thumb::Failed => {}
                 }
             }
-            chip(ui, &label, LEGEND, false);
+            let r = chip(ui, &label, LEGEND, false);
+            ui.ctx().accesskit_node_builder(r.id, |node| {
+                node.set_role(egui::accesskit::Role::Group);
+                node.set_label(format!("attached {label}"));
+            });
         }
     });
 }

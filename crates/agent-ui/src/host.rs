@@ -1,6 +1,6 @@
 use super::{chat, pane};
 pub use agent_core::{
-    Ask, Backend, CancellationToken, Cx, Desk, Reply, Services, Welcome, async_trait, code,
+    Ask, Backend, CancellationToken, Cx, Desk, Reply, Services, Timings, Welcome, async_trait, code,
     config, grants, http, jobs, local, lsp, runtime, sandbox, skills, skillset, spawn, todo,
     toolkit, tools, workspace,
 };
