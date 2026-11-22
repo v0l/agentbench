@@ -35,6 +35,19 @@ pub fn show(ui: &mut Ui, draft: &mut Config, app: &str, dir: Option<&Path>) -> O
         draft.steps = steps as usize;
     }
     ui.add_space(6.0);
+    ui.label(legend("thinking"));
+    choice(
+        ui,
+        "thinking",
+        &mut draft.thinking,
+        [
+            (None, "server default".to_string()),
+            (Some(true), "on".to_string()),
+            (Some(false), "off".to_string()),
+        ],
+    );
+    hint(ui, "Sent as chat_template_kwargs.enable_thinking. Server default sends nothing.");
+    ui.add_space(6.0);
     ui.label(legend("workspace folder"));
     let default = Config { workspace: String::new(), ..draft.clone() }.workspace_path(app);
     field(ui, &mut draft.workspace, &default.display().to_string());

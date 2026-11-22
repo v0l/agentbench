@@ -11,6 +11,7 @@ pub struct Config {
     pub steps: usize,
     pub brief: String,
     pub workspace: String,
+    pub thinking: Option<bool>,
     pub rest: Vec<(String, String)>,
 }
 
@@ -23,12 +24,25 @@ impl Default for Config {
             steps: DEFAULT_STEPS,
             brief: String::new(),
             workspace: String::new(),
+            thinking: None,
             rest: Vec::new(),
         }
     }
 }
 
+fn parse_thinking(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" | "yes" => Some(true),
+        "off" | "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 impl Config {
+    pub fn chat_template_kwargs(&self) -> Option<serde_json::Value> {
+        self.thinking.map(|on| serde_json::json!({ "enable_thinking": on }))
+    }
+
     pub fn path(dir: Option<&Path>) -> Option<PathBuf> {
         Some(dir?.join("agent"))
     }
@@ -70,6 +84,7 @@ impl Config {
                 "steps" => c.steps = value.parse().unwrap_or(DEFAULT_STEPS),
                 "brief" => c.brief = value.replace("\\n", "\n"),
                 "workspace" => c.workspace = value.to_string(),
+                "thinking" => c.thinking = parse_thinking(value),
                 other => c.rest.push((other.to_string(), value.to_string())),
             }
         }
@@ -78,13 +93,17 @@ impl Config {
 
     pub fn render(&self) -> String {
         format!(
-            "url = {}\nmodel = {}\nkey = {}\nsteps = {}\nbrief = {}\nworkspace = {}\n{}",
+            "url = {}\nmodel = {}\nkey = {}\nsteps = {}\nbrief = {}\nworkspace = {}\n{}{}",
             self.url,
             self.model,
             self.key,
             self.steps,
             self.brief.replace('\n', "\\n"),
             self.workspace,
+            match self.thinking {
+                Some(on) => format!("thinking = {}\n", if on { "on" } else { "off" }),
+                None => String::new(),
+            },
             self.rest.iter().map(|(k, v)| format!("{k} = {v}\n")).collect::<String>()
         )
     }
@@ -127,6 +146,7 @@ mod tests {
             steps: 7,
             brief: "two\nlines".into(),
             workspace: "/work/parts".into(),
+            thinking: Some(false),
             rest: vec![("wake".into(), "shark".into())],
         };
         assert_eq!(Config::parse(&c.render()), c);
@@ -141,6 +161,18 @@ mod tests {
         assert_eq!(again.rest, c.rest);
         assert_eq!(again.model, "m");
         assert!(c.render().contains("wake = shark"));
+    }
+
+    #[test]
+    fn thinking_is_left_to_the_server_until_set() {
+        assert_eq!(Config::default().chat_template_kwargs(), None);
+        assert!(!Config::default().render().contains("thinking"));
+        let on = Config::parse("thinking = on\n");
+        assert_eq!(on.thinking, Some(true));
+        assert_eq!(on.chat_template_kwargs().unwrap()["enable_thinking"], true);
+        let off = Config::parse(&Config { thinking: Some(false), ..Config::default() }.render());
+        assert_eq!(off.chat_template_kwargs().unwrap()["enable_thinking"], false);
+        assert!(off.rest.is_empty());
     }
 
     #[test]
