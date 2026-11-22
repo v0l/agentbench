@@ -10,7 +10,27 @@ pub enum Done {
 }
 
 pub fn show(ui: &mut Ui, draft: &mut Config, app: &str, dir: Option<&Path>) -> Option<Done> {
+    const FOOTER: f32 = 84.0;
+    let body = (ui.available_height() - FOOTER).max(120.0);
+    egui::ScrollArea::vertical().max_height(body).auto_shrink([false, false]).show(ui, |ui| {
+        form(ui, draft, app);
+    });
+    ui.add_space(8.0);
+    hint(ui, &format!("Saved in {}, readable by you only.", where_saved(dir)));
+    ui.add_space(8.0);
     let mut done = None;
+    ui.horizontal_wrapped(|ui| {
+        if ui.add(Key::new("save").solid(READOUT).min_width(90.0)).clicked() {
+            done = Some(Done::Save(draft.clone()));
+        }
+        if ui.add(Key::new("cancel").outline(VALUE).min_width(90.0)).clicked() {
+            done = Some(Done::Cancel);
+        }
+    });
+    done
+}
+
+fn form(ui: &mut Ui, draft: &mut Config, app: &str) {
     ui.add_space(8.0);
     modal_title(ui, "model");
     hint(
@@ -67,18 +87,6 @@ pub fn show(ui: &mut Ui, draft: &mut Config, app: &str, dir: Option<&Path>) -> O
     ui.add_space(6.0);
     ui.label(legend("extra instructions"));
     prose(ui, &mut draft.brief, "anything to add to what the model is told", 3);
-    ui.add_space(12.0);
-    hint(ui, &format!("Saved in {}, readable by you only.", where_saved(dir)));
-    ui.add_space(8.0);
-    ui.horizontal_wrapped(|ui| {
-        if ui.add(Key::new("save").solid(READOUT).min_width(90.0)).clicked() {
-            done = Some(Done::Save(draft.clone()));
-        }
-        if ui.add(Key::new("cancel").outline(VALUE).min_width(90.0)).clicked() {
-            done = Some(Done::Cancel);
-        }
-    });
-    done
 }
 
 fn optional<T: std::str::FromStr + ToString>(ui: &mut Ui, name: &str, value: &mut Option<T>) {
@@ -122,14 +130,55 @@ mod tests {
         let mut h = Harness::builder().with_size(size).build_ui_state(
             |ui, draft: &mut Config| {
                 egui_bench::theme::install(ui.ctx());
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    show(ui, draft, "test", None);
-                });
+                show(ui, draft, "test", None);
             },
             Config::default(),
         );
         h.run_steps(3);
         h
+    }
+
+    #[test]
+    fn saving_on_a_phone_keeps_what_was_typed() {
+        let mut h = Harness::builder().with_size([390.0, 844.0]).build_ui_state(
+            |ui, (draft, saved): &mut (Config, Option<Config>)| {
+                egui_bench::theme::install(ui.ctx());
+                if let Some(Done::Save(c)) = show(ui, draft, "test", None) {
+                    *saved = Some(c);
+                }
+            },
+            (Config::default(), None),
+        );
+        h.run_steps(3);
+        h.get_by_label("temperature default").click();
+        h.run_steps(1);
+        h.get_by_label("temperature default").type_text("0.7");
+        h.run_steps(2);
+        let save = h.get_by_label("save");
+        assert!(save.rect().max.y <= 844.0, "save is below the screen");
+        save.click();
+        h.run_steps(3);
+        let saved = h.state().1.clone().expect("save was pressed");
+        assert_eq!(saved.sampling.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn shots_tmp() {
+        for (name, size) in [("desktop", [1280.0, 900.0]), ("phone", [390.0, 844.0])] {
+            let mut setup = egui_kittest::wgpu::default_wgpu_setup();
+            if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
+                new.instance_descriptor.flags = egui_wgpu::wgpu::InstanceFlags::empty();
+            }
+            let mut h = Harness::builder().with_size(size).wgpu_setup(setup).build_ui_state(
+                |ui, draft: &mut Config| {
+                    egui_bench::theme::install(ui.ctx());
+                    show(ui, draft, "test", None);
+                },
+                Config::default(),
+            );
+            h.run_steps(4);
+            h.render().unwrap().save(format!("/tmp/settings-{name}.png")).unwrap();
+        }
     }
 
     fn typed(h: &mut Harness<'_, Config>, label: &str, text: &str) {

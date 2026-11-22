@@ -258,11 +258,9 @@ fn settings_view<H>(ui: &mut Ui, agent: &mut Agent<H>) {
     let dir = agent.chat.backend.config_dir();
     let Some(draft) = agent.settings.as_mut() else { return };
     let mut done = None;
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let page = column(ui.max_rect(), 560.0);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
-            done = settings::show(ui, draft, app, dir.as_deref());
-        });
+    let page = column(ui.max_rect(), 560.0);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
+        done = settings::show(ui, draft, app, dir.as_deref());
     });
     match done {
         Some(Done::Save(config)) => {
