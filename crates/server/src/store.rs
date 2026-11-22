@@ -282,6 +282,7 @@ CREATE TABLE issue_deps (
 );
 CREATE INDEX issue_deps_on ON issue_deps(depends_on);
 "#,
+    "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS note_versions; DROP TABLE IF EXISTS global_notes;",
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -621,21 +622,104 @@ impl Store {
             }
         }
         let memory = Memory::open(memory);
-        let store = Store::setup(Connection::open(path)?, memory)?;
+        let store = Store::setup(Connection::open(path)?, memory, path.parent())?;
         #[cfg(unix)]
         restrict_database_files(path);
         Ok(store)
     }
 
     pub fn memory() -> Result<Store> {
-        Store::setup(Connection::open_in_memory()?, Memory::temporary())
+        Store::setup(Connection::open_in_memory()?, Memory::temporary(), None)
     }
 
-    fn setup(conn: Connection, memory: Memory) -> Result<Store> {
+    fn archive_legacy_notes(conn: &Connection, dir: Option<&Path>) -> Result<()> {
+        let has = |table: &str| -> Result<bool> {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table],
+                |r| r.get::<_, i64>(0),
+            )? > 0)
+        };
+        let (notes, versions, globals) = (has("notes")?, has("note_versions")?, has("global_notes")?);
+        let mut out = serde_json::Map::new();
+        if notes {
+            let mut stmt = conn.prepare(
+                "SELECT n.project_id, p.name, n.topic, n.body, n.updated_at FROM notes n
+                 LEFT JOIN projects p ON p.id = n.project_id ORDER BY n.project_id, n.topic",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(serde_json::json!({
+                        "project_id": r.get::<_, Id>(0)?,
+                        "project": r.get::<_, Option<String>>(1)?,
+                        "topic": r.get::<_, String>(2)?,
+                        "body": r.get::<_, String>(3)?,
+                        "updated_at": r.get::<_, i64>(4)?,
+                    }))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out.insert("notes".into(), rows.into());
+        }
+        if versions {
+            let mut stmt = conn.prepare(
+                "SELECT v.id, v.project_id, p.name, v.topic, v.body, v.hash, v.author, v.session, v.created_at
+                 FROM note_versions v LEFT JOIN projects p ON p.id = v.project_id ORDER BY v.id",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(serde_json::json!({
+                        "id": r.get::<_, Id>(0)?,
+                        "project_id": r.get::<_, Id>(1)?,
+                        "project": r.get::<_, Option<String>>(2)?,
+                        "topic": r.get::<_, String>(3)?,
+                        "body": r.get::<_, String>(4)?,
+                        "hash": r.get::<_, String>(5)?,
+                        "author": r.get::<_, String>(6)?,
+                        "session": r.get::<_, Option<String>>(7)?,
+                        "created_at": r.get::<_, i64>(8)?,
+                    }))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out.insert("note_versions".into(), rows.into());
+        }
+        if globals {
+            let mut stmt = conn.prepare("SELECT topic, body, updated_at FROM global_notes ORDER BY topic")?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(serde_json::json!({
+                        "topic": r.get::<_, String>(0)?,
+                        "body": r.get::<_, String>(1)?,
+                        "updated_at": r.get::<_, i64>(2)?,
+                    }))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out.insert("global_notes".into(), rows.into());
+        }
+        let any = out.values().any(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+        let Some(dir) = dir.filter(|_| any) else {
+            return Ok(());
+        };
+        let secs = now() / 1000;
+        let path = dir.join(format!("legacy-notes-{secs}.json"));
+        let text = serde_json::to_string_pretty(&serde_json::Value::Object(out))
+            .map_err(|e| StoreError(e.to_string()))?;
+        std::fs::write(&path, text).map_err(|e| StoreError(e.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    fn setup(conn: Connection, memory: Memory, dir: Option<&Path>) -> Result<Store> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "OFF")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if (version.max(0) as usize) < SCHEMA.len() {
+            Store::archive_legacy_notes(&conn, dir)?;
+        }
         for (i, step) in SCHEMA.iter().enumerate().skip(version.max(0) as usize) {
             conn.execute_batch(&format!(
                 "BEGIN; {step}; PRAGMA user_version = {}; COMMIT;",
@@ -655,7 +739,6 @@ impl Store {
         }
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Store { conn: Arc::new(Mutex::new(conn)), memory: Arc::new(memory) };
-        store.import_notes()?;
         if store.setting(WIRE_TRANSCRIPTS)?.is_none() {
             store.convert_native_transcripts()?;
         }
@@ -1532,53 +1615,6 @@ impl Store {
         Ok(self.memory.list(Scope::Project(project_id)))
     }
 
-    fn import_notes(&self) -> Result<()> {
-        if !self.memory.is_empty() {
-            return Ok(());
-        }
-        let mut rows = Vec::new();
-        {
-            let db = self.db();
-            let mut stmt = db.prepare(
-                "SELECT p.id, p.name, n.topic, n.body FROM notes n JOIN projects p ON p.id = n.project_id
-                 ORDER BY n.updated_at, n.topic",
-            )?;
-            for r in stmt.query_map([], |r| Ok((r.get::<_, Id>(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?)))? {
-                let (id, name, topic, body) = r?;
-                rows.push((Scope::Project(id), name, topic, body));
-            }
-            let mut stmt = db.prepare("SELECT topic, body FROM global_notes ORDER BY updated_at, topic")?;
-            for r in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-                let (topic, body) = r?;
-                rows.push((Scope::Global, String::new(), topic, body));
-            }
-        }
-        if rows.is_empty() {
-            return Ok(());
-        }
-        self.memory.import(&rows).map_err(StoreError)
-    }
-
-    #[cfg(test)]
-    pub fn legacy_insert_note(&self, project_id: Id, topic: &str, body: &str) {
-        self.db()
-            .execute(
-                "INSERT INTO notes (project_id, topic, body, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                params![project_id, topic, body, now()],
-            )
-            .unwrap();
-    }
-
-    #[cfg(test)]
-    pub fn legacy_insert_global(&self, topic: &str, body: &str) {
-        self.db()
-            .execute(
-                "INSERT INTO global_notes (topic, body, updated_at) VALUES (?1, ?2, ?3)",
-                params![topic, body, now()],
-            )
-            .unwrap();
-    }
-
     pub fn add_watch(&self, watched: SessionId, watcher: SessionId) -> Result<()> {
         self.db().execute(
             "INSERT OR IGNORE INTO watches (watched, watcher) VALUES (?1, ?2)",
@@ -2156,6 +2192,89 @@ pub mod testing {
 mod tests {
     use super::testing::project;
     use super::*;
+
+    fn archives(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut found: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("legacy-notes-"))
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn legacy_note_rows_are_archived_before_the_tables_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agentbench.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            let last = SCHEMA.len() - 1;
+            for (i, step) in SCHEMA[..last].iter().enumerate() {
+                conn.execute_batch(&format!("BEGIN; {step}; PRAGMA user_version = {}; COMMIT;", i + 1)).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, name, path, created_at) VALUES (1, 'Alpha', '/a', 0);
+                 INSERT INTO notes (project_id, topic, body, updated_at) VALUES (1, 'tests', 'cargo test \"quoted\"', 5), (1, 'style', 'plain', 6);
+                 INSERT INTO note_versions (project_id, topic, body, hash, author, session, created_at)
+                   VALUES (1, 'tests', 'old body', 'h1', 'agent', NULL, 3), (1, 'tests', 'cargo test', 'h2', 'user', 's1', 4);
+                 INSERT INTO global_notes (topic, body, updated_at) VALUES ('rules', 'no dashes', 7);",
+            )
+            .unwrap();
+        }
+        let memory = dir.path().join("memory");
+        let s = Store::open_with_memory(&path, memory.clone()).unwrap();
+        let left: i64 = s
+            .db()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('notes', 'note_versions', 'global_notes')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+        let files = archives(dir.path());
+        assert_eq!(files.len(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&files[0]).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&files[0]).unwrap()).unwrap();
+        assert_eq!(json["notes"].as_array().unwrap().len(), 2);
+        assert_eq!(json["note_versions"].as_array().unwrap().len(), 2);
+        assert_eq!(json["global_notes"].as_array().unwrap().len(), 1);
+        let tests = json["notes"].as_array().unwrap().iter().find(|n| n["topic"] == "tests").unwrap();
+        assert_eq!(tests["body"], "cargo test \"quoted\"");
+        assert_eq!(tests["project"], "Alpha");
+        assert_eq!(json["global_notes"][0]["body"], "no dashes");
+        drop(s);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let _ = Store::open_with_memory(&path, memory).unwrap();
+        assert_eq!(archives(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn a_fresh_database_writes_no_legacy_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = Store::open(&dir.path().join("agentbench.db")).unwrap();
+        assert!(archives(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn the_legacy_note_tables_are_dropped() {
+        let s = Store::memory().unwrap();
+        let left: i64 = s
+            .db()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('notes', 'note_versions', 'global_notes')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+    }
 
     #[cfg(unix)]
     #[test]
