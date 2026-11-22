@@ -282,6 +282,7 @@ CREATE TABLE issue_deps (
 );
 CREATE INDEX issue_deps_on ON issue_deps(depends_on);
 "#,
+    "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS note_versions; DROP TABLE IF EXISTS global_notes;",
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -655,7 +656,6 @@ impl Store {
         }
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Store { conn: Arc::new(Mutex::new(conn)), memory: Arc::new(memory) };
-        store.import_notes()?;
         if store.setting(WIRE_TRANSCRIPTS)?.is_none() {
             store.convert_native_transcripts()?;
         }
@@ -1532,53 +1532,6 @@ impl Store {
         Ok(self.memory.list(Scope::Project(project_id)))
     }
 
-    fn import_notes(&self) -> Result<()> {
-        if !self.memory.is_empty() {
-            return Ok(());
-        }
-        let mut rows = Vec::new();
-        {
-            let db = self.db();
-            let mut stmt = db.prepare(
-                "SELECT p.id, p.name, n.topic, n.body FROM notes n JOIN projects p ON p.id = n.project_id
-                 ORDER BY n.updated_at, n.topic",
-            )?;
-            for r in stmt.query_map([], |r| Ok((r.get::<_, Id>(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?)))? {
-                let (id, name, topic, body) = r?;
-                rows.push((Scope::Project(id), name, topic, body));
-            }
-            let mut stmt = db.prepare("SELECT topic, body FROM global_notes ORDER BY updated_at, topic")?;
-            for r in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-                let (topic, body) = r?;
-                rows.push((Scope::Global, String::new(), topic, body));
-            }
-        }
-        if rows.is_empty() {
-            return Ok(());
-        }
-        self.memory.import(&rows).map_err(StoreError)
-    }
-
-    #[cfg(test)]
-    pub fn legacy_insert_note(&self, project_id: Id, topic: &str, body: &str) {
-        self.db()
-            .execute(
-                "INSERT INTO notes (project_id, topic, body, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                params![project_id, topic, body, now()],
-            )
-            .unwrap();
-    }
-
-    #[cfg(test)]
-    pub fn legacy_insert_global(&self, topic: &str, body: &str) {
-        self.db()
-            .execute(
-                "INSERT INTO global_notes (topic, body, updated_at) VALUES (?1, ?2, ?3)",
-                params![topic, body, now()],
-            )
-            .unwrap();
-    }
-
     pub fn add_watch(&self, watched: SessionId, watcher: SessionId) -> Result<()> {
         self.db().execute(
             "INSERT OR IGNORE INTO watches (watched, watcher) VALUES (?1, ?2)",
@@ -2156,6 +2109,20 @@ pub mod testing {
 mod tests {
     use super::testing::project;
     use super::*;
+
+    #[test]
+    fn the_legacy_note_tables_are_dropped() {
+        let s = Store::memory().unwrap();
+        let left: i64 = s
+            .db()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('notes', 'note_versions', 'global_notes')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+    }
 
     #[cfg(unix)]
     #[test]
