@@ -588,6 +588,9 @@ pub struct Usage {
     /// How hard the model was asked to think. Empty when the server decides.
     #[serde(default)]
     pub effort: String,
+    /// The most tokens one reply may have, when the user set one. 0 leaves it to the server.
+    #[serde(default)]
+    pub max_tokens: u64,
     /// The language servers behind the agent's code tools, as they were last seen. Like `context`
     /// this is a reading, not a total: a newer one replaces it.
     #[serde(default)]
@@ -657,6 +660,7 @@ impl Usage {
             self.model = other.model.clone();
             self.host = other.host.clone();
             self.effort = other.effort.clone();
+            self.max_tokens = other.max_tokens;
         }
         if !other.lsp.is_empty() {
             self.lsp = other.lsp.clone();
@@ -675,6 +679,11 @@ impl Usage {
             effort: effort.into(),
             ..Usage::default()
         }
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u64) -> Usage {
+        self.max_tokens = max_tokens;
+        self
     }
 
     /// How full the context is, 0.0 to 1.0 and a little beyond when it has overflowed.
@@ -1183,6 +1192,9 @@ pub struct ModelSettings {
     /// How hard the model thinks. Empty leaves it to the server.
     #[serde(default)]
     pub effort: String,
+    /// The most tokens one reply may have. 0 leaves it to the server.
+    #[serde(default)]
+    pub max_tokens: u64,
 }
 
 /// One rung of the model ladder: a cheap model for mechanical work, a stronger

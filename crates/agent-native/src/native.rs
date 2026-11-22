@@ -66,6 +66,8 @@ pub struct Model {
     pub request_budget: usize,
     #[serde(default = "default_keep_pictures")]
     pub keep_pictures: usize,
+    #[serde(default)]
+    pub max_tokens: u64,
 }
 
 /// One rung of the ladder. A level with no model is not set up. One with no
@@ -136,6 +138,7 @@ impl Default for Model {
             effort: String::new(),
             request_budget: default_request_budget(),
             keep_pictures: default_keep_pictures(),
+            max_tokens: 0,
         }
     }
 }
@@ -1953,6 +1956,7 @@ impl Agent for Native {
         let mut hinted = languages.is_empty();
         let mut failures = 0usize;
         let mut nudged = false;
+        let mut cut_short = 0u32;
         messages.prompt(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(
             &base,
@@ -2032,6 +2036,24 @@ impl Agent for Native {
                 crowded.context = u.context;
                 io.emit(Event::Usage(Usage { model: String::new(), ..u }));
             }
+            if reply.finish.as_deref() == Some("length") {
+                cut_short += 1;
+                if cut_short > MAX_CONTINUES {
+                    return Err(OUTPUT_LIMIT.into());
+                }
+                let ask = if reply.calls.is_empty() { CONTINUE } else { SPLIT_CALL };
+                io.emit(Event::Warning(format!(
+                    "the reply hit the output limit; asking the model to go on ({cut_short}/{MAX_CONTINUES})"
+                )));
+                if !reply.text.trim().is_empty() {
+                    messages.push(json!({ "role": "assistant", "content": reply.text }));
+                    messages.push(json!({ "role": "user", "content": ask }));
+                } else {
+                    messages.push(json!({ "role": "user", "content": ask }));
+                }
+                continue;
+            }
+            cut_short = 0;
             let mut message = json!({ "role": "assistant", "content": reply.text });
             if !reply.calls.is_empty() {
                 message["tool_calls"] = Value::Array(
@@ -2385,6 +2407,7 @@ async fn serving(model: &Model, probe: Duration) -> Usage {
         window,
         model.effort.trim(),
     )
+    .with_max_tokens(model.max_tokens)
 }
 
 /// The windows already found, by server and model.
@@ -2667,6 +2690,9 @@ async fn complete(
     if !effort.is_empty() {
         body["reasoning_effort"] = json!(effort);
     }
+    if model.max_tokens > 0 {
+        body["max_tokens"] = json!(model.max_tokens);
+    }
     let mut attempt = 0;
     let mut limits = 0;
     loop {
@@ -2700,7 +2726,10 @@ async fn complete(
                     _ => return Err(message),
                 }
             }
-            Err(Failure::Truncated) => {
+            Err(Failure::Truncated(partial)) => {
+                if !partial.text.trim().is_empty() || !partial.calls.is_empty() {
+                    return Ok(partial);
+                }
                 let current = body.get("reasoning_effort").and_then(Value::as_str).unwrap_or("");
                 match calmer(current) {
                     Some(next) if attempt < RETRIES => {
@@ -2823,7 +2852,7 @@ enum Failure {
     /// The server answered with a refusal, or the user stopped the turn.
     Fatal(String),
     /// The reply ran into the server's output limit, usually because thinking used it all.
-    Truncated,
+    Truncated(Reply),
     EffortRefused(String),
 }
 
@@ -2857,7 +2886,13 @@ fn nearest_effort(current: &str, accepted: &[String]) -> Option<&'static str> {
         .and_then(|(r, _)| agentbench_core::EFFORTS.get(r).copied())
 }
 
-const OUTPUT_LIMIT: &str = "the model hit its output limit before it finished, even with less thinking; raise the limit on the server";
+const OUTPUT_LIMIT: &str = "the model hit its output limit before it finished, even with less thinking; send /thinking low, ask for the work in parts, or raise max tokens for this model in the settings";
+
+const MAX_CONTINUES: u32 = 4;
+
+const CONTINUE: &str = "Your reply hit the output limit and was cut off. Continue exactly where you stopped, without repeating what you already wrote.";
+
+const SPLIT_CALL: &str = "Your reply hit the output limit in the middle of a tool call, so the call was not run. Do the work in smaller pieces: split it into several shorter tool calls, such as smaller files or fewer changes per call.";
 
 fn calmer(effort: &str) -> Option<&'static str> {
     match effort {
@@ -3440,7 +3475,7 @@ fn check_complete(done: bool, reply: Reply) -> Result<Reply, Failure> {
         return Err(Failure::Fatal(e));
     }
     if reply.finish.as_deref() == Some("length") {
-        return Err(Failure::Truncated);
+        return Err(Failure::Truncated(reply));
     }
     if !done && reply.finish.is_none() {
         return Err(Failure::Transient(
@@ -5923,13 +5958,79 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn a_reply_cut_off_by_the_output_limit_is_asked_to_go_on_and_both_parts_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![
+            vec![say("first half, "), finished("length")],
+            vec![say("second half")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        asked.recv().unwrap();
+        let second = asked.recv().unwrap();
+        let messages = second["messages"].as_array().unwrap();
+        let n = messages.len();
+        assert_eq!(messages[n - 2]["role"], "assistant");
+        assert_eq!(messages[n - 2]["content"], "first half, ");
+        assert!(messages[n - 1]["content"].as_str().unwrap().contains("Continue"));
+        let said: String = io
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Text { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, "first half, second half");
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_cut_off_by_the_output_limit_asks_for_smaller_pieces() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![
+            vec![call("c1", "write_file", json!({"path": "a"})), finished("length")],
+            vec![say("ok")],
+        ]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        asked.recv().unwrap();
+        let second = asked.recv().unwrap();
+        let last = second["messages"].as_array().unwrap().last().unwrap().clone();
+        assert!(last["content"].as_str().unwrap().contains("smaller pieces"), "{last}");
+        assert!(!dir.path().join("a").exists());
+    }
+
+    #[tokio::test]
+    async fn a_max_tokens_setting_is_sent_with_the_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, asked) = stub(vec![vec![say("hi")]]);
+        let native =
+            Native::new(Model { url, model: "m".into(), max_tokens: 4096, ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        assert_eq!(asked.recv().unwrap()["max_tokens"], 4096);
+    }
+
+    #[tokio::test]
     async fn running_out_of_output_tokens_is_an_error_not_a_quiet_stop() {
         let dir = tempfile::tempdir().unwrap();
         let (url, _) = stub(vec![vec![thought("a very long plan"), finished("length")]; 4]);
         let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
         let io = TestIo::new(Arc::new(FakeApi));
         let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
-        assert!(e.contains("output limit"), "{e}");
+        assert!(e.contains("output limit") && e.contains("/thinking low"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn endless_cut_off_replies_stop_with_advice() {
+        let dir = tempfile::tempdir().unwrap();
+        let (url, _) = stub(vec![vec![say("more "), finished("length")]; 8]);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        let e = run(&native, dir.path(), "go", &io).await.unwrap_err();
+        assert!(e.contains("/thinking low"), "{e}");
     }
 
     #[tokio::test]

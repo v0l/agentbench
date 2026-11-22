@@ -474,6 +474,7 @@ fn masked(m: &crate::agent::native::Model) -> agentbench_core::ModelSettings {
         medium: level_masked(&m.medium),
         high: level_masked(&m.high),
         effort: m.effort.clone(),
+        max_tokens: m.max_tokens,
     }
 }
 
@@ -533,6 +534,7 @@ async fn put_model(
     m.fold_at = new.fold_at.min(100);
     m.fold_keep = new.fold_keep.clamp(10, 90);
     m.effort = clean_effort(&new.effort);
+    m.max_tokens = new.max_tokens.min(10_000_000);
     m.low = level_merged(&m.low, &new.low);
     m.medium = level_merged(&m.medium, &new.medium);
     m.high = level_merged(&m.high, &new.high);

@@ -48,6 +48,7 @@ impl App {
                 medium: Default::default(),
                 high: Default::default(),
                 effort: String::new(),
+                max_tokens: 0,
             },
             loaded: false,
             models: None,
@@ -305,6 +306,9 @@ impl App {
                             ui.add(egui::DragValue::new(&mut st.model.fold_keep).range(10..=90).suffix("%"));
                         },
                     );
+                    row_help(ui, "max tokens", MAX_TOKENS_HELP, |ui| {
+                        ui.add(egui::DragValue::new(&mut st.model.max_tokens).range(0..=10_000_000).speed(100).custom_formatter(|n, _| if n == 0.0 { "server default".to_string() } else { format!("{n}") }));
+                    });
                     row_help(ui, "thinking", EFFORT_HELP, |ui| {
                         effort_input(ui, "effort-main", &mut st.model.effort, "server default");
                     });
@@ -876,6 +880,8 @@ pub(super) fn speech_section(
         "The speak key beside send records from the default microphone until you press it again, then adds what you said to the message. Nothing is sent until you send it.",
     );
 }
+
+const MAX_TOKENS_HELP: &str = "The most tokens one reply may use, thinking included. A reply that runs into it is asked to carry on. 0 leaves it to the server.";
 
 const EFFORT_HELP: &str = "How hard the model thinks, sent as reasoning_effort. Lower is faster and keeps long thinking from stalling a turn. Empty leaves it to the server.";
 

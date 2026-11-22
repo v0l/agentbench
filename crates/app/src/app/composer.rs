@@ -462,6 +462,12 @@ fn build(s: &Session, f: Fields, short: bool) -> (Built, String) {
         line = line.legend(tag).gap(if short { 4.0 } else { 6.0 }).value(effort).size(11.0);
         any = true;
     }
+    if u.max_tokens > 0 {
+        line = if any { line.gap(if short { 10.0 } else { 14.0 }) } else { line };
+        let tag = if short { "o" } else { "max out" };
+        line = line.legend(tag).gap(if short { 4.0 } else { 6.0 }).value(&tokens(u.max_tokens)).size(11.0);
+        any = true;
+    }
     let fill = u.fill();
     if u.context > 0 {
         let tint = match fill {
