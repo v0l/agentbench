@@ -259,15 +259,6 @@ impl Memory {
         Ok(true)
     }
 
-    pub fn import(&self, notes: &[(Scope, String, String, String)]) -> Result<(), String> {
-        for (scope, name, topic, body) in notes {
-            let dir = self.folder(*scope, Some(name)).ok_or("memory folder unavailable")?;
-            let path = self.path_for(&dir, topic);
-            std::fs::write(path, render(topic, body)).map_err(err)?;
-        }
-        Ok(())
-    }
-
     pub fn sizes(&self, scope: Scope) -> (usize, usize) {
         let notes = self.list(scope);
         (notes.iter().map(|(_, b)| b.len()).sum(), notes.iter().map(|(_, b)| b.len()).max().unwrap_or(0))
@@ -462,28 +453,6 @@ mod tests {
         assert!(s.set_note(p, "t", "", "agent", None, Some(&h)).unwrap());
         assert!(!folder(s.memory_root(), p).join("t.md").exists());
         assert!(s.notes(p).unwrap().is_empty());
-    }
-
-    #[test]
-    fn existing_rows_are_imported_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("agentbench.db");
-        let p;
-        {
-            let s = Store::open(&path).unwrap();
-            let (_, main) = project(&s, "/a");
-            p = main.project_id;
-            s.legacy_insert_note(p, "tests", "cargo test");
-            s.legacy_insert_global("style", "no em dashes");
-        }
-        let s = Store::open(&path).unwrap();
-        assert_eq!(s.notes(p).unwrap(), [("tests".to_string(), "cargo test".to_string())]);
-        assert_eq!(s.global_notes().unwrap(), [("style".to_string(), "no em dashes".to_string())]);
-        let h = s.note_hash(p, "tests").unwrap();
-        s.set_note(p, "tests", "", "user", None, Some(&h)).unwrap();
-        drop(s);
-        let s = Store::open(&path).unwrap();
-        assert!(s.notes(p).unwrap().is_empty(), "the deleted note must not come back");
     }
 
     #[test]
