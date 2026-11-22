@@ -149,6 +149,46 @@ pub struct Welcome {
     pub placeholder: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Timings {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub prefill_per_s: Option<f64>,
+    pub decode_per_s: Option<f64>,
+}
+
+impl Timings {
+    pub fn from_chunk(v: &Value) -> Option<Self> {
+        let n = |p: &str| v.pointer(p).and_then(Value::as_u64);
+        let f = |p: &str| v.pointer(p).and_then(Value::as_f64).filter(|x| *x > 0.0);
+        let t = Self {
+            prompt_tokens: n("/timings/prompt_n").or_else(|| n("/usage/prompt_tokens")),
+            completion_tokens: n("/timings/predicted_n")
+                .or_else(|| n("/usage/completion_tokens")),
+            prefill_per_s: f("/timings/prompt_per_second"),
+            decode_per_s: f("/timings/predicted_per_second"),
+        };
+        (t != Self::default()).then_some(t)
+    }
+
+    pub fn line(&self) -> String {
+        let part = |label: &str, rate: Option<f64>, tokens: Option<u64>| match (rate, tokens) {
+            (Some(r), Some(n)) => Some(format!("{label} {r:.1} tok/s ({n} tok)")),
+            (Some(r), None) => Some(format!("{label} {r:.1} tok/s")),
+            (None, Some(n)) => Some(format!("{label} {n} tok")),
+            (None, None) => None,
+        };
+        [
+            part("prefill", self.prefill_per_s, self.prompt_tokens),
+            part("decode", self.decode_per_s, self.completion_tokens),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ")
+    }
+}
+
 #[async_trait]
 pub trait Backend: Send + Sync + 'static {
     fn app(&self) -> &'static str;
@@ -192,4 +232,6 @@ pub trait Backend: Send + Sync + 'static {
     fn summary(&self, name: &str, args: &Value) -> Option<String> {
         self.toolkit().summary(name, args)
     }
+
+    fn timings(&self, _timings: &Timings) {}
 }

@@ -183,6 +183,7 @@ dependencies = [
  "egui_kittest",
  "futures-util",
  "reqwest",
+ "rfd",
  "serde_json",
  "tempfile",
  "tokio",

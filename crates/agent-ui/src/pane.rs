@@ -60,6 +60,7 @@ pub fn show_with<H>(ui: &mut Ui, agent: &mut Agent<H>, extras: &mut Extras) {
             shared::plan_panel(ui, "agent-pane", &plan, ui.available_width() > 500.0);
         }
         let placeholder = agent.chat.backend.welcome().placeholder;
+        agent.chat.take_dropped(ui.ctx());
         let asked = ask_box(ui, &mut agent.chat.draft, &mut agent.chat.files, &placeholder, busy);
         match asked {
             Some(Asked::Send(text, files)) => {
@@ -67,6 +68,10 @@ pub fn show_with<H>(ui: &mut Ui, agent: &mut Agent<H>, extras: &mut Extras) {
                 agent.chat.ask_with(&text, files, desk);
             }
             Some(Asked::Stop) => agent.chat.interrupt(),
+            Some(Asked::Attach) => {
+                #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+                agent.chat.pick_files(ui.ctx());
+            }
             None => {}
         }
         egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(
@@ -261,6 +266,7 @@ fn settings_view<H>(ui: &mut Ui, agent: &mut Agent<H>) {
 enum Asked {
     Send(String, Vec<Attached>),
     Stop,
+    Attach,
 }
 
 fn ask_box(
@@ -304,6 +310,9 @@ fn ask_box(
                     }
                     if busy && crate::composer::stop_key(ui) {
                         asked = Some(Asked::Stop);
+                    }
+                    if crate::composer::attach_key(ui) {
+                        asked = Some(Asked::Attach);
                     }
                 });
             });
@@ -354,6 +363,9 @@ fn draw(
         }
         Turn::Said(text) => {
             shared::entry(ui, &mut show, id, &Item::Said { text });
+        }
+        Turn::Speed(text) => {
+            shared::entry(ui, &mut show, id, &Item::Speed { text });
         }
         Turn::Thinking(text) => {
             shared::entry(ui, &mut show, id, &Item::Thinking { text });
@@ -627,6 +639,17 @@ mod tests {
             matches!(h.state().chat.turns.get(6), Some(Turn::Asked { answers: Some(a), .. }) if a == &["yes".to_string()]),
             "a click answers the question"
         );
+    }
+
+    #[test]
+    fn a_reply_shows_its_speed_and_the_attach_key_and_chip_are_findable() {
+        let mut a = agent();
+        transcript(&mut a);
+        a.chat.turns.push(Turn::Speed("prefill 850.5 tok/s (120 tok), decode 32.2 tok/s (40 tok)".into()));
+        let h = pane(a);
+        h.get_by_label("attach");
+        h.get_by_label("attached billing.csv 2 KB");
+        assert!(painted(&h).contains("decode 32.2 tok/s"));
     }
 
     #[test]

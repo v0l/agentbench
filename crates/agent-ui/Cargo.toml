@@ -23,6 +23,9 @@ dirs = { version = "6", optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 base64 = { version = "0.23", optional = true }
 
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "fs"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream", "gzip"], optional = true }

@@ -1,7 +1,7 @@
 use super::config::Config;
 use super::grants::{self, Grants};
 use super::workspace::Workspace;
-use super::{Backend, CancellationToken, Cx, Desk, Services, local, skillset, tools};
+use super::{Backend, CancellationToken, Cx, Desk, Services, Timings, local, skillset, tools};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -94,6 +94,21 @@ impl Attached {
     }
 }
 
+pub fn mime_of(name: &str) -> &'static str {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "pdf" => "application/pdf",
+        _ => "text/plain",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asking {
     pub text: String,
@@ -104,6 +119,7 @@ pub struct Asking {
 pub enum Turn {
     You { text: String, files: Vec<Attached> },
     Said(String),
+    Speed(String),
     Thinking(String),
     Did { name: String, args: String, answer: Option<Result<String, String>> },
     Asked { id: u64, questions: Vec<Asking>, answers: Option<Vec<String>> },
@@ -114,6 +130,7 @@ enum Update {
     Delta(String),
     Thinking(String),
     Said,
+    Speed(Timings),
     Calling { name: String, args: String },
     Answered(Result<String, String>),
     Asking { questions: Vec<Asking>, reply: tokio::sync::oneshot::Sender<Vec<String>> },
@@ -129,6 +146,7 @@ pub struct Chat {
     pub draft: String,
     pub files: Vec<Attached>,
     pub services: Arc<Services>,
+    picked: (Sender<Attached>, Receiver<Attached>),
     history: Vec<Value>,
     remembered: usize,
     updates: Option<Receiver<Update>>,
@@ -149,6 +167,7 @@ impl Chat {
             draft: String::new(),
             files: Vec::new(),
             services: Arc::new(Services::default()),
+            picked: channel(),
             history: Vec::new(),
             remembered: 0,
             updates: None,
@@ -167,6 +186,48 @@ impl Chat {
 
     pub fn workspace_path(&self) -> std::path::PathBuf {
         self.config.workspace_path(self.backend.app())
+    }
+
+    pub fn attach(&mut self, name: String, data: Vec<u8>) {
+        let mime = mime_of(&name).to_string();
+        self.files.push(Attached { name, mime, data: Arc::new(data) });
+    }
+
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub fn pick_files(&self, ctx: &egui::Context) {
+        let (tx, ctx) = (self.picked.0.clone(), ctx.clone());
+        super::runtime().spawn(async move {
+            let Some(files) = rfd::AsyncFileDialog::new().set_title("Attach files").pick_files().await
+            else {
+                return;
+            };
+            for f in files {
+                let name = f.file_name();
+                let data = f.read().await;
+                let mime = mime_of(&name).to_string();
+                let _ = tx.send(Attached { name, mime, data: Arc::new(data) });
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    pub fn take_dropped(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for f in dropped {
+            let path = f.path().to_path_buf();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let data = match f.bytes() {
+                Ok(d) => d,
+                Err(e) => {
+                    self.turns.push(Turn::Fault(format!("could not read {name}: {e}")));
+                    continue;
+                }
+            };
+            self.attach(name, data);
+        }
     }
 
     pub fn busy(&self) -> bool {
@@ -260,6 +321,7 @@ impl Chat {
     }
 
     pub fn poll(&mut self) {
+        self.files.extend(self.picked.1.try_iter());
         let Some(rx) = self.updates.as_ref() else { return };
         let mut done = false;
         for u in rx.try_iter().collect::<Vec<_>>() {
@@ -306,6 +368,13 @@ impl Chat {
                     self.thinking = false;
                     if let Some(Turn::Said(s)) = self.turns.last_mut() {
                         s.truncate(s.trim_end().len());
+                    }
+                }
+                Update::Speed(t) => {
+                    self.speaking = false;
+                    let line = t.line();
+                    if !line.is_empty() {
+                        self.turns.push(Turn::Speed(line));
                     }
                 }
                 Update::Calling { name, args } => {
@@ -369,6 +438,7 @@ struct Worker {
 struct Completion {
     text: String,
     calls: Vec<Call>,
+    timings: Option<Timings>,
 }
 
 #[derive(Default, Clone)]
@@ -419,9 +489,18 @@ impl Worker {
                 );
             }
             self.history.push(message);
+            if let Some(t) = &reply.timings {
+                self.backend.timings(t);
+            }
             if reply.calls.is_empty() {
                 self.say(Update::Said);
+                if let Some(t) = reply.timings {
+                    self.say(Update::Speed(t));
+                }
                 return Ok(());
+            }
+            if let Some(t) = reply.timings.clone() {
+                self.say(Update::Speed(t));
             }
             for call in reply.calls {
                 let answer = self.run_tool(&call).await;
@@ -522,6 +601,9 @@ impl Worker {
             return;
         }
         if let Ok(v) = serde_json::from_str::<Value>(data) {
+            if let Some(t) = Timings::from_chunk(&v) {
+                reply.timings = Some(t);
+            }
             self.take_delta(&v, reply);
         }
     }
@@ -731,6 +813,30 @@ mod tests {
         assert_eq!(chat.turns.iter().filter(|t| matches!(t, Turn::Said(_))).count(), 1);
         let Some(Turn::Said(said)) = chat.turns.last() else { panic!("no reply") };
         assert_eq!(said, "Done it.");
+    }
+
+    #[test]
+    fn timings_in_a_stream_chunk_become_a_speed_line() {
+        let chunk = json!({"timings":{"prompt_n":120,"prompt_per_second":850.5,"predicted_n":40,"predicted_per_second":32.25}});
+        let t = Timings::from_chunk(&chunk).expect("timings");
+        assert_eq!(t.line(), "prefill 850.5 tok/s (120 tok), decode 32.2 tok/s (40 tok)");
+        assert!(Timings::from_chunk(&json!({"choices":[]})).is_none());
+        let (tx, rx) = channel();
+        let mut chat = Chat { updates: Some(rx), ..chat() };
+        let _ = tx.send(Update::Delta("hi".into()));
+        let _ = tx.send(Update::Said);
+        let _ = tx.send(Update::Speed(t));
+        chat.poll();
+        assert!(matches!(chat.turns.last(), Some(Turn::Speed(s)) if s.contains("decode")));
+    }
+
+    #[test]
+    fn an_attached_file_is_kept_with_its_type() {
+        let mut chat = chat();
+        chat.attach("shot.PNG".into(), vec![1, 2]);
+        chat.attach("notes.txt".into(), vec![3]);
+        assert!(chat.files[0].is_image());
+        assert_eq!(chat.files[1].mime, "text/plain");
     }
 
     #[test]
