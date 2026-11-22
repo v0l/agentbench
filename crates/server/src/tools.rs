@@ -1474,7 +1474,7 @@ impl Api for StoreApi {
                     Err(crate::autopilot::Unshipped::Conflict(files)) => {
                         return Err(format!("merge conflict with the main branch ({files}); send the worker a needs_followup asking it to rebase"));
                     }
-                    Err(crate::autopilot::Unshipped::Failed(e)) => return Err(format!("merge failed: {e}")),
+                    Err(e) => return Err(format!("merge failed: {}", e.why())),
                 }
             }
             "groom_done" => {

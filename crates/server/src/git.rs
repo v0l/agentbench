@@ -187,13 +187,38 @@ pub fn current_branch(dir: &Path) -> Option<String> {
 }
 
 pub fn merge_branch(main: &Path, branch: &str) -> Result<(), String> {
-    match git(main, &["merge", "--no-edit", branch]) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            let _ = git(main, &["merge", "--abort"]);
-            Err(e)
-        }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(main)
+        .args(["merge", "--no-edit", branch])
+        .output()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if out.status.success() {
+        return Ok(());
     }
+    let _ = git(main, &["merge", "--abort"]);
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout).trim(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let text = text.trim();
+    Err(if text.is_empty() { format!("git merge --no-edit {branch} failed") } else { text.to_string() })
+}
+
+pub fn branch_tip(main: &Path, branch: &str) -> Option<String> {
+    git(main, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).ok()
+}
+
+pub fn remote_branch_tip(main: &Path, remote: &str, branch: &str) -> Option<String> {
+    let out = git(main, &["ls-remote", remote, &format!("refs/heads/{branch}")]).ok()?;
+    out.split_whitespace().next().map(str::to_string)
+}
+
+pub fn dirty_files(path: &Path, limit: usize) -> Vec<String> {
+    git(path, &["status", "--short"])
+        .map(|o| o.lines().take(limit).map(|l| l.trim().to_string()).collect())
+        .unwrap_or_default()
 }
 
 pub fn conflicts_with(main: &Path, branch: &str) -> Option<String> {
