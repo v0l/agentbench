@@ -1122,14 +1122,26 @@ impl App {
     }
 
     /// Tell the background service which server to watch, and whether to.
+    fn watch_targets(&self, primary: &Server) -> Vec<crate::notify::Watched> {
+        let w = |name: &str, url: &str, token: &str| crate::notify::Watched {
+            name: name.to_string(),
+            url: url.to_string(),
+            token: token.to_string(),
+        };
+        crate::notify::watch_list(
+            w(&self.server_name, &primary.url, &primary.token),
+            self.servers.iter().map(|r| w(&r.name, &r.url, &r.token)),
+        )
+    }
+
     fn sync_alerts(&self) {
         if let Some(c) = &self.client {
-            crate::notify::watch(&c.server.url, &c.server.token, self.alerts);
+            crate::notify::watch(&self.watch_targets(&c.server), self.alerts);
         }
     }
 
     fn connect_to(&mut self, ctx: &egui::Context, server: Server) {
-        crate::notify::watch(&server.url, &server.token, self.alerts);
+        crate::notify::watch(&self.watch_targets(&server), self.alerts);
         self.keep_pairing(&server);
         let ctx = ctx.clone();
         let client =
@@ -1910,6 +1922,7 @@ impl App {
             c.overview();
         }
         self.apply_view();
+        self.sync_alerts();
         self.session = self.session.filter(|s| self.session_by_id(*s).is_some());
     }
 
@@ -2054,6 +2067,14 @@ impl App {
         }
         if let Some(sid) = self.detail_session() {
             self.fetch_messages(sid);
+        }
+        if self.view.is_none()
+            && let Some(c) = self.client.as_ref().filter(|c| c.multi())
+        {
+            let asking: Vec<SessionId> = c.waiting().into_iter().map(|w| w.1).collect();
+            for sid in asking {
+                self.fetch_messages(sid);
+            }
         }
     }
 

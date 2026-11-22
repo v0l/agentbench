@@ -101,6 +101,11 @@ impl App {
         }
     }
 
+    fn open_question(&self, sid: SessionId) -> Option<Message> {
+        let t = self.transcripts.get(&sid)?;
+        t.rows.iter().rev().find(|m| matches!(&m.entry, Entry::Question { answer: None, .. } | Entry::Questions { answers: None, .. })).cloned()
+    }
+
     fn needs_you_panel(&mut self, ui: &mut Ui) {
         let Some(c) = self.client.as_ref().filter(|c| c.multi() && self.view.is_none()) else {
             return;
@@ -118,16 +123,20 @@ impl App {
             .into_iter()
             .map(|(slot, p)| (slot, c.name(slot).to_string(), p.summary))
             .collect();
+        let questions: Vec<Option<Message>> = rows.iter().map(|r| self.open_question(r.2)).collect();
         let mut open: Option<(u32, SessionId, bool)> = None;
         let mut review: Option<u32> = None;
         section_panel(ui, |ui| {
             Line::new().legend("needs you").size(10.0).tint(READOUT).elided(ui);
-            for (slot, name, id, title, sup) in &rows {
+            for ((slot, name, id, title, sup), question) in rows.iter().zip(&questions) {
                 let label = format!("[{name}] {}", if *sup { format!("supervisor: {title}") } else { title.clone() });
                 let r = needs_you_row(ui, &label);
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("needs you {label}")));
                 if r.clicked() {
                     open = Some((*slot, *id, *sup));
+                }
+                if let Some(m) = question {
+                    ui.push_id(("needs-you-card", *id), |ui| self.entry(ui, m, *id));
                 }
             }
             for (slot, name, summary) in &cards {

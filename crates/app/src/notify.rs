@@ -38,7 +38,7 @@ mod android {
     }
 
     /// Point the service at a server, or stop it when `on` is false or there is no server.
-    pub fn watch(url: &str, token: &str, on: bool) {
+    pub fn watch(url: &str, token: &str, servers: &str, on: bool) {
         let on = on && !url.trim().is_empty() && !token.trim().is_empty();
         if on && !allowed(POST_NOTIFICATIONS) {
             // Android 13 and later ask first; the answer arrives later, and the next call (the
@@ -67,6 +67,7 @@ mod android {
             };
             put(env, "url", url.trim())?;
             put(env, "token", token.trim())?;
+            put(env, "servers", servers)?;
             let k = env.new_string("on")?;
             env.call_method(
                 &edit,
@@ -100,15 +101,87 @@ mod android {
     }
 }
 
-/// Watch `url` in the background, or stop watching.
-pub fn watch(url: &str, token: &str, on: bool) {
+/// One workspace the background service watches.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Watched {
+    pub name: String,
+    pub url: String,
+    pub token: String,
+}
+
+/// The workspaces to watch: the first, then each other, skipping any without a url or token and
+/// any repeat of a server already listed.
+pub fn watch_list(first: Watched, others: impl IntoIterator<Item = Watched>) -> Vec<Watched> {
+    let mut out: Vec<Watched> = Vec::new();
+    for w in std::iter::once(first).chain(others) {
+        let (url, token) = (w.url.trim().trim_end_matches('/'), w.token.trim());
+        if url.is_empty() || token.is_empty() || out.iter().any(|o| o.url == url && o.token == token) {
+            continue;
+        }
+        out.push(Watched { name: w.name.trim().to_string(), url: url.to_string(), token: token.to_string() });
+    }
+    out
+}
+
+pub fn watch_json(list: &[Watched]) -> String {
+    let items: Vec<_> = list
+        .iter()
+        .map(|w| serde_json::json!({ "name": w.name, "url": w.url, "token": w.token }))
+        .collect();
+    serde_json::Value::Array(items).to_string()
+}
+
+/// Watch every server in `list` in the background, or stop watching.
+pub fn watch(list: &[Watched], on: bool) {
     #[cfg(target_os = "android")]
-    android::watch(url, token, on);
+    {
+        let (url, token) = list.first().map(|w| (w.url.as_str(), w.token.as_str())).unwrap_or(("", ""));
+        android::watch(url, token, &watch_json(list), on);
+    }
     #[cfg(not(target_os = "android"))]
-    let _ = (url, token, on);
+    let _ = (list, on);
 }
 
 /// Whether this device can raise notifications while the app is closed.
 pub const fn available() -> bool {
     cfg!(target_os = "android")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(name: &str, url: &str, token: &str) -> Watched {
+        Watched { name: name.into(), url: url.into(), token: token.into() }
+    }
+
+    #[test]
+    fn every_workspace_is_in_the_watch_list_with_its_name() {
+        let list = watch_list(w("desktop", "http://a:1/", "ta"), [w("workstation", "http://b:2", "tb")]);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].url, "http://a:1");
+        assert_eq!(list[1].name, "workstation");
+        let json: serde_json::Value = serde_json::from_str(&watch_json(&list)).unwrap();
+        assert_eq!(json[1]["name"], "workstation");
+        assert_eq!(json[1]["token"], "tb");
+    }
+
+    #[test]
+    fn the_watch_list_follows_added_and_removed_workspaces() {
+        let first = || w("desktop", "http://a:1", "ta");
+        let two = watch_list(first(), [w("b", "http://b:2", "tb")]);
+        assert_eq!(two.len(), 2);
+        let one = watch_list(first(), []);
+        assert_eq!(one.len(), 1);
+        assert_eq!(watch_json(&one).matches("http").count(), 1);
+    }
+
+    #[test]
+    fn incomplete_and_repeated_servers_are_left_out() {
+        let list = watch_list(
+            w("a", "http://a:1", "ta"),
+            [w("empty", "", "t"), w("notoken", "http://c:3", " "), w("again", "http://a:1/", "ta")],
+        );
+        assert_eq!(list.len(), 1);
+    }
 }

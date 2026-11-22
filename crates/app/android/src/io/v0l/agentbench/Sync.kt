@@ -13,15 +13,37 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
-/** What the app tells the background work: which server, with what token, and whether to watch. */
-class Config(ctx: Context) {
+/** One workspace to watch. */
+data class Target(val name: String, val url: String, val token: String)
+
+/** What the app tells the background work: which servers, with what tokens, and whether to watch. */
+class Config(ctx: Context, private val target: Target? = null, private val several: Boolean = false) {
     @Suppress("DEPRECATION")
     private val prefs = ctx.applicationContext.getSharedPreferences("agentbench-sync", Context.MODE_MULTI_PROCESS)
-    private val seen = ctx.applicationContext.getSharedPreferences("agentbench-watch", Context.MODE_PRIVATE)
+    private val seen = ctx.applicationContext.getSharedPreferences(
+        if (target == null) "agentbench-watch" else "agentbench-watch-${target.url.hashCode()}",
+        Context.MODE_PRIVATE,
+    )
     val on get() = prefs.getBoolean("on", false)
-    val url get() = prefs.getString("url", "").orEmpty().trim().trimEnd('/')
-    val token get() = prefs.getString("token", "").orEmpty().trim()
+    val url get() = (target?.url ?: prefs.getString("url", "").orEmpty()).trim().trimEnd('/')
+    val token get() = (target?.token ?: prefs.getString("token", "").orEmpty()).trim()
     val ready get() = on && url.isNotEmpty() && token.isNotEmpty()
+
+    /** The workspace name to put in a notification, only when more than one is watched. */
+    val label get() = if (several) target?.name.orEmpty() else ""
+
+    /** Every workspace the app asked to watch; an older app only sets one url and token. */
+    fun targets(): List<Target> {
+        val list = runCatching { JSONArray(prefs.getString("servers", "").orEmpty()) }.getOrNull()
+        val out = ArrayList<Target>()
+        if (list != null) for (i in 0 until list.length()) {
+            val o = list.getJSONObject(i)
+            val t = Target(o.optString("name"), o.optString("url").trim().trimEnd('/'), o.optString("token").trim())
+            if (t.url.isNotEmpty() && t.token.isNotEmpty()) out.add(t)
+        }
+        if (out.isEmpty() && url.isNotEmpty() && token.isNotEmpty()) out.add(Target("", url, token))
+        return out
+    }
 
     init {
         val server = url
@@ -54,12 +76,12 @@ class Config(ctx: Context) {
 }
 
 object Net {
-    @Volatile private var open: HttpURLConnection? = null
+    private val open = java.util.concurrent.CopyOnWriteArraySet<HttpURLConnection>()
     private val lock = Object()
 
     fun drop() {
         android.util.Log.i("agentbench", "watch: network changed, reconnecting")
-        open?.disconnect()
+        open.forEach { it.disconnect() }
         synchronized(lock) { lock.notifyAll() }
     }
 
@@ -73,11 +95,11 @@ object Net {
         c.connectTimeout = 10_000
         c.readTimeout = timeoutMs
         c.setRequestProperty("Authorization", "Bearer ${cfg.token}")
-        open = c
+        open.add(c)
         try {
             if (c.responseCode == 200) JSONObject(c.inputStream.bufferedReader().readText()) else { c.errorStream?.close(); null }
         } finally {
-            open = null
+            open.remove(c)
         }
     } catch (e: Exception) {
         null
@@ -174,9 +196,9 @@ object Watcher {
         for (e in events) when (e) {
             is Event.Cancel -> nm.cancel(e.id.hashCode())
             is Event.Alert -> if (show) when (e.kind) {
-                "needs" -> notify(ctx, ATTENTION, e.id.hashCode(), "${e.project} needs you", e.title, e.id)
-                "failed" -> notify(ctx, ATTENTION, e.id.hashCode(), "${e.project} failed", e.title, e.id)
-                else -> notify(ctx, DONE, e.id.hashCode(), "${e.project} finished", e.title, e.id)
+                "needs" -> notify(ctx, ATTENTION, e.id.hashCode(), heading(cfg, e.project, "needs you"), e.title, e.id)
+                "failed" -> notify(ctx, ATTENTION, e.id.hashCode(), heading(cfg, e.project, "failed"), e.title, e.id)
+                else -> notify(ctx, DONE, e.id.hashCode(), heading(cfg, e.project, "finished"), e.title, e.id)
             }
         }
         if (deltas.isNotEmpty() || reset) save(cfg, state.rows)
@@ -184,6 +206,9 @@ object Watcher {
         cfg.feedCursor = r.optLong("cursor", 0)
         return true
     }
+
+    fun heading(cfg: Config, project: String, what: String): String =
+        if (cfg.label.isEmpty()) "$project $what" else "[${cfg.label}] $project $what"
 
     private fun legacy(ctx: Context, cfg: Config): Boolean {
         val ok = check(ctx, cfg) != null
@@ -215,9 +240,9 @@ object Watcher {
             val project = projects[s.optLong("project_id")].orEmpty()
             val title = s.optString("title").ifBlank { "chat" }
             when {
-                status == "waiting" -> notify(ctx, ATTENTION, nid, "$project needs you", title, id)
-                status == "failed" -> notify(ctx, ATTENTION, nid, "$project failed", title, id)
-                status == "idle" && was == "running" -> notify(ctx, DONE, nid, "$project finished", title, id)
+                status == "waiting" -> notify(ctx, ATTENTION, nid, heading(cfg, project, "needs you"), title, id)
+                status == "failed" -> notify(ctx, ATTENTION, nid, heading(cfg, project, "failed"), title, id)
+                status == "idle" && was == "running" -> notify(ctx, DONE, nid, heading(cfg, project, "finished"), title, id)
             }
         }
         cfg.known = now.toString()

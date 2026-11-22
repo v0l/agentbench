@@ -21,6 +21,7 @@ class WatchService : Service() {
     @Volatile private var running = false
     private var callback: android.net.ConnectivityManager.NetworkCallback? = null
     private var shown = ""
+    private val active = HashSet<Target>()
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -73,14 +74,33 @@ class WatchService : Service() {
     }
 
     private fun loop() {
-        var failures = 0
-        val pacing = Pacing()
+        val threads = HashMap<Target, Thread>()
         while (running) {
-            val cfg = Config(this)
-            if (!cfg.ready) {
+            val root = Config(this)
+            if (!root.ready) {
                 stopSelf()
                 return
             }
+            val wanted = root.targets()
+            synchronized(active) {
+                active.clear()
+                active.addAll(wanted)
+            }
+            threads.entries.removeAll { !it.value.isAlive }
+            for (t in wanted) {
+                if (threads[t]?.isAlive == true) continue
+                threads[t] = Thread({ watch(t, wanted.size > 1) }, "agentbench-watch-${t.name}").also { it.start() }
+            }
+            Net.sleep(5_000)
+        }
+    }
+
+    private fun watch(target: Target, several: Boolean) {
+        var failures = 0
+        val pacing = Pacing()
+        while (running) {
+            val cfg = Config(this, target, several)
+            if (!cfg.on || synchronized(active) { target !in active }) return
             val gap = pacing.delayBeforeNext(System.currentTimeMillis())
             if (gap > 0) Net.sleep(gap)
             pacing.started(System.currentTimeMillis())
@@ -122,10 +142,11 @@ class WatchService : Service() {
 class SyncJob : JobService() {
     override fun onStartJob(p: JobParameters): Boolean {
         Thread {
-            val cfg = Config(this)
-            if (cfg.ready) {
+            val root = Config(this)
+            if (root.ready) {
                 Watcher.channels(this)
-                Watcher.sync(this, cfg, 0)
+                val all = root.targets()
+                for (t in all) Watcher.sync(this, Config(this, t, all.size > 1), 0)
             }
             jobFinished(p, false)
         }.start()

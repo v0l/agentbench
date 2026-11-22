@@ -4061,6 +4061,40 @@ fn a_workspace_with_a_waiting_chat_shows_an_activity_dot_and_the_needs_you_panel
 }
 
 #[test]
+fn a_question_from_the_second_workspace_is_answered_in_the_all_view() {
+    let (first, second) = (rig(), rig_with(vec![Box::new(Waiter)]));
+    let project = second.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
+    let mut h = two_servers(&first, &second);
+    until(&mut h, "both overviews", both_loaded);
+    let mut c = agentbench::client::Client::new(
+        agentbench::client::Server { url: second.url.clone(), token: TOKEN.into() },
+        || {},
+    );
+    c.add_session(&agentbench_core::NewSession {
+        project_id: project,
+        agent: "waiter".into(),
+        prompt: Some("pick".into()),
+        ..Default::default()
+    });
+    until(&mut h, "the question card in the panel", |h| {
+        h.state().view().is_none() && h.query_by_label("Apache-2.0").is_some()
+    });
+    assert_eq!(h.state().view(), None);
+    shot(&mut h, "needs-you-question");
+    h.get_by_label("Apache-2.0").click();
+    let answered = || {
+        second.store.sessions().unwrap().into_iter().filter(|s| s.agent == "waiter").any(|s| {
+            second.store.messages(s.id, 0).unwrap().iter().any(
+                |m| matches!(&m.entry, Entry::Question { answer: Some(a), .. } if a == "Apache-2.0"),
+            )
+        })
+    };
+    until(&mut h, "the answer on the second server", |_| answered());
+    assert!(first.store.sessions().unwrap().iter().all(|s| s.agent != "waiter"));
+    assert_eq!(h.state().view(), None, "answering does not leave the all view");
+}
+
+#[test]
 fn each_workspaces_supervisor_is_reached_from_its_own_view() {
     let (first, second) = (rig(), rig());
     let mut h = two_servers(&first, &second);
