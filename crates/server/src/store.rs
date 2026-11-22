@@ -769,6 +769,11 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn db_for_test(&self) -> MutexGuard<'_, Connection> {
+        self.db()
+    }
+
     fn db(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }

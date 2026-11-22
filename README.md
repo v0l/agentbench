@@ -355,6 +355,21 @@ and the session, its worktree and the merged branch are closed. `auto_close`
 closing off. Label an issue `parked` to keep the picker off it. `merge_branch`
 is for a branch with no issue.
 
+When a merge does not go through, the comment names the branch, the main
+branch, the head and the git error, and the autopilot retries on its own with a
+backoff of 30 s, 2 min, 10 min, then every 30 min. A notice goes out at most
+once an hour per project.
+
+| Cause | The session is told | Retries |
+|---|---|---|
+| Conflict found before merging | rebase onto main, the files | after the worker finishes again, 3 follow-ups per head, then `merge-blocked` |
+| `git merge` failed, or the branch is not in main afterwards | the git error, run `git merge <main>` and resolve | same |
+| Branch missing or moved since the verdict | the reason | same |
+| The worker's worktree has uncommitted changes | commit or discard them | same |
+| The main checkout has uncommitted changes | nothing, the user is notified | every tick once clean |
+| The main checkout is on the wrong branch | nothing, the user is notified | every tick once fixed |
+| Push failed after a local merge | nothing, the user is notified | the push is retried, never a second merge |
+
 A worker on a model below the top level (anything but the `high` level) gets a
 `check_in` message to the supervisor every `check_in_minutes` of a turn
 (default 30), with its time on the issue, commits, dirty files, last bash

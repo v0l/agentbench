@@ -597,11 +597,54 @@ pub struct Autopilot {
     said: Arc<Mutex<HashSet<String>>>,
     pub(crate) checks: Arc<Mutex<HashMap<SessionId, crate::checkin::Check>>>,
     pub(crate) stuck_hook: Arc<Mutex<Option<crate::checkin::StuckHook>>>,
+    merges: Arc<Mutex<HashMap<SessionId, (u32, i64)>>>,
+    notified: Arc<Mutex<HashMap<Id, i64>>>,
 }
 
 impl Autopilot {
     pub fn new(runner: Runner) -> Autopilot {
-        Autopilot { runner, said: Default::default(), checks: Default::default(), stuck_hook: Default::default() }
+        Autopilot {
+            runner,
+            said: Default::default(),
+            checks: Default::default(),
+            stuck_hook: Default::default(),
+            merges: Default::default(),
+            notified: Default::default(),
+        }
+    }
+
+    fn merge_due(&self, session: SessionId, now: i64) -> bool {
+        self.merges.lock().unwrap_or_else(|e| e.into_inner()).get(&session).is_none_or(|(_, next)| *next <= now)
+    }
+
+    fn merge_failed_at(&self, session: SessionId, now: i64, backoff: bool) {
+        let mut merges = self.merges.lock().unwrap_or_else(|e| e.into_inner());
+        let failures = merges.get(&session).map_or(0, |(f, _)| *f) + 1;
+        let next = if backoff { now + merge_backoff_ms(failures) } else { 0 };
+        merges.insert(session, (failures, next));
+    }
+
+    fn merge_ok(&self, session: SessionId) {
+        self.merges.lock().unwrap_or_else(|e| e.into_inner()).remove(&session);
+    }
+
+    fn notify_capped(&self, project: Id, text: &str, now: i64) -> bool {
+        {
+            let mut notified = self.notified.lock().unwrap_or_else(|e| e.into_inner());
+            if notified.get(&project).is_some_and(|at| now - *at < NOTIFY_CAP_MS) {
+                return false;
+            }
+            notified.insert(project, now);
+        }
+        self.notify(text);
+        true
+    }
+
+    fn comment_once(&self, issue: Id, body: &str) {
+        let key = format!("comment/{issue}/{body}");
+        if self.said.lock().unwrap_or_else(|e| e.into_inner()).insert(key) {
+            self.comment(issue, body);
+        }
     }
 
     pub(crate) fn store(&self) -> &Store {
@@ -813,11 +856,11 @@ impl Autopilot {
                         self.log(Some(s.project_id), s.issue_id, &format!("{name}: could not ask for a rebase: {}", clip(&e.0, 160)));
                     }
                 }
-                Err(Unshipped::Failed(why)) => {
+                Err(un) => {
                     self.log_once(
                         Some(s.project_id),
                         s.issue_id,
-                        &format!("{name} not merged: {}", clip(&why, 200)),
+                        &format!("{name} not merged: {}", clip(&un.why(), 200)),
                     );
                 }
             }
@@ -956,7 +999,7 @@ impl Autopilot {
                     );
                 } else if w.green {
                     match current_verdict(store, &session) {
-                        Some(v) if v.verdict == Verdict::ConcludedPass.as_str() => self.merge(w, &session, &v),
+                        Some(v) if v.verdict == Verdict::ConcludedPass.as_str() => self.merge(w, &session, &v, now),
                         _ => {
                             self.log(
                                 Some(w.project),
@@ -971,6 +1014,11 @@ impl Autopilot {
             "merge_failed" => {
                 if issue.state == IssueState::Done {
                     let _ = store.remove_worker(w.session);
+                } else if flag(store, ENABLED)
+                    && level(store, w.project) >= Automation::Ship
+                    && let Some(v) = current_verdict(store, &session).filter(|v| v.verdict == Verdict::ConcludedPass.as_str())
+                {
+                    self.merge(w, &session, &v, now);
                 }
             }
             _ => {}
@@ -1145,17 +1193,22 @@ impl Autopilot {
         }
     }
 
-    fn merge(&self, w: &Worker, session: &Session, v: &Judged) {
+    fn merge(&self, w: &Worker, session: &Session, v: &Judged, now: i64) {
         let store = self.store();
+        if !self.merge_due(w.session, now) {
+            return;
+        }
         match ship(store, session) {
             Ok(shipped) if matches!(shipped.pushed, Some(Err(_))) => {
                 let why = format!("{}; the issue stays in review until it is pushed", shipped.describe());
                 let _ = store.set_worker(w.session, "merge_failed", true);
-                self.comment(w.issue, &format!("autopilot: {why}"));
-                self.log(Some(w.project), Some(w.issue), &format!("#{}: {}", w.issue, clip(&why, 200)));
-                self.notify(&format!("#{} merged but not pushed", w.issue));
+                self.merge_failed_at(w.session, now, true);
+                self.comment_once(w.issue, &format!("autopilot: {why}"));
+                self.log_once(Some(w.project), Some(w.issue), &format!("#{}: {}", w.issue, clip(&why, 200)));
+                self.notify_capped(w.project, &format!("#{} merged but not pushed", w.issue), now);
             }
             Ok(shipped) => {
+                self.merge_ok(w.session);
                 let closed = auto_close_on(store);
                 let line = verdict_line(v);
                 if closed {
@@ -1185,13 +1238,46 @@ impl Autopilot {
                 self.comment(w.issue, &format!("autopilot: not merged: {}", conflict_line(&files)));
                 self.rework(w, session, &text, &format!("not merged: {}", conflict_line(&files)));
             }
-            Err(Unshipped::Failed(why)) => {
-                let _ = store.set_worker(w.session, "merge_failed", true);
-                self.comment(w.issue, &format!("autopilot: merge failed: {why}"));
-                self.log(Some(w.project), Some(w.issue), &format!("merge of #{} failed: {}", w.issue, clip(&why, 200)));
-                self.notify(&format!("#{} could not be merged: {}", w.issue, clip(&why, 160)));
-            }
+            Err(un) => self.merge_refused(w, session, &un, now),
         }
+    }
+
+    fn merge_refused(&self, w: &Worker, session: &Session, un: &Unshipped, now: i64) {
+        let store = self.store();
+        let (branch, main) = match (store.project(w.project), store.worktree(session.worktree_id)) {
+            (Ok(p), Ok(t)) => (
+                t.branch.unwrap_or_default(),
+                p.branch.clone().or_else(|| crate::git::current_branch(Path::new(&p.path))).unwrap_or_default(),
+            ),
+            _ => (String::new(), String::new()),
+        };
+        let Some(ex) = explain(un, &branch, &main) else { return };
+        let head = head_of(store, session).unwrap_or_default();
+        let line = format!("not merged ({}): {}", ex.cause, clip(&ex.detail, 200));
+        self.comment_once(
+            w.issue,
+            &format!(
+                "autopilot: merge failed, case {}. branch {branch}, main {main}, head {head}: {}",
+                ex.cause,
+                clip(&ex.detail, 600)
+            ),
+        );
+        self.log_once(Some(w.project), Some(w.issue), &format!("#{}: {line}", w.issue));
+        let Some(tell) = ex.tell else {
+            let _ = store.set_worker(w.session, "ready", true);
+            self.merge_failed_at(w.session, now, false);
+            self.notify_capped(w.project, &format!("#{} cannot merge yet: {}", w.issue, clip(&ex.detail, 160)), now);
+            return;
+        };
+        self.merge_failed_at(w.session, now, true);
+        if w.reworks >= MAX_REWORKS {
+            self.add_labels(w.issue, &[MERGE_BLOCKED]);
+            self.comment_once(w.issue, &format!("autopilot: merge-blocked after {MAX_REWORKS} follow-ups; {line}"));
+            self.notify_capped(w.project, &format!("#{} is merge-blocked: {}", w.issue, clip(&ex.detail, 160)), now);
+            let _ = store.remove_worker(w.session);
+            return;
+        }
+        self.rework(w, session, &tell, &line);
     }
 
     fn start_more(&self) {
@@ -1348,6 +1434,88 @@ pub enum Unshipped {
     NoBranch,
     Conflict(String),
     Failed(String),
+    MissingBranch(String),
+    MainDirty(Vec<String>),
+    WorktreeDirty(String),
+    WrongBranch(String),
+}
+
+impl Unshipped {
+    pub fn why(&self) -> String {
+        match self {
+            Unshipped::NoBranch => "there is no branch to merge".into(),
+            Unshipped::Conflict(files) => conflict_line(files),
+            Unshipped::Failed(why)
+            | Unshipped::MissingBranch(why)
+            | Unshipped::WorktreeDirty(why)
+            | Unshipped::WrongBranch(why) => why.clone(),
+            Unshipped::MainDirty(files) => {
+                format!("the main checkout has uncommitted changes: {}", files.join("; "))
+            }
+        }
+    }
+}
+
+pub(crate) fn merge_backoff_ms(failures: u32) -> i64 {
+    match failures {
+        0 => 0,
+        1 => 30_000,
+        2 => 120_000,
+        3 => 600_000,
+        _ => 1_800_000,
+    }
+}
+
+const NOTIFY_CAP_MS: i64 = 3_600_000;
+const MERGE_BLOCKED: &str = "merge-blocked";
+
+struct Explained {
+    cause: &'static str,
+    detail: String,
+    tell: Option<String>,
+}
+
+fn explain(un: &Unshipped, branch: &str, main: &str) -> Option<Explained> {
+    let told = |why: &str| {
+        format!(
+            "Your branch was judged concluded_pass but could not be merged: {}. Fix it in your worktree, run the tests and finish with a conclusion.",
+            clip(why, 400)
+        )
+    };
+    match un {
+        Unshipped::NoBranch | Unshipped::Conflict(_) => None,
+        Unshipped::Failed(why) => Some(Explained {
+            cause: "a, git merge failed",
+            detail: clip(why, 600),
+            tell: Some(format!(
+                "Your branch was judged concluded_pass but the merge of {branch} into {main} failed: {}; run `git merge {main}` in your worktree, resolve, run the tests, commit, and finish with a conclusion.",
+                clip(why, 400)
+            )),
+        }),
+        Unshipped::MissingBranch(why) => Some(Explained {
+            cause: "a, branch missing",
+            detail: clip(why, 600),
+            tell: Some(told(why)),
+        }),
+        Unshipped::WorktreeDirty(why) => Some(Explained {
+            cause: "c, the worktree has uncommitted changes",
+            detail: clip(why, 600),
+            tell: Some(format!(
+                "Your branch was judged concluded_pass but could not be merged: {}. Commit or discard the uncommitted changes in your worktree, run the tests and finish with a conclusion.",
+                clip(why, 400)
+            )),
+        }),
+        Unshipped::MainDirty(files) => Some(Explained {
+            cause: "b, the main checkout has uncommitted changes",
+            detail: files.join("; "),
+            tell: None,
+        }),
+        Unshipped::WrongBranch(why) => Some(Explained {
+            cause: "d, the main checkout is on the wrong branch",
+            detail: clip(why, 600),
+            tell: None,
+        }),
+    }
 }
 
 #[derive(Debug)]
@@ -1388,26 +1556,45 @@ pub fn ship(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
     if let Some(want) = &project.branch
         && crate::git::current_branch(main).as_deref() != Some(want.as_str())
     {
-        return Err(fail(format!("the main checkout is not on {want}")));
+        return Err(Unshipped::WrongBranch(format!("the main checkout is not on {want}")));
+    }
+    let main_name = project.branch.clone().or_else(|| crate::git::current_branch(main)).unwrap_or_default();
+    let Some(tip) = crate::git::branch_tip(main, &branch) else {
+        return Err(Unshipped::MissingBranch(format!("the branch {branch} does not exist in {main_name}")));
+    };
+    if let Some(v) = store.latest_verdict(session.id).ok().flatten()
+        && v.head.as_deref().is_some_and(|h| h != tip)
+    {
+        return Err(Unshipped::MissingBranch(format!("the tip of {branch} moved after the verdict was given")));
     }
     if crate::git::is_dirty(main).unwrap_or(true) {
-        return Err(fail("the main checkout has uncommitted changes".into()));
+        return Err(Unshipped::MainDirty(crate::git::dirty_files(main, 10)));
     }
     if crate::git::is_dirty(Path::new(&tree.path)).unwrap_or(false) {
-        return Err(fail(format!("{branch} has uncommitted changes")));
+        return Err(Unshipped::WorktreeDirty(format!("{branch} has uncommitted changes")));
     }
     if let Some(files) = crate::git::conflicts_with(main, &branch) {
         return Err(Unshipped::Conflict(files));
     }
-    crate::git::merge_branch(main, &branch).map_err(fail)?;
-    if !crate::git::is_merged(main, &branch) {
+    if !crate::git::is_merged(main, &tip) {
+        crate::git::merge_branch(main, &branch).map_err(fail)?;
+    }
+    if !crate::git::is_merged(main, &tip) {
         return Err(fail(format!("{branch} is not in the main branch after the merge")));
     }
     let target = project.branch.clone().or_else(|| crate::git::current_branch(main));
     let pushed = match (crate::git::push_remote(main), target) {
-        (Some(remote), Some(b)) => {
-            Some(crate::git::push(main, &remote, &b).map(|()| format!("{remote}/{b}")))
-        }
+        (Some(remote), Some(b)) => Some(
+            crate::git::push(main, &remote, &b)
+                .and_then(|()| {
+                    let local = crate::git::head(main);
+                    match crate::git::remote_branch_tip(main, &remote, &b) {
+                        Some(r) if Some(&r) == local.as_ref() => Ok(()),
+                        _ => Err(format!("{remote}/{b} is not at the local head after the push")),
+                    }
+                })
+                .map(|()| format!("{remote}/{b}")),
+        ),
         _ => None,
     };
     let deployed = match &project.deploy {
@@ -2636,14 +2823,147 @@ mod tests {
         assert!(feed(&r).iter().any(|l| l.contains("merged") && l.contains("judged concluded_pass")), "{:?}", feed(&r));
     }
 
+    #[test]
+    fn the_merge_backoff_schedule() {
+        for (failures, want) in [(0, 0), (1, 30_000), (2, 120_000), (3, 600_000), (4, 1_800_000), (9, 1_800_000)] {
+            assert_eq!(merge_backoff_ms(failures), want, "{failures}");
+        }
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    fn told(r: &Rig, sid: agentbench_core::SessionId) -> Vec<String> {
+        r.store
+            .messages(sid, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::User { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_merge_that_fails_on_a_binary_conflict_tells_the_worker_the_git_error() {
+        let r = rig(DONE);
+        let (a, sid) = worked_on(&r).await;
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        std::fs::write(r.repo.join("other.txt"), "o").unwrap();
+        git_in(&r.repo, &["add", "."]);
+        git_in(&r.repo, &["commit", "-qm", "main work"]);
+        let hook = r.repo.join(".git/hooks/pre-merge-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\necho 'binary file blob.bin differs' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        passed(&r, sid).await;
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        settle(&r).await;
+        let msg = told(&r, sid).join("\n");
+        assert!(msg.contains("blob.bin differs") && msg.contains("run `git merge"), "{msg}");
+        assert!(!r.repo.join(".git/MERGE_HEAD").exists());
+        assert!(!crate::git::is_dirty(&r.repo).unwrap());
+        assert!(!r.repo.join(".git/MERGE_HEAD").exists());
+        assert!(!crate::git::is_dirty(&r.repo).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_dirty_main_checkout_does_not_send_the_worker_back_and_the_merge_is_retried() {
+        let (r, a, sid) = finished_worker(DONE).await;
+        std::fs::write(r.repo.join("scratch.txt"), "x").unwrap();
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        let before = told(&r, sid).len();
+        passed(&r, sid).await;
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        assert_eq!(r.store.workers().unwrap()[0].state, "ready");
+        assert_eq!(told(&r, sid).len(), before, "the worker is not told");
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("scratch.txt")));
+        std::fs::remove_file(r.repo.join("scratch.txt")).unwrap();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.repo.join("feature.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_dirty_main_checkout_does_not_block_another_passed_branch_once_clean() {
+        let (r, a, sid) = finished_worker(DONE).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        std::fs::write(r.repo.join("scratch.txt"), "x").unwrap();
+        r.ap.tick();
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        std::fs::remove_file(r.repo.join("scratch.txt")).unwrap();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+    }
+
+    #[tokio::test]
+    async fn a_worktree_record_with_a_missing_branch_never_reports_merged() {
+        let (r, a, sid) = finished_worker(DONE).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        r.ap.tick();
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        r.ap.tick();
+        let id = r.store.session(sid).unwrap().worktree_id;
+        r.store.db_for_test().execute("UPDATE worktrees SET branch = 'no-such-branch' WHERE id = ?1", [id]).unwrap();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("no-such-branch does not exist") || c.body.contains("the branch no-such-branch does not exist")));
+        settle(&r).await;
+        assert!(told(&r, sid).iter().any(|m| m.contains("does not exist")));
+    }
+
+    #[tokio::test]
+    async fn a_failed_push_is_retried_without_merging_again() {
+        let r = rig(DONE);
+        let missing = r._dir.path().join("gone.git");
+        git_in(&r.repo, &["remote", "add", "origin", &missing.to_string_lossy()]);
+        let (a, sid) = worked_on(&r).await;
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        passed(&r, sid).await;
+        r.ap.tick();
+        let head = crate::git::head(&r.repo).unwrap();
+        let bare = r._dir.path().join("gone.git");
+        assert!(std::process::Command::new("git").args(["init", "-q", "--bare", "-b", "main"]).arg(&bare).status().unwrap().success());
+        r.ap.tick_at(crate::store::now() + 60_000);
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert_eq!(crate::git::head(&r.repo).unwrap(), head, "no second merge");
+        assert!(remote_has(&bare, "feature.txt"));
+    }
+
+    #[test]
+    fn the_notification_cap_is_once_an_hour_per_project() {
+        let r = rig(DONE);
+        let t = 1_000_000;
+        assert!(r.ap.notify_capped(1, "x", t));
+        assert!(!r.ap.notify_capped(1, "x", t + 59 * 60_000));
+        assert!(r.ap.notify_capped(2, "x", t));
+        assert!(r.ap.notify_capped(1, "x", t + 61 * 60_000));
+    }
+
     #[tokio::test]
     async fn a_dirty_main_checkout_stops_the_merge_instead_of_forcing_it() {
         let (r, a, sid) = finished_worker(DONE).await;
         std::fs::write(r.repo.join("scratch.txt"), "x").unwrap();
         passed(&r, sid).await;
-        r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
-        assert_eq!(r.store.workers().unwrap()[0].state, "merge_failed");
+        assert_eq!(r.store.workers().unwrap()[0].state, "ready");
     }
 
     async fn started_by_boss(r: &Rig, issue: Id) -> agentbench_core::SessionId {
