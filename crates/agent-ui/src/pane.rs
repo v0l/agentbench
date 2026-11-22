@@ -297,7 +297,9 @@ fn ask_box(
     busy: bool,
 ) -> Option<Asked> {
     let mut asked = None;
-    let height = ASK_H + if files.is_empty() { 0.0 } else { 36.0 };
+    let phone = crate::key::phone(ui.ctx());
+    let chips = if phone { 52.0 } else { 36.0 };
+    let height = ASK_H + if phone { 28.0 } else { 0.0 } + if files.is_empty() { 0.0 } else { chips };
     egui::Panel::bottom("ask")
         .exact_size(height)
         .resizable(false)
@@ -722,6 +724,50 @@ mod tests {
             h.run_steps(4);
             let img = h.render().expect("rendered");
             img.save(std::path::Path::new(&dir).join(format!("agent-ui-settings-{width}.png"))).unwrap();
+        }
+    }
+
+    #[derive(Debug)]
+    struct Dropped(std::path::PathBuf, Vec<u8>);
+
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Ok(self.1.clone())
+        }
+    }
+
+    #[test]
+    fn a_dropped_file_becomes_a_chip_and_a_reply_shows_its_speed() {
+        for width in [900.0, 390.0] {
+            let mut a = agent();
+            a.chat.turns.push(Turn::Said("Here is the answer.".into()));
+            a.chat.turns.push(Turn::Speed("prefill 850.5 tok/s (120 tok), decode 32.2 tok/s (40 tok)".into()));
+            let mut setup = egui_kittest::wgpu::default_wgpu_setup();
+            if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
+                new.instance_descriptor.flags = egui_wgpu::wgpu::InstanceFlags::empty();
+            }
+            let mut h = Harness::builder().with_size([width, 500.0]).wgpu_setup(setup).build_ui_state(
+                |ui, a: &mut Agent<()>| {
+                    egui_bench::theme::install(ui.ctx());
+                    show(ui, a);
+                },
+                a,
+            );
+            h.run_steps(3);
+            h.input_mut().dropped_files.push(std::sync::Arc::new(Dropped("/tmp/notes.txt".into(), vec![7; 3000])));
+            h.run_steps(4);
+            assert_eq!(h.state().chat.files.len(), 1);
+            assert_eq!(h.state().chat.files[0].name, "notes.txt");
+            h.get_by_label("remove notes.txt");
+            assert!(painted(&h).contains("decode 32.2 tok/s"));
+            if let Ok(dir) = std::env::var("AGENT_UI_SHOTS") {
+                let img = h.render().expect("rendered");
+                img.save(std::path::Path::new(&dir).join(format!("agent-ui-drop-{width}.png"))).unwrap();
+            }
         }
     }
 

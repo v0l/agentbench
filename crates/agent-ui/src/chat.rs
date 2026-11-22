@@ -847,6 +847,20 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_without_timings_has_no_speed_line() {
+        for chunk in [json!({"timings":{"prompt_per_second":0.0,"predicted_per_second":0}}), json!({"usage":{}}), json!({"choices":[{"delta":{"content":"x"}}]})] {
+            assert!(Timings::from_chunk(&chunk).is_none(), "{chunk}");
+        }
+        let (tx, rx) = channel();
+        let mut chat = Chat { updates: Some(rx), ..chat() };
+        let _ = tx.send(Update::Delta("hi".into()));
+        let _ = tx.send(Update::Said);
+        let _ = tx.send(Update::Speed(Timings::default()));
+        chat.poll();
+        assert!(!chat.turns.iter().any(|t| matches!(t, Turn::Speed(_))));
+    }
+
+    #[test]
     fn an_attached_file_is_kept_with_its_type() {
         let mut chat = chat();
         chat.attach("shot.PNG".into(), vec![1, 2]);
