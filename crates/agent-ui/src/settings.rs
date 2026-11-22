@@ -1,9 +1,10 @@
 use super::config::Config;
 use crate::key::Key;
-use egui_bench::prelude::*;
 use egui::Ui;
+use egui_bench::prelude::*;
 use std::path::Path;
 
+#[allow(clippy::large_enum_variant)]
 pub enum Done {
     Save(Config),
     Cancel,
@@ -51,7 +52,9 @@ fn form(ui: &mut Ui, draft: &mut Config, app: &str) {
     ui.add_space(6.0);
     let steps_label = ui.label(legend("tool calls per question"));
     let mut steps = draft.steps as f64;
-    let drag = ui.add(egui::DragValue::new(&mut steps).range(1.0..=100.0).speed(0.2)).labelled_by(steps_label.id);
+    let drag = ui
+        .add(egui::DragValue::new(&mut steps).range(1.0..=100.0).speed(0.2))
+        .labelled_by(steps_label.id);
     if drag.changed() {
         draft.steps = steps as usize;
     }
@@ -90,7 +93,7 @@ fn form(ui: &mut Ui, draft: &mut Config, app: &str) {
 }
 
 fn optional<T: std::str::FromStr + ToString>(ui: &mut Ui, name: &str, value: &mut Option<T>) {
-    let id = ui.id().with(("sampling", name));
+    let id = ui.scope_id().with(("sampling", name));
     let shown = value.as_ref().map(T::to_string).unwrap_or_default();
     let mut text = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| shown.clone());
     if parsed::<T>(&text).map(|v| v.to_string()).unwrap_or_default() != shown {
@@ -218,7 +221,9 @@ mod tests {
     fn the_form_with_sampling_fits_a_phone_and_a_desktop() {
         for (name, size) in [("desktop", [1280.0, 800.0]), ("phone", [390.0, 844.0])] {
             let h = form(size);
-            for label in ["temperature default", "top_p default", "top_k default", "max_tokens default"] {
+            for label in
+                ["temperature default", "top_p default", "top_k default", "max_tokens default"]
+            {
                 let node = h.get_by_label(label);
                 assert!(node.rect().width() > 40.0, "{name} {label}");
                 assert!(node.rect().max.x <= size[0] + 1.0, "{name} {label} runs off the right");
