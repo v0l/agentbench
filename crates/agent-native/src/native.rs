@@ -355,7 +355,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 38] = [
+pub const AGENTBENCH_TOOLS: [&str; 39] = [
     "list_issues",
     "get_issue",
     "file_issue",
@@ -394,6 +394,7 @@ pub const AGENTBENCH_TOOLS: [&str; 38] = [
     "judge_session",
     "check_in",
     "groom_done",
+    "main_checkout",
 ];
 
 /// How long `wait_for_session` waits when not told, and the longest it may.
@@ -554,6 +555,23 @@ fn agentbench_specs() -> Vec<Spec> {
                     "text": string("For message: what the worker gets. For escalate: why"),
                 }),
                 &["id", "action"],
+            ),
+        ),
+        Spec::new(
+            "main_checkout",
+            "Supervisor chat only, at ship or above. Deal with a dirty main checkout that blocks a merge, without raw shell. action commit: commit with your own `message` (optionally only `paths`), only on the project's main branch. action stash: git stash push -u with a named message. action reset_paths: discard the changes in `paths` only; give dry_run true first to list them; a tracked modified file is refused unless `force` is true. action ask_session: send the session `id` working in the main checkout a request (`request` commit or stash) with the file list. Every action is refused while a merge or rebase is in progress, and is logged to the issue and the autopilot feed. The autopilot retries the merge on its next tick.",
+            object(
+                json!({
+                    "project": string("The project, by name or id"),
+                    "action": json!({ "type": "string", "enum": ["commit", "stash", "reset_paths", "ask_session"] }),
+                    "message": string("For commit: the commit message"),
+                    "paths": json!({ "type": "array", "items": { "type": "string" }, "description": "For reset_paths: the files or folders to reset; for commit: only these" }),
+                    "force": boolean("For reset_paths: also reset tracked modified files"),
+                    "dry_run": boolean("For reset_paths: only list what would be reset"),
+                    "id": string("For ask_session: the session working in the main checkout"),
+                    "request": string("For ask_session: commit (default) or stash"),
+                }),
+                &["project", "action"],
             ),
         ),
         Spec::new(

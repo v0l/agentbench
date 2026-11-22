@@ -599,7 +599,17 @@ pub struct Autopilot {
     pub(crate) stuck_hook: Arc<Mutex<Option<crate::checkin::StuckHook>>>,
     merges: Arc<Mutex<HashMap<SessionId, (u32, i64)>>>,
     notified: Arc<Mutex<HashMap<Id, i64>>>,
+    dirty: Arc<Mutex<HashMap<Id, DirtyMain>>>,
 }
+
+struct DirtyMain {
+    since: i64,
+    told_at: Option<i64>,
+    user_told: bool,
+}
+
+const DIRTY_TELL_MS: i64 = 15 * 60_000;
+const DIRTY_USER_MS: i64 = 30 * 60_000;
 
 impl Autopilot {
     pub fn new(runner: Runner) -> Autopilot {
@@ -610,6 +620,46 @@ impl Autopilot {
             stuck_hook: Default::default(),
             merges: Default::default(),
             notified: Default::default(),
+            dirty: Default::default(),
+        }
+    }
+
+    fn dirty_cleared(&self, project: Id) {
+        self.dirty.lock().unwrap_or_else(|e| e.into_inner()).remove(&project);
+    }
+
+    fn main_dirty(&self, project: Id, blocked: &Session, issue: Option<Id>, now: i64) {
+        let store = self.store();
+        let Ok(p) = store.project(project) else { return };
+        let (send, notify) = {
+            let mut dirty = self.dirty.lock().unwrap_or_else(|e| e.into_inner());
+            let d = dirty.entry(project).or_insert(DirtyMain { since: now, told_at: None, user_told: false });
+            let send = d.told_at.is_none_or(|at| now - at >= DIRTY_TELL_MS);
+            if send {
+                d.told_at = Some(now);
+            }
+            let notify = !d.user_told && now - d.since >= DIRTY_USER_MS;
+            if notify {
+                d.user_told = true;
+            }
+            (send, notify)
+        };
+        if send {
+            let report = crate::maindirty::report(store, &p, Some((issue, blocked)), now);
+            let to = blocked
+                .parent
+                .and_then(|id| store.session(id).ok())
+                .or_else(|| self.runner.supervisor_session());
+            if let Some(to) = to {
+                let origin = Origin::new("main_dirty", Some(blocked.id));
+                match self.runner.tell(&to, &report.text, origin) {
+                    Ok(()) => self.log(Some(project), issue, &format!("dirty main in {}: told session {} ({:?})", p.name, to.id, report.advice)),
+                    Err(e) => self.log(Some(project), issue, &format!("dirty main in {}: could not tell session {}: {}", p.name, to.id, clip(&e.0, 160))),
+                }
+            }
+        }
+        if notify {
+            self.notify(&format!("the main checkout of {} has been dirty for {} and nothing acted; a merge is waiting", p.name, agentbench_core::span(now - self.dirty.lock().unwrap_or_else(|e| e.into_inner()).get(&project).map_or(now, |d| d.since))));
         }
     }
 
@@ -748,6 +798,13 @@ impl Autopilot {
 
     pub fn tick_at(&self, now: i64) {
         let store = self.store();
+        let watched: Vec<Id> = self.dirty.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().collect();
+        for p in watched {
+            let clean = store.project(p).is_ok_and(|p| !crate::git::is_dirty(Path::new(&p.path)).unwrap_or(true));
+            if clean {
+                self.dirty_cleared(p);
+            }
+        }
         let workers = store.workers().unwrap_or_default();
         if !flag(store, ENABLED) && workers.is_empty() {
             return;
@@ -756,7 +813,7 @@ impl Autopilot {
             self.reconcile(w, now);
         }
         self.sweep(now);
-        self.ship_untracked();
+        self.ship_untracked(now);
         self.start_more();
         if flag(store, ENABLED) {
             self.groom(now);
@@ -802,7 +859,7 @@ impl Autopilot {
             self.close_finished(s, &format!("{why}; {}", verdict_line(&v)));
         }
     }
-    fn ship_untracked(&self) {
+    fn ship_untracked(&self, now: i64) {
         let store = self.store();
         if !flag(store, ENABLED) {
             return;
@@ -857,6 +914,9 @@ impl Autopilot {
                     }
                 }
                 Err(un) => {
+                    if matches!(un, Unshipped::MainDirty(_)) {
+                        self.main_dirty(s.project_id, s, s.issue_id, now);
+                    }
                     self.log_once(
                         Some(s.project_id),
                         s.issue_id,
@@ -1266,7 +1326,11 @@ impl Autopilot {
         let Some(tell) = ex.tell else {
             let _ = store.set_worker(w.session, "ready", true);
             self.merge_failed_at(w.session, now, false);
-            self.notify_capped(w.project, &format!("#{} cannot merge yet: {}", w.issue, clip(&ex.detail, 160)), now);
+            if matches!(un, Unshipped::MainDirty(_)) {
+                self.main_dirty(w.project, session, Some(w.issue), now);
+            } else {
+                self.notify_capped(w.project, &format!("#{} cannot merge yet: {}", w.issue, clip(&ex.detail, 160)), now);
+            }
             return;
         };
         self.merge_failed_at(w.session, now, true);

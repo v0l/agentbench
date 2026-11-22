@@ -560,6 +560,7 @@ fn describe(tool: &str, args: &Value) -> String {
         "close_session" => "close a session",
         "create_worktree" => "make a worktree",
         "merge_branch" => "merge a branch and push it",
+        "main_checkout" => "change the main checkout",
         other => other,
     };
     let mut shown = args.clone();
@@ -1418,8 +1419,13 @@ impl Api for StoreApi {
                 let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
                 json!(state)
             }
-            "merge_branch" | "set_automation" | "risky_action" | "approve_action" | "set_vision" if !sup => {
+            "merge_branch" | "set_automation" | "risky_action" | "approve_action" | "set_vision" | "main_checkout" if !sup => {
                 return Err(format!("only the supervisor chat can use {tool}"));
+            }
+            "main_checkout" => {
+                let target = s.project(project).map_err(|e| e.0)?;
+                let runner = self.runner.get().ok();
+                crate::maindirty::act(s, runner.as_ref(), &target, args, crate::store::now())?
             }
             "merge_branch" => {
                 let other = s.session(session_id(args)?).map_err(|e| e.0)?;
@@ -1526,6 +1532,7 @@ impl Api for StoreApi {
                 | "report_process_issue"
                 | "autopilot"
                 | "merge_branch"
+                | "main_checkout"
                 | "judge_session"
                 | "check_in"
                 | "groom_done"

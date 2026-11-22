@@ -298,6 +298,91 @@ pub fn is_dirty(path: &Path) -> Result<bool, String> {
     Ok(!git(path, &["status", "--porcelain"])?.is_empty())
 }
 
+pub fn status_entries(path: &Path) -> Vec<(String, String)> {
+    git(path, &["status", "--porcelain", "-uall"])
+        .map(|o| {
+            o.lines()
+                .filter(|l| l.len() > 3)
+                .map(|l| {
+                    let rest = &l[3..];
+                    let file = rest.rsplit(" -> ").next().unwrap_or(rest).trim_matches('"');
+                    (l[..2].to_string(), file.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn stash_count(main: &Path) -> usize {
+    git(main, &["stash", "list"]).map(|o| o.lines().count()).unwrap_or(0)
+}
+
+pub fn operation_in_progress(main: &Path) -> Option<&'static str> {
+    let has = |name: &str| {
+        git(main, &["rev-parse", "--git-path", name])
+            .map(|p| {
+                let p = PathBuf::from(p);
+                if p.is_absolute() { p } else { main.join(p) }
+            })
+            .is_ok_and(|p| p.exists())
+    };
+    if has("MERGE_HEAD") {
+        Some("a merge")
+    } else if has("rebase-merge") || has("rebase-apply") {
+        Some("a rebase")
+    } else {
+        None
+    }
+}
+
+pub fn changed_files(main: &Path, branch: &str) -> Vec<String> {
+    git(main, &["diff", "--name-only", &format!("HEAD...{branch}")])
+        .map(|o| o.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+pub fn stash_all(main: &Path, message: &str) -> Result<String, String> {
+    git(main, &["stash", "push", "-u", "-m", message])
+}
+
+pub fn commit_paths(main: &Path, message: &str, paths: &[String]) -> Result<String, String> {
+    let mut add = vec!["add", "-A"];
+    if !paths.is_empty() {
+        add.push("--");
+        add.extend(paths.iter().map(String::as_str));
+    }
+    git(main, &add)?;
+    git(main, &["commit", "-q", "-m", message])?;
+    head(main).ok_or_else(|| "no head after the commit".to_string())
+}
+
+pub fn clean_dry_run(main: &Path, files: &[String]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut args = vec!["clean", "-n", "--"];
+    args.extend(files.iter().map(String::as_str));
+    git(main, &args).unwrap_or_default()
+}
+
+pub fn restore_tracked(main: &Path, files: &[String]) -> Result<(), String> {
+    let mut args = vec!["checkout", "HEAD", "--"];
+    args.extend(files.iter().map(String::as_str));
+    git(main, &args).map(|_| ())
+}
+
+pub fn remove_untracked(main: &Path, files: &[String]) -> Result<(), String> {
+    let mut args = vec!["clean", "-f", "--"];
+    args.extend(files.iter().map(String::as_str));
+    git(main, &args).map(|_| ())
+}
+
+pub fn remove_added(main: &Path, files: &[String]) -> Result<(), String> {
+    let mut args = vec!["rm", "-f", "-q", "--"];
+    args.extend(files.iter().map(String::as_str));
+    git(main, &args).map(|_| ())
+}
+
 pub fn dirty_count(path: &Path) -> Result<usize, String> {
     Ok(git(path, &["status", "--porcelain"])?.lines().count())
 }

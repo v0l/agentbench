@@ -9,7 +9,7 @@ pub fn required(tool: &str) -> Option<Automation> {
         }
         "start_session" | "send_message" | "stop_session" | "close_session"
         | "create_worktree" => Automation::Delegate,
-        "merge_branch" => Automation::Ship,
+        "merge_branch" | "main_checkout" => Automation::Ship,
         _ => return None,
     })
 }
