@@ -3819,9 +3819,13 @@ fn a_quota_paused_session_reads_paused_and_is_not_counted_as_needing_you() {
 }
 
 fn two_servers(first: &Rig, second: &Rig) -> Harness<'static, App> {
+    two_servers_at(first, second, [1280.0, 800.0])
+}
+
+fn two_servers_at(first: &Rig, second: &Rig, size: [f32; 2]) -> Harness<'static, App> {
     let _build = build_lock();
     let (a, b) = (first.url.clone(), second.url.clone());
-    Harness::builder().with_size([1280.0, 800.0]).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
+    Harness::builder().with_size(size).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
         let mut storage = Mem::default();
         storage.0.insert("url".into(), a);
         storage.0.insert("token".into(), TOKEN.into());
@@ -4092,6 +4096,33 @@ fn a_question_from_the_second_workspace_is_answered_in_the_all_view() {
     until(&mut h, "the answer on the second server", |_| answered());
     assert!(first.store.sessions().unwrap().iter().all(|s| s.agent != "waiter"));
     assert_eq!(h.state().view(), None, "answering does not leave the all view");
+}
+
+#[test]
+fn the_needs_you_question_fits_a_phone() {
+    for size in [[390.0, 844.0], [412.0, 900.0]] {
+        let (first, second) = (rig(), rig_with(vec![Box::new(Waiter)]));
+        let project = second.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap().id;
+        let mut h = two_servers_at(&first, &second, size);
+        until(&mut h, "both overviews", both_loaded);
+        let mut c = agentbench::client::Client::new(
+            agentbench::client::Server { url: second.url.clone(), token: TOKEN.into() },
+            || {},
+        );
+        c.add_session(&agentbench_core::NewSession {
+            project_id: project,
+            agent: "waiter".into(),
+            prompt: Some("pick".into()),
+            ..Default::default()
+        });
+        h.get_by_label("projects").click();
+        h.run_steps(3);
+        until(&mut h, "the card", |h| h.query_by_label("Apache-2.0").is_some());
+        let tag = size[0] as u32;
+        shot(&mut h, &format!("needs-you-question-{tag}"));
+        let bad = off_sideways(&h, size);
+        assert!(bad.is_empty(), "needs you at {size:?}: {bad:?}");
+    }
 }
 
 #[test]
