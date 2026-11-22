@@ -205,11 +205,15 @@ fn head<H>(ui: &mut Ui, agent: &mut Agent<H>, busy: bool, mut on_model: Option<&
             }
         }
         let thinking = agent.chat.config.thinking;
-        if toggle(ui, "think", thinking == Some(true))
-            .on_hover_text("ask the model to think before it answers")
-            .clicked()
-        {
-            agent.chat.config.thinking = Some(thinking != Some(true));
+        let (label, tip) = match thinking {
+            None => ("think: auto", "thinking is left to the server, click to turn it on"),
+            Some(true) => ("think: on", "thinking is on, click to turn it off"),
+            Some(false) => ("think: off", "thinking is off, click to leave it to the server"),
+        };
+        let r = toggle(ui, label, thinking == Some(true));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+        if r.on_hover_text(tip).clicked() {
+            agent.chat.config.thinking = next_thinking(thinking);
             let _ = agent.chat.config.save(agent.chat.backend.config_dir().as_deref());
         }
         let can_clear = !agent.chat.turns.is_empty() && !busy;
@@ -231,6 +235,14 @@ fn head<H>(ui: &mut Ui, agent: &mut Agent<H>, busy: bool, mut on_model: Option<&
         ui.horizontal_wrapped(|ui| buttons(ui));
         Line::new().legend("model").set(model).size(11.0).wrapped(ui);
         Line::new().legend("workspace").value(workspace).size(11.0).wrapped(ui);
+    }
+}
+
+fn next_thinking(now: Option<bool>) -> Option<bool> {
+    match now {
+        None => Some(true),
+        Some(true) => Some(false),
+        Some(false) => None,
     }
 }
 
@@ -652,9 +664,21 @@ mod tests {
     }
 
     #[test]
+    fn the_think_toggle_cycles_auto_on_off_auto() {
+        let mut h = pane(agent());
+        h.get_by_label("think: auto");
+        for (label, want) in [("think: auto", Some(true)), ("think: on", Some(false)), ("think: off", None)] {
+            h.get_by_label(label).click();
+            h.run_steps(3);
+            assert_eq!(h.state().chat.config.thinking, want);
+        }
+        h.get_by_label("think: auto");
+    }
+
+    #[test]
     fn the_head_renders_at_narrow_and_wide_widths() {
         let Ok(dir) = std::env::var("AGENT_UI_SHOTS") else { return };
-        for width in [900.0, 420.0] {
+        for width in [900.0, 390.0] {
             let mut a = agent();
             transcript(&mut a);
             let mut setup = egui_kittest::wgpu::default_wgpu_setup();
@@ -671,6 +695,10 @@ mod tests {
             h.run_steps(4);
             let img = h.render().expect("rendered");
             img.save(std::path::Path::new(&dir).join(format!("agent-ui-head-{width}.png"))).unwrap();
+            h.state_mut().settings = Some(h.state().chat.config.clone());
+            h.run_steps(4);
+            let img = h.render().expect("rendered");
+            img.save(std::path::Path::new(&dir).join(format!("agent-ui-settings-{width}.png"))).unwrap();
         }
     }
 
