@@ -1999,11 +1999,11 @@ impl Store {
     pub fn add_comment(&self, issue_id: Id, new: &NewComment) -> Result<Comment> {
         let comment = self.add_comment_local(issue_id, new)?;
         let issue = self.issue(issue_id)?;
-        if issue.source == IssueSource::Github {
+        let by_user = new.author.as_deref().is_none_or(|a| a.trim().is_empty());
+        if issue.source == IssueSource::Github && by_user {
             if let Some(number) = issue.external_number {
-                let text = crate::github::flow::fallback_summary(&comment.body);
                 let trusted = crate::github::flow::trusted_target(self, &issue);
-                crate::github::flow::queue(self, issue.project_id, "comment", number, &text, serde_json::json!({"issue_id": issue_id}), trusted);
+                crate::github::flow::queue(self, issue.project_id, "comment", number, &comment.body, serde_json::json!({"issue_id": issue_id}), trusted);
             }
         }
         Ok(comment)

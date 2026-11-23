@@ -485,7 +485,7 @@ fn run_sync(store: &Store, gh: &str, project_id: Id, now: i64, state: &mut SyncS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentbench_core::{IssuePatch, NewComment, ProjectPatch};
+    use agentbench_core::{IssuePatch, NewComment, PostMode, ProjectPatch};
     use std::path::{Path, PathBuf};
 
     struct Stub {
@@ -810,6 +810,68 @@ esac
         let internal = store.add_issue(&agentbench_core::NewIssue { project_id: p, title: "mine".into(), ..Default::default() }).unwrap();
         store.update_issue(internal.id, &IssuePatch { priority: Some(2), ..Default::default() }).unwrap();
         assert_eq!(store.outbox(None).unwrap().len(), 2);
+    }
+
+    fn mirrored(post_mode: PostMode, assoc_json: &str) -> (Store, Id, Id) {
+        let (store, p, stub) = setup();
+        store.update_project(p, &ProjectPatch { post_mode: Some(post_mode), ..Default::default() }).unwrap();
+        let issue = issue_json(4, "A", &[], T0, "").replace("\"login\":\"alice\"}", &format!("\"login\":\"alice\"}},\"author_association\":\"{assoc_json}\""));
+        stub.put("issues.json", &format!("[{issue}]"));
+        sync(&store, p, &stub, 1_000);
+        let id = all_issues(&store, p)[0].id;
+        (store, p, id)
+    }
+
+    fn user(body: &str) -> NewComment {
+        NewComment { author: None, body: body.into() }
+    }
+
+    #[test]
+    fn a_user_comment_on_a_mirrored_issue_is_one_proposed_row_with_its_text() {
+        let (store, p, id) = mirrored(PostMode::Draft, "OWNER");
+        store.add_comment(id, &user("thanks, looking")).unwrap();
+        let out = store.outbox(Some(p)).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].kind.as_str(), out[0].status.as_str(), out[0].number, out[0].text.as_str()), ("comment", "proposed", 4, "thanks, looking"));
+        assert!(out.iter().all(|o| o.status != "pending"));
+    }
+
+    #[test]
+    fn internal_authors_stay_local_and_never_reach_the_outbox() {
+        let (store, p, id) = mirrored(PostMode::Auto, "OWNER");
+        for author in ["agentbench", "supervisor", "session 12 fix the thing"] {
+            store.add_comment(id, &NewComment { author: Some(author.into()), body: "verdict from 0b1c2d3e-0000-4000-8000-000000000000".into() }).unwrap();
+        }
+        assert!(store.outbox(Some(p)).unwrap().is_empty());
+        let stored = store.comments(id).unwrap();
+        assert_eq!(stored.iter().map(|c| c.author.as_str()).collect::<Vec<_>>(), ["agentbench", "supervisor", "session 12 fix the thing"]);
+    }
+
+    #[test]
+    fn an_unsafe_user_comment_is_stored_locally_and_queues_nothing() {
+        let (store, p, id) = mirrored(PostMode::Draft, "OWNER");
+        store.add_comment(id, &user("the key is sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF")).unwrap();
+        store.add_comment(id, &user("see /home/kieran/git/secret/file.txt")).unwrap();
+        assert!(store.outbox(Some(p)).unwrap().is_empty());
+        assert_eq!(store.comments(id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_user_comment_on_an_untrusted_issue_is_proposed_not_auto_posted() {
+        let (store, p, id) = mirrored(PostMode::Auto, "NONE");
+        assert!(store.issue(id).unwrap().trust.is_untrusted());
+        store.add_comment(id, &user("hello stranger")).unwrap();
+        let out = store.outbox(Some(p)).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].status, "proposed");
+        assert!(!out[0].trusted);
+    }
+
+    #[test]
+    fn a_user_comment_on_a_trusted_issue_posts_by_itself_in_auto_mode() {
+        let (store, p, id) = mirrored(PostMode::Auto, "OWNER");
+        store.add_comment(id, &user("hello owner")).unwrap();
+        assert_eq!(store.outbox(Some(p)).unwrap()[0].status, "approved");
     }
 
     #[test]
