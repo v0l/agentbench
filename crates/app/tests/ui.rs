@@ -4329,13 +4329,13 @@ fn an_unknown_session_state_shows_as_unknown() {
 #[test]
 fn a_server_that_needs_a_newer_app_shows_the_update_the_app_banner() {
     let mut o = recorded_overview();
-    o["api_version"] = 9.into();
-    o["min_client_api"] = 9.into();
+    o["api_version"] = 99.into();
+    o["min_client_api"] = 99.into();
     let mut h = harness(canned_server(o.to_string()));
     until(&mut h, "the banner", |h| {
         h.query_by_label_contains("This app is older than the server").is_some()
     });
-    assert!(h.query_by_label_contains(&format!("app v{}, server v9", agentbench_core::API_VERSION)).is_some());
+    assert!(h.query_by_label_contains(&format!("app v{}, server v99", agentbench_core::API_VERSION)).is_some());
     assert!(h.query_by_label_contains("Update the app").is_some());
     assert!(h.query_by_label_contains("cargo install --git https://github.com/v0l/agentbench agentbench").is_some());
 }
