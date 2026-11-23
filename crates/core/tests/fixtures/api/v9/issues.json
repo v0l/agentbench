@@ -1,0 +1,28 @@
+[
+  {
+    "blocks": [],
+    "body": "details",
+    "created_at": 1795460614353,
+    "depends_on": [],
+    "external_author": null,
+    "external_number": null,
+    "external_updated_at": null,
+    "external_url": null,
+    "goal": null,
+    "held": null,
+    "id": 1,
+    "labels": [
+      "bug"
+    ],
+    "off_vision": false,
+    "priority": 3,
+    "project_id": 1,
+    "ready_by": null,
+    "source": "internal",
+    "state": "doing",
+    "title": "Fix it",
+    "trust": "trusted",
+    "updated_at": 1795460614353,
+    "waiting_on": []
+  }
+]

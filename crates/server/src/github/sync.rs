@@ -453,6 +453,7 @@ for a in "$@"; do last="$a"; done
 case "$last" in
   *per_page=1) cat "$D/probe" ;;
   */pulls?*) cat "$D/pulls.json" ;;
+  */pulls/[0-9]*) cat "$D/pull_${last##*/}.json" ;;
   */issues/comments?*) cat "$D/comments.json" ;;
   */issues/[0-9]*) f="$D/issue_${last##*/}.json"; if [ -f "$f" ]; then cat "$f"; else echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi ;;
   */issues?state*) cat "$D/issues.json" ;;
@@ -723,9 +724,10 @@ esac
         store.update_issue(id, &IssuePatch { state: Some(IssueState::Doing), labels: Some(vec!["x".into()]), ..Default::default() }).unwrap();
         store.add_comment(id, &NewComment { author: None, body: "note".into() }).unwrap();
         let out = store.outbox(Some(p)).unwrap();
-        assert_eq!(out.iter().map(|o| o.kind.as_str()).collect::<Vec<_>>(), ["update_issue", "comment"]);
-        assert!(out.iter().all(|o| o.status == "pending"));
-        assert!(out[0].payload.contains("\"number\":4"));
+        assert_eq!(out.iter().map(|o| o.kind.as_str()).collect::<Vec<_>>(), ["label_add", "comment"]);
+        assert_eq!(out[0].status, "proposed");
+        assert_eq!(out[1].status, "pending");
+        assert!(out[1].payload.contains("\"number\":4"));
         let internal = store.add_issue(&agentbench_core::NewIssue { project_id: p, title: "mine".into(), ..Default::default() }).unwrap();
         store.update_issue(internal.id, &IssuePatch { priority: Some(2), ..Default::default() }).unwrap();
         assert_eq!(store.outbox(None).unwrap().len(), 2);
@@ -749,6 +751,34 @@ esac
             assert_eq!(parse_time(&iso(ms)), ms);
         }
         assert_eq!(iso(1_709_296_215_000), "2024-03-01T12:30:15Z");
+    }
+
+    #[test]
+    fn a_pull_request_closed_without_merge_returns_the_issue_to_todo_and_a_merged_one_marks_it_done() {
+        let (store, p, stub) = setup();
+        stub.put("issues.json", &format!("[{}]", issue_json(4, "A", &["ready"], T0, "")));
+        stub.put("pulls.json", "[{\"number\":9,\"title\":\"A\",\"body\":\"Closes #4\",\"user\":{\"login\":\"bot\"},\"head\":{\"ref\":\"issue-4\",\"sha\":\"s\"},\"base\":{\"ref\":\"main\"},\"html_url\":\"https://github.com/o/r/pull/9\",\"author_association\":\"OWNER\"}]");
+        sync(&store, p, &stub, 1_000);
+        assert_eq!(all_issues(&store, p)[0].state, IssueState::Review);
+        stub.put("pulls.json", "[]");
+        stub.put("pull_9.json", "{\"number\":9,\"state\":\"closed\",\"merged\":false,\"merged_at\":null}");
+        stub.probe("200 OK", "\"e2\"", 4000, 4_000_000_000);
+        sync(&store, p, &stub, 200_000);
+        let i = &all_issues(&store, p)[0];
+        assert_eq!(i.state, IssueState::Todo);
+        assert!(store.comments(i.id).unwrap().iter().any(|c| c.body.contains("closed without merging")));
+
+        let (store, p, stub) = setup();
+        stub.put("issues.json", &format!("[{}]", issue_json(4, "A", &["ready"], T0, "")));
+        stub.put("pulls.json", "[{\"number\":9,\"title\":\"A\",\"body\":\"Closes #4\",\"user\":{\"login\":\"bot\"},\"head\":{\"ref\":\"issue-4\",\"sha\":\"s\"},\"base\":{\"ref\":\"main\"},\"html_url\":\"u\",\"author_association\":\"OWNER\"}]");
+        sync(&store, p, &stub, 1_000);
+        stub.put("pulls.json", "[]");
+        stub.put("pull_9.json", "{\"number\":9,\"state\":\"closed\",\"merged\":true,\"merged_at\":\"2025-01-01T00:00:00Z\"}");
+        stub.put("issues.json", "[]");
+        stub.put("issue_4.json", &issue_json(4, "A", &["ready"], T1, "").replace("\"open\"", "\"closed\""));
+        stub.probe("200 OK", "\"e2\"", 4000, 4_000_000_000);
+        sync(&store, p, &stub, 200_000);
+        assert_eq!(all_issues(&store, p)[0].state, IssueState::Done);
     }
 
     #[test]

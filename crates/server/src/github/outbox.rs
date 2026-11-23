@@ -396,7 +396,7 @@ if [ -f "$D/failures" ] && [ "$(cat "$D/failures")" -gt 0 ]; then
   cat "$D/msg" >&2
   exit 1
 fi
-echo '{"id": 4242}'
+echo '{"id": 4242, "number": 4242}'
 "#;
             crate::testing_stub::write_script(&gh, script);
             Stub { gh: gh.to_string_lossy().into_owned(), dir }
@@ -427,6 +427,19 @@ echo '{"id": 4242}'
 
     fn comment(project: Id, text: &str, trusted: bool) -> Ask {
         Ask { project, kind: "comment".into(), number: 7, text: text.into(), params: json!({}), asked_by: "session 1".into(), trusted }
+    }
+
+    #[test]
+    fn an_issue_created_through_the_outbox_carries_the_agentbench_label_and_is_linked() {
+        let (store, p, stub) = setup(PostMode::Auto);
+        let local = store.add_issue(&agentbench_core::NewIssue { project_id: p, title: "follow up".into(), ..Default::default() }).unwrap();
+        let ask = Ask { project: p, kind: "issue_create".into(), number: 0, text: "details".into(), params: json!({"title": "follow up", "issue_id": local.id}), asked_by: "session 1".into(), trusted: true };
+        let (_, status) = propose(&store, ask).unwrap();
+        assert_eq!(status, "approved");
+        assert_eq!(drain(&store, &stub.gh, 1_000), 1);
+        assert!(stub.bodies().contains("\"labels\":[\"agentbench\"]"), "{}", stub.bodies());
+        let linked = store.issue(local.id).unwrap();
+        assert_eq!((linked.source, linked.external_number), (agentbench_core::IssueSource::Github, Some(4242)));
     }
 
     #[test]

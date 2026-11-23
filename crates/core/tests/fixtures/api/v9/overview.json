@@ -1,0 +1,163 @@
+{
+  "agents": [
+    {
+      "about": "sh",
+      "available": true,
+      "label": "Echo",
+      "name": "echo",
+      "resumable": false
+    }
+  ],
+  "api_version": 9,
+  "autopilot": {
+    "activity": [],
+    "auto_close": true,
+    "auto_escalate": false,
+    "cap": 4,
+    "check_in_all": false,
+    "check_in_minutes": 30,
+    "default_level": "delegate",
+    "enabled": false,
+    "groom": true,
+    "groom_hours": 24,
+    "idle": false,
+    "intake_per_hour": 20,
+    "max_nudges": 2,
+    "project_cap": 2,
+    "stuck_compactions": 2,
+    "stuck_failed_runs": 3,
+    "stuck_minutes": 15,
+    "stuck_no_commit_minutes": 45,
+    "untrusted_turns_per_day": 50,
+    "untrusted_turns_today": 0,
+    "workers": 0
+  },
+  "cursor": 9,
+  "host": {
+    "cores": 48,
+    "disk_free": 607709048832,
+    "disk_total": 3935812239360,
+    "load": 21.42,
+    "mem_total": 66741600256,
+    "mem_used": 17398185984
+  },
+  "issues": [
+    {
+      "blocks": [],
+      "body": "details",
+      "created_at": 1795460614353,
+      "depends_on": [],
+      "external_author": null,
+      "external_number": null,
+      "external_updated_at": null,
+      "external_url": null,
+      "goal": null,
+      "held": null,
+      "id": 1,
+      "labels": [
+        "bug"
+      ],
+      "off_vision": false,
+      "priority": 3,
+      "project_id": 1,
+      "ready_by": null,
+      "source": "internal",
+      "state": "doing",
+      "title": "Fix it",
+      "trust": "trusted",
+      "updated_at": 1795460614353,
+      "waiting_on": []
+    }
+  ],
+  "min_client_api": 1,
+  "projects": [
+    {
+      "automation": null,
+      "branch": "main",
+      "created_at": 1795460614349,
+      "deploy": null,
+      "home": false,
+      "id": 1,
+      "merge_mode": "pr",
+      "name": "demo",
+      "path": "/tmp/.tmpiA9aIk/demo",
+      "pinned": false,
+      "post_mode": "draft",
+      "remote": null,
+      "risky": [],
+      "supervisor": false,
+      "tags": [],
+      "tracker": {
+        "kind": "internal"
+      }
+    }
+  ],
+  "sessions": [
+    {
+      "agent": "echo",
+      "agent_session": null,
+      "created_at": 1795460614354,
+      "cwd": "/tmp/.tmpiA9aIk/demo",
+      "effort": null,
+      "id": "8cf7890f-7270-40c8-9bb0-88327919b096",
+      "issue_id": null,
+      "model": null,
+      "parent": null,
+      "project_id": 1,
+      "status": "idle",
+      "title": "hello",
+      "updated_at": 1795460614358,
+      "usage": {
+        "bash_edits": 0,
+        "bash_sleeps": 0,
+        "cache_read_tokens": 0,
+        "context": 0,
+        "cost_usd": 0.0,
+        "effort": "",
+        "file_edits": 0,
+        "host": "",
+        "input_tokens": 0,
+        "lsp": [],
+        "max_tokens": 0,
+        "model": "",
+        "output_tokens": 0,
+        "turns": 0,
+        "window": 0
+      },
+      "worktree_id": 1
+    }
+  ],
+  "supervisor": null,
+  "triage": {
+    "budget_tokens": 24000,
+    "every_hours": 0,
+    "last_run": null,
+    "last_status": "",
+    "notes": [],
+    "proposals": [],
+    "running": false
+  },
+  "usage": {
+    "quotas": [],
+    "spend": {
+      "projects": [],
+      "today_usd": -0.0,
+      "total_usd": -0.0
+    }
+  },
+  "version": "0.9.2",
+  "visions": [],
+  "worktrees": [
+    {
+      "branch": "main",
+      "created_at": 1795460614350,
+      "head": "eff12d88d245d2cc327019b5c885802388e5ec54",
+      "id": 1,
+      "main": true,
+      "missing": false,
+      "owned": false,
+      "path": "/tmp/.tmpiA9aIk/demo",
+      "project_id": 1
+    }
+  ]
+}

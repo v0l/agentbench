@@ -368,3 +368,94 @@ pub async fn triage_issues(store: &Store, target: &Target, now_ms: i64) -> usize
     }
     done
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::MirrorIssue;
+    use agentbench_core::{PostMode, ProjectPatch, Tracker};
+
+    fn setup(mode: PostMode) -> (Store, Id) {
+        let store = Store::memory().unwrap();
+        let p = store.add_project("demo", "/tmp/demo-flow", Some("main"), None).unwrap();
+        store
+            .update_project(p.id, &ProjectPatch { tracker: Some(Tracker::Github { repo: "o/r".into() }), post_mode: Some(mode), ..Default::default() })
+            .unwrap();
+        (store, p.id)
+    }
+
+    fn mirror(store: &Store, p: Id, n: i64, trust: Trust, labels: &[&str]) -> Issue {
+        let id = store
+            .mirror_issue(
+                p,
+                &MirrorIssue {
+                    number: n,
+                    title: format!("issue {n}"),
+                    body: "crashes on start".into(),
+                    state: IssueState::Backlog,
+                    priority: 0,
+                    labels: labels.iter().map(|s| s.to_string()).collect(),
+                    author: "mallory".into(),
+                    url: "u".into(),
+                    updated_at: 1,
+                    trust,
+                },
+            )
+            .unwrap();
+        store.issue(id).unwrap()
+    }
+
+    #[test]
+    fn triage_of_an_untrusted_issue_proposes_in_the_outbox_and_changes_no_state() {
+        let (store, p) = setup(PostMode::Auto);
+        mirror(&store, p, 1, Trust::Trusted, &["bug", "docs"]);
+        let issue = mirror(&store, p, 2, Trust::Untrusted, &[]);
+        let known = repo_labels(&store, p);
+        assert_eq!(known, ["bug", "docs"]);
+        let reply = r#"{"type":"bug","labels":["bug","invented","ready"],"priority":3,"duplicate_of":1,"question":"Which version?","note":"x"}"#;
+        assert!(needs_triage(&store, &issue));
+        let queued = apply_triage(&store, &issue, &known, reply, false);
+        assert!(queued >= 3);
+        let rows = store.outbox(Some(p)).unwrap();
+        assert!(rows.iter().all(|r| r.status == "proposed"), "{rows:?}");
+        let labels: Vec<_> = rows.iter().filter(|r| r.kind == "label_add").map(|r| r.payload.clone()).collect();
+        assert_eq!(labels.len(), 1, "{labels:?}");
+        assert!(labels[0].contains("bug"));
+        assert!(rows.iter().all(|r| r.kind != "issue_state"));
+        assert!(rows.iter().any(|r| r.text.contains("duplicate of #1")));
+        assert!(rows.iter().any(|r| r.text.contains("Which version?")));
+        let after = store.issue(issue.id).unwrap();
+        assert_eq!((after.state, after.labels), (IssueState::Backlog, vec![]));
+        let again = apply_triage(&store, &issue, &known, reply, false);
+        assert_eq!(again, 0, "the same proposals are not queued twice");
+    }
+
+    #[test]
+    fn a_new_comment_by_someone_else_triggers_triage_again_but_the_bots_own_does_not() {
+        let (store, p) = setup(PostMode::Draft);
+        let issue = mirror(&store, p, 2, Trust::Untrusted, &[]);
+        store.set_setting(&triage_key(issue.id), &triage_marker(&store, &issue)).unwrap();
+        assert!(!needs_triage(&store, &issue));
+        store.mirror_comment(issue.id, "10", "agentbench", "hi", "u", 1, Trust::Trusted).unwrap();
+        assert!(!needs_triage(&store, &issue));
+        store.mirror_comment(issue.id, "11", "mallory", "more", "u", 2, Trust::Untrusted).unwrap();
+        assert!(needs_triage(&store, &issue));
+    }
+
+    #[test]
+    fn the_public_summary_has_no_paths_secrets_or_session_ids() {
+        let reply = "Fixed it in /home/kieran/git/x/src/a.rs for session 6c2aa8ac-1872-45f2-b477-87fe98b604dc, key sk-abcdefghijklmnopqrstuv123456.\nDONE #4 tests:pass ok";
+        let text = fallback_summary(reply);
+        assert!(!text.contains("/home/") && !text.contains("6c2aa8ac") && !text.contains("sk-abc") && !text.contains("DONE #"), "{text}");
+        assert!(outbox::refuse_unsafe(&text).is_ok());
+    }
+
+    #[test]
+    fn a_pull_request_body_closes_the_issue() {
+        let (store, p) = setup(PostMode::Draft);
+        let issue = mirror(&store, p, 7, Trust::Trusted, &[]);
+        let (title, body) = pr_title_and_body(Some(&issue), "issue-7");
+        assert_eq!(title, "issue 7");
+        assert!(body.ends_with("Closes #7"), "{body}");
+    }
+}

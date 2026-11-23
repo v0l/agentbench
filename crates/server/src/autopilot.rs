@@ -2534,6 +2534,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_ready_github_issue_starts_one_worker_and_a_passed_one_opens_exactly_one_pull_request() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        git_in(&r.repo, &["push", "-q", "origin", "main"]);
+        set_project(
+            &r.store,
+            r.project,
+            &ProjectPatch { tracker: Some(agentbench_core::Tracker::Github { repo: "o/r".into() }), post_mode: Some(agentbench_core::PostMode::Auto), ..Default::default() },
+        )
+        .unwrap();
+        let id = r
+            .store
+            .mirror_issue(
+                r.project,
+                &crate::store::MirrorIssue {
+                    number: 4,
+                    title: "Fix login".into(),
+                    body: "it loops".into(),
+                    state: IssueState::Todo,
+                    priority: 0,
+                    labels: vec!["ready".into()],
+                    author: "owner".into(),
+                    url: "https://github.com/o/r/issues/4".into(),
+                    updated_at: 1,
+                    trust: agentbench_core::Trust::Trusted,
+                },
+            )
+            .unwrap();
+        let log = r._dir.path().join("gh.log");
+        let gh = stub_gh(r._dir.path(), &log);
+        unsafe { std::env::set_var("AGENTBENCH_GH", &gh) };
+        on(&r);
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        r.ap.tick();
+        r.ap.tick();
+        let workers = r.store.workers().unwrap();
+        assert_eq!(workers.len(), 1, "exactly one worker");
+        assert_eq!(r.store.issue(id).unwrap().state, IssueState::Doing);
+        let tree = r.store.worktree(r.store.session(workers[0].session).unwrap().worktree_id).unwrap();
+        assert!(tree.branch.as_deref().unwrap().starts_with("issue-4-"), "{:?}", tree.branch);
+        let started = r.store.outbox(Some(r.project)).unwrap();
+        assert!(started.iter().any(|o| o.kind == "comment" && o.text.contains("Working on this (branch issue-4-")), "{started:?}");
+        let sid = workers[0].session;
+        settle(&r).await;
+        commit_in(&tree.path, "feature.txt");
+        passed(&r, sid).await;
+        r.ap.tick();
+        unsafe { std::env::remove_var("AGENTBENCH_GH") };
+        let called = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(called.matches("pr create").count(), 1, "{called}");
+        let pr_line = called.lines().find(|l| l.contains("pr create")).unwrap();
+        assert!(called.contains("Closes #4") && pr_line.contains("--base main"), "{called}");
+        assert!(!remote_has(&bare, "feature.txt"), "main is not pushed to");
+        let issue = r.store.issue(id).unwrap();
+        assert_eq!(issue.state, IssueState::Review);
+        assert!(r.store.comments(id).unwrap().iter().any(|c| c.body.contains("/pull/9")));
+        let rows = r.store.outbox(Some(r.project)).unwrap();
+        let summaries: Vec<_> = rows.iter().filter(|o| o.kind == "comment" && o.text.contains("/pull/9")).collect();
+        assert_eq!(summaries.len(), 1, "{rows:?}");
+        assert!(!summaries[0].text.contains(&sid.to_string()));
+        r.ap.tick();
+        let again = std::fs::read_to_string(&log).unwrap_or_default();
+        assert_eq!(again.matches("pr create").count(), 1, "still one");
+    }
+
+    #[tokio::test]
     async fn autowork_leaves_a_passed_branch_in_review_and_ship_merges_and_pushes_it() {
         let r = rig(DONE);
         let bare = bare_remote(&r);
