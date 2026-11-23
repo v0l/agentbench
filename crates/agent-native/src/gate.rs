@@ -4,7 +4,7 @@ pub const PROPOSAL: &str = "proposal:";
 
 pub fn required(tool: &str) -> Option<Automation> {
     Some(match tool {
-        "file_issue" | "update_issue" | "comment_on_issue" | "remember" | "compact_memory" | "rename_session" => {
+        "file_issue" | "update_issue" | "comment_on_issue" | "github_post" | "remember" | "compact_memory" | "rename_session" => {
             Automation::Assist
         }
         "start_session" | "send_message" | "stop_session" | "close_session"

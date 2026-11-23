@@ -591,6 +591,7 @@ fn describe(tool: &str, args: &Value) -> String {
         "file_issue" => "file an issue",
         "update_issue" => "update an issue",
         "comment_on_issue" => "comment on an issue",
+        "github_post" => "queue a GitHub post",
         "remember" => "keep a note",
         "compact_memory" => "compact the notes",
         "rename_session" => "rename a session",
@@ -866,6 +867,31 @@ impl Api for StoreApi {
                 let mut out = issue_json(&i);
                 out["comments"] = json!(comments);
                 out
+            }
+            "github_post" => {
+                let number = args.get("number").and_then(Value::as_i64).unwrap_or(0);
+                let kind = text(args, "kind").unwrap_or_default();
+                let body = text(args, "text").unwrap_or_default();
+                let mut params = serde_json::Map::new();
+                for key in ["label", "login", "state", "reason", "event", "comments", "remove"] {
+                    if let Some(v) = args.get(key).filter(|v| !v.is_null()) {
+                        params.insert(key.into(), v.clone());
+                    }
+                }
+                let by = if sup { "supervisor".to_string() } else { format!("session {session}") };
+                let trusted = !self.on_untrusted_issue(&me)
+                    && !s.target_trust(project, number).map_err(|e| e.0)?.is_untrusted();
+                let ask = crate::github::outbox::Ask {
+                    project,
+                    kind,
+                    number,
+                    text: body,
+                    params: Value::Object(params),
+                    asked_by: by,
+                    trusted,
+                };
+                let (row, status) = crate::github::outbox::propose(s, ask)?;
+                json!({ "outbox": row, "status": status })
             }
             "comment_on_issue" => {
                 let issue = id(args)?;

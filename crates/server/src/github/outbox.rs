@@ -122,7 +122,7 @@ pub fn propose(store: &Store, ask: Ask) -> Result<(Id, String), String> {
     Ok((id, status.to_string()))
 }
 
-pub fn approve(store: &Store, id: Id, edited: Option<&str>) -> Result<(), String> {
+pub fn approve(store: &Store, id: Id, edited: Option<&str>, by: &str) -> Result<(), String> {
     let item = store.outbox_item(id).map_err(|e| e.0)?;
     if let Some(t) = edited {
         refuse_unsafe(t)?;
@@ -131,13 +131,14 @@ pub fn approve(store: &Store, id: Id, edited: Option<&str>) -> Result<(), String
     if !ok {
         return Err(format!("row {id} is {}, only proposed or failed rows are approved", item.status));
     }
-    store.outbox_result(id, "approved", None, None, 0, 0).map_err(|e| e.0)
+    store.outbox_result(id, "approved", None, None, 0, 0).map_err(|e| e.0)?;
+    store.outbox_set_approver(id, by).map_err(|e| e.0)
 }
 
-pub fn approve_all(store: &Store, project: Id) -> Result<Vec<Id>, String> {
+pub fn approve_all(store: &Store, project: Id, by: &str) -> Result<Vec<Id>, String> {
     let mut done = Vec::new();
     for item in store.outbox(Some(project)).map_err(|e| e.0)?.into_iter().filter(|i| i.status == "proposed") {
-        approve(store, item.id, None)?;
+        approve(store, item.id, None, by)?;
         done.push(item.id);
     }
     Ok(done)
@@ -249,6 +250,30 @@ fn send(gh: &str, repo: &str, item: &OutboxItem) -> Sent {
     }
 }
 
+pub const HOURLY_CAP: i64 = 30;
+
+fn allowed_to_send(store: &Store, item: &OutboxItem, now: i64) -> Result<(), String> {
+    if item.approved_by.is_empty() {
+        let target = store.target_trust(item.project_id, item.number).map_err(|e| e.0)?;
+        if !item.trusted || target.is_untrusted() {
+            return Err("held: not approved by the owner and the input is untrusted".into());
+        }
+        if item.kind == "merge_request" {
+            return Err("held: a merge is never posted without approval".into());
+        }
+    }
+    let recent = store
+        .outbox(Some(item.project_id))
+        .map_err(|e| e.0)?
+        .iter()
+        .filter(|o| o.status == "done" && now - o.updated_at < 3_600_000)
+        .count() as i64;
+    if recent >= HOURLY_CAP {
+        return Err("held: the hourly post cap is reached".into());
+    }
+    Ok(())
+}
+
 pub fn drain(store: &Store, gh: &str, now: i64) -> usize {
     if is_paused(store) {
         return 0;
@@ -271,6 +296,12 @@ pub fn drain(store: &Store, gh: &str, now: i64) -> usize {
         })).find_map(|t| refuse_unsafe(&t).err());
         if let Some(why) = unsafe_text {
             let _ = store.outbox_result(item.id, "failed", None, Some(&why), item.attempts, 0);
+            continue;
+        }
+        if let Err(why) = allowed_to_send(store, &item, now) {
+            let status = if why.contains("cap") { "approved" } else { "proposed" };
+            let next = if status == "approved" { now + 600_000 } else { 0 };
+            let _ = store.outbox_result(item.id, status, None, Some(&why), item.attempts, next);
             continue;
         }
         match store.outbox_transition(item.id, &["approved"], "posting", None) {

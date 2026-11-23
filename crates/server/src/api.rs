@@ -147,6 +147,10 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects/{id}/sync", post(sync_project))
         .route("/api/projects/{id}/github", get(github_status))
         .route("/api/projects/{id}/github/sync", post(github_sync_now))
+        .route("/api/outbox", get(outbox_list))
+        .route("/api/outbox/{id}/approve", post(outbox_approve))
+        .route("/api/outbox/{id}/reject", post(outbox_reject))
+        .route("/api/github/pause", post(github_pause))
         .route("/api/projects/{id}/notes", get(list_notes))
         .route("/api/projects/{id}/prompts", get(list_prompts))
         .route("/api/projects/{id}/notes/restore", post(restore_note))
@@ -812,6 +816,45 @@ async fn update_project(
     let project = crate::autopilot::set_project(api.runner.store(), id, &patch)?;
     changed(&api);
     Ok(Json(project))
+}
+
+#[derive(Deserialize, Default)]
+struct OutboxApprove {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct Paused {
+    #[serde(default)]
+    paused: bool,
+}
+
+async fn outbox_list(State(api): State<Api>) -> Reply<serde_json::Value> {
+    let store = api.runner.store();
+    Ok(Json(json!({
+        "paused": crate::github::outbox::is_paused(store),
+        "items": store.outbox(None)?,
+    })))
+}
+
+async fn outbox_approve(State(api): State<Api>, Path(id): Path<Id>, body: Option<Json<OutboxApprove>>) -> Reply<serde_json::Value> {
+    let text = body.and_then(|b| b.0.text);
+    crate::github::outbox::approve(api.runner.store(), id, text.as_deref(), "user").map_err(bad)?;
+    changed(&api);
+    Ok(Json(json!({ "approved": id })))
+}
+
+async fn outbox_reject(State(api): State<Api>, Path(id): Path<Id>) -> Reply<serde_json::Value> {
+    crate::github::outbox::reject(api.runner.store(), id).map_err(bad)?;
+    changed(&api);
+    Ok(Json(json!({ "rejected": id })))
+}
+
+async fn github_pause(State(api): State<Api>, body: Option<Json<Paused>>) -> Reply<serde_json::Value> {
+    let paused = body.map(|b| b.0.paused).unwrap_or(true);
+    crate::github::outbox::set_paused(api.runner.store(), paused).map_err(bad)?;
+    Ok(Json(json!({ "paused": paused })))
 }
 
 async fn github_sync_now(State(api): State<Api>, Path(id): Path<Id>) -> Reply<agentbench_core::GithubStatus> {

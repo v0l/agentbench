@@ -23,6 +23,26 @@ pub struct Cli {
 }
 
 #[derive(Subcommand)]
+pub enum GithubAction {
+    Pause,
+    Resume,
+    Outbox {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    Approve {
+        id: Option<i64>,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        all: Option<String>,
+    },
+    Reject {
+        id: i64,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum Command {
     Serve,
     Token {
@@ -34,6 +54,11 @@ pub enum Command {
     GithubSync {
         /// The project, by name.
         project: String,
+    },
+    /// Review and post what agents queued for GitHub.
+    Github {
+        #[command(subcommand)]
+        action: GithubAction,
     },
     /// Compact the notes of one project (or the global notes) with the saved model.
     CompactMemory {
@@ -245,6 +270,32 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             match out {
                 crate::github::Outcome::Failed(e) => Err(e),
                 _ => Ok(()),
+            }
+        }
+        Command::Github { action } => {
+            use crate::github::outbox;
+            match action {
+                GithubAction::Pause => outbox::set_paused(&store, true),
+                GithubAction::Resume => outbox::set_paused(&store, false),
+                GithubAction::Outbox { project } => {
+                    let id = match project {
+                        Some(name) => Some(store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == name).ok_or_else(|| format!("no project named {name}"))?.id),
+                        None => None,
+                    };
+                    for o in store.outbox(id).map_err(|e| e.0)? {
+                        println!("{:<5} {:<9} {:<14} #{:<5} by {:<14} {}", o.id, o.status, o.kind, o.number, o.asked_by, o.text.replace('\n', " "));
+                    }
+                    Ok(())
+                }
+                GithubAction::Approve { id, text, all } => match (id, all) {
+                    (Some(id), _) => outbox::approve(&store, id, text.as_deref(), "user"),
+                    (None, Some(name)) => {
+                        let p = store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == name).ok_or_else(|| format!("no project named {name}"))?;
+                        outbox::approve_all(&store, p.id, "user").map(|ids| println!("approved {}", ids.len()))
+                    }
+                    _ => Err("give a row id or --all <project>".into()),
+                },
+                GithubAction::Reject { id } => outbox::reject(&store, id),
             }
         }
         Command::Chat { .. } => unreachable!("handled before the store opens"),

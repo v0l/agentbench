@@ -339,6 +339,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("outbox", "external_id", "TEXT"),
     ("outbox", "error", "TEXT"),
     ("outbox", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("outbox", "approved_by", "TEXT NOT NULL DEFAULT ''"),
 ];
 
 const AFTER_COLUMNS: &str = r#"
@@ -411,6 +412,7 @@ pub struct OutboxItem {
     pub external_id: Option<String>,
     pub error: Option<String>,
     pub updated_at: i64,
+    pub approved_by: String,
 }
 
 pub struct NewOutbox<'a> {
@@ -441,6 +443,7 @@ fn outbox_row(r: &Row) -> rusqlite::Result<OutboxItem> {
         external_id: r.get("external_id")?,
         error: r.get("error")?,
         updated_at: r.get("updated_at")?,
+        approved_by: r.get("approved_by")?,
     })
 }
 
@@ -1584,6 +1587,18 @@ impl Store {
             params![id, status, external_id, error, attempts, next_at, now()],
         )?;
         Ok(())
+    }
+
+    pub fn outbox_set_approver(&self, id: Id, by: &str) -> Result<()> {
+        self.db().execute("UPDATE outbox SET approved_by = ?2 WHERE id = ?1", params![id, by])?;
+        Ok(())
+    }
+
+    pub fn target_trust(&self, project_id: Id, number: i64) -> Result<Trust> {
+        if let Some(t) = self.pr_trust(project_id, number)? {
+            return Ok(t);
+        }
+        Ok(self.mirrored_issue(project_id, number)?.map_or(Trust::Trusted, |i| i.trust))
     }
 
     pub fn outbox_ready(&self, at: i64) -> Result<Vec<OutboxItem>> {

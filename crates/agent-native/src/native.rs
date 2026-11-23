@@ -358,7 +358,8 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 39] = [
+pub const AGENTBENCH_TOOLS: [&str; 40] = [
+    "github_post",
     "list_issues",
     "get_issue",
     "file_issue",
@@ -487,6 +488,26 @@ fn agentbench_specs() -> Vec<Spec> {
                     "depends_on": depends_on_schema("Replaces the issues this one waits on; an empty list clears them. Rejected if it makes a cycle"),
                 }),
                 &["id"],
+            ),
+        ),
+        Spec::new(
+            "github_post",
+            "Put a write to GitHub in the agentbench outbox. Nothing goes to GitHub from here directly: in draft mode the owner approves each row, in auto mode only rows from trusted input are posted, in off mode rows stay local notes. kind is comment, label_add, label_remove, assignee, issue_state, review or merge_request. Text is posted as written, so never include secrets or paths from this machine.",
+            object(
+                json!({
+                    "kind": json!({ "type": "string", "enum": ["comment", "label_add", "label_remove", "assignee", "issue_state", "review", "merge_request"] }),
+                    "number": id("The issue or pull request number on GitHub"),
+                    "text": string("The comment or review body, exactly as it should be posted"),
+                    "label": string("For label_add and label_remove"),
+                    "login": string("For assignee"),
+                    "remove": json!({ "type": "boolean", "description": "For assignee: remove instead of add" }),
+                    "state": json!({ "type": "string", "enum": ["closed", "open"], "description": "For issue_state" }),
+                    "reason": json!({ "type": "string", "enum": ["completed", "not_planned"], "description": "For closing" }),
+                    "event": json!({ "type": "string", "enum": ["comment", "approve", "request_changes"], "description": "For review" }),
+                    "comments": json!({ "type": "array", "items": { "type": "object" }, "description": "For review: line comments, each {path, line, body}" }),
+                    "project": string("Supervisor chat only: the project by name or id"),
+                }),
+                &["kind", "number"],
             ),
         ),
         Spec::new(
