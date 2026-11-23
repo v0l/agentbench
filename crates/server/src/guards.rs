@@ -317,6 +317,28 @@ mod tests {
     }
 
     #[test]
+    fn the_trust_rules_are_seeded_into_an_existing_file_once_in_the_stores_own_temp_dir() {
+        let s = Store::memory().unwrap();
+        let file = path(&s);
+        let real = std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".agents/memory")).unwrap_or_default();
+        assert!(!file.starts_with(&real), "{} is the real guards file", file.display());
+        assert!(file.starts_with(std::env::temp_dir()), "{} is not in a temp dir", file.display());
+        let old = DEFAULTS.split("[[rule]]\nid = \"worker-gh-writes\"").next().unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, old).unwrap();
+        let first = load(&s).unwrap();
+        for id in TRUST_RULES {
+            assert!(first.rules.iter().any(|r| r.id == id), "{id} was not seeded into {}", file.display());
+        }
+        assert!(first.rules.iter().any(|r| r.id == "worker-no-push") && first.rules.iter().any(|r| r.id == "pr-reviews"));
+        assert!(std::fs::read_to_string(&file).unwrap().contains("untrusted-no-github-writes"));
+        let mut kept = first;
+        kept.rules.retain(|r| r.id != "worker-git-push-main");
+        save(&s, &kept).unwrap();
+        assert!(!load(&s).unwrap().rules.iter().any(|r| r.id == "worker-git-push-main"), "a rule the supervisor removed stays removed");
+    }
+
+    #[test]
     fn rules_live_in_one_file_and_a_new_rule_needs_no_code() {
         let s = Store::memory().unwrap();
         assert!(hit(&s, "start_session", &json!({"prompt": "push to main"})).is_some());

@@ -58,7 +58,6 @@ pub fn resolve(store: &Store, gh: &str, repo: &str, user: &str, association: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     struct Gh {
         dir: tempfile::TempDir,
@@ -73,8 +72,7 @@ mod tests {
             script.push_str(&format!("  */collaborators/{user}/permission) echo '{{\"permission\":\"{perm}\"}}' ;;\n"));
         }
         script.push_str("  *) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;\nesac\n");
-        std::fs::write(&gh, script).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing_stub::write_script(&gh, &script);
         Gh { gh: gh.to_string_lossy().into_owned(), dir }
     }
 

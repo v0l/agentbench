@@ -3562,9 +3562,7 @@ mod tests {
 
     fn stub_gh(dir: &std::path::Path, log: &std::path::Path) -> std::path::PathBuf {
         let gh = dir.join("gh-stub");
-        std::fs::write(&gh, format!("#!/bin/sh\necho \"$@\" >> {}\necho https://github.com/o/r/pull/9\n", log.display())).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing_stub::write_script(&gh, &format!("#!/bin/sh\necho \"$@\" >> {}\necho https://github.com/o/r/pull/9\n", log.display()));
         gh
     }
 

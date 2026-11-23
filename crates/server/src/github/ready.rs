@@ -163,7 +163,6 @@ mod tests {
     use crate::github::sync::{Outcome, sync_project};
     use crate::store::Store;
     use agentbench_core::{ProjectPatch, Tracker};
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     struct Stub {
@@ -187,8 +186,7 @@ case "$last" in
   */issues/[0-9]*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
 esac
 "#;
-            std::fs::write(&gh, script).unwrap();
-            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::testing_stub::write_script(&gh, script);
             let s = Stub { gh: gh.to_string_lossy().into_owned(), dir };
             s.put("comments.json", "[]");
             s.put("issues.json", "[]");

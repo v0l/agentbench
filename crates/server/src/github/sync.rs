@@ -69,8 +69,21 @@ pub(super) struct Reply {
     pub stderr: String,
 }
 
+fn output_retrying(gh: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+    let mut tries = 0;
+    loop {
+        match Command::new(gh).args(args).stdin(Stdio::null()).output() {
+            Err(e) if e.raw_os_error() == Some(26) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            other => return other,
+        }
+    }
+}
+
 pub(super) fn call(gh: &str, args: &[&str]) -> Reply {
-    match Command::new(gh).args(args).stdin(Stdio::null()).output() {
+    match output_retrying(gh, args) {
         Ok(o) => Reply {
             ok: o.status.success(),
             stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -167,6 +180,7 @@ fn pr_row(v: &Value) -> Option<MirrorPr> {
         title: s("title"),
         body: s("body"),
         author: nested("user", "login"),
+        association: s("author_association"),
         head_ref: nested("head", "ref"),
         base_ref: nested("base", "ref"),
         head_sha: nested("head", "sha"),
@@ -175,6 +189,7 @@ fn pr_row(v: &Value) -> Option<MirrorPr> {
         url: s("html_url"),
         created_at: parse_time(&s("created_at")),
         updated_at: parse_time(&s("updated_at")),
+        trust: agentbench_core::Trust::Untrusted,
     })
 }
 
@@ -288,7 +303,9 @@ fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64
         }
     }
     for pr in &f.prs {
-        store.mirror_pr(project, pr)?;
+        let mut pr = pr.clone();
+        pr.trust = trust_of(&pr.author, &pr.association);
+        store.mirror_pr(project, &pr)?;
     }
     store.close_prs_not_in(project, &pr_numbers)?;
     for (number, nums) in links {
@@ -416,7 +433,6 @@ mod tests {
 
     impl Stub {
         fn new() -> Stub {
-            use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().unwrap();
             let gh = dir.path().join("gh");
             let script = r#"#!/bin/sh
@@ -432,8 +448,7 @@ case "$last" in
   */issues?state*) cat "$D/issues.json" ;;
 esac
 "#;
-            std::fs::write(&gh, script).unwrap();
-            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::testing_stub::write_script(&gh, script);
             let s = Stub { gh: gh.to_string_lossy().into_owned(), dir };
             s.put("pulls.json", "[]");
             s.put("issues.json", "[]");
@@ -488,6 +503,18 @@ esac
 
     fn sync(store: &Store, p: Id, stub: &Stub, now: i64) -> Outcome {
         sync_project(store, &stub.gh, p, now, false)
+    }
+
+    #[test]
+    fn a_mirrored_pull_request_carries_the_trust_of_its_author() {
+        let (store, p, stub) = setup();
+        stub.put(
+            "pulls.json",
+            r#"[{"number":9,"title":"Fix","body":"x","user":{"login":"mallory"},"author_association":"NONE","head":{"ref":"f","sha":"a"},"base":{"ref":"main"},"draft":false,"html_url":"u","created_at":"2024-03-01T12:00:00Z","updated_at":"2024-03-01T12:00:00Z"},{"number":10,"title":"Own","body":"x","user":{"login":"kieran"},"author_association":"OWNER","head":{"ref":"g","sha":"b"},"base":{"ref":"main"},"draft":false,"html_url":"u","created_at":"2024-03-01T12:00:00Z","updated_at":"2024-03-01T12:00:00Z"}]"#,
+        );
+        assert_eq!(sync(&store, p, &stub, 1_000), Outcome::Synced);
+        assert_eq!(store.pr_trust(p, 9).unwrap(), Some(agentbench_core::Trust::Untrusted));
+        assert_eq!(store.pr_trust(p, 10).unwrap(), Some(agentbench_core::Trust::Trusted));
     }
 
     #[test]

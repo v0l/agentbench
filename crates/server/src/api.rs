@@ -3022,10 +3022,8 @@ mod tests {
     }
 
     fn stub(dir: &std::path::Path, name: &str, script: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing_stub::write_script(&path, &format!("#!/bin/sh\n{script}\n"));
         path.to_string_lossy().into_owned()
     }
 

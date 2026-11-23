@@ -11,6 +11,8 @@ pub mod github;
 pub mod groom;
 pub mod guards;
 mod injection;
+#[cfg(test)]
+mod testing_stub;
 pub mod host;
 pub mod ledger;
 pub mod local;

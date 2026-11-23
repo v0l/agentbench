@@ -355,6 +355,7 @@ CREATE TABLE IF NOT EXISTS pull_requests (
     updated_at INTEGER NOT NULL DEFAULT 0,
     issue_id INTEGER REFERENCES issues(id) ON DELETE SET NULL,
     reviewed_sha TEXT,
+    trust TEXT NOT NULL DEFAULT 'trusted',
     UNIQUE (project_id, number)
 );
 CREATE TABLE IF NOT EXISTS outbox (
@@ -421,6 +422,7 @@ pub struct MirrorPr {
     pub title: String,
     pub body: String,
     pub author: String,
+    pub association: String,
     pub head_ref: String,
     pub base_ref: String,
     pub head_sha: String,
@@ -429,6 +431,7 @@ pub struct MirrorPr {
     pub url: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub trust: Trust,
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -877,6 +880,13 @@ impl Store {
             }
         }
         conn.execute_batch(AFTER_COLUMNS)?;
+        let pr_trust = conn
+            .prepare("PRAGMA table_info(pull_requests)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .any(|name| name.map(|n| n == "trust").unwrap_or(false));
+        if !pr_trust {
+            conn.execute_batch("ALTER TABLE pull_requests ADD COLUMN trust TEXT NOT NULL DEFAULT 'trusted';")?;
+        }
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Store { conn: Arc::new(Mutex::new(conn)), memory: Arc::new(memory) };
         if store.setting(WIRE_TRANSCRIPTS)?.is_none() {
@@ -1617,12 +1627,12 @@ impl Store {
     pub fn mirror_pr(&self, project_id: Id, m: &MirrorPr) -> Result<()> {
         let db = self.db();
         db.execute(
-            "INSERT INTO pull_requests (project_id, number, title, body, author, head_ref, base_ref, head_sha, state, draft, url, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO pull_requests (project_id, number, title, body, author, head_ref, base_ref, head_sha, state, draft, url, created_at, updated_at, trust)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(project_id, number) DO UPDATE SET title = excluded.title, body = excluded.body, author = excluded.author,
                head_ref = excluded.head_ref, base_ref = excluded.base_ref, head_sha = excluded.head_sha, state = excluded.state,
-               draft = excluded.draft, url = excluded.url, updated_at = excluded.updated_at",
-            params![project_id, m.number, m.title, m.body, m.author, m.head_ref, m.base_ref, m.head_sha, m.state, m.draft, m.url, m.created_at, m.updated_at],
+               draft = excluded.draft, url = excluded.url, updated_at = excluded.updated_at, trust = excluded.trust",
+            params![project_id, m.number, m.title, m.body, m.author, m.head_ref, m.base_ref, m.head_sha, m.state, m.draft, m.url, m.created_at, m.updated_at, m.trust.as_str()],
         )?;
         Ok(())
     }
@@ -1671,6 +1681,18 @@ impl Store {
             )
             .optional()?
             .flatten())
+    }
+
+    pub fn pr_trust(&self, project_id: Id, number: i64) -> Result<Option<Trust>> {
+        Ok(self
+            .db()
+            .query_row(
+                "SELECT trust FROM pull_requests WHERE project_id = ?1 AND number = ?2",
+                params![project_id, number],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|t| Trust::parse(&t)))
     }
 
     pub fn pr_count(&self, project_id: Id, state: &str) -> Result<i64> {
