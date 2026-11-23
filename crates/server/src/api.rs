@@ -147,6 +147,9 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects/{id}/sync", post(sync_project))
         .route("/api/projects/{id}/github", get(github_status))
         .route("/api/projects/{id}/github/sync", post(github_sync_now))
+        .route("/api/projects/{id}/pulls", get(pulls_list))
+        .route("/api/projects/{id}/pulls/{number}/review", post(pull_review))
+        .route("/api/projects/{id}/pulls/{number}/merge", post(pull_merge))
         .route("/api/outbox", get(outbox_list))
         .route("/api/outbox/{id}/approve", post(outbox_approve))
         .route("/api/outbox/{id}/reject", post(outbox_reject))
@@ -855,6 +858,30 @@ async fn github_pause(State(api): State<Api>, body: Option<Json<Paused>>) -> Rep
     let paused = body.map(|b| b.0.paused).unwrap_or(true);
     crate::github::outbox::set_paused(api.runner.store(), paused).map_err(bad)?;
     Ok(Json(json!({ "paused": paused })))
+}
+
+async fn pulls_list(State(api): State<Api>, Path(id): Path<Id>) -> Reply<Vec<agentbench_core::PullRequest>> {
+    Ok(Json(api.runner.store().pull_requests(id)?))
+}
+
+async fn pull_review(State(api): State<Api>, Path((id, number)): Path<(Id, i64)>) -> Reply<serde_json::Value> {
+    let store = api.runner.store();
+    store.pull_request(id, number)?.ok_or_else(|| Failure(StatusCode::NOT_FOUND, format!("no mirrored pull request #{number}")))?;
+    store.ask_pr_review(id, number)?;
+    changed(&api);
+    Ok(Json(json!({ "review_asked": number })))
+}
+
+async fn pull_merge(State(api): State<Api>, Path((id, number)): Path<(Id, i64)>) -> Reply<serde_json::Value> {
+    let store = api.runner.store().clone();
+    let done = tokio::task::spawn_blocking(move || {
+        crate::github::merge::merge(&store, &crate::github::gh_program(), id, number, crate::github::merge::OWNER)
+    })
+    .await
+    .map_err(|e| bad(e.to_string()))?
+    .map_err(bad)?;
+    changed(&api);
+    Ok(Json(json!({ "merged": number, "result": done })))
 }
 
 async fn github_sync_now(State(api): State<Api>, Path(id): Path<Id>) -> Reply<agentbench_core::GithubStatus> {

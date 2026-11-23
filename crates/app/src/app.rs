@@ -3738,6 +3738,8 @@ mod tests {
             post_mode: Default::default(),
             model_levels: Default::default(),
             merge_mode: Default::default(),
+            automerge: Default::default(),
+            merge_method: Default::default(),
         }
     }
 

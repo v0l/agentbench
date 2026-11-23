@@ -306,6 +306,10 @@ fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64
         let mut pr = pr.clone();
         pr.trust = trust_of(&pr.author, &pr.association);
         store.mirror_pr(project, &pr)?;
+        if super::flow::bot_names(store).contains(&pr.author.to_ascii_lowercase()) {
+            store.set_pr_by_agentbench(project, pr.number)?;
+        }
+        refresh_checks(store, gh, repo, project, &pr)?;
     }
     for (n, linked_issue) in store.open_pr_numbers(project)?.into_iter().filter(|(n, _)| !pr_numbers.contains(n)) {
         let r = call(gh, &["api", &format!("repos/{repo}/pulls/{n}")]);
@@ -332,6 +336,15 @@ fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64
         let Some(number) = c.get("issue_url").and_then(Value::as_str).and_then(trailing_number) else {
             continue;
         };
+        let author = c.get("user").and_then(|u| u.get("login")).and_then(Value::as_str).unwrap_or_default();
+        let assoc = c.get("author_association").and_then(Value::as_str).unwrap_or_default();
+        if let Some(ext) = c.get("id").and_then(Value::as_i64)
+            && super::review::is_review_command(c.get("body").and_then(Value::as_str).unwrap_or_default())
+            && store.pull_request(project, number)?.is_some()
+            && !trust_of(author, assoc).is_untrusted()
+        {
+            store.pr_review_command(project, number, ext)?;
+        }
         let issue_id = match store.pr_issue(project, number)? {
             Some(id) => Some(id),
             None => store.mirrored_issue(project, number)?.map(|i| i.id),
@@ -340,8 +353,6 @@ fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64
             continue;
         };
         let s = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or_default();
-        let author = c.get("user").and_then(|u| u.get("login")).and_then(Value::as_str).unwrap_or_default();
-        let assoc = c.get("author_association").and_then(Value::as_str).unwrap_or_default();
         store.mirror_comment(issue_id, &ext.to_string(), author, s("body"), s("html_url"), parse_time(s("created_at")), trust_of(author, assoc))?;
     }
     super::ready::evaluate(store, project, &fresh, now)?;
@@ -350,6 +361,47 @@ fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64
 
 fn backoff_after_failure(failures: u32) -> i64 {
     (FAILURE_BACKOFF_MS << failures.saturating_sub(1).min(5)).min(MAX_BACKOFF_MS)
+}
+
+fn run_id(url: &str) -> Option<i64> {
+    let (_, rest) = url.split_once("/actions/runs/")?;
+    rest.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+}
+
+pub fn check_runs(v: &Value) -> Vec<agentbench_core::PrCheck> {
+    v.get("check_runs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let s = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+            agentbench_core::PrCheck {
+                name: s("name"),
+                status: s("status"),
+                conclusion: c.get("conclusion").and_then(Value::as_str).map(str::to_string),
+                run_id: run_id(&s("details_url")).or_else(|| run_id(&s("html_url"))),
+                url: s("html_url"),
+            }
+        })
+        .collect()
+}
+
+fn refresh_checks(store: &Store, gh: &str, repo: &str, project: Id, pr: &MirrorPr) -> crate::store::Result<()> {
+    if pr.head_sha.is_empty() {
+        return Ok(());
+    }
+    if let Some(known) = store.pull_request(project, pr.number)?
+        && known.checks_known()
+        && known.checks.iter().all(agentbench_core::PrCheck::done)
+    {
+        return Ok(());
+    }
+    let r = call(gh, &["api", &format!("repos/{repo}/commits/{}/check-runs?per_page=100", pr.head_sha)]);
+    let Some(v) = r.ok.then(|| serde_json::from_str::<Value>(&r.stdout).ok()).flatten() else { return Ok(()) };
+    if v.get("check_runs").is_none() {
+        return Ok(());
+    }
+    store.set_pr_checks(project, pr.number, &pr.head_sha, &check_runs(&v))
 }
 
 pub fn sync_project(store: &Store, gh: &str, project_id: Id, now: i64, force: bool) -> Outcome {
@@ -452,6 +504,7 @@ if [ -f "$D/exit" ]; then echo "$(cat "$D/exit_msg" 2>/dev/null)" >&2; exit "$(c
 for a in "$@"; do last="$a"; done
 case "$last" in
   *per_page=1) cat "$D/probe" ;;
+  */check-runs*) if [ -f "$D/checks.json" ]; then cat "$D/checks.json"; else echo '{"check_runs":[]}'; fi ;;
   */pulls/[0-9]*) cat "$D/pull_${last##*/}.json" ;;
   */pulls?*) cat "$D/pulls.json" ;;
   */issues/comments?*) cat "$D/comments.json" ;;
@@ -526,6 +579,31 @@ esac
         assert_eq!(sync(&store, p, &stub, 1_000), Outcome::Synced);
         assert_eq!(store.pr_trust(p, 9).unwrap(), Some(agentbench_core::Trust::Untrusted));
         assert_eq!(store.pr_trust(p, 10).unwrap(), Some(agentbench_core::Trust::Trusted));
+    }
+
+    #[test]
+    fn checks_are_mirrored_per_head_and_a_trusted_review_command_asks_for_a_review() {
+        let (store, p, stub) = setup();
+        stub.put(
+            "pulls.json",
+            r#"[{"number":9,"title":"Fix","body":"x","user":{"login":"agentbench"},"author_association":"OWNER","head":{"ref":"f","sha":"abc"},"base":{"ref":"main"},"html_url":"u"}]"#,
+        );
+        stub.put("checks.json", r#"{"check_runs":[{"name":"test","status":"completed","conclusion":"failure","html_url":"h","details_url":"https://github.com/o/r/actions/runs/42/job/1"}]}"#);
+        stub.put(
+            "comments.json",
+            r#"[{"id":70,"issue_url":"https://api.github.com/repos/o/r/issues/9","user":{"login":"mallory"},"author_association":"NONE","body":"/review","html_url":"u","created_at":"2024-03-01T12:00:00Z"},{"id":71,"issue_url":"https://api.github.com/repos/o/r/issues/9","user":{"login":"kieran"},"author_association":"OWNER","body":"/review","html_url":"u","created_at":"2024-03-01T12:00:00Z"}]"#,
+        );
+        assert_eq!(sync(&store, p, &stub, 1_000), Outcome::Synced);
+        let pr = store.pull_request(p, 9).unwrap().unwrap();
+        assert!(pr.by_agentbench);
+        assert!(pr.checks_red() && !pr.checks_green());
+        assert_eq!(pr.checks[0].run_id, Some(42));
+        assert_eq!(pr.review_asked, 1, "only the trusted /review counts");
+        stub.probe("200 OK", "\"e2\"", 4000, 4_000_000_000);
+        sync(&store, p, &stub, 2_000);
+        assert_eq!(store.pull_request(p, 9).unwrap().unwrap().review_asked, 1, "a comment seen again does not ask again");
+        let args = std::fs::read_to_string(stub.path("calls")).unwrap();
+        assert_eq!(args.matches("commits/abc/check-runs").count(), 1, "finished checks are not fetched again");
     }
 
     #[test]
