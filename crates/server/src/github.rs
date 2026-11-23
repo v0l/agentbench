@@ -3,6 +3,7 @@ use std::process::{Command, Stdio};
 
 pub mod caps;
 pub mod map;
+pub mod ready;
 pub mod sync;
 pub mod trust;
 

@@ -244,6 +244,7 @@ fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64
         }
     }
     let mut wanted_deps: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut fresh: HashSet<Id> = HashSet::new();
     for i in &f.issues {
         match map::map_issue(i, linked.contains(&i.number), bot.as_deref()) {
             Mapped::Remove => {
@@ -255,6 +256,9 @@ fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64
                 m.trust = trust_of(&i.author, &i.association);
                 let before = store.mirrored_issue(project, i.number)?;
                 let id = store.mirror_issue(project, &m)?;
+                if before.is_none() {
+                    fresh.insert(id);
+                }
                 if m.state == IssueState::Done && before.is_none_or(|b| b.state != IssueState::Done) {
                     store.unblock_dependents(id)?;
                 }
@@ -313,6 +317,7 @@ fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64
         let assoc = c.get("author_association").and_then(Value::as_str).unwrap_or_default();
         store.mirror_comment(issue_id, &ext.to_string(), author, s("body"), s("html_url"), parse_time(s("created_at")), trust_of(author, assoc))?;
     }
+    super::ready::evaluate(store, project, &fresh, now)?;
     Ok(())
 }
 
