@@ -828,6 +828,20 @@ impl Api for StoreApi {
                         depends_on: depends_on(args)?.unwrap_or_default(),
                     })
                     .map_err(|e| e.0)?;
+                if s.project(target).is_ok_and(|p| p.tracker.is_github()) {
+                    let label_ok = i.labels.clone();
+                    let params = json!({"title": i.title, "issue_id": i.id, "labels": label_ok});
+                    let ask = crate::github::outbox::Ask {
+                        project: target,
+                        kind: "issue_create".into(),
+                        number: 0,
+                        text: i.body.clone(),
+                        params,
+                        asked_by: if sup { "supervisor".into() } else { format!("session {session}") },
+                        trusted: !self.on_untrusted_issue(&me),
+                    };
+                    let _ = crate::github::outbox::propose(s, ask);
+                }
                 json!({ "filed": i.id, "title": i.title })
             }
             "update_issue" => {
@@ -1550,6 +1564,13 @@ impl Api for StoreApi {
                     return Err(format!("{b} is already merged and pushed to origin; the autopilot marks the issue done and closes the session"));
                 }
                 match crate::autopilot::ship(s, &other) {
+                    Ok(done) if done.pr.is_some() => {
+                        let target = self.runner.get().ok().and_then(|r| r.titles().and_then(|t| t.target()));
+                        crate::autopilot::after_pr(s, &other, &done, target);
+                        let _ = s.settle_verdicts(other.id);
+                        let _ = s.remove_worker(other.id);
+                        json!({ "branch": done.branch, "pull_request": done.pr.as_ref().map(|p| p.url.clone()), "summary": done.describe() })
+                    }
                     Ok(done) => {
                         let mut out = json!({
                             "branch": done.branch,

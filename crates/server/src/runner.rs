@@ -317,7 +317,10 @@ impl Runner {
                 let branch = match branch.trim() {
                     "" => issue
                         .as_ref()
-                        .map(|i| format!("issue-{}-{}", i.id, branch_slug(&i.title)))
+                        .map(|i| match (i.source, i.external_number) {
+                            (agentbench_core::IssueSource::Github, Some(n)) => format!("issue-{n}-{}", branch_slug(&i.title)),
+                            _ => format!("issue-{}-{}", i.id, branch_slug(&i.title)),
+                        })
                         .ok_or_else(|| bad("name the branch for the new worktree".into()))?,
                     b => b.to_string(),
                 };

@@ -2,6 +2,7 @@ use agentbench_core::{GithubStatus, Project, Tracker};
 use std::process::{Command, Stdio};
 
 pub mod caps;
+pub mod flow;
 pub mod map;
 pub mod outbox;
 pub mod ready;
@@ -53,6 +54,9 @@ pub fn spawn(runner: crate::runner::Runner) {
                 sync_due(&store, &gh, now)
             })
             .await;
+            if let Some(target) = runner.titles().and_then(|t| t.target()) {
+                flow::triage_issues(runner.store(), &target, crate::store::now()).await;
+            }
             match result {
                 Ok(done) if done.iter().any(|(_, o)| *o == Outcome::Synced) => {
                     let _ = runner.store().set_setting("github_poll_changed", &crate::store::now().to_string());

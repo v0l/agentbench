@@ -8,7 +8,16 @@ pub const PAUSED: &str = "github_paused";
 pub const MAX_ATTEMPTS: i64 = 5;
 pub const BACKOFF_MS: i64 = 30_000;
 
-pub const KINDS: [&str; 7] = ["comment", "label_add", "label_remove", "assignee", "issue_state", "review", "merge_request"];
+pub const KINDS: [&str; 8] = ["comment", "label_add", "label_remove", "assignee", "issue_state", "review", "merge_request", "issue_create"];
+
+static UUID: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap());
+
+pub fn sanitize(text: &str) -> String {
+    let text = crate::compact::scrub(text).0;
+    let text = HOST_PATH.replace_all(&text, " (path)");
+    UUID.replace_all(&text, "(id)").into_owned()
+}
 
 static HOST_PATH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:^|[\s`(\[])(?:/home/|/Users/|/root/|/mnt/|/tmp/|~/)[^\s`)\]]+").unwrap());
@@ -45,7 +54,7 @@ fn validate(ask: &Ask) -> Result<(), String> {
     if !KINDS.contains(&ask.kind.as_str()) {
         return Err(format!("unknown kind {}; the kinds are {}", ask.kind, KINDS.join(", ")));
     }
-    if ask.number <= 0 {
+    if ask.number <= 0 && ask.kind != "issue_create" {
         return Err("a post needs the issue or pull request `number`".into());
     }
     let need = |key: &str| {
@@ -55,6 +64,7 @@ fn validate(ask: &Ask) -> Result<(), String> {
         "comment" if ask.text.trim().is_empty() => Err("a comment needs text".into()),
         "label_add" | "label_remove" => need("label"),
         "assignee" => need("login"),
+        "issue_create" => need("title"),
         "issue_state" => {
             let state = ask.params.get("state").and_then(Value::as_str).unwrap_or_default();
             if matches!(state, "closed" | "open") { Ok(()) } else { Err("`state` is closed or open".into()) }
@@ -78,7 +88,7 @@ fn texts(ask: &Ask) -> Vec<String> {
     if let Some(list) = ask.params.get("comments").and_then(Value::as_array) {
         all.extend(list.iter().filter_map(|c| c.get("body").and_then(Value::as_str)).map(str::to_string));
     }
-    all.extend(ask.params.values_of(&["label", "login", "reason"]));
+    all.extend(ask.params.values_of(&["label", "login", "reason", "title"]));
     all
 }
 
@@ -248,6 +258,25 @@ fn send(gh: &str, repo: &str, item: &OutboxItem) -> Sent {
             let _ = std::fs::remove_file(file);
             out
         }
+        "issue_create" => {
+            let body = json!({"title": text_of("title"), "body": format!("{}{}", item.text, footer(repo)), "labels": ["agentbench"]});
+            let file = match temp_file(item.id, &body) {
+                Ok(f) => f,
+                Err(e) => return Sent::Fail(e),
+            };
+            let path = file.to_string_lossy().into_owned();
+            let url = format!("repos/{repo}/issues");
+            let r = super::sync::call(gh, &["api", "--method", "POST", &url, "--input", &path]);
+            let _ = std::fs::remove_file(file);
+            if !r.ok {
+                return classify(&r.stderr);
+            }
+            let number = serde_json::from_str::<Value>(&r.stdout).ok().and_then(|v| v.get("number").and_then(Value::as_i64));
+            match number {
+                Some(n) => Sent::Done(Some(n.to_string())),
+                None => Sent::Fail("gh created the issue but returned no number".into()),
+            }
+        }
         other => Sent::Fail(format!("{other} is not posted by the drain")),
     }
 }
@@ -274,6 +303,15 @@ fn allowed_to_send(store: &Store, item: &OutboxItem, now: i64) -> Result<(), Str
         return Err("held: the hourly post cap is reached".into());
     }
     Ok(())
+}
+
+fn link_created(store: &Store, repo: &str, item: &OutboxItem, external: Option<&str>) {
+    let params: Value = serde_json::from_str(&item.payload).unwrap_or(Value::Null);
+    let (Some(issue), Some(number)) = (params.get("issue_id").and_then(Value::as_i64), external.and_then(|e| e.parse::<i64>().ok())) else {
+        return;
+    };
+    let url = format!("https://github.com/{repo}/issues/{number}");
+    let _ = store.link_external(issue, number, &url, "agentbench");
 }
 
 pub fn drain(store: &Store, gh: &str, now: i64) -> usize {
@@ -314,6 +352,9 @@ pub fn drain(store: &Store, gh: &str, now: i64) -> usize {
         match send(gh, &repo, &item) {
             Sent::Done(external) => {
                 let _ = store.outbox_result(item.id, "done", external.as_deref(), None, attempts, 0);
+                if item.kind == "issue_create" {
+                    link_created(store, &repo, &item, external.as_deref());
+                }
                 posted += 1;
             }
             Sent::Retry(e) if attempts < MAX_ATTEMPTS => {

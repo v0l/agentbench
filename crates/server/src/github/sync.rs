@@ -307,6 +307,16 @@ fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64
         pr.trust = trust_of(&pr.author, &pr.association);
         store.mirror_pr(project, &pr)?;
     }
+    for (n, linked_issue) in store.open_pr_numbers(project)?.into_iter().filter(|(n, _)| !pr_numbers.contains(n)) {
+        let r = call(gh, &["api", &format!("repos/{repo}/pulls/{n}")]);
+        if !r.ok {
+            continue;
+        }
+        let Some(v) = serde_json::from_str::<Value>(&r.stdout).ok() else { continue };
+        let merged = v.get("merged").and_then(Value::as_bool).unwrap_or(false) || v.get("merged_at").is_some_and(|m| !m.is_null());
+        store.set_pr_state(project, n, if merged { "merged" } else { "closed" })?;
+        super::flow::pr_finished(store, project, n, linked_issue, merged);
+    }
     store.close_prs_not_in(project, &pr_numbers)?;
     for (number, nums) in links {
         let mut target = None;

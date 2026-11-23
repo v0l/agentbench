@@ -370,9 +370,32 @@ pub fn pick(issues: &[Issue], room: &Room) -> Picked {
     for i in todo {
         let has = |l: &str| i.labels.iter().any(|x| x.eq_ignore_ascii_case(l));
         let vision = (room.vision)(i.project_id);
+        let mirrored = i.source == agentbench_core::IssueSource::Github;
         let goal_active = |v: &agentbench_core::Vision| {
             i.goal.as_deref().and_then(|g| v.goal(g)).is_some_and(|g| g.status == agentbench_core::GoalStatus::Active)
         };
+        if mirrored {
+            if has(NEEDS_USER) {
+                out.skipped.push((i.id, "labelled needs-user"));
+            } else if has("parked") {
+                out.skipped.push((i.id, "labelled parked"));
+            } else if !i.waiting_on.is_empty() {
+                out.waiting.push((i.id, i.waiting_on.clone()));
+            } else if has(BLOCKED) {
+                out.skipped.push((i.id, "labelled blocked"));
+            } else if room.live.contains(&i.id) {
+                out.skipped.push((i.id, "it already has a live session"));
+            } else if !(room.git_repo)(i.project_id) {
+                out.skipped.push((i.id, "its project is not a git repo"));
+            } else if running >= room.cap || *by_project.get(&i.project_id).unwrap_or(&0) >= room.project_cap {
+                continue;
+            } else {
+                running += 1;
+                *by_project.entry(i.project_id).or_default() += 1;
+                out.issues.push(i.clone());
+            }
+            continue;
+        }
         if vision.is_none() {
             if !out.no_vision.contains(&i.project_id) {
                 out.no_vision.push(i.project_id);
@@ -902,6 +925,11 @@ impl Autopilot {
             let name = s.issue_id.map(|i| format!("#{i}")).unwrap_or_else(|| format!("session {}", s.id));
             let line = verdict_line(&v);
             match ship(store, s) {
+                Ok(shipped) if shipped.pr.is_some() => {
+                    after_pr(store, s, &shipped, self.runner.titles().and_then(|t| t.target()));
+                    let _ = store.settle_verdicts(s.id);
+                    self.log(Some(s.project_id), s.issue_id, &format!("{name} {}", shipped.describe()));
+                }
                 Ok(shipped) if matches!(shipped.pushed, Some(Err(_))) => {
                     self.log_once(
                         Some(s.project_id),
@@ -1278,6 +1306,13 @@ impl Autopilot {
             return;
         }
         match ship(store, session) {
+            Ok(shipped) if shipped.pr.is_some() => {
+                self.merge_ok(w.session);
+                after_pr(store, session, &shipped, self.runner.titles().and_then(|t| t.target()));
+                let _ = store.settle_verdicts(w.session);
+                let _ = store.remove_worker(w.session);
+                self.log(Some(w.project), Some(w.issue), &format!("#{}: {}", w.issue, shipped.describe()));
+            }
             Ok(shipped) if matches!(shipped.pushed, Some(Err(_))) => {
                 let why = format!("{}; the issue stays in review until it is pushed", shipped.describe());
                 let _ = store.set_worker(w.session, "merge_failed", true);
@@ -1459,6 +1494,11 @@ impl Autopilot {
                 Ok(crate::runner::Claim::Started(_)) => {
                     started += 1;
                     self.set_state(issue.id, IssueState::Doing);
+                    if issue.source == agentbench_core::IssueSource::Github
+                        && let Some(n) = issue.external_number
+                    {
+                        crate::github::flow::announce_start(store, issue, &format!("issue-{n}-{}", agentbench_core::branch_slug(&issue.title)));
+                    }
                     self.log(
                         Some(issue.project_id),
                         Some(issue.id),
@@ -1602,14 +1642,30 @@ fn explain(un: &Unshipped, branch: &str, main: &str) -> Option<Explained> {
 }
 
 #[derive(Debug)]
+pub struct PullRequestOpened {
+    pub url: String,
+    pub base: String,
+}
+
+#[derive(Debug)]
 pub struct Shipped {
     pub branch: String,
     pub pushed: Option<Result<String, String>>,
     pub deployed: Option<Result<String, String>>,
+    pub pr: Option<PullRequestOpened>,
+}
+
+pub fn after_pr(store: &Store, session: &Session, shipped: &Shipped, target: Option<crate::titles::Target>) {
+    let (Some(pr), Some(issue)) = (&shipped.pr, session.issue_id) else { return };
+    let reply = last_reply(store, session.id);
+    crate::github::flow::pr_opened(store, issue, &pr.url, &shipped.branch, &pr.base, &reply, target);
 }
 
 impl Shipped {
     pub fn describe(&self) -> String {
+        if let Some(pr) = &self.pr {
+            return format!("{} not merged, pull request opened: {}", self.branch, pr.url);
+        }
         if let Some(Err(e)) = &self.pushed
             && e.contains(PROTECTED_PR)
         {
@@ -1659,6 +1715,17 @@ pub fn ship(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
     }
     if crate::git::is_dirty(Path::new(&tree.path)).unwrap_or(false) {
         return Err(Unshipped::WorktreeDirty(format!("{branch} has uncommitted changes")));
+    }
+    if project.tracker.is_github() && project.merge_mode == agentbench_core::MergeMode::Pr {
+        let Some(remote) = crate::git::push_remote(main) else {
+            return Err(fail(format!("{branch} cannot become a pull request: the project has no git remote")));
+        };
+        crate::git::push(main, &remote, &branch).map_err(|e| fail(format!("could not push {branch} for a pull request: {}", clip(&e, 200))))?;
+        let issue = session.issue_id.and_then(|i| store.issue(i).ok());
+        let (title, body) = crate::github::flow::pr_title_and_body(issue.as_ref(), &branch);
+        let url = crate::git::open_pull_request(main, &branch, &main_name, &title, &body)
+            .map_err(|e| fail(format!("no pull request could be opened: {}", clip(&e, 200))))?;
+        return Ok(Shipped { branch, pushed: None, deployed: None, pr: Some(PullRequestOpened { url, base: main_name }) });
     }
     let temp = if on_default {
         None
@@ -1717,7 +1784,7 @@ pub fn ship(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
         }
         _ => None,
     };
-    Ok(Shipped { branch, pushed, deployed })
+    Ok(Shipped { branch, pushed, deployed, pr: None })
 }
 
 pub const PROTECTED_PR: &str = "protected, PR opened";

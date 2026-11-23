@@ -1464,6 +1464,7 @@ impl Store {
 
     pub fn update_issue(&self, id: Id, patch: &IssuePatch) -> Result<Issue> {
         let mut issue = self.issue(id)?;
+        let before = issue.clone();
         let was_done = issue.state == IssueState::Done;
         if let Some(project) = patch.project.filter(|p| *p != issue.project_id) {
             self.project(project)?;
@@ -1533,13 +1534,47 @@ impl Store {
         }
         let issue = self.issue(id)?;
         if issue.source == IssueSource::Github {
-            self.enqueue_outbox(
-                issue.project_id,
-                "update_issue",
-                &serde_json::json!({"number": issue.external_number, "issue_id": id, "patch": patch}).to_string(),
-            )?;
+            crate::github::flow::mirror_update(self, &before, &issue);
         }
         Ok(issue)
+    }
+
+    pub fn open_pr_numbers(&self, project_id: Id) -> Result<Vec<(i64, Option<Id>)>> {
+        let db = self.db();
+        let mut stmt = db.prepare("SELECT number, issue_id FROM pull_requests WHERE project_id = ?1 AND state = 'open' ORDER BY number")?;
+        let rows = stmt.query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn pr_state(&self, project_id: Id, number: i64) -> Result<Option<String>> {
+        Ok(self
+            .db()
+            .query_row("SELECT state FROM pull_requests WHERE project_id = ?1 AND number = ?2", params![project_id, number], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn set_pr_state(&self, project_id: Id, number: i64, state: &str) -> Result<()> {
+        self.db().execute(
+            "UPDATE pull_requests SET state = ?3 WHERE project_id = ?1 AND number = ?2",
+            params![project_id, number, state],
+        )?;
+        Ok(())
+    }
+
+    pub fn link_external(&self, issue_id: Id, number: i64, url: &str, author: &str) -> Result<()> {
+        let issue = self.issue(issue_id)?;
+        if let Some(other) = self.mirrored_issue(issue.project_id, number)?
+            && other.id != issue_id
+        {
+            self.delete_issue(issue_id)?;
+            return Ok(());
+        }
+        let db = self.db();
+        db.execute(
+            "UPDATE issues SET source = 'github', external_number = ?2, external_url = ?3, external_author = ?4 WHERE id = ?1",
+            params![issue_id, number, url, author],
+        )?;
+        Store::changed(&db, "issue", issue_id)
     }
 
     pub fn enqueue_outbox(&self, project_id: Id, kind: &str, payload: &str) -> Result<Id> {
