@@ -3,6 +3,10 @@ use agentbench_core::{Entry, IssueState, SessionId};
 use serde_json::Value;
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "ledger_tests.rs"]
+mod tests;
+
 pub const MAX_NUDGES: u32 = 3;
 const PENDING_AFTER_MS: i64 = 60_000;
 const CLIP: usize = 160;
@@ -36,25 +40,31 @@ pub fn delivered(store: &Store, supervisor: SessionId, source: &str, worker: Opt
         return;
     }
     let target = worker.map(|w| w.to_string());
+    let already = store.open_items(supervisor).unwrap_or_default().iter().any(|i| {
+        i.kind == kind && i.target == target && (kind != "user" && i.text == clip(text) || kind == "judge")
+    });
+    if already {
+        if kind == "judge" {
+            let stale: Vec<_> = store
+                .open_items(supervisor)
+                .unwrap_or_default()
+                .iter()
+                .filter(|i| i.kind == kind && i.target == target)
+                .map(|i| i.id)
+                .collect();
+            let _ = store.close_open_items(&stale);
+        } else {
+            return;
+        }
+    }
     let head = (kind == "judge")
         .then(|| worker.and_then(|w| store.session(w).ok()).and_then(|s| crate::autopilot::head_of(store, &s)))
         .flatten();
     let _ = store.add_open_item(supervisor, kind, target.as_deref(), head.as_deref(), &clip(text));
 }
 
-pub fn duplicate_judge(store: &Store, supervisor: SessionId, worker: SessionId) -> bool {
-    let Ok(session) = store.session(worker) else { return false };
-    if crate::autopilot::already_judged(store, &session) {
-        return true;
-    }
-    let head = crate::autopilot::head_of(store, &session);
-    let target = worker.to_string();
-    head.is_some()
-        && store
-            .open_items(supervisor)
-            .unwrap_or_default()
-            .iter()
-            .any(|i| i.kind == "judge" && i.target.as_deref() == Some(target.as_str()) && i.head == head)
+pub fn duplicate_judge(store: &Store, worker: SessionId) -> bool {
+    store.session(worker).is_ok_and(|s| crate::autopilot::already_judged(store, &s))
 }
 
 fn close_where(store: &Store, supervisor: SessionId, pick: impl Fn(&OpenItem) -> bool) {
@@ -96,8 +106,7 @@ fn target_settled(store: &Store, target: SessionId, kind: &str) -> bool {
     };
     let Some(branch) = tree.branch.as_deref().filter(|_| !tree.main) else { return false };
     let main = Path::new(&project.path);
-    let own = crate::git::head(Path::new(&tree.path));
-    own.is_some() && own != crate::git::head(main) && crate::git::is_merged(main, branch)
+    crate::git::is_merged(main, branch)
 }
 
 pub fn sweep(store: &Store, supervisor: SessionId) {
@@ -179,12 +188,20 @@ pub enum Hold {
     Clear,
 }
 
+pub const HOLD_SETTING: &str = "supervisor_hold_open_items";
+
+fn holds(kind: &str) -> bool {
+    matches!(kind, "judge" | "check_in" | "main_dirty" | "question" | "user")
+}
+
 pub fn at_turn_end(store: &Store, supervisor: SessionId, now: i64) -> Hold {
     close_replied(store, supervisor);
     sweep(store, supervisor);
-    let open = store.open_items(supervisor).unwrap_or_default();
+    let off = store.setting(HOLD_SETTING).ok().flatten().is_some_and(|v| v == "0");
+    let open: Vec<OpenItem> =
+        store.open_items(supervisor).unwrap_or_default().into_iter().filter(|i| holds(&i.kind)).collect();
     let key = nudges_key(supervisor);
-    if open.is_empty() {
+    if open.is_empty() || off {
         let _ = store.set_setting(&key, "0");
         return Hold::Clear;
     }
