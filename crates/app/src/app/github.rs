@@ -211,9 +211,10 @@ impl App {
             if !repo.is_empty() {
                 Line::new().value(&repo).size(11.5).show(ui);
             }
-            ui.push_id("scope", |ui| {
-                segments(ui, &mut self.scope, &[(Scope::Project, "this project", None), (Scope::Everything, "all projects", None)]);
-            });
+        });
+        ui.add_space(4.0);
+        ui.push_id("scope", |ui| {
+            segments(ui, &mut self.scope, &[(Scope::Project, "this project", None), (Scope::Everything, "all projects", None)]);
         });
         ui.add_space(6.0);
         let pulls_known = self.server_has(pid, API_PR_REVIEW);
@@ -430,7 +431,7 @@ impl App {
                     if !item.trusted {
                         chip(ui, "from untrusted input", WARN, true);
                     }
-                    if !item.approved_by.is_empty() {
+                    if !item.approved_by.is_empty() && item.status != "failed" {
                         chip(ui, &format!("approved by {}", item.approved_by), LEGEND, false);
                     }
                 });
