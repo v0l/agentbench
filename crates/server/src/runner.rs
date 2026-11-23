@@ -432,10 +432,8 @@ impl Runner {
         if level == ModelLevel::Med {
             return Ok(LevelChoice { session: None, quota: self.quotas.start_model() });
         }
-        let concrete = self
-            .quotas
-            .level_model(word)
-            .or_else(|| crate::providers::level_model(&self.store, agent, word));
+        let concrete = crate::providers::level_model(&self.store, agent, word)
+            .or_else(|| self.quotas.level_model(word));
         match concrete {
             Some(quota) => Ok(LevelChoice { session: Some(word.into()), quota }),
             None => Err(format!(
