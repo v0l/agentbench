@@ -206,6 +206,85 @@ pub fn merge_branch(main: &Path, branch: &str) -> Result<(), String> {
     Err(if text.is_empty() { format!("git merge --no-edit {branch} failed") } else { text.to_string() })
 }
 
+pub fn default_branch(main: &Path, configured: Option<&str>) -> Option<String> {
+    if let Some(b) = configured.filter(|b| !b.is_empty()) {
+        return Some(b.to_string());
+    }
+    if let Ok(head) = git(main, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        && let Some(b) = head.strip_prefix("origin/")
+        && branch_exists(main, b)
+    {
+        return Some(b.to_string());
+    }
+    for b in ["main", "master"] {
+        if branch_exists(main, b) {
+            return Some(b.to_string());
+        }
+    }
+    current_branch(main)
+}
+
+pub struct TempTree {
+    main: PathBuf,
+    pub path: PathBuf,
+}
+
+impl TempTree {
+    pub fn add(main: &Path, branch: &str) -> Result<TempTree, String> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("agentbench-merge-{}-{nanos}", std::process::id()));
+        git(main, &["worktree", "add", &path.to_string_lossy(), branch])?;
+        Ok(TempTree { main: main.to_path_buf(), path })
+    }
+}
+
+impl Drop for TempTree {
+    fn drop(&mut self) {
+        if remove_worktree(&self.main, &self.path, true).is_err() {
+            let _ = std::fs::remove_dir_all(&self.path);
+            let _ = git(&self.main, &["worktree", "prune"]);
+        }
+    }
+}
+
+pub fn reset_hard(dir: &Path, rev: &str) -> Result<(), String> {
+    git(dir, &["reset", "--hard", "-q", rev]).map(|_| ())
+}
+
+pub fn is_protected_rejection(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.contains("repository rule violations")
+        || t.contains("protected branch")
+        || t.contains("gh006")
+        || t.contains("gh013")
+}
+
+pub fn open_pull_request(dir: &Path, branch: &str, base: &str, title: &str, body: &str) -> Result<String, String> {
+    let out = Command::new(std::env::var("AGENTBENCH_GH").unwrap_or_else(|_| "gh".into()))
+        .current_dir(dir)
+        .args(["pr", "create", "--head", branch, "--base", base, "--title", title, "--body", body])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run gh: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let url = |text: &str| {
+        text.split_whitespace().find(|w| w.starts_with("http://") || w.starts_with("https://")).map(str::to_string)
+    };
+    if out.status.success() {
+        return url(&stdout).ok_or_else(|| "gh pr create printed no URL".to_string());
+    }
+    if stderr.contains("already exists")
+        && let Some(u) = url(&stderr)
+    {
+        return Ok(u);
+    }
+    Err(stderr.trim().to_string())
+}
+
 pub fn branch_tip(main: &Path, branch: &str) -> Option<String> {
     git(main, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).ok()
 }

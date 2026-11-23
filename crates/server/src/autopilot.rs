@@ -1591,6 +1591,11 @@ pub struct Shipped {
 
 impl Shipped {
     pub fn describe(&self) -> String {
+        if let Some(Err(e)) = &self.pushed
+            && e.contains(PROTECTED_PR)
+        {
+            return format!("{} not merged, {}", self.branch, clip(e, 300));
+        }
         let mut out = format!("merged {} into the main branch", self.branch);
         match &self.pushed {
             Some(Ok(to)) => out.push_str(&format!(", pushed to {to}")),
@@ -1617,12 +1622,8 @@ pub fn ship(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
         return Err(Unshipped::NoBranch);
     };
     let main = Path::new(&project.path);
-    if let Some(want) = &project.branch
-        && crate::git::current_branch(main).as_deref() != Some(want.as_str())
-    {
-        return Err(Unshipped::WrongBranch(format!("the main checkout is not on {want}")));
-    }
-    let main_name = project.branch.clone().or_else(|| crate::git::current_branch(main)).unwrap_or_default();
+    let main_name = crate::git::default_branch(main, project.branch.as_deref()).unwrap_or_default();
+    let on_default = crate::git::current_branch(main).as_deref() == Some(main_name.as_str());
     let Some(tip) = crate::git::branch_tip(main, &branch) else {
         return Err(Unshipped::MissingBranch(format!("the branch {branch} does not exist in {main_name}")));
     };
@@ -1631,46 +1632,89 @@ pub fn ship(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
     {
         return Err(Unshipped::MissingBranch(format!("the tip of {branch} moved after the verdict was given")));
     }
-    let blocking = crate::git::blocking_dirt(main, Some(&branch));
-    if !blocking.is_empty() {
-        return Err(Unshipped::MainDirty(blocking.kind().to_string(), blocking.paths()));
+    if on_default {
+        let blocking = crate::git::blocking_dirt(main, Some(&branch));
+        if !blocking.is_empty() {
+            return Err(Unshipped::MainDirty(blocking.kind().to_string(), blocking.paths()));
+        }
     }
     if crate::git::is_dirty(Path::new(&tree.path)).unwrap_or(false) {
         return Err(Unshipped::WorktreeDirty(format!("{branch} has uncommitted changes")));
     }
-    if let Some(files) = crate::git::conflicts_with(main, &branch) {
+    let temp = if on_default {
+        None
+    } else {
+        let on = crate::git::current_branch(main).unwrap_or_else(|| "a detached head".into());
+        match crate::git::TempTree::add(main, &main_name) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                return Err(Unshipped::WrongBranch(format!(
+                    "the main checkout is on {on}, not {main_name}, and a temporary worktree of {main_name} could not be made ({}); add a worktree on {main_name} for the merge, or switch the main checkout to {main_name}",
+                    clip(&e, 160)
+                )));
+            }
+        }
+    };
+    let work: &Path = temp.as_ref().map(|t| t.path.as_path()).unwrap_or(main);
+    if let Some(files) = crate::git::conflicts_with(work, &branch) {
         return Err(Unshipped::Conflict(files));
     }
-    if !crate::git::is_merged(main, &tip) {
-        crate::git::merge_branch(main, &branch).map_err(fail)?;
+    let before = crate::git::head(work);
+    if !crate::git::is_merged(work, &tip) {
+        crate::git::merge_branch(work, &branch).map_err(fail)?;
     }
-    if !crate::git::is_merged(main, &tip) {
-        return Err(fail(format!("{branch} is not in the main branch after the merge")));
+    if !crate::git::is_merged(work, &tip) {
+        return Err(fail(format!("{branch} is not in {main_name} after the merge")));
     }
-    let target = project.branch.clone().or_else(|| crate::git::current_branch(main));
-    let pushed = match (crate::git::push_remote(main), target) {
-        (Some(remote), Some(b)) => Some(
-            crate::git::push(main, &remote, &b)
+    let pushed = match crate::git::push_remote(main) {
+        Some(remote) => Some(
+            crate::git::push(work, &remote, &main_name)
                 .and_then(|()| {
-                    let local = crate::git::head(main);
-                    match crate::git::remote_branch_tip(main, &remote, &b) {
+                    let local = crate::git::head(work);
+                    match crate::git::remote_branch_tip(main, &remote, &main_name) {
                         Some(r) if Some(&r) == local.as_ref() => Ok(()),
-                        _ => Err(format!("{remote}/{b} is not at the local head after the push")),
+                        _ => Err(format!("{remote}/{main_name} is not at the local head after the push")),
                     }
                 })
-                .map(|()| format!("{remote}/{b}")),
+                .map(|()| format!("{remote}/{main_name}"))
+                .map_err(|e| {
+                    if crate::git::is_protected_rejection(&e) {
+                        if let Some(b) = &before {
+                            let _ = crate::git::reset_hard(work, b);
+                        }
+                        protected_pull_request(store, session, main, &remote, &branch, &main_name)
+                    } else {
+                        e
+                    }
+                }),
         ),
-        _ => None,
+        None => None,
     };
     let deployed = match &project.deploy {
         Some(cmd) if pushed.as_ref().is_none_or(Result::is_ok)
             && project.allows(default_level(store), Risky::Deploy) =>
         {
-            Some(run_deploy(main, cmd, DEPLOY_LIMIT))
+            Some(run_deploy(work, cmd, DEPLOY_LIMIT))
         }
         _ => None,
     };
     Ok(Shipped { branch, pushed, deployed })
+}
+
+pub const PROTECTED_PR: &str = "protected, PR opened";
+
+fn protected_pull_request(store: &Store, session: &Session, main: &Path, remote: &str, branch: &str, base: &str) -> String {
+    if let Err(e) = crate::git::push(main, remote, branch) {
+        return format!("{base} is protected and the branch {branch} could not be pushed for a pull request: {}", clip(&e, 200));
+    }
+    let (title, body) = match session.issue_id.and_then(|i| store.issue(i).ok()) {
+        Some(i) => (format!("{} (#{})", i.title, i.id), i.body),
+        None => (branch.to_string(), String::new()),
+    };
+    match crate::git::open_pull_request(main, branch, base, &title, &body) {
+        Ok(url) => format!("{base} is protected, PR opened: {url}"),
+        Err(e) => format!("{base} is protected and no pull request could be opened: {}", clip(&e, 200)),
+    }
 }
 
 pub fn run_deploy(dir: &Path, command: &str, limit: Duration) -> Result<String, String> {
@@ -3469,6 +3513,107 @@ mod tests {
         assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
         assert!(!crate::git::branch_exists(&r.repo, tree.branch.as_deref().unwrap()), "branch deleted");
         assert!(r.store.workers().unwrap().is_empty());
+    }
+
+    fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn protect_main(bare: &std::path::Path) {
+        let hook = bare.join("hooks/pre-receive");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nwhile read old new ref; do\n  if [ \"$ref\" = refs/heads/main ]; then echo 'remote: error: GH013: Repository rule violations found for refs/heads/main.' >&2; exit 1; fi\ndone\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn stub_gh(dir: &std::path::Path, log: &std::path::Path) -> std::path::PathBuf {
+        let gh = dir.join("gh-stub");
+        std::fs::write(&gh, format!("#!/bin/sh\necho \"$@\" >> {}\necho https://github.com/o/r/pull/9\n", log.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        gh
+    }
+
+    async fn judged_feature(r: &Rig) -> (Id, agentbench_core::SessionId, agentbench_core::Worktree) {
+        let a = todo(r, "a", 0, &[]);
+        let sid = started_by_boss(r, a).await;
+        settle(r).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        judge(r, sid, "concluded_pass", None).unwrap();
+        (a, sid, tree)
+    }
+
+    fn merge_tool(r: &Rig, sid: agentbench_core::SessionId) -> Result<serde_json::Value, String> {
+        r.ap.runner.tools().call("merge_branch", &serde_json::json!({"id": sid.to_string()}), r.boss.unwrap())
+    }
+
+    #[tokio::test]
+    async fn merge_branch_leaves_a_feature_branch_checkout_alone_and_merges_on_the_default_branch() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let (a, sid, tree) = judged_feature(&r).await;
+        git_in(&r.repo, &["push", "-q", "origin", "main"]);
+        git_in(&r.repo, &["checkout", "-q", "-b", "pr/mine"]);
+        std::fs::write(r.repo.join("mine.txt"), "m").unwrap();
+        git_in(&r.repo, &["add", "."]);
+        git_in(&r.repo, &["commit", "-qm", "mine"]);
+        std::fs::write(r.repo.join("scratch.txt"), "s").unwrap();
+        let tip = git_out(&r.repo, &["rev-parse", "pr/mine"]);
+        let out = merge_tool(&r, sid).unwrap();
+        assert_eq!(git_out(&r.repo, &["rev-parse", "pr/mine"]), tip, "{out}");
+        assert_eq!(git_out(&r.repo, &["rev-parse", "--abbrev-ref", "HEAD"]), "pr/mine");
+        assert!(r.repo.join("scratch.txt").exists());
+        assert!(!r.repo.join("feature.txt").exists());
+        assert!(remote_has(&bare, "feature.txt"), "default branch pushed: {out}");
+        assert!(git_out(&bare, &["branch", "--list", "pr/mine"]).is_empty(), "no other branch pushed");
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(!std::path::Path::new(&tree.path).exists());
+        assert_eq!(git_out(&r.repo, &["worktree", "list"]).lines().count(), 1, "temporary worktree removed");
+    }
+
+    #[tokio::test]
+    async fn merge_branch_opens_a_pull_request_when_the_default_branch_is_protected() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let (a, sid, tree) = judged_feature(&r).await;
+        git_in(&r.repo, &["push", "-q", "origin", "main"]);
+        protect_main(&bare);
+        let log = r._dir.path().join("gh.log");
+        let gh = stub_gh(r._dir.path(), &log);
+        unsafe { std::env::set_var("AGENTBENCH_GH", &gh) };
+        let before = git_out(&r.repo, &["rev-parse", "main"]);
+        let out = merge_tool(&r, sid).unwrap();
+        unsafe { std::env::remove_var("AGENTBENCH_GH") };
+        let summary = out["summary"].as_str().unwrap().to_string();
+        assert!(summary.contains("protected, PR opened") && summary.contains("/pull/9"), "{summary}");
+        let called = std::fs::read_to_string(&log).unwrap();
+        assert!(called.contains("pr create") && called.contains(&tree.branch.clone().unwrap()), "{called}");
+        assert!(crate::git::branch_exists(&r.repo, tree.branch.as_deref().unwrap()), "issue branch survives");
+        assert_eq!(git_out(&r.repo, &["rev-parse", "main"]), before, "local default branch not advanced");
+        assert!(!remote_has(&bare, "feature.txt"));
+        assert!(!git_out(&bare, &["branch", "--list", tree.branch.as_deref().unwrap()]).is_empty(), "issue branch pushed");
+        assert_ne!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("protected, PR opened")));
+    }
+
+    #[tokio::test]
+    async fn merge_branch_still_merges_pushes_and_deletes_the_branch_with_unrelated_untracked_files() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let (a, sid, tree) = judged_feature(&r).await;
+        std::fs::write(r.repo.join("notes.log"), "n").unwrap();
+        merge_tool(&r, sid).unwrap();
+        assert!(remote_has(&bare, "feature.txt"));
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(!crate::git::branch_exists(&r.repo, tree.branch.as_deref().unwrap()));
+        assert!(r.repo.join("notes.log").exists());
     }
 
     #[tokio::test]

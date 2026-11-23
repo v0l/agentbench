@@ -1489,6 +1489,12 @@ impl Api for StoreApi {
                             "deployed": done.deployed.as_ref().map(|r| r.is_ok()),
                             "summary": done.describe(),
                         });
+                        if let (Some(Err(_)), Some(i)) = (&done.pushed, other.issue_id) {
+                            let _ = s.add_comment(
+                                i,
+                                &NewComment { author: Some("supervisor".into()), body: format!("merge_branch: {}", done.describe()) },
+                            );
+                        }
                         if !matches!(done.pushed, Some(Err(_))) {
                             if let Some(i) = other.issue_id {
                                 s.update_issue(i, &IssuePatch { state: Some(IssueState::Done), ..Default::default() })
