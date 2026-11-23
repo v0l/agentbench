@@ -18,7 +18,7 @@ pub fn queue(store: &Store, project: Id, kind: &str, number: i64, text: &str, pa
     outbox::propose(store, ask).ok()
 }
 
-fn trusted_target(store: &Store, issue: &Issue) -> bool {
+pub(crate) fn trusted_target(store: &Store, issue: &Issue) -> bool {
     !issue.trust.is_untrusted() && issue.external_number.is_none_or(|n| !store.target_trust(issue.project_id, n).is_ok_and(|t| t.is_untrusted()))
 }
 
@@ -42,7 +42,7 @@ pub fn announce_start(store: &Store, issue: &Issue, branch: &str) {
     queue(store, issue.project_id, "comment", number, &text, json!({}), trusted_target(store, issue));
 }
 
-fn fallback_summary(reply: &str) -> String {
+pub(crate) fn fallback_summary(reply: &str) -> String {
     let kept: Vec<&str> = reply
         .lines()
         .map(str::trim)

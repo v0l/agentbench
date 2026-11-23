@@ -804,8 +804,9 @@ esac
         let out = store.outbox(Some(p)).unwrap();
         assert_eq!(out.iter().map(|o| o.kind.as_str()).collect::<Vec<_>>(), ["label_add", "comment"]);
         assert_eq!(out[0].status, "proposed");
-        assert_eq!(out[1].status, "pending");
-        assert!(out[1].payload.contains("\"number\":4"));
+        assert_eq!(out[1].status, "proposed");
+        assert_eq!(out[1].number, 4);
+        assert_eq!(out[1].text, "note");
         let internal = store.add_issue(&agentbench_core::NewIssue { project_id: p, title: "mine".into(), ..Default::default() }).unwrap();
         store.update_issue(internal.id, &IssuePatch { priority: Some(2), ..Default::default() }).unwrap();
         assert_eq!(store.outbox(None).unwrap().len(), 2);

@@ -1639,15 +1639,6 @@ impl Store {
         Store::changed(&db, "issue", issue_id)
     }
 
-    pub fn enqueue_outbox(&self, project_id: Id, kind: &str, payload: &str) -> Result<Id> {
-        let db = self.db();
-        db.execute(
-            "INSERT INTO outbox (project_id, kind, payload, status, created_at) VALUES (?1, ?2, ?3, 'pending', ?4)",
-            params![project_id, kind, payload, now()],
-        )?;
-        Ok(db.last_insert_rowid())
-    }
-
     pub fn outbox(&self, project_id: Option<Id>) -> Result<Vec<OutboxItem>> {
         let db = self.db();
         let mut stmt = db.prepare("SELECT * FROM outbox WHERE (?1 IS NULL OR project_id = ?1) ORDER BY id")?;
@@ -2009,11 +2000,11 @@ impl Store {
         let comment = self.add_comment_local(issue_id, new)?;
         let issue = self.issue(issue_id)?;
         if issue.source == IssueSource::Github {
-            self.enqueue_outbox(
-                issue.project_id,
-                "comment",
-                &serde_json::json!({"number": issue.external_number, "issue_id": issue_id, "body": comment.body, "author": comment.author}).to_string(),
-            )?;
+            if let Some(number) = issue.external_number {
+                let text = crate::github::flow::fallback_summary(&comment.body);
+                let trusted = crate::github::flow::trusted_target(self, &issue);
+                crate::github::flow::queue(self, issue.project_id, "comment", number, &text, serde_json::json!({"issue_id": issue_id}), trusted);
+            }
         }
         Ok(comment)
     }
