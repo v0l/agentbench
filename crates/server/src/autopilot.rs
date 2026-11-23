@@ -1797,6 +1797,11 @@ mod tests {
             depends_on: vec![],
             waiting_on: vec![],
             blocks: vec![],
+            source: Default::default(),
+            external_number: None,
+            external_url: None,
+            external_author: None,
+            external_updated_at: None,
             created_at: created,
             updated_at: created,
         }

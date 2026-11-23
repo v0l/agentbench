@@ -3642,6 +3642,11 @@ mod tests {
             depends_on: vec![],
             waiting_on: vec![],
             blocks: vec![],
+            source: Default::default(),
+            external_number: None,
+            external_url: None,
+            external_author: None,
+            external_updated_at: None,
             created_at: 0,
             updated_at: id,
         }
@@ -3684,6 +3689,8 @@ mod tests {
             automation: None,
             risky: vec![],
             deploy: None,
+            tracker: Default::default(),
+            post_mode: Default::default(),
         }
     }
 

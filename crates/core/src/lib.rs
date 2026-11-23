@@ -298,6 +298,96 @@ pub struct Project {
     pub risky: Vec<Risky>,
     #[serde(default)]
     pub deploy: Option<String>,
+    #[serde(default)]
+    pub tracker: Tracker,
+    #[serde(default)]
+    pub post_mode: PostMode,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Tracker {
+    Github {
+        #[serde(default)]
+        repo: String,
+    },
+    #[default]
+    #[serde(other)]
+    Internal,
+}
+
+impl Tracker {
+    pub fn is_github(&self) -> bool {
+        matches!(self, Tracker::Github { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostMode {
+    Auto,
+    Off,
+    #[default]
+    #[serde(other)]
+    Draft,
+}
+
+impl PostMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PostMode::Draft => "draft",
+            PostMode::Auto => "auto",
+            PostMode::Off => "off",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PostMode> {
+        [PostMode::Draft, PostMode::Auto, PostMode::Off].into_iter().find(|m| m.as_str() == s)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueSource {
+    Github,
+    #[default]
+    #[serde(other)]
+    Internal,
+}
+
+impl IssueSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IssueSource::Internal => "internal",
+            IssueSource::Github => "github",
+        }
+    }
+
+    pub fn parse(s: &str) -> IssueSource {
+        if s == "github" { IssueSource::Github } else { IssueSource::Internal }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GithubStatus {
+    #[serde(default)]
+    pub tracker: Tracker,
+    #[serde(default)]
+    pub post_mode: PostMode,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub authenticated: bool,
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub write_access: Option<bool>,
+    #[serde(default)]
+    pub rate_limit_remaining: Option<i64>,
+    #[serde(default)]
+    pub last_sync: Option<i64>,
+    #[serde(default)]
+    pub problem: Option<String>,
 }
 
 impl Project {
@@ -476,6 +566,16 @@ pub struct Issue {
     pub waiting_on: Vec<Id>,
     #[serde(default)]
     pub blocks: Vec<Id>,
+    #[serde(default)]
+    pub source: IssueSource,
+    #[serde(default)]
+    pub external_number: Option<i64>,
+    #[serde(default)]
+    pub external_url: Option<String>,
+    #[serde(default)]
+    pub external_author: Option<String>,
+    #[serde(default)]
+    pub external_updated_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -487,6 +587,12 @@ pub struct Comment {
     pub author: String,
     pub body: String,
     pub created_at: i64,
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub external_author: Option<String>,
+    #[serde(default)]
+    pub external_url: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1515,6 +1621,10 @@ pub struct ProjectPatch {
     pub risky: Option<Vec<Risky>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracker: Option<Tracker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_mode: Option<PostMode>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2055,7 +2165,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 6;
+pub const API_VERSION: u32 = 7;
+pub const API_GITHUB_FLOW: u32 = 7;
 pub const API_GLOBAL_NOTE: u32 = 6;
 pub const API_PROMPTS: u32 = 5;
 pub const API_ISSUE_DEPS: u32 = 2;
@@ -2372,6 +2483,11 @@ mod tests {
             depends_on: vec![],
             waiting_on: vec![],
             blocks: vec![],
+            source: Default::default(),
+            external_number: None,
+            external_url: None,
+            external_author: None,
+            external_updated_at: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -2381,6 +2497,9 @@ mod tests {
             author: "kieran".into(),
             body: "only on firefox".into(),
             created_at: 0,
+            external_id: None,
+            external_author: None,
+            external_url: None,
         }];
         let p = issue_prompt(&issue, &comments);
         assert!(p.starts_with("Work on issue #7: Fix login\n"));

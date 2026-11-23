@@ -7,6 +7,7 @@ pub mod checkin;
 pub mod cli;
 pub mod compact;
 pub mod git;
+pub mod github;
 pub mod groom;
 pub mod guards;
 pub mod host;

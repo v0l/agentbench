@@ -1,5 +1,5 @@
 use agentbench_core::{
-    Automation, Comment, Entry, Id, Issue, IssuePatch, IssueState, Message, NewComment, NewIssue,
+    Automation, Comment, Entry, Id, Issue, IssuePatch, IssueSource, IssueState, Message, PostMode, Tracker, NewComment, NewIssue,
     Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Vision, VisionBody, Worktree,
 };
 use crate::memory::{Memory, Scope};
@@ -300,7 +300,45 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("issues", "goal", "TEXT"),
     ("issues", "off_vision", "INTEGER NOT NULL DEFAULT 0"),
     ("sessions", "released", "INTEGER NOT NULL DEFAULT 0"),
+    ("projects", "tracker", "TEXT NOT NULL DEFAULT 'internal'"),
+    ("projects", "github_repo", "TEXT"),
+    ("projects", "post_mode", "TEXT NOT NULL DEFAULT 'draft'"),
+    ("issues", "source", "TEXT NOT NULL DEFAULT 'internal'"),
+    ("issues", "external_number", "INTEGER"),
+    ("issues", "external_url", "TEXT"),
+    ("issues", "external_author", "TEXT"),
+    ("issues", "external_updated_at", "INTEGER"),
+    ("comments", "external_id", "TEXT"),
+    ("comments", "external_author", "TEXT"),
+    ("comments", "external_url", "TEXT"),
 ];
+
+const AFTER_COLUMNS: &str = r#"
+CREATE UNIQUE INDEX IF NOT EXISTS issues_external ON issues(project_id, external_number) WHERE source = 'github';
+CREATE UNIQUE INDEX IF NOT EXISTS comments_external ON comments(issue_id, external_id) WHERE external_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS pull_requests (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    number INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    head_ref TEXT NOT NULL DEFAULT '',
+    base_ref TEXT NOT NULL DEFAULT '',
+    head_sha TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'open',
+    draft INTEGER NOT NULL DEFAULT 0,
+    mergeable TEXT,
+    checks TEXT NOT NULL DEFAULT '[]',
+    review_decision TEXT,
+    url TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    issue_id INTEGER REFERENCES issues(id) ON DELETE SET NULL,
+    reviewed_sha TEXT,
+    UNIQUE (project_id, number)
+);
+"#;
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
 
@@ -428,6 +466,11 @@ fn issue_row(row: &Row) -> rusqlite::Result<Issue> {
         depends_on: Vec::new(),
         waiting_on: Vec::new(),
         blocks: Vec::new(),
+        source: IssueSource::parse(&row.get::<_, String>("source")?),
+        external_number: row.get("external_number")?,
+        external_url: row.get("external_url")?,
+        external_author: row.get("external_author")?,
+        external_updated_at: row.get("external_updated_at")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -525,6 +568,11 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
             .and_then(Automation::parse),
         risky: serde_json::from_str(&row.get::<_, String>("risky")?).unwrap_or_default(),
         deploy: row.get("deploy")?,
+        tracker: match row.get::<_, String>("tracker")?.as_str() {
+            "github" => Tracker::Github { repo: row.get::<_, Option<String>>("github_repo")?.unwrap_or_default() },
+            _ => Tracker::Internal,
+        },
+        post_mode: PostMode::parse(&row.get::<_, String>("post_mode")?).unwrap_or_default(),
     })
 }
 
@@ -584,6 +632,9 @@ fn comment_row(row: &Row) -> rusqlite::Result<Comment> {
         author: row.get("author")?,
         body: row.get("body")?,
         created_at: row.get("created_at")?,
+        external_id: row.get("external_id")?,
+        external_author: row.get("external_author")?,
+        external_url: row.get("external_url")?,
     })
 }
 
@@ -737,6 +788,7 @@ impl Store {
                 ))?;
             }
         }
+        conn.execute_batch(AFTER_COLUMNS)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let store = Store { conn: Arc::new(Mutex::new(conn)), memory: Arc::new(memory) };
         if store.setting(WIRE_TRANSCRIPTS)?.is_none() {
@@ -961,10 +1013,19 @@ impl Store {
         if let Some(deploy) = &patch.deploy {
             project.deploy = Some(deploy.trim().to_string()).filter(|d| !d.is_empty());
         }
+        if let Some(tracker) = &patch.tracker {
+            project.tracker = match tracker {
+                Tracker::Github { repo } => Tracker::Github { repo: repo.trim().to_string() },
+                other => other.clone(),
+            };
+        }
+        if let Some(mode) = patch.post_mode {
+            project.post_mode = mode;
+        }
         {
             let db = self.db();
             db.execute(
-                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6 WHERE id = ?7",
+                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6, tracker = ?8, github_repo = ?9, post_mode = ?10 WHERE id = ?7",
                 params![
                     project.name,
                     project.pinned,
@@ -972,7 +1033,13 @@ impl Store {
                     project.automation.map(Automation::as_str),
                     serde_json::to_string(&project.risky).unwrap_or_else(|_| "[]".into()),
                     project.deploy,
-                    id
+                    id,
+                    if project.tracker.is_github() { "github" } else { "internal" },
+                    match &project.tracker {
+                        Tracker::Github { repo } => Some(repo.clone()),
+                        _ => None,
+                    },
+                    project.post_mode.as_str()
                 ],
             )?;
             Store::changed(&db, "project", id)?;
@@ -2791,6 +2858,99 @@ mod tests {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.projects().unwrap()[0].path, "/r");
         assert_eq!(s.setting("token").unwrap().as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn an_old_database_migrates_and_keeps_its_issues() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for (i, step) in SCHEMA.iter().enumerate() {
+                conn.execute_batch(&format!("BEGIN; {step}; PRAGMA user_version = {}; COMMIT;", i + 1)).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, name, path, created_at) VALUES (1, 'old', '/o', 0);
+                 INSERT INTO issues (id, project_id, title, state, created_at, updated_at) VALUES (5, 1, 'kept', 'todo', 1, 1);
+                 INSERT INTO comments (issue_id, author, body, created_at) VALUES (5, 'me', 'hi', 1);",
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let issue = s.issue(5).unwrap();
+        assert_eq!(issue.title, "kept");
+        assert_eq!(issue.source, IssueSource::Internal);
+        assert_eq!(issue.external_number, None);
+        assert_eq!(s.comments(5).unwrap()[0].external_id, None);
+        let p = s.project(1).unwrap();
+        assert_eq!(p.tracker, Tracker::Internal);
+        assert_eq!(p.post_mode, PostMode::Draft);
+        assert_eq!(s.db().query_row("SELECT count(*) FROM pull_requests", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_github_issue_number_cannot_be_mirrored_twice() {
+        let s = Store::memory().unwrap();
+        let (p, _) = testing::project(&s, "/tmp");
+        let insert = |project: Id, number: i64, source: &str| {
+            s.db().execute(
+                "INSERT INTO issues (project_id, title, state, source, external_number, created_at, updated_at) VALUES (?1, 't', 'todo', ?3, ?2, 0, 0)",
+                params![project, number, source],
+            )
+        };
+        insert(p.id, 7, "github").unwrap();
+        assert!(insert(p.id, 7, "github").is_err());
+        insert(p.id, 8, "github").unwrap();
+        let other = s.add_project("other", "/other", Some("main"), None).unwrap();
+        insert(other.id, 7, "github").unwrap();
+        insert(p.id, 7, "internal").unwrap();
+        insert(p.id, 7, "internal").unwrap();
+    }
+
+    #[test]
+    fn a_mirrored_comment_cannot_be_stored_twice() {
+        let s = Store::memory().unwrap();
+        let (p, _) = testing::project(&s, "/tmp");
+        let i = issue(&s, p.id, "x");
+        let insert = |ext: Option<&str>| {
+            s.db().execute(
+                "INSERT INTO comments (issue_id, author, body, created_at, external_id) VALUES (?1, 'a', 'b', 0, ?2)",
+                params![i.id, ext],
+            )
+        };
+        insert(Some("c1")).unwrap();
+        assert!(insert(Some("c1")).is_err());
+        insert(None).unwrap();
+        insert(None).unwrap();
+    }
+
+    #[test]
+    fn tracker_and_post_mode_persist_and_switching_back_is_lossless() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let s = Store::open(&path).unwrap();
+        let (p, _) = testing::project(&s, "/tmp");
+        let a = issue(&s, p.id, "internal one");
+        s.update_project(
+            p.id,
+            &ProjectPatch {
+                tracker: Some(Tracker::Github { repo: " o/r ".into() }),
+                post_mode: Some(PostMode::Auto),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        let p = s.project(p.id).unwrap();
+        assert_eq!(p.tracker, Tracker::Github { repo: "o/r".into() });
+        assert_eq!(p.post_mode, PostMode::Auto);
+        assert_eq!(s.issue(a.id).unwrap().source, IssueSource::Internal);
+        s.update_project(p.id, &ProjectPatch { tracker: Some(Tracker::Internal), ..Default::default() }).unwrap();
+        let p = s.project(p.id).unwrap();
+        assert_eq!(p.tracker, Tracker::Internal);
+        assert_eq!(p.post_mode, PostMode::Auto);
+        assert_eq!(s.issues().unwrap().iter().filter(|i| i.project_id == p.id).count(), 1);
     }
 
     #[test]

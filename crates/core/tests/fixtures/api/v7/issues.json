@@ -1,0 +1,25 @@
+[
+  {
+    "blocks": [],
+    "body": "details",
+    "created_at": 1795447988735,
+    "depends_on": [],
+    "external_author": null,
+    "external_number": null,
+    "external_updated_at": null,
+    "external_url": null,
+    "goal": null,
+    "id": 1,
+    "labels": [
+      "bug"
+    ],
+    "off_vision": false,
+    "priority": 3,
+    "project_id": 1,
+    "source": "internal",
+    "state": "doing",
+    "title": "Fix it",
+    "updated_at": 1795447988735,
+    "waiting_on": []
+  }
+]

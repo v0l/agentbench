@@ -145,6 +145,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects", get(list_projects).post(add_project))
         .route("/api/projects/{id}", delete(delete_project).patch(update_project))
         .route("/api/projects/{id}/sync", post(sync_project))
+        .route("/api/projects/{id}/github", get(github_status))
         .route("/api/projects/{id}/notes", get(list_notes))
         .route("/api/projects/{id}/prompts", get(list_prompts))
         .route("/api/projects/{id}/notes/restore", post(restore_note))
@@ -810,6 +811,18 @@ async fn update_project(
     let project = crate::autopilot::set_project(api.runner.store(), id, &patch)?;
     changed(&api);
     Ok(Json(project))
+}
+
+async fn github_status(State(api): State<Api>, Path(id): Path<Id>) -> Reply<agentbench_core::GithubStatus> {
+    let store = api.runner.store().clone();
+    let project = store.project(id)?;
+    let last_sync = store.setting(&format!("github_last_sync_{id}")).ok().flatten().and_then(|v| v.parse().ok());
+    let status = tokio::task::spawn_blocking(move || {
+        crate::github::status(&crate::github::gh_program(), &project, last_sync)
+    })
+    .await
+    .map_err(|e| bad(e.to_string()))?;
+    Ok(Json(status))
 }
 
 async fn project_icon(State(api): State<Api>, Path(id): Path<Id>) -> Result<Response, Failure> {
@@ -2970,6 +2983,62 @@ mod tests {
         assert!(snapshot.to_string().len() < 8_000, "{}", snapshot.to_string().len());
         let text = snapshot.to_string();
         assert!(!text.contains("question") && !text.contains("entry"));
+    }
+
+    #[tokio::test]
+    async fn project_tracker_settings_round_trip_through_the_api() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, p) = call(&f.app, "GET", "/api/projects", None, T).await;
+        assert_eq!(p[0]["post_mode"], "draft");
+        assert_eq!(p[0]["tracker"]["kind"], "internal");
+        let patch = json!({"tracker": {"kind": "github", "repo": "o/r"}, "post_mode": "off"});
+        let (s, p) = call(&f.app, "PATCH", &format!("/api/projects/{pid}"), Some(patch), T).await;
+        assert_eq!(s, StatusCode::OK, "{p}");
+        assert_eq!(p["tracker"], json!({"kind": "github", "repo": "o/r"}));
+        assert_eq!(p["post_mode"], "off");
+        let (_, p) = call(&f.app, "GET", "/api/projects", None, T).await;
+        assert_eq!(p[0]["tracker"]["repo"], "o/r");
+        let (_, back) = call(&f.app, "PATCH", &format!("/api/projects/{pid}"), Some(json!({"tracker": {"kind": "internal"}})), T).await;
+        assert_eq!(back["tracker"]["kind"], "internal");
+        assert_eq!(back["post_mode"], "off");
+    }
+
+    fn stub(dir: &std::path::Path, name: &str, script: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn the_github_status_names_a_missing_or_unauthenticated_gh() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let patch = json!({"tracker": {"kind": "github", "repo": "o/r"}});
+        call(&f.app, "PATCH", &format!("/api/projects/{pid}"), Some(patch), T).await;
+        let uri = format!("/api/projects/{pid}/github");
+        let dir = f._dir.path();
+        let ok = stub(dir, "gh-ok", "case \"$*\" in *rate_limit*) echo 4999;; *repos/*) echo true;; esac");
+        let denied = stub(dir, "gh-denied", "exit 1");
+        let _guard = crate::github::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("AGENTBENCH_GH", dir.join("absent")) };
+        let (s, st) = call(&f.app, "GET", &uri, None, T).await;
+        assert_eq!(s, StatusCode::OK, "{st}");
+        assert_eq!((st["installed"].as_bool(), st["problem"].as_str()), (Some(false), Some("gh missing")));
+        unsafe { std::env::set_var("AGENTBENCH_GH", &denied) };
+        let (_, st) = call(&f.app, "GET", &uri, None, T).await;
+        assert_eq!((st["installed"].as_bool(), st["authenticated"].as_bool()), (Some(true), Some(false)));
+        assert_eq!(st["problem"], "not authenticated");
+        unsafe { std::env::set_var("AGENTBENCH_GH", &ok) };
+        let (_, st) = call(&f.app, "GET", &uri, None, T).await;
+        unsafe { std::env::remove_var("AGENTBENCH_GH") };
+        assert_eq!(st["authenticated"], true, "{st}");
+        assert_eq!(st["repo"], "o/r");
+        assert_eq!(st["write_access"], true);
+        assert_eq!(st["rate_limit_remaining"], 4999);
+        assert!(st["problem"].is_null());
     }
 
     #[tokio::test]

@@ -765,6 +765,8 @@ pub mod tests {
             automation: None,
             risky: vec![],
             deploy: None,
+            tracker: Default::default(),
+            post_mode: Default::default(),
         }
     }
 
