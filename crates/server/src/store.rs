@@ -338,6 +338,14 @@ CREATE TABLE IF NOT EXISTS pull_requests (
     reviewed_sha TEXT,
     UNIQUE (project_id, number)
 );
+CREATE TABLE IF NOT EXISTS outbox (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
@@ -355,6 +363,45 @@ impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> Self {
         StoreError(e.to_string())
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutboxItem {
+    pub id: Id,
+    pub project_id: Id,
+    pub kind: String,
+    pub payload: String,
+    pub status: String,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct MirrorIssue {
+    pub number: i64,
+    pub title: String,
+    pub body: String,
+    pub state: IssueState,
+    pub priority: i64,
+    pub labels: Vec<String>,
+    pub author: String,
+    pub url: String,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct MirrorPr {
+    pub number: i64,
+    pub title: String,
+    pub body: String,
+    pub author: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub head_sha: String,
+    pub state: String,
+    pub draft: bool,
+    pub url: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -1226,7 +1273,7 @@ impl Store {
         Store::changed(&db, "issue", id)
     }
 
-    fn unblock_dependents(&self, done: Id) -> Result<()> {
+    pub fn unblock_dependents(&self, done: Id) -> Result<()> {
         let dependents: Vec<Id> = {
             let db = self.db();
             let mut stmt = db.prepare("SELECT issue_id FROM issue_deps WHERE depends_on = ?1 ORDER BY issue_id")?;
@@ -1246,7 +1293,7 @@ impl Store {
                 )?;
                 note.push_str("; moved to todo");
             }
-            self.add_comment(d, &NewComment { author: Some("agentbench".into()), body: note })?;
+            self.add_comment_local(d, &NewComment { author: Some("agentbench".into()), body: note })?;
             self.log_autopilot(
                 Some(issue.project_id),
                 Some(d),
@@ -1363,7 +1410,199 @@ impl Store {
         if issue.state == IssueState::Done && !was_done {
             self.unblock_dependents(id)?;
         }
-        self.issue(id)
+        let issue = self.issue(id)?;
+        if issue.source == IssueSource::Github {
+            self.enqueue_outbox(
+                issue.project_id,
+                "update_issue",
+                &serde_json::json!({"number": issue.external_number, "issue_id": id, "patch": patch}).to_string(),
+            )?;
+        }
+        Ok(issue)
+    }
+
+    pub fn enqueue_outbox(&self, project_id: Id, kind: &str, payload: &str) -> Result<Id> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO outbox (project_id, kind, payload, status, created_at) VALUES (?1, ?2, ?3, 'pending', ?4)",
+            params![project_id, kind, payload, now()],
+        )?;
+        Ok(db.last_insert_rowid())
+    }
+
+    pub fn outbox(&self, project_id: Option<Id>) -> Result<Vec<OutboxItem>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT id, project_id, kind, payload, status, created_at FROM outbox WHERE (?1 IS NULL OR project_id = ?1) ORDER BY id",
+        )?;
+        let rows = stmt.query_map([project_id], |r| {
+            Ok(OutboxItem {
+                id: r.get(0)?,
+                project_id: r.get(1)?,
+                kind: r.get(2)?,
+                payload: r.get(3)?,
+                status: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn mirror_issue(&self, project_id: Id, m: &MirrorIssue) -> Result<Id> {
+        let db = self.db();
+        let labels = serde_json::to_string(&m.labels).unwrap_or_else(|_| "[]".into());
+        let existing: Option<Issue> = db
+            .query_row(
+                "SELECT * FROM issues WHERE project_id = ?1 AND source = 'github' AND external_number = ?2",
+                params![project_id, m.number],
+                issue_row,
+            )
+            .optional()?;
+        let Some(old) = existing else {
+            let t = now();
+            db.execute(
+                "INSERT INTO issues (project_id, title, body, state, priority, labels, source, external_number, external_url, external_author, external_updated_at, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'github', ?7, ?8, ?9, ?10, ?11, ?11)",
+                params![project_id, m.title, m.body, m.state.as_str(), m.priority, labels, m.number, m.url, m.author, m.updated_at, t],
+            )?;
+            let id = db.last_insert_rowid();
+            Store::changed(&db, "issue", id)?;
+            return Ok(id);
+        };
+        let same = old.external_updated_at == Some(m.updated_at)
+            && old.external_url.as_deref() == Some(m.url.as_str())
+            && old.external_author.as_deref() == Some(m.author.as_str());
+        if !same {
+            db.execute(
+                "UPDATE issues SET title = ?1, body = ?2, state = ?3, priority = ?4, labels = ?5, external_url = ?6, external_author = ?7, external_updated_at = ?8, updated_at = ?9 WHERE id = ?10",
+                params![m.title, m.body, m.state.as_str(), m.priority, labels, m.url, m.author, m.updated_at, now(), old.id],
+            )?;
+            Store::changed(&db, "issue", old.id)?;
+        }
+        Ok(old.id)
+    }
+
+    pub fn mirrored_issue(&self, project_id: Id, number: i64) -> Result<Option<Issue>> {
+        let id: Option<Id> = self
+            .db()
+            .query_row(
+                "SELECT id FROM issues WHERE project_id = ?1 AND source = 'github' AND external_number = ?2",
+                params![project_id, number],
+                |r| r.get(0),
+            )
+            .optional()?;
+        id.map(|id| self.issue(id)).transpose()
+    }
+
+    pub fn open_mirrored_numbers(&self, project_id: Id) -> Result<Vec<i64>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT external_number FROM issues WHERE project_id = ?1 AND source = 'github' AND state != 'done' ORDER BY external_number",
+        )?;
+        let rows = stmt.query_map([project_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn mirror_comment(
+        &self,
+        issue_id: Id,
+        external_id: &str,
+        author: &str,
+        body: &str,
+        url: &str,
+        created_at: i64,
+    ) -> Result<bool> {
+        let db = self.db();
+        let old: Option<(Id, String)> = db
+            .query_row(
+                "SELECT id, body FROM comments WHERE issue_id = ?1 AND external_id = ?2",
+                params![issue_id, external_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match old {
+            Some((_, b)) if b == body => Ok(false),
+            Some((id, _)) => {
+                db.execute("UPDATE comments SET body = ?1 WHERE id = ?2", params![body, id])?;
+                Store::changed(&db, "issue", issue_id)?;
+                Ok(true)
+            }
+            None => {
+                db.execute(
+                    "INSERT INTO comments (issue_id, author, body, created_at, external_id, external_author, external_url) VALUES (?1, ?2, ?3, ?4, ?5, ?2, ?6)",
+                    params![issue_id, author, body, created_at, external_id, url],
+                )?;
+                Store::changed(&db, "issue", issue_id)?;
+                Ok(true)
+            }
+        }
+    }
+
+    pub fn mirror_pr(&self, project_id: Id, m: &MirrorPr) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO pull_requests (project_id, number, title, body, author, head_ref, base_ref, head_sha, state, draft, url, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(project_id, number) DO UPDATE SET title = excluded.title, body = excluded.body, author = excluded.author,
+               head_ref = excluded.head_ref, base_ref = excluded.base_ref, head_sha = excluded.head_sha, state = excluded.state,
+               draft = excluded.draft, url = excluded.url, updated_at = excluded.updated_at",
+            params![project_id, m.number, m.title, m.body, m.author, m.head_ref, m.base_ref, m.head_sha, m.state, m.draft, m.url, m.created_at, m.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn close_prs_not_in(&self, project_id: Id, open: &[i64]) -> Result<()> {
+        let db = self.db();
+        let mut stmt = db.prepare("SELECT number FROM pull_requests WHERE project_id = ?1 AND state = 'open'")?;
+        let numbers: Vec<i64> =
+            stmt.query_map([project_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        for n in numbers.into_iter().filter(|n| !open.contains(n)) {
+            db.execute(
+                "UPDATE pull_requests SET state = 'closed' WHERE project_id = ?1 AND number = ?2",
+                params![project_id, n],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn open_pr_texts(&self, project_id: Id) -> Result<Vec<(i64, String, String)>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT number, body, head_ref FROM pull_requests WHERE project_id = ?1 AND state = 'open' ORDER BY number",
+        )?;
+        let rows = stmt.query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn link_pr(&self, project_id: Id, pr_number: i64, issue_number: Option<i64>) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "UPDATE pull_requests SET issue_id = (SELECT id FROM issues WHERE project_id = ?1 AND source = 'github' AND external_number = ?3)
+             WHERE project_id = ?1 AND number = ?2",
+            params![project_id, pr_number, issue_number],
+        )?;
+        Ok(())
+    }
+
+    pub fn pr_issue(&self, project_id: Id, pr_number: i64) -> Result<Option<Id>> {
+        Ok(self
+            .db()
+            .query_row(
+                "SELECT issue_id FROM pull_requests WHERE project_id = ?1 AND number = ?2",
+                params![project_id, pr_number],
+                |r| r.get::<_, Option<Id>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn pr_count(&self, project_id: Id, state: &str) -> Result<i64> {
+        Ok(self.db().query_row(
+            "SELECT count(*) FROM pull_requests WHERE project_id = ?1 AND state = ?2",
+            params![project_id, state],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn delete_issue(&self, id: Id) -> Result<()> {
@@ -1383,6 +1622,19 @@ impl Store {
     }
 
     pub fn add_comment(&self, issue_id: Id, new: &NewComment) -> Result<Comment> {
+        let comment = self.add_comment_local(issue_id, new)?;
+        let issue = self.issue(issue_id)?;
+        if issue.source == IssueSource::Github {
+            self.enqueue_outbox(
+                issue.project_id,
+                "comment",
+                &serde_json::json!({"number": issue.external_number, "issue_id": issue_id, "body": comment.body, "author": comment.author}).to_string(),
+            )?;
+        }
+        Ok(comment)
+    }
+
+    fn add_comment_local(&self, issue_id: Id, new: &NewComment) -> Result<Comment> {
         if new.body.trim().is_empty() {
             return Err(StoreError("a comment needs a body".into()));
         }

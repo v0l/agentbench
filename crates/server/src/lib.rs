@@ -291,6 +291,7 @@ async fn serve_inner(
         quota::spawn_poll(api.runner.clone(), m);
     }
     triage::spawn(api.runner.clone());
+    github::spawn(api.runner.clone());
     process::spawn(api.runner.clone());
     fold_watch(api.runner.clone());
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));

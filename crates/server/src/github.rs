@@ -1,6 +1,62 @@
 use agentbench_core::{GithubStatus, Project, Tracker};
 use std::process::{Command, Stdio};
 
+pub mod map;
+pub mod sync;
+
+pub use sync::{Outcome, SyncState, load_state, sync_project};
+
+pub const POLL_SETTING: &str = "github_poll_secs";
+
+pub fn poll_secs(store: &crate::store::Store) -> i64 {
+    store
+        .setting(POLL_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|s| *s >= 5)
+        .unwrap_or(sync::POLL_SECS)
+}
+
+pub fn sync_due(store: &crate::store::Store, gh: &str, now: i64) -> Vec<(agentbench_core::Id, Outcome)> {
+    let every = poll_secs(store) * 1000;
+    let mut done = Vec::new();
+    for p in store.projects().unwrap_or_default() {
+        if !matches!(p.tracker, Tracker::Github { .. }) {
+            continue;
+        }
+        let state = load_state(store, p.id);
+        if state.last_attempt.is_some_and(|t| now - t < every) {
+            continue;
+        }
+        let out = sync_project(store, gh, p.id, now, false);
+        if out != Outcome::Skipped {
+            done.push((p.id, out));
+        }
+    }
+    done
+}
+
+pub fn spawn(runner: crate::runner::Runner) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let store = runner.store().clone();
+            let result = tokio::task::spawn_blocking(move || {
+                sync_due(&store, &gh_program(), crate::store::now())
+            })
+            .await;
+            match result {
+                Ok(done) if done.iter().any(|(_, o)| *o == Outcome::Synced) => {
+                    let _ = runner.store().set_setting("github_poll_changed", &crate::store::now().to_string());
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("github sync task failed: {e}"),
+            }
+        }
+    });
+}
+
 pub fn gh_program() -> String {
     std::env::var("AGENTBENCH_GH").unwrap_or_else(|_| "gh".into())
 }
@@ -54,12 +110,13 @@ fn run(gh: &str, args: &[&str]) -> std::io::Result<(bool, String)> {
     Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string()))
 }
 
-pub fn status(gh: &str, project: &Project, last_sync: Option<i64>) -> GithubStatus {
+pub fn status(store: &crate::store::Store, gh: &str, project: &Project, last_sync: Option<i64>) -> GithubStatus {
     let mut s = GithubStatus {
         tracker: project.tracker.clone(),
         post_mode: project.post_mode,
         repo: project_repo(project),
         last_sync,
+        sync_error: load_state(store, project.id).error,
         ..Default::default()
     };
     match run(gh, &["auth", "status"]) {
