@@ -8,6 +8,7 @@ const TRUST_SEEDED: &str = "guards_trust_rules_seeded";
 const TRUST_RULES: [&str; 3] = ["worker-gh-writes", "untrusted-no-github-writes", "worker-git-push-main"];
 const OWNER_SEEDED: &str = "guards_owner_rules_seeded";
 const OWNER_RULES: [&str; 1] = ["owner-approves-and-merges"];
+const OWNER_PATTERN_V1: &str = r"(?i)/api/outbox/[^/\s]+/approve|/api/projects/[^/\s]+/pulls/[^/\s]+/merge|\bagentbench(-server)?\s+github\s+(approve|merge)\b|\bgh\s+pr\s+merge\b";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
@@ -100,7 +101,7 @@ message = "Workers never push to main or master, force push or delete remote bra
 id = "owner-approves-and-merges"
 tools = ["bash"]
 fields = ["command"]
-pattern = '''(?i)/api/outbox/[^/\s]+/approve|/api/projects/[^/\s]+/pulls/[^/\s]+/merge|\bagentbench(-server)?\s+github\s+(approve|merge)\b|\bgh\s+pr\s+merge\b'''
+pattern = '''(?i)/api/outbox/[^/\s]+/approve|/api/projects/[^/\s]+/pulls/[^/\s]+/merge|\bgithub\s+(approve|merge)\b|\bgh\s+pr\s+merge\b'''
 require_field = "_brief"
 require = '^\(user chat\)$'
 action = "refuse"
@@ -133,6 +134,17 @@ pub fn load(store: &Store) -> Result<Rules, String> {
         }
         let _ = save(store, &rules);
         let _ = store.set_setting(key, "1");
+    }
+    let current: Rules = toml::from_str(DEFAULTS).map_err(|e| e.to_string())?;
+    let mut upgraded = false;
+    if let Some(new) = current.rules.iter().find(|r| r.id == "owner-approves-and-merges") {
+        for r in rules.rules.iter_mut().filter(|r| r.id == new.id && r.pattern == OWNER_PATTERN_V1) {
+            r.pattern = new.pattern.clone();
+            upgraded = true;
+        }
+    }
+    if upgraded {
+        let _ = save(store, &rules);
     }
     Ok(rules)
 }
@@ -328,6 +340,9 @@ mod tests {
             "curl -X POST http://127.0.0.1:7420/api/projects/14/pulls/9/merge",
             "agentbench github merge 9 --project demo",
             "agentbench github approve 12",
+            "agentbench-server github approve 99",
+            "ab github approve 1",
+            "ab() { agentbench-server \"$@\"; }; ab github merge 4",
             "gh pr merge 9 --squash",
         ];
         for w in agent {
@@ -337,6 +352,20 @@ mod tests {
         for ok in ["curl $AGENTBENCH_URL/api/outbox", "curl $AGENTBENCH_URL/api/projects/14/pulls", "agentbench github outbox"] {
             assert!(bash(ok, "Fix the bug", "no").is_none(), "{ok}");
         }
+    }
+
+    #[test]
+    fn the_old_owner_pattern_in_an_existing_file_is_upgraded() {
+        let s = Store::memory().unwrap();
+        let file = path(&s);
+        let v1 = DEFAULTS.replace(r"\bgithub\s+(approve|merge)\b", r"\bagentbench(-server)?\s+github\s+(approve|merge)\b");
+        assert_ne!(v1, DEFAULTS);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, v1).unwrap();
+        s.set_setting(TRUST_SEEDED, "1").unwrap();
+        s.set_setting(OWNER_SEEDED, "1").unwrap();
+        let r = load(&s).unwrap();
+        assert!(matches(&r, "bash", &json!({"command": "ab github approve 1", "_brief": "x"})).is_some());
     }
 
     #[test]
