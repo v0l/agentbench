@@ -74,8 +74,13 @@ impl Toolbox<'_> {
             "bash" if tools::flag(args, &["background"]).unwrap_or(false) => {
                 let command = need(args, "command")?;
                 let confine = self.confine().await;
-                let handle =
-                    services.jobs.start(&job_owner(cx), cx.workspace.root(), &command, &confine)?;
+                let handle = services.jobs.start_limited(
+                    &job_owner(cx),
+                    cx.workspace.root(),
+                    &command,
+                    &confine,
+                    super::limits::Limits::background_from_args(args),
+                )?;
                 Ok(format!(
                     "started in the background as {handle}. bash_output {handle} reads what it prints; bash_kill {handle} stops it."
                 ))

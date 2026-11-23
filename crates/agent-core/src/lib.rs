@@ -5,6 +5,7 @@ pub mod config;
 pub mod grants;
 pub mod http;
 pub mod jobs;
+pub mod limits;
 pub mod local;
 pub mod lsp;
 #[cfg(feature = "mcp")]

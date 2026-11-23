@@ -1,3 +1,4 @@
+use super::limits::Limits;
 use super::spawn::{self, Confine, Scratch};
 use std::collections::HashMap;
 use std::path::Path;
@@ -53,6 +54,8 @@ struct Output {
     dropped: usize,
     read: usize,
     exit: Option<Option<i32>>,
+    killed: Option<String>,
+    stopped: bool,
 }
 
 struct Job {
@@ -78,6 +81,66 @@ pub struct Snapshot {
 #[derive(Clone, Default)]
 pub struct Jobs(Arc<Mutex<HashMap<(Owner, String), Job>>>);
 
+mod scope {
+    use std::process::ExitStatus;
+    use tokio::process::Command;
+
+    #[cfg(target_os = "linux")]
+    pub fn available() -> bool {
+        static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *OK.get_or_init(|| {
+            std::process::Command::new("systemd-run")
+                .args(["--user", "--scope", "--quiet", "-p", "MemoryMax=64M", "--", "true"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn available() -> bool {
+        false
+    }
+
+    pub fn wrap(cmd: Command, mb: u64) -> Command {
+        let inner = cmd.as_std();
+        let mut wrapped = Command::new("systemd-run");
+        wrapped
+            .args(["--user", "--scope", "--quiet", "-p"])
+            .arg(format!("MemoryMax={mb}M"))
+            .args(["-p", "MemorySwapMax=0", "-p", "CPUWeight=30", "-p", "IOWeight=30", "--"])
+            .arg(inner.get_program())
+            .args(inner.get_args());
+        for (k, v) in inner.get_envs() {
+            match v {
+                Some(v) => wrapped.env(k, v),
+                None => wrapped.env_remove(k),
+            };
+        }
+        if let Some(dir) = inner.get_current_dir() {
+            wrapped.current_dir(dir);
+        }
+        wrapped.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+        #[cfg(unix)]
+        wrapped.process_group(0);
+        wrapped
+    }
+
+    #[cfg(unix)]
+    pub fn killed_by_signal(status: &Option<ExitStatus>) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        status.as_ref().and_then(|s| s.signal()).filter(|s| *s == 9)
+    }
+
+    #[cfg(not(unix))]
+    pub fn killed_by_signal(_status: &Option<ExitStatus>) -> Option<i32> {
+        None
+    }
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -93,6 +156,29 @@ impl Jobs {
         cwd: &Path,
         command: &str,
         confine: &Confine,
+    ) -> Result<String, String> {
+        self.start_limited(session, cwd, command, confine, Limits::default())
+    }
+
+    pub fn start_limited(
+        &self,
+        session: &str,
+        cwd: &Path,
+        command: &str,
+        confine: &Confine,
+        limits: Limits,
+    ) -> Result<String, String> {
+        self.start_with(session, cwd, command, confine, limits, scope::available())
+    }
+
+    fn start_with(
+        &self,
+        session: &str,
+        cwd: &Path,
+        command: &str,
+        confine: &Confine,
+        limits: Limits,
+        use_scope: bool,
     ) -> Result<String, String> {
         if command.trim().is_empty() {
             return Err("`command` is empty".into());
@@ -110,6 +196,11 @@ impl Jobs {
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        let scoped = limits.memory_mb.is_some() && use_scope;
+        let mut cmd = match limits.memory_mb {
+            Some(mb) if scoped => scope::wrap(cmd, mb),
+            _ => cmd,
+        };
         let mut child = cmd.spawn().map_err(|e| format!("bash: {e}"))?;
         let out = Arc::new(Mutex::new(Output::default()));
         let woke = Arc::new(Notify::new());
@@ -151,10 +242,27 @@ impl Jobs {
             format!("job-{n}")
         };
         let (watch_out, watch_woke) = (out.clone(), woke.clone());
+        let watchdog = if scoped { Limits::default() } else { limits };
         tokio::spawn(async move {
-            let status = child.wait().await.ok();
+            let mut over = None;
+            let status = tokio::select! {
+                s = child.wait() => s.ok(),
+                used = watchdog.exceeded(pid) => {
+                    over = Some(used);
+                    if let Some(pid) = pid {
+                        spawn::signal_group(pid, "-KILL").await;
+                    }
+                    child.wait().await.ok()
+                }
+            };
+            let cap = limits.memory_mb.unwrap_or_default();
+            let by_cap = over.or_else(|| scoped.then(|| scope::killed_by_signal(&status)).flatten().map(|_| cap));
             for r in readers {
                 let _ = tokio::time::timeout(Duration::from_secs(2), r).await;
+            }
+            if let Some(used) = by_cap.filter(|_| !lock(&watch_out).stopped) {
+                lock(&watch_out).killed =
+                    Some(format!("killed: used {} MB, over memory_mb {cap}", used.max(cap)));
             }
             lock(&watch_out).exit = Some(exit_code(status));
             watch_woke.notify_waiters();
@@ -298,6 +406,10 @@ impl Jobs {
             Some(Some(c)) => format!("[{handle} exited {c}]"),
             Some(None) => format!("[{handle} ended]"),
         };
+        let state = match &o.killed {
+            Some(why) => format!("[{why}]\n{state}"),
+            None => state,
+        };
         let mut lost = if skipped > 0 {
             format!("[{skipped} bytes of older output were dropped]\n")
         } else {
@@ -324,6 +436,7 @@ impl Jobs {
             return Ok(format!("{handle} had already finished"));
         }
         if let Some(pid) = job.pid {
+            lock(&job.out).stopped = true;
             spawn::signal_group(pid, "-KILL").await;
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -342,6 +455,54 @@ mod tests {
 
     fn open() -> Confine {
         Confine::Open { env: Vec::new() }
+    }
+
+    #[tokio::test]
+    async fn a_background_job_over_its_memory_cap_is_killed_and_says_so() {
+        let jobs = Jobs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let stop = CancellationToken::new();
+        let cmd = "python3 -c 'b = bytearray(300 << 20); import time; time.sleep(30)'";
+        let limits = Limits { memory_mb: Some(64) };
+        for scoped in [true, false] {
+            if scoped && !scope::available() {
+                continue;
+            }
+            let h = jobs.start_with(SID, dir.path(), cmd, &open(), limits, scoped).unwrap();
+            let out = jobs
+                .output_until(SID, &h, Duration::from_secs(30), Some(&Until::Exit), &stop)
+                .await
+                .unwrap();
+            assert!(out.contains("killed: used") && out.contains("over memory_mb 64"), "{scoped} {out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_background_job_under_its_memory_cap_finishes_with_its_output() {
+        let jobs = Jobs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let stop = CancellationToken::new();
+        let limits = Limits { memory_mb: Some(512) };
+        let h = jobs.start_limited(SID, dir.path(), "echo fine", &open(), limits).unwrap();
+        let out = jobs
+            .output_until(SID, &h, Duration::from_secs(30), Some(&Until::Exit), &stop)
+            .await
+            .unwrap();
+        assert!(out.contains("fine") && out.contains("exited 0") && !out.contains("killed"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn a_background_job_with_no_memory_cap_is_left_alone() {
+        let jobs = Jobs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let stop = CancellationToken::new();
+        let cmd = "python3 -c 'b = bytearray(300 << 20); print(len(b))'";
+        let h = jobs.start_limited(SID, dir.path(), cmd, &open(), Limits::default()).unwrap();
+        let out = jobs
+            .output_until(SID, &h, Duration::from_secs(30), Some(&Until::Exit), &stop)
+            .await
+            .unwrap();
+        assert!(out.contains("314572800") && out.contains("exited 0"), "{out}");
     }
 
     #[tokio::test]
