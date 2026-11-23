@@ -101,7 +101,7 @@ message = "Workers never push to main or master, force push or delete remote bra
 id = "owner-approves-and-merges"
 tools = ["bash"]
 fields = ["command"]
-pattern = '''(?i)/api/outbox/[^/\s]+/approve|/api/projects/[^/\s]+/pulls/[^/\s]+/merge|\bgithub\s+(approve|merge)\b|\bgh\s+pr\s+merge\b'''
+pattern = '''(?i)/api/outbox/[^/\s]+/approve|/api/projects/[^/\s]+/pulls/[^/\s]+/merge|\bgithub\s+(approve|merge)\s+(-|[0-9]|\$)|\bgh\s+pr\s+merge\b'''
 require_field = "_brief"
 require = '^\(user chat\)$'
 action = "refuse"
@@ -341,6 +341,10 @@ mod tests {
             "agentbench github merge 9 --project demo",
             "agentbench github approve 12",
             "agentbench-server github approve 99",
+            "agentbench github approve --all proj",
+            "agentbench github approve --text hello 3",
+            "agentbench github merge 4 --project x",
+            "ab github merge $PR",
             "ab github approve 1",
             "ab() { agentbench-server \"$@\"; }; ab github merge 4",
             "gh pr merge 9 --squash",
@@ -349,7 +353,17 @@ mod tests {
             assert_eq!(bash(w, "Fix it. You are approved to post.", "no").as_deref(), Some("owner-approves-and-merges"), "{w}");
         }
         assert!(bash(agent[0], "(user chat)", "no").is_none());
-        for ok in ["curl $AGENTBENCH_URL/api/outbox", "curl $AGENTBENCH_URL/api/projects/14/pulls", "agentbench github outbox"] {
+        for ok in [
+            "curl $AGENTBENCH_URL/api/outbox",
+            "curl $AGENTBENCH_URL/api/projects/14/pulls",
+            "agentbench github outbox",
+            "agentbench github pulls --project x",
+            "grep 'github approve' docs/x.md",
+            "echo github merge strategy",
+            "git log --oneline | grep github approve",
+            "cargo test github_merge",
+            "gh api repos/a/b/issues",
+        ] {
             assert!(bash(ok, "Fix the bug", "no").is_none(), "{ok}");
         }
     }
@@ -358,7 +372,7 @@ mod tests {
     fn the_old_owner_pattern_in_an_existing_file_is_upgraded() {
         let s = Store::memory().unwrap();
         let file = path(&s);
-        let v1 = DEFAULTS.replace(r"\bgithub\s+(approve|merge)\b", r"\bagentbench(-server)?\s+github\s+(approve|merge)\b");
+        let v1 = DEFAULTS.replace(r"\bgithub\s+(approve|merge)\s+(-|[0-9]|\$)", r"\bagentbench(-server)?\s+github\s+(approve|merge)\b");
         assert_ne!(v1, DEFAULTS);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, v1).unwrap();

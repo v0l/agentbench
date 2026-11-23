@@ -1974,6 +1974,19 @@ mod tests {
     }
 
     #[test]
+    fn the_plain_owner_command_is_refused_for_a_worker_with_a_wire_history() {
+        let b = boss();
+        b.s.set_parent(b.worker, Some(b.boss)).unwrap();
+        wire_user(&b, "Fix the bug and commit on your branch");
+        for cmd in ["agentbench-server github approve 99", "ab github approve 1", "curl -X POST $U/api/outbox/3/approve"] {
+            let found = b.api.call("check_guard", &json!({"tool": "bash", "args": {"command": cmd}}), b.worker).unwrap();
+            assert_eq!(found["hit"].as_str(), Some("owner-approves-and-merges"), "{cmd}");
+        }
+        let ok = b.api.call("check_guard", &json!({"tool": "bash", "args": {"command": "echo github merge strategy"}}), b.worker).unwrap();
+        assert!(ok["hit"].is_null());
+    }
+
+    #[test]
     fn a_delivered_supervisor_message_reaches_the_brief() {
         let b = boss();
         let me = b.s.session(b.worker).unwrap();
