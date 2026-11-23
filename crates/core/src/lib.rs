@@ -388,6 +388,8 @@ pub struct GithubStatus {
     pub last_sync: Option<i64>,
     #[serde(default)]
     pub problem: Option<String>,
+    #[serde(default)]
+    pub sync_error: Option<String>,
 }
 
 impl Project {

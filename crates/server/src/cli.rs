@@ -30,6 +30,11 @@ pub enum Command {
         rotate: bool,
     },
     Agents,
+    /// Sync the open issues and pull requests of a GitHub project now.
+    GithubSync {
+        /// The project, by name.
+        project: String,
+    },
     /// Compact the notes of one project (or the global notes) with the saved model.
     CompactMemory {
         /// The project, by name; leave out for the global notes.
@@ -227,6 +232,20 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             let done = crate::compact::run(&store, &target, scopes, true).await;
             println!("{}", serde_json::to_string_pretty(&done).map_err(|e| e.to_string())?);
             Ok(())
+        }
+        Command::GithubSync { project } => {
+            let found = store
+                .projects()
+                .map_err(|e| e.0)?
+                .into_iter()
+                .find(|p| p.name == project)
+                .ok_or_else(|| format!("no project named {project}"))?;
+            let out = crate::github::sync_project(&store, &crate::github::gh_program(), found.id, crate::store::now(), true);
+            println!("{out:?}");
+            match out {
+                crate::github::Outcome::Failed(e) => Err(e),
+                _ => Ok(()),
+            }
         }
         Command::Chat { .. } => unreachable!("handled before the store opens"),
         Command::Agents => {

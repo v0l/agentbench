@@ -146,6 +146,7 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects/{id}", delete(delete_project).patch(update_project))
         .route("/api/projects/{id}/sync", post(sync_project))
         .route("/api/projects/{id}/github", get(github_status))
+        .route("/api/projects/{id}/github/sync", post(github_sync_now))
         .route("/api/projects/{id}/notes", get(list_notes))
         .route("/api/projects/{id}/prompts", get(list_prompts))
         .route("/api/projects/{id}/notes/restore", post(restore_note))
@@ -813,12 +814,28 @@ async fn update_project(
     Ok(Json(project))
 }
 
+async fn github_sync_now(State(api): State<Api>, Path(id): Path<Id>) -> Reply<agentbench_core::GithubStatus> {
+    let store = api.runner.store().clone();
+    let project = store.project(id)?;
+    if !project.tracker.is_github() {
+        return Err(bad("this project does not use GitHub"));
+    }
+    let s = store.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::github::sync_project(&s, &crate::github::gh_program(), id, crate::store::now(), true)
+    })
+    .await
+    .map_err(|e| bad(e.to_string()))?;
+    changed(&api);
+    github_status(State(api), Path(id)).await
+}
+
 async fn github_status(State(api): State<Api>, Path(id): Path<Id>) -> Reply<agentbench_core::GithubStatus> {
     let store = api.runner.store().clone();
     let project = store.project(id)?;
     let last_sync = store.setting(&format!("github_last_sync_{id}")).ok().flatten().and_then(|v| v.parse().ok());
     let status = tokio::task::spawn_blocking(move || {
-        crate::github::status(&crate::github::gh_program(), &project, last_sync)
+        crate::github::status(&store, &crate::github::gh_program(), &project, last_sync)
     })
     .await
     .map_err(|e| bad(e.to_string()))?;
