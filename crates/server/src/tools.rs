@@ -498,20 +498,54 @@ impl StoreApi {
         if !sup {
             return Err("global notes are written only from the supervisor chat, with the user's yes. Ask your parent or the user to keep it there; `remember` without `scope` writes this project's notes.".into());
         }
-        if !self.take_approval(me.id, 0, REMEMBER_GLOBAL) {
-            let what = format!("keep the global note `{topic}`: {}", clip(note.trim(), 300));
-            let default = crate::autopilot::default_level(&self.store);
-            return Err(proposal(&what, REMEMBER_GLOBAL, None, "the user's confirmation", default));
+        self.expire_global_notes();
+        let summary = format!("keep the global note `{topic}`: {}", clip(note.trim(), 300));
+        let pending = agentbench_core::Proposal {
+            id: 0,
+            kind: agentbench_core::ProposalKind::GlobalNote,
+            summary,
+            issues: Vec::new(),
+            sessions: vec![me.id.to_string()],
+            projects: Vec::new(),
+            changes: vec![agentbench_core::Change::GlobalNote { topic: topic.to_string(), note: note.to_string() }],
+            state: agentbench_core::ProposalState::Pending,
+            created_at: 0,
+        };
+        let fingerprint = format!("global_note:{topic}:{}", crate::store::hash_note(note));
+        let known = self.pending_global_notes().into_iter().any(|(t, n, _)| t == topic && n == note);
+        if !known {
+            self.store.add_proposal(&fingerprint, &pending).map_err(|e| e.0)?;
         }
-        self.store.set_global_note(topic, note).map_err(|e| e.0)?;
-        if let Ok(runner) = self.runner.get() {
-            crate::compact::after_write(&runner, crate::memory::Scope::Global);
+        Ok(json!({
+            "pending": topic,
+            "scope": "global",
+            "note": "pending user confirmation: the global note is not saved yet. The user sees a confirmation card and it is written when they accept; it is dropped if they decline or do not answer within 24 hours. Carry on; `recall` with scope global lists it as pending."
+        }))
+    }
+
+    fn pending_global_notes(&self) -> Vec<(String, String, agentbench_core::Id)> {
+        self.store
+            .proposals(agentbench_core::ProposalState::Pending)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| match p.changes.first() {
+                Some(agentbench_core::Change::GlobalNote { topic, note }) => Some((topic.clone(), note.clone(), p.id)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn expire_global_notes(&self) {
+        let cutoff = crate::store::now() - GLOBAL_NOTE_TTL_MS;
+        for p in self.store.proposals(agentbench_core::ProposalState::Pending).unwrap_or_default() {
+            if p.kind == agentbench_core::ProposalKind::GlobalNote && p.created_at < cutoff {
+                let _ = self.store.decide_proposal(p.id, agentbench_core::ProposalState::Rejected);
+            }
         }
-        Ok(if note.trim().is_empty() { json!({ "forgot": topic, "scope": "global" }) } else { json!({ "remembered": topic, "scope": "global" }) })
     }
 }
 
-const REMEMBER_GLOBAL: &str = "remember:global";
+const GLOBAL_NOTE_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
 impl StoreApi {
     fn restart_hit(&self, me: &agentbench_core::Session, tool: &str, args: &Value) -> Option<crate::guards::Hit> {
@@ -1339,18 +1373,23 @@ impl Api for StoreApi {
                 let global = text(args, "scope").is_some_and(|s| s.trim().eq_ignore_ascii_case("global"));
                 let notes = if global { s.global_notes() } else { s.notes(project) }.map_err(|e| e.0)?;
                 let want = text(args, "topic").map(|t| t.trim().to_lowercase());
-                let notes: Vec<Value> = notes
-                    .into_iter()
-                    .filter(|(t, b)| {
-                        want.as_ref().is_none_or(|w| {
-                            t.to_lowercase().contains(w) || b.to_lowercase().contains(w)
-                        })
-                    })
+                let matches = |t: &str, b: &str| {
+                    want.as_ref().is_none_or(|w| t.to_lowercase().contains(w) || b.to_lowercase().contains(w))
+                };
+                let mut out: Vec<Value> = notes
+                    .iter()
+                    .filter(|(t, b)| matches(t, b))
                     .map(|(topic, note)| {
-                        json!({ "topic": topic, "hash": crate::store::hash_note(&note), "note": note })
+                        json!({ "topic": topic, "hash": crate::store::hash_note(note), "note": note })
                     })
                     .collect();
-                json!(notes)
+                if global {
+                    self.expire_global_notes();
+                    out.extend(self.pending_global_notes().into_iter().filter(|(t, n, _)| matches(t, n)).map(|(topic, note, _)| {
+                        json!({ "topic": topic, "note": note, "pending": true, "status": "pending user confirmation, not saved yet" })
+                    }));
+                }
+                json!(out)
             }
             "send_file" => {
                 let path = text(args, "path").filter(|p| !p.trim().is_empty());
@@ -2321,22 +2360,40 @@ mod tests {
     }
 
     #[test]
-    fn the_supervisor_writes_a_global_note_once_the_user_says_yes() {
+    fn the_supervisor_global_note_is_pending_until_the_user_accepts_it() {
         let b = boss();
         let note = json!({"scope": "global", "topic": "style", "note": "plain words"});
-        let asked = b.api.call("remember", &note, b.boss);
-        assert!(proposed(&asked), "{asked:?}");
+        let out = b.api.call("remember", &note, b.boss).unwrap();
+        assert_eq!(out["pending"], "style");
+        assert!(out["note"].as_str().unwrap().contains("pending user confirmation"), "{out}");
         assert!(b.s.global_notes().unwrap().is_empty());
         let sup = b.s.session(b.boss).unwrap().project_id;
         assert!(b.s.notes(sup).unwrap().is_empty(), "nothing lands in the supervisor folder");
-        b.api.call("approve_action", &json!({"tool": "remember:global", "scope": "once"}), b.boss).unwrap();
-        let out = b.api.call("remember", &note, b.boss).unwrap();
-        assert_eq!(out["scope"], "global");
-        assert_eq!(b.s.global_notes().unwrap(), [("style".to_string(), "plain words".to_string())]);
-        assert!(b.s.notes(sup).unwrap().is_empty());
-        assert!(proposed(&b.api.call("remember", &note, b.boss)), "once is once");
+        let seen = b.api.call("recall", &json!({"scope": "global"}), b.boss).unwrap();
+        assert_eq!(seen[0]["pending"], true, "{seen}");
+        assert_eq!(seen[0]["note"], "plain words");
+        b.api.call("remember", &note, b.boss).unwrap();
+        let queued = b.s.proposals(agentbench_core::ProposalState::Pending).unwrap();
+        assert_eq!(queued.len(), 1, "the same note is not queued twice");
+        assert_eq!(queued[0].kind, agentbench_core::ProposalKind::GlobalNote);
         let own = b.api.call("remember", &json!({"topic": "queue", "note": "3 workers"}), b.boss).unwrap();
         assert!(own["note"].as_str().unwrap().contains("scope `global`"), "{own}");
+    }
+
+    #[test]
+    fn a_declined_or_stale_global_note_is_dropped() {
+        let b = boss();
+        let note = json!({"scope": "global", "topic": "style", "note": "plain words"});
+        b.api.call("remember", &note, b.boss).unwrap();
+        let id = b.s.proposals(agentbench_core::ProposalState::Pending).unwrap()[0].id;
+        b.s.decide_proposal(id, agentbench_core::ProposalState::Rejected).unwrap();
+        assert_eq!(b.api.call("recall", &json!({"scope": "global"}), b.boss).unwrap(), json!([]));
+        assert!(b.s.global_notes().unwrap().is_empty());
+        b.api.call("remember", &json!({"scope": "global", "topic": "old", "note": "x"}), b.boss).unwrap();
+        let old = b.s.proposals(agentbench_core::ProposalState::Pending).unwrap()[0].id;
+        b.s.backdate_proposal(old, 25 * 60 * 60 * 1000).unwrap();
+        assert_eq!(b.api.call("recall", &json!({"scope": "global"}), b.boss).unwrap(), json!([]));
+        assert!(b.s.proposals(agentbench_core::ProposalState::Pending).unwrap().is_empty());
     }
 
     #[test]

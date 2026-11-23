@@ -1927,6 +1927,7 @@ pub enum ProposalKind {
     Labels,
     CrossCutting,
     AddProject,
+    GlobalNote,
 }
 
 impl ProposalKind {
@@ -1937,6 +1938,7 @@ impl ProposalKind {
             ProposalKind::Labels => "labels",
             ProposalKind::CrossCutting => "cross_cutting",
             ProposalKind::AddProject => "add_project",
+            ProposalKind::GlobalNote => "global_note",
         }
     }
 
@@ -1958,6 +1960,7 @@ pub enum Change {
     Comment { issue_id: Id, body: String },
     Create { issue: NewIssue },
     AddProject { request: AddProject },
+    GlobalNote { topic: String, note: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2052,7 +2055,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 5;
+pub const API_VERSION: u32 = 6;
+pub const API_GLOBAL_NOTE: u32 = 6;
 pub const API_PROMPTS: u32 = 5;
 pub const API_ISSUE_DEPS: u32 = 2;
 pub const API_ATTENTION_FEED: u32 = 3;

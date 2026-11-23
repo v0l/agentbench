@@ -1159,6 +1159,10 @@ async fn accept_proposal(
                 store.add_issue(issue)?;
             }
             agentbench_core::Change::AddProject { .. } => {}
+            agentbench_core::Change::GlobalNote { topic, note } => {
+                store.set_global_note(topic, note)?;
+                crate::compact::after_write(&api.runner, crate::memory::Scope::Global);
+            }
         }
     }
     let decided = store.decide_proposal(id, agentbench_core::ProposalState::Accepted)?;
@@ -2331,6 +2335,32 @@ mod tests {
         assert!(store.proposal_known("x:2").unwrap(), "and is remembered");
         let (_, list) = call(&f.app, "GET", "/api/triage", None, T).await;
         assert!(list["proposals"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepting_a_global_note_proposal_writes_it_and_rejecting_drops_it() {
+        use agentbench_core::{Change, Proposal, ProposalKind, ProposalState};
+        let f = fixture();
+        let store = f.api.runner.store();
+        let mk = |topic: &str| Proposal {
+            id: 0,
+            kind: ProposalKind::GlobalNote,
+            summary: topic.into(),
+            issues: vec![],
+            sessions: vec![],
+            projects: vec![],
+            changes: vec![Change::GlobalNote { topic: topic.into(), note: "plain words".into() }],
+            state: ProposalState::Pending,
+            created_at: 0,
+        };
+        let yes = store.add_proposal("g:1", &mk("style")).unwrap();
+        let no = store.add_proposal("g:2", &mk("other")).unwrap();
+        let (st, _) = call(&f.app, "POST", &format!("/api/triage/{no}/reject"), None, T).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(store.global_notes().unwrap().is_empty());
+        let (st, _) = call(&f.app, "POST", &format!("/api/triage/{yes}/accept"), None, T).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(store.global_notes().unwrap(), [("style".to_string(), "plain words".to_string())]);
     }
 
     #[tokio::test]

@@ -53,7 +53,7 @@ mod gate_tests {
     }
 
     #[tokio::test]
-    async fn a_global_note_from_the_supervisor_is_written_after_the_user_says_yes() {
+    async fn a_global_note_from_the_supervisor_returns_pending_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let s = crate::store::Store::memory().unwrap();
         let sup = crate::projects::ensure_supervisor(&s, &dir.path().join("sup")).unwrap();
@@ -63,13 +63,11 @@ mod gate_tests {
         let api = Arc::new(crate::tools::StoreApi::new(s.clone()));
         let note = json!({"scope": "global", "topic": "style", "note": "plain words"});
         let io = TestIo::new(api.clone());
-        io.answers.lock().unwrap().push("No".into());
-        assert!(gated("remember", &note, &c, &io).await.is_err());
+        let started = std::time::Instant::now();
+        let out = gated("remember", &note, &c, &io).await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(out["note"].as_str().unwrap().contains("pending user confirmation"), "{out}");
         assert!(s.global_notes().unwrap().is_empty());
-        let io = TestIo::new(api.clone());
-        io.answers.lock().unwrap().push("Do it this once".into());
-        gated("remember", &note, &c, &io).await.unwrap();
-        assert_eq!(s.global_notes().unwrap(), [("style".to_string(), "plain words".to_string())]);
     }
 
     #[tokio::test]

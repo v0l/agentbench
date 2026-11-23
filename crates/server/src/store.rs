@@ -1924,6 +1924,15 @@ impl Store {
         Ok(id)
     }
 
+    #[cfg(test)]
+    pub fn backdate_proposal(&self, id: Id, by_ms: i64) -> Result<()> {
+        self.db().execute(
+            "UPDATE triage_proposals SET created_at = created_at - ?1 WHERE id = ?2",
+            params![by_ms, id],
+        )?;
+        Ok(())
+    }
+
     pub fn decide_proposal(
         &self,
         id: Id,

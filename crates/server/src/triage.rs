@@ -391,7 +391,7 @@ pub fn build(store: &Store, raw: &Value) -> Option<(String, Proposal)> {
             }
             extra = title.to_lowercase();
         }
-        ProposalKind::AddProject => return None,
+        ProposalKind::AddProject | ProposalKind::GlobalNote => return None,
     }
     let evidence: Vec<Id> = evidence.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
     if evidence.is_empty() || changes.is_empty() {

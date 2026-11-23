@@ -99,7 +99,7 @@ fn tag_proposal(p: &mut agentbench_core::Proposal, slot: u32) {
                 *issue_id = tag(slot, *issue_id)
             }
             Change::Create { issue } => issue.project_id = tag(slot, issue.project_id),
-            Change::AddProject { .. } => {}
+            Change::AddProject { .. } | Change::GlobalNote { .. } => {}
         }
     }
 }
