@@ -87,6 +87,9 @@ pub fn closed_by(store: &Store, tool: &str, args: &Value, supervisor: SessionId)
         "check_in" => on(&["check_in"]),
         "answer_session" | "escalate_question" => on(&["question"]),
         "unwatch_session" | "read_session" => on(&["watch"]),
+        "file_issue" | "start_session" | "update_issue" | "comment_on_issue" => {
+            close_where(store, supervisor, |i| i.kind == "user")
+        }
         "groom_done" => close_where(store, supervisor, |i| i.kind == "groom"),
         "main_checkout" => close_where(store, supervisor, |i| i.kind == "main_dirty"),
         _ => {}
@@ -215,7 +218,7 @@ pub fn at_turn_end(store: &Store, supervisor: SessionId, now: i64) -> Hold {
     }
     let _ = store.set_setting(&key, &(sent + 1).to_string());
     Hold::Nudge(format!(
-        "You still have {} open items:\n{}\nClose each one with its action (judge_session, check_in, answer_session, a reply, file_issue or start_session), or write what blocks it into a tracker issue, then end the turn.",
+        "You still have {} open items:\n{}\nClose each one by calling one of: judge_session, check_in, answer_session, escalate_question, file_issue, start_session, update_issue, comment_on_issue, or by replying, or write what blocks it into a tracker issue, then end the turn.",
         open.len(),
         lines.join("\n")
     ))

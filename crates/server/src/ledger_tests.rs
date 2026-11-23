@@ -120,6 +120,14 @@ fn a_user_message_closes_only_on_a_supervisor_reply() {
 }
 
 #[test]
+fn file_issue_closes_an_open_user_item() {
+    let w = world();
+    delivered(&w.store, w.boss.id, "user", None, "please track this");
+    closed_by(&w.store, "file_issue", &serde_json::json!({"title": "t"}), w.boss.id);
+    assert!(w.store.open_items(w.boss.id).unwrap().is_empty());
+}
+
+#[test]
 fn the_turn_end_nudges_three_times_then_gives_up_with_the_list() {
     let w = world();
     delivered(&w.store, w.boss.id, "judge", Some(w.worker.id), "judge it");
