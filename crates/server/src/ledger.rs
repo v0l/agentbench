@@ -135,9 +135,8 @@ pub fn close_replied(store: &Store, supervisor: SessionId) {
     if users.is_empty() {
         return;
     }
-    let replies: Vec<i64> = store
-        .messages(supervisor, 0)
-        .unwrap_or_default()
+    let rows = store.messages(supervisor, 0).unwrap_or_default();
+    let replies: Vec<i64> = agentbench_core::shown(&rows)
         .into_iter()
         .filter(|m| matches!(m.entry, Entry::Assistant { .. }))
         .map(|m| m.created_at)

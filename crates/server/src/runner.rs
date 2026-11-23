@@ -4773,6 +4773,16 @@ mod deferred_tests {
     }
 
     #[tokio::test]
+    async fn a_plain_reply_closes_the_user_ask() {
+        let r = rig();
+        r.store.set_setting(crate::ledger::HOLD_SETTING, "1").unwrap();
+        r.runner.send(&r.boss, "what about the sessions").unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let open = r.store.open_items(r.boss.id).unwrap();
+        assert!(open.is_empty(), "{open:?} {:?}", log(&r.boss_log));
+    }
+
+    #[tokio::test]
     async fn a_judge_session_call_lets_the_supervisor_go_idle() {
         let r = rig();
         r.store.set_setting(crate::ledger::HOLD_SETTING, "1").unwrap();

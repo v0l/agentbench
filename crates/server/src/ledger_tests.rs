@@ -120,6 +120,25 @@ fn a_user_message_closes_only_on_a_supervisor_reply() {
 }
 
 #[test]
+fn a_wire_logged_reply_closes_the_user_ask() {
+    use agentbench_core::{Said, Sent};
+    let w = world();
+    delivered(&w.store, w.boss.id, "user", None, "what about the sessions");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let tool_only = Sent {
+        message: serde_json::json!({"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]}),
+        said: Said::Plain,
+    };
+    w.store.add_message(w.boss.id, &Entry::Wire { messages: vec![tool_only] }).unwrap();
+    close_replied(&w.store, w.boss.id);
+    assert_eq!(w.store.open_items(w.boss.id).unwrap().len(), 1);
+    let reply = Sent { message: serde_json::json!({"role": "assistant", "content": "closed them"}), said: Said::Plain };
+    w.store.add_message(w.boss.id, &Entry::Wire { messages: vec![reply] }).unwrap();
+    close_replied(&w.store, w.boss.id);
+    assert!(w.store.open_items(w.boss.id).unwrap().is_empty());
+}
+
+#[test]
 fn file_issue_closes_an_open_user_item() {
     let w = world();
     delivered(&w.store, w.boss.id, "user", None, "please track this");
