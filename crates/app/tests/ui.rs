@@ -2718,6 +2718,79 @@ fn rejecting_the_add_project_card_adds_nothing() {
     assert_eq!(rig.store.projects().unwrap().len(), before);
 }
 
+fn global_note_request(rig: &Rig, topic: &str) -> agentbench_core::Id {
+    let proposal = agentbench_core::Proposal {
+        id: 0,
+        kind: agentbench_core::ProposalKind::GlobalNote,
+        summary: format!("keep the global note {topic}"),
+        issues: vec![],
+        sessions: vec![],
+        projects: vec![],
+        changes: vec![agentbench_core::Change::GlobalNote {
+            topic: topic.into(),
+            note: "Write plain words, no dashes, and keep replies short enough to read on a phone screen without scrolling sideways.".into(),
+        }],
+        state: agentbench_core::ProposalState::Pending,
+        created_at: 0,
+    };
+    rig.store.add_proposal(&format!("global_note:{topic}"), &proposal).unwrap()
+}
+
+fn open_global_note_card(rig: &Rig, id: agentbench_core::Id, size: [f32; 2]) -> Harness<'static, App> {
+    let mut h = harness_at(rig.url.clone(), size);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    if size[0] < 600.0 {
+        h.get_by_label("projects").click();
+        h.run_steps(3);
+    }
+    h.get_by_label("supervisor").click();
+    until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+    until(&mut h, "the card", |h| h.query_by_label(&format!("accept global note {id}")).is_some());
+    h
+}
+
+#[test]
+fn the_global_note_card_shows_the_note_and_accept_writes_it() {
+    let rig = rig();
+    let id = global_note_request(&rig, "style");
+    let mut h = open_global_note_card(&rig, id, [1280.0, 800.0]);
+    assert!(h.query_by_label_contains("global note: style").is_some());
+    assert!(h.query_by_label_contains("keep replies short enough").is_some());
+    assert!(rig.store.global_notes().unwrap().is_empty());
+    h.get_by_label(&format!("accept global note {id}")).click();
+    until(&mut h, "the note", |_| rig.store.global_notes().unwrap().len() == 1);
+    until(&mut h, "the card goes", |h| h.query_by_label(&format!("accept global note {id}")).is_none());
+}
+
+#[test]
+fn declining_the_global_note_card_writes_nothing() {
+    let rig = rig();
+    let id = global_note_request(&rig, "style");
+    let mut h = open_global_note_card(&rig, id, [1280.0, 800.0]);
+    h.get_by_label(&format!("decline global note {id}")).click();
+    until(&mut h, "the card goes", |h| h.query_by_label(&format!("decline global note {id}")).is_none());
+    assert!(rig.store.global_notes().unwrap().is_empty());
+    assert!(rig.store.proposals(agentbench_core::ProposalState::Pending).unwrap().is_empty());
+}
+
+#[test]
+fn the_global_note_card_fits_a_phone() {
+    for size in [[390.0, 844.0], [412.0, 900.0]] {
+        let rig = rig();
+        let id = global_note_request(&rig, "style");
+        let mut h = open_global_note_card(&rig, id, size);
+        h.run_steps(10);
+        if h.state().drawer_open() {
+            click(&mut h, size[0] - 10.0, 600.0);
+            h.run_steps(5);
+        }
+        assert!(!h.state().drawer_open(), "the drawer is away");
+        shot(&mut h, &format!("global-note-card-{}", size[0] as u32));
+        let bad = off_sideways(&h, size);
+        assert!(bad.is_empty(), "global note card at {size:?}: {bad:?}");
+    }
+}
+
 fn open_crowded_supervisor(h: &mut Harness<'_, App>) -> agentbench_core::SessionId {
     until(h, "the overview", |h| h.state().overview().is_some_and(|o| o.projects.len() >= 24));
     h.get_by_label("supervisor").click();

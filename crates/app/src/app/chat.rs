@@ -537,7 +537,7 @@ impl App {
 
     fn triage_panel(&mut self, ui: &mut Ui) {
         let Some(mut t) = self.overview.as_ref().and_then(|o| o.triage.clone()) else { return };
-        t.proposals.retain(|p| p.kind != agentbench_core::ProposalKind::AddProject);
+        t.proposals.retain(|p| !matches!(p.kind, agentbench_core::ProposalKind::AddProject | agentbench_core::ProposalKind::GlobalNote));
         let autopilot_open = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("autopilot_open"))).unwrap_or(false);
         if t.proposals.is_empty() && !t.running && !autopilot_open {
             return;
@@ -656,6 +656,53 @@ impl App {
         }
     }
 
+    fn global_note_cards(&mut self, ui: &mut Ui, session: agentbench_core::SessionId) {
+        if self.supervisor_chat() != Some(session) {
+            return;
+        }
+        let here = self.client.as_ref().map_or(0, |c| c.session_slot(session));
+        if !self.client.as_ref().is_none_or(|c| c.server_has(here, agentbench_core::API_GLOBAL_NOTE)) {
+            return;
+        }
+        let cards: Vec<(agentbench_core::Id, String, String)> = self
+            .client
+            .as_ref()
+            .map(|c| c.proposals())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(slot, _)| *slot == here)
+            .filter_map(|(_, p)| {
+                p.changes.iter().find_map(|c| match c {
+                    agentbench_core::Change::GlobalNote { topic, note } => Some((p.id, topic.clone(), note.clone())),
+                    _ => None,
+                })
+            })
+            .collect();
+        let mut decide: Option<(agentbench_core::Id, bool)> = None;
+        for (id, topic, note) in &cards {
+            ui.add_space(4.0);
+            section_panel(ui, |ui| {
+                ui.label(egui::RichText::new(format!("global note: {topic}")).size(11.5).color(READOUT));
+                ui.add(egui::Label::new(egui::RichText::new(note).size(10.5).color(LEGEND)).wrap());
+                ui.horizontal(|ui| {
+                    let accept = ui.add(Key::new("accept").outline(READOUT));
+                    accept.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("accept global note {id}")));
+                    if accept.clicked() {
+                        decide = Some((*id, true));
+                    }
+                    let decline = ui.add(Key::new("decline").outline(FAULT));
+                    decline.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("decline global note {id}")));
+                    if decline.clicked() {
+                        decide = Some((*id, false));
+                    }
+                });
+            });
+        }
+        if let (Some((id, accept)), Some(c)) = (decide, &mut self.client) {
+            c.triage_decide(id, accept);
+        }
+    }
+
     fn add_project_cards(&mut self, ui: &mut Ui, session: agentbench_core::SessionId) {
         let supervisor = self.supervisor_chat() == Some(session);
         let here = self.client.as_ref().map_or(0, |c| c.session_slot(session));
@@ -717,6 +764,7 @@ impl App {
             self.triage_panel(ui);
         }
         self.add_project_cards(ui, s.id);
+        self.global_note_cards(ui, s.id);
         self.session_body(ui, s, tree);
     }
 
