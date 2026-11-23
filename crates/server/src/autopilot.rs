@@ -1380,7 +1380,7 @@ impl Autopilot {
             None => self.resume_note(false),
         }
         let workers = store.workers().unwrap_or_default();
-        let issues = store.issues().unwrap_or_default();
+        let issues = crate::github::caps::startable(store, store.issues().unwrap_or_default(), crate::store::now());
         let mut live: HashSet<Id> = workers.iter().map(|w| w.issue).collect();
         for s in store.sessions().unwrap_or_default() {
             if let Some(i) = s.issue_id

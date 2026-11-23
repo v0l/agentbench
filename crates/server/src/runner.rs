@@ -959,6 +959,7 @@ impl Runner {
             let status = runner
                 .turn(agent.as_ref(), &session, &prompt, &stop, &inbox, &questions, mode)
                 .await;
+            crate::github::caps::count_session_turn(&runner.store, &session, crate::store::now());
             let held = status == SessionStatus::Idle
                 && mode == Mode::Chat
                 && runner.hold_for_open_items(&session, &inbox);
