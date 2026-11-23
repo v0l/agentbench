@@ -330,6 +330,15 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("issues", "ready_hash", "TEXT"),
     ("issues", "ready_after", "INTEGER NOT NULL DEFAULT 0"),
     ("comments", "trust", "TEXT NOT NULL DEFAULT 'trusted'"),
+    ("outbox", "asked_by", "TEXT NOT NULL DEFAULT ''"),
+    ("outbox", "trusted", "INTEGER NOT NULL DEFAULT 1"),
+    ("outbox", "number", "INTEGER NOT NULL DEFAULT 0"),
+    ("outbox", "text", "TEXT NOT NULL DEFAULT ''"),
+    ("outbox", "attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("outbox", "next_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("outbox", "external_id", "TEXT"),
+    ("outbox", "error", "TEXT"),
+    ("outbox", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 const AFTER_COLUMNS: &str = r#"
@@ -385,7 +394,7 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct OutboxItem {
     pub id: Id,
     pub project_id: Id,
@@ -393,6 +402,46 @@ pub struct OutboxItem {
     pub payload: String,
     pub status: String,
     pub created_at: i64,
+    pub asked_by: String,
+    pub trusted: bool,
+    pub number: i64,
+    pub text: String,
+    pub attempts: i64,
+    pub next_at: i64,
+    pub external_id: Option<String>,
+    pub error: Option<String>,
+    pub updated_at: i64,
+}
+
+pub struct NewOutbox<'a> {
+    pub project_id: Id,
+    pub kind: &'a str,
+    pub payload: &'a str,
+    pub status: &'a str,
+    pub asked_by: &'a str,
+    pub trusted: bool,
+    pub number: i64,
+    pub text: &'a str,
+}
+
+fn outbox_row(r: &Row) -> rusqlite::Result<OutboxItem> {
+    Ok(OutboxItem {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        kind: r.get("kind")?,
+        payload: r.get("payload")?,
+        status: r.get("status")?,
+        created_at: r.get("created_at")?,
+        asked_by: r.get("asked_by")?,
+        trusted: r.get("trusted")?,
+        number: r.get("number")?,
+        text: r.get("text")?,
+        attempts: r.get("attempts")?,
+        next_at: r.get("next_at")?,
+        external_id: r.get("external_id")?,
+        error: r.get("error")?,
+        updated_at: r.get("updated_at")?,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1483,19 +1532,66 @@ impl Store {
 
     pub fn outbox(&self, project_id: Option<Id>) -> Result<Vec<OutboxItem>> {
         let db = self.db();
-        let mut stmt = db.prepare(
-            "SELECT id, project_id, kind, payload, status, created_at FROM outbox WHERE (?1 IS NULL OR project_id = ?1) ORDER BY id",
+        let mut stmt = db.prepare("SELECT * FROM outbox WHERE (?1 IS NULL OR project_id = ?1) ORDER BY id")?;
+        let rows = stmt.query_map([project_id], outbox_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn outbox_item(&self, id: Id) -> Result<OutboxItem> {
+        self.db()
+            .query_row("SELECT * FROM outbox WHERE id = ?1", [id], outbox_row)
+            .optional()?
+            .ok_or_else(|| not_found("outbox row", id))
+    }
+
+    pub fn outbox_insert(&self, new: &NewOutbox) -> Result<Id> {
+        let db = self.db();
+        let t = now();
+        db.execute(
+            "INSERT INTO outbox (project_id, kind, payload, status, created_at, asked_by, trusted, number, text, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?5)",
+            params![new.project_id, new.kind, new.payload, new.status, t, new.asked_by, new.trusted, new.number, new.text],
         )?;
-        let rows = stmt.query_map([project_id], |r| {
-            Ok(OutboxItem {
-                id: r.get(0)?,
-                project_id: r.get(1)?,
-                kind: r.get(2)?,
-                payload: r.get(3)?,
-                status: r.get(4)?,
-                created_at: r.get(5)?,
-            })
-        })?;
+        Ok(db.last_insert_rowid())
+    }
+
+    pub fn outbox_transition(&self, id: Id, from: &[&str], to: &str, text: Option<&str>) -> Result<bool> {
+        let db = self.db();
+        let current: Option<String> =
+            db.query_row("SELECT status FROM outbox WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        let Some(current) = current else { return Err(not_found("outbox row", id)) };
+        if !from.contains(&current.as_str()) {
+            return Ok(false);
+        }
+        db.execute(
+            "UPDATE outbox SET status = ?2, text = COALESCE(?3, text), updated_at = ?4 WHERE id = ?1 AND status = ?5",
+            params![id, to, text, now(), current],
+        )?;
+        Ok(true)
+    }
+
+    pub fn outbox_result(
+        &self,
+        id: Id,
+        status: &str,
+        external_id: Option<&str>,
+        error: Option<&str>,
+        attempts: i64,
+        next_at: i64,
+    ) -> Result<()> {
+        self.db().execute(
+            "UPDATE outbox SET status = ?2, external_id = COALESCE(?3, external_id), error = ?4, attempts = ?5, next_at = ?6, updated_at = ?7 WHERE id = ?1",
+            params![id, status, external_id, error, attempts, next_at, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn outbox_ready(&self, at: i64) -> Result<Vec<OutboxItem>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT * FROM outbox WHERE status = 'approved' AND next_at <= ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([at], outbox_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
