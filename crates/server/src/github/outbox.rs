@@ -201,6 +201,28 @@ enum Sent {
     Fail(String),
 }
 
+fn api_detail(stdout: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(stdout.trim()).ok()?;
+    let mut parts = Vec::new();
+    if let Some(m) = v.get("message").and_then(Value::as_str) {
+        parts.push(m.to_string());
+    }
+    for e in v.get("errors").and_then(Value::as_array).into_iter().flatten() {
+        match e {
+            Value::String(s) => parts.push(s.clone()),
+            other => parts.push(other.to_string()),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+fn failure(r: &super::sync::Reply) -> Sent {
+    match api_detail(&r.stdout) {
+        Some(d) => classify(&format!("{}: {d}", r.stderr.trim())),
+        None => classify(&r.stderr),
+    }
+}
+
 fn classify(stderr: &str) -> Sent {
     let msg = stderr.trim().to_string();
     let code = Regex::new(r"HTTP (\d{3})").unwrap().captures(&msg).and_then(|c| c[1].parse::<u16>().ok());
@@ -215,10 +237,23 @@ fn classify(stderr: &str) -> Sent {
 fn run(gh: &str, args: &[&str]) -> Sent {
     let r = super::sync::call(gh, args);
     if !r.ok {
-        return classify(&r.stderr);
+        return failure(&r);
     }
     let id = serde_json::from_str::<Value>(&r.stdout).ok().and_then(|v| v.get("id").map(|i| i.to_string().trim_matches('"').to_string()));
     Sent::Done(id)
+}
+
+fn login_of(stdout: &str, pointer: &str) -> Option<String> {
+    serde_json::from_str::<Value>(stdout).ok()?.pointer(pointer)?.as_str().map(str::to_string)
+}
+
+fn is_own_pull_request(gh: &str, repo: &str, number: &str) -> bool {
+    let me = super::sync::call(gh, &["api", "user"]);
+    let pr = super::sync::call(gh, &["api", &format!("repos/{repo}/pulls/{number}")]);
+    match (login_of(&me.stdout, "/login"), login_of(&pr.stdout, "/user/login")) {
+        (Some(a), Some(b)) => me.ok && pr.ok && a.eq_ignore_ascii_case(&b),
+        _ => false,
+    }
 }
 
 fn send(gh: &str, repo: &str, item: &OutboxItem) -> Sent {
@@ -257,8 +292,13 @@ fn send(gh: &str, repo: &str, item: &OutboxItem) -> Sent {
                 "request_changes" => "REQUEST_CHANGES",
                 _ => "COMMENT",
             };
+            let own = event != "COMMENT" && is_own_pull_request(gh, repo, &n);
+            let event = if own { "COMMENT" } else { event };
             let mut body = json!({"event": event});
-            if !item.text.trim().is_empty() {
+            if own {
+                let verdict = if text_of("event") == "approve" { "approves" } else { "asks for changes on" };
+                body["body"] = json!(format!("agentbench reviewed this and {verdict} it. GitHub does not allow that verdict on your own pull request, so it is posted as a comment.\n\n{}{}", item.text, footer(repo)));
+            } else if !item.text.trim().is_empty() {
                 body["body"] = json!(format!("{}{}", item.text, footer(repo)));
             }
             if let Some(list) = params.get("comments").and_then(Value::as_array).filter(|l| !l.is_empty()) {
@@ -288,7 +328,7 @@ fn send(gh: &str, repo: &str, item: &OutboxItem) -> Sent {
             let r = super::sync::call(gh, &["api", "--method", "POST", &url, "--input", &path]);
             let _ = std::fs::remove_file(file);
             if !r.ok {
-                return classify(&r.stderr);
+                return failure(&r);
             }
             let number = serde_json::from_str::<Value>(&r.stdout).ok().and_then(|v| v.get("number").and_then(Value::as_i64));
             match number {
@@ -418,6 +458,11 @@ if [ -f "$D/failures" ] && [ "$(cat "$D/failures")" -gt 0 ]; then
   cat "$D/msg" >&2
   exit 1
 fi
+case "$*" in
+  "api user") echo '{"login": "me"}'; exit 0 ;;
+  *pulls/7) if [ -f "$D/author" ]; then echo "{\"user\": {\"login\": \"$(cat "$D/author")\"}}"; else echo '{"user": {"login": "other"}}'; fi; exit 0 ;;
+  *pulls/9/reviews*) if [ -f "$D/own" ]; then echo '{"message":"Unprocessable Entity","errors":["Can not approve your own pull request"]}'; echo "gh: Unprocessable Entity (HTTP 422)" >&2; exit 1; fi ;;
+esac
 echo '{"id": 4242, "number": 4242}'
 "#;
             crate::testing_stub::write_script(&gh, script);
@@ -602,5 +647,31 @@ echo '{"id": 4242, "number": 4242}'
         assert!(calls.contains("pulls/7/reviews"), "{calls}");
         let bodies = stub.bodies();
         assert!(bodies.contains("REQUEST_CHANGES") && bodies.contains("a.rs"), "{bodies}");
+    }
+
+    #[test]
+    fn a_review_on_the_owners_own_pull_request_is_posted_as_a_comment() {
+        let (store, p, stub) = setup(PostMode::Auto);
+        std::fs::write(stub.dir.path().join("author"), "me").unwrap();
+        let ask = Ask { kind: "review".into(), params: json!({"event": "request_changes", "comments": [{"path": "a.rs", "line": 3, "body": "fix"}]}), ..comment(p, "needs work", true) };
+        let (review, _) = propose(&store, ask).unwrap();
+        approve(&store, review, None, "user").unwrap();
+        assert_eq!(drain(&store, &stub.gh, 1_000), 1);
+        let bodies = stub.bodies();
+        assert!(bodies.contains("\"event\":\"COMMENT\"") && !bodies.contains("REQUEST_CHANGES"), "{bodies}");
+        assert!(bodies.contains("agentbench reviewed this"), "{bodies}");
+    }
+
+    #[test]
+    fn a_422_row_error_carries_the_github_message() {
+        let (store, p, stub) = setup(PostMode::Auto);
+        std::fs::write(stub.dir.path().join("own"), "1").unwrap();
+        let ask = Ask { kind: "review".into(), number: 9, params: json!({"event": "comment"}), ..comment(p, "hello", true) };
+        let (review, _) = propose(&store, ask).unwrap();
+        drain(&store, &stub.gh, 1_000);
+        let row = store.outbox_item(review).unwrap();
+        assert_eq!(row.status, "failed");
+        let err = row.error.unwrap_or_default();
+        assert!(err.contains("HTTP 422") && err.contains("Can not approve your own pull request"), "{err}");
     }
 }

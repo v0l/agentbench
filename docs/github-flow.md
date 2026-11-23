@@ -71,7 +71,7 @@ Posted comments end with a line saying agentbench posted them for the repo owner
 
 The **pull requests** tab lists the open pull requests with their checks, the review verdict for the current head, and a one line summary. **review now** asks for a review of the current head. Reviews run on the high model in a throwaway worktree; a pull request from an outside contributor is read only, its code is never run. The review lands in the outbox like any other post.
 
-**merge** is for you only. The server merges with `gh pr merge` and the project's merge method, and only when the checks pass and you approved the review row of the current head in the outbox. Branch protection is never bypassed. **automerge: trusted** lets agentbench merge its own pull requests for ready issues once checks pass and the review approves.
+**merge** is for you only. The server merges with `gh pr merge` and the project's merge method, and only when the checks pass and you approved the review row of the current head in the outbox. Branch protection is never bypassed. On your own pull request GitHub refuses approve and request changes, so the drain posts the review as a comment that says agentbench reviewed it; the row keeps its verdict, so an approved row still unblocks the merge. A failed post shows GitHub's own message in the row error. **automerge: trusted** lets agentbench merge its own pull requests for ready issues once checks pass and the review approves.
 
 ```
 agentbench github pulls --project <project>
