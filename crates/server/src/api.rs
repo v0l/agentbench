@@ -3189,6 +3189,38 @@ mod tests {
         keep("messages", &messages);
         let (_, changes) = call(&f.app, "GET", "/api/changes", None, T).await;
         keep("changes", &changes);
+        let pid_num = pid;
+        f.api.runner.store().update_project(pid_num, &agentbench_core::ProjectPatch { tracker: Some(agentbench_core::Tracker::Github { repo: "o/r".into() }), ..Default::default() }).unwrap();
+        f.api
+            .runner
+            .store()
+            .mirror_pr(
+                pid_num,
+                &crate::store::MirrorPr {
+                    number: 9,
+                    title: "Fix".into(),
+                    body: "Closes #4".into(),
+                    author: "agentbench".into(),
+                    association: String::new(),
+                    head_ref: "issue-4".into(),
+                    base_ref: "main".into(),
+                    head_sha: "abc".into(),
+                    state: "open".into(),
+                    draft: false,
+                    url: "https://github.com/o/r/pull/9".into(),
+                    created_at: 1,
+                    updated_at: 2,
+                    trust: agentbench_core::Trust::Trusted,
+                },
+            )
+            .unwrap();
+        let check = agentbench_core::PrCheck { name: "test".into(), status: "completed".into(), conclusion: Some("success".into()), run_id: Some(5), url: "u".into() };
+        f.api.runner.store().set_pr_checks(pid_num, 9, "abc", &[check]).unwrap();
+        f.api.runner.store().set_pr_review(pid_num, 9, "abc", "approve", 1, 0).unwrap();
+        let (s, pulls) = call(&f.app, "GET", &format!("/api/projects/{pid}/pulls"), None, T).await;
+        assert_eq!(s, StatusCode::OK, "{pulls}");
+        keep("pulls", &pulls);
+        let _: Vec<agentbench_core::PullRequest> = serde_json::from_value(pulls).unwrap();
         let overview: agentbench_core::Overview = serde_json::from_value(overview).unwrap();
         assert_eq!(overview.api_version, agentbench_core::API_VERSION);
         let _: agentbench_core::ChangesFeed = serde_json::from_value(changes).unwrap();

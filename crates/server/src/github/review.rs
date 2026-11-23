@@ -431,7 +431,7 @@ pub async fn review_due(store: &Store, gh: &str, target: &Target, now: i64) -> u
 pub fn high_target(runner: &crate::runner::Runner) -> Option<Target> {
     let main = runner.titles()?.main();
     let m = main.level("high")?;
-    (!m.url.trim().is_empty() && !m.model.trim().is_empty()).then(|| Target { url: m.url, model: m.model, key: m.key })
+    (!m.url.trim().is_empty() && !m.model.trim().is_empty()).then_some(Target { url: m.url, model: m.model, key: m.key })
 }
 
 pub fn spawn(runner: crate::runner::Runner) {
