@@ -48,9 +48,18 @@ fn owners(store: &Store, project: Id, except: Option<&Session>, now: i64) -> Vec
 
 pub fn report(store: &Store, project: &Project, blocked: Option<(Option<Id>, &Session)>, now: i64) -> Report {
     let main = Path::new(&project.path);
-    let entries = git::status_entries(main);
-    let files: Vec<String> = entries.iter().map(|(_, f)| f.clone()).collect();
-    let short = git::dirty_files(main, STATUS_LINES);
+    let incoming = blocked
+        .and_then(|(_, s)| store.worktree(s.worktree_id).ok())
+        .and_then(|t| t.branch.filter(|_| !t.main));
+    let blocking = git::blocking_dirt(main, incoming.as_deref());
+    let kind = if blocking.is_empty() { "uncommitted changes" } else { blocking.kind() };
+    let files: Vec<String> = blocking.paths();
+    let entries: Vec<(String, String)> = git::status_entries(main)
+        .into_iter()
+        .filter(|(_, f)| files.contains(f))
+        .collect();
+    let short: Vec<String> = files.iter().take(STATUS_LINES).cloned().collect();
+    let only_untracked = blocking.tracked.is_empty() && !blocking.colliding.is_empty();
     let own = owners(store, project.id, blocked.map(|(_, s)| s), now);
     let mut touching: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -76,17 +85,17 @@ pub fn report(store: &Store, project: &Project, blocked: Option<(Option<Id>, &Se
     let mut text = String::new();
     match blocked {
         Some((Some(issue), s)) => text.push_str(&format!(
-            "Dirty main checkout: the merge of #{issue} (session {}) is waiting because the main checkout has uncommitted changes.\n",
+            "Dirty main checkout: the merge of #{issue} (session {}) is waiting because the main checkout has {kind}.\n",
             s.id
         )),
         Some((None, s)) => text.push_str(&format!(
-            "Dirty main checkout: the merge of session {} is waiting because the main checkout has uncommitted changes.\n",
+            "Dirty main checkout: the merge of session {} is waiting because the main checkout has {kind}.\n",
             s.id
         )),
-        None => text.push_str("Dirty main checkout: a merge is waiting because the main checkout has uncommitted changes.\n"),
+        None => text.push_str(&format!("Dirty main checkout: a merge is waiting because the main checkout has {kind}.\n")),
     }
     text.push_str(&format!("Project: {} (id {})\nMain checkout: {}\n", project.name, project.id, project.path));
-    text.push_str(&format!("git status --short (first {STATUS_LINES}):\n{}\n", short.join("\n")));
+    text.push_str(&format!("Blocking paths (first {STATUS_LINES}):\n{}\n", short.join("\n")));
     text.push_str(&format!("Stashes already there: {}\n", git::stash_count(main)));
     if own.is_empty() {
         text.push_str("Sessions working in the main checkout: none\n");
@@ -137,8 +146,11 @@ pub fn report(store: &Store, project: &Project, blocked: Option<(Option<Id>, &Se
         }
         Advice::Stash => {
             text.push_str(&format!(
-                "Recommendation: stash with a named message. No session owns these changes and they look like source edits. Call main_checkout with {pass} and action stash; it stashes with a named message and the merge goes through on the next tick. Use commit with your own message instead if they belong on main."
+                "Recommendation: stash with a named message. No session owns these changes and they look like source edits. Call main_checkout with {pass} and action stash; it stashes tracked changes with a named message and the merge goes through on the next tick. Use commit with your own message instead if they belong on main."
             ));
+            if only_untracked {
+                text.push_str(" These untracked files collide with files the branch adds: move or delete them, or pass include_untracked true to stash.");
+            }
         }
     }
     Report { advice, text }
@@ -226,7 +238,7 @@ pub fn act(
         });
     let (done, out) = match action.as_str() {
         "commit" => commit(project, args)?,
-        "stash" => stash(main, issue, now)?,
+        "stash" => stash(main, issue, now, flag(args, "include_untracked"))?,
         "reset_paths" => reset_paths(main, args)?,
         "ask_session" => ask_session(store, runner, project, args)?,
         _ => return Err("`action` is one of commit, stash, reset_paths, ask_session".into()),
@@ -263,13 +275,18 @@ fn commit(project: &Project, args: &Value) -> Result<(Option<String>, Value), St
     Ok((Some(format!("committed {} as {head}", if paths.is_empty() { "everything".to_string() } else { paths.join(", ") })), json!({ "committed": head, "branch": branch })))
 }
 
-fn stash(main: &Path, issue: Option<i64>, now: i64) -> Result<(Option<String>, Value), String> {
+fn stash(main: &Path, issue: Option<i64>, now: i64, include_untracked: bool) -> Result<(Option<String>, Value), String> {
     if !git::is_dirty(main)? {
         return Err("the main checkout is clean; nothing to stash".into());
     }
+    if !include_untracked && git::blocking_dirt(main, None).tracked.is_empty() {
+        let big = git::big_untracked(main);
+        let large = if big.is_empty() { String::new() } else { format!(" (over 50 MB: {})", big.join(", ")) };
+        return Err(format!("there are no tracked changes to stash; untracked files{large} are left in place (pass include_untracked true to stash them)"));
+    }
     let what = issue.map(|i| format!("merging #{i}")).unwrap_or_else(|| "merging".into());
     let message = format!("autopilot: dirty main before {what}, {}", date_of(now));
-    git::stash_all(main, &message)?;
+    git::stash_all(main, &message, include_untracked)?;
     Ok((Some(format!("stashed everything as '{message}'")), json!({ "stashed": message, "stashes": git::stash_count(main) })))
 }
 

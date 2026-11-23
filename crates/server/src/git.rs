@@ -341,8 +341,74 @@ pub fn changed_files(main: &Path, branch: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn stash_all(main: &Path, message: &str) -> Result<String, String> {
-    git(main, &["stash", "push", "-u", "-m", message])
+pub fn stash_all(main: &Path, message: &str, include_untracked: bool) -> Result<String, String> {
+    let mut args = vec!["stash", "push"];
+    if include_untracked {
+        args.push("-u");
+    }
+    args.extend(["-m", message]);
+    git(main, &args)
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Blocking {
+    pub tracked: Vec<String>,
+    pub colliding: Vec<String>,
+}
+
+impl Blocking {
+    pub fn is_empty(&self) -> bool {
+        self.tracked.is_empty() && self.colliding.is_empty()
+    }
+
+    pub fn kind(&self) -> &'static str {
+        if self.tracked.is_empty() { "untracked files that would be overwritten" } else { "tracked changes" }
+    }
+
+    pub fn paths(&self) -> Vec<String> {
+        if self.tracked.is_empty() { self.colliding.clone() } else { self.tracked.clone() }
+    }
+}
+
+pub fn blocking_dirt(main: &Path, branch: Option<&str>) -> Blocking {
+    let tracked = git(main, &["status", "--porcelain", "-uno"])
+        .map(|o| o.lines().filter(|l| l.len() > 3).map(|l| l[3..].trim_matches('"').to_string()).collect())
+        .unwrap_or_default();
+    let untracked: Vec<String> = git(main, &["ls-files", "--others", "--exclude-standard"])
+        .map(|o| o.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    let added: Vec<String> = match branch {
+        Some(b) => git(main, &["diff", "--name-only", "--diff-filter=A", &format!("HEAD...{b}")])
+            .map(|o| o.lines().map(str::to_string).collect())
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let colliding = untracked.into_iter().filter(|f| branch.is_none() || added.contains(f)).collect();
+    Blocking { tracked, colliding }
+}
+
+const BIG_UNTRACKED_BYTES: u64 = 50 * 1024 * 1024;
+
+fn size_of(path: &Path) -> u64 {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::read_dir(path)
+            .map(|d| d.flatten().map(|e| size_of(&e.path())).sum())
+            .unwrap_or(0),
+        Ok(m) => m.len(),
+        Err(_) => 0,
+    }
+}
+
+pub fn big_untracked(main: &Path) -> Vec<String> {
+    git(main, &["status", "--porcelain"])
+        .map(|o| {
+            o.lines()
+                .filter(|l| l.starts_with("?? "))
+                .map(|l| l[3..].trim_matches('"').to_string())
+                .filter(|f| size_of(&main.join(f.trim_end_matches('/'))) > BIG_UNTRACKED_BYTES)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub fn commit_paths(main: &Path, message: &str, paths: &[String]) -> Result<String, String> {

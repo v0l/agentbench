@@ -914,7 +914,7 @@ impl Autopilot {
                     }
                 }
                 Err(un) => {
-                    if matches!(un, Unshipped::MainDirty(_)) {
+                    if matches!(un, Unshipped::MainDirty(..)) {
                         self.main_dirty(s.project_id, s, s.issue_id, now);
                     }
                     self.log_once(
@@ -1326,7 +1326,7 @@ impl Autopilot {
         let Some(tell) = ex.tell else {
             let _ = store.set_worker(w.session, "ready", true);
             self.merge_failed_at(w.session, now, false);
-            if matches!(un, Unshipped::MainDirty(_)) {
+            if matches!(un, Unshipped::MainDirty(..)) {
                 self.main_dirty(w.project, session, Some(w.issue), now);
             } else {
                 self.notify_capped(w.project, &format!("#{} cannot merge yet: {}", w.issue, clip(&ex.detail, 160)), now);
@@ -1499,7 +1499,7 @@ pub enum Unshipped {
     Conflict(String),
     Failed(String),
     MissingBranch(String),
-    MainDirty(Vec<String>),
+    MainDirty(String, Vec<String>),
     WorktreeDirty(String),
     WrongBranch(String),
 }
@@ -1513,8 +1513,8 @@ impl Unshipped {
             | Unshipped::MissingBranch(why)
             | Unshipped::WorktreeDirty(why)
             | Unshipped::WrongBranch(why) => why.clone(),
-            Unshipped::MainDirty(files) => {
-                format!("the main checkout has uncommitted changes: {}", files.join("; "))
+            Unshipped::MainDirty(kind, files) => {
+                format!("the main checkout has {kind}: {}", files.join("; "))
             }
         }
     }
@@ -1569,7 +1569,7 @@ fn explain(un: &Unshipped, branch: &str, main: &str) -> Option<Explained> {
                 clip(why, 400)
             )),
         }),
-        Unshipped::MainDirty(files) => Some(Explained {
+        Unshipped::MainDirty(_, files) => Some(Explained {
             cause: "b, the main checkout has uncommitted changes",
             detail: files.join("; "),
             tell: None,
@@ -1631,8 +1631,9 @@ pub fn ship(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
     {
         return Err(Unshipped::MissingBranch(format!("the tip of {branch} moved after the verdict was given")));
     }
-    if crate::git::is_dirty(main).unwrap_or(true) {
-        return Err(Unshipped::MainDirty(crate::git::dirty_files(main, 10)));
+    let blocking = crate::git::blocking_dirt(main, Some(&branch));
+    if !blocking.is_empty() {
+        return Err(Unshipped::MainDirty(blocking.kind().to_string(), blocking.paths()));
     }
     if crate::git::is_dirty(Path::new(&tree.path)).unwrap_or(false) {
         return Err(Unshipped::WorktreeDirty(format!("{branch} has uncommitted changes")));
@@ -2947,7 +2948,7 @@ mod tests {
     #[tokio::test]
     async fn a_dirty_main_checkout_does_not_send_the_worker_back_and_the_merge_is_retried() {
         let (r, a, sid) = finished_worker(DONE).await;
-        std::fs::write(r.repo.join("scratch.txt"), "x").unwrap();
+        std::fs::write(r.repo.join("feature.txt"), "x").unwrap();
         let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
         commit_in(&tree.path, "feature.txt");
         let before = told(&r, sid).len();
@@ -2956,11 +2957,84 @@ mod tests {
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
         assert_eq!(r.store.workers().unwrap()[0].state, "ready");
         assert_eq!(told(&r, sid).len(), before, "the worker is not told");
-        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("scratch.txt")));
-        std::fs::remove_file(r.repo.join("scratch.txt")).unwrap();
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("feature.txt")));
+        std::fs::remove_file(r.repo.join("feature.txt")).unwrap();
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
         assert!(r.repo.join("feature.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn untracked_files_that_cannot_collide_do_not_block_a_merge() {
+        let (r, a, sid) = finished_worker(DONE).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        std::fs::create_dir(r.repo.join("out_v3")).unwrap();
+        std::fs::write(r.repo.join("out_v3/model.bin"), "x").unwrap();
+        std::fs::write(r.repo.join("score.log"), "x").unwrap();
+        passed(&r, sid).await;
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.repo.join("feature.txt").exists());
+        assert!(r.repo.join("out_v3/model.bin").exists() && r.repo.join("score.log").exists());
+    }
+
+    #[tokio::test]
+    async fn an_untracked_file_the_branch_adds_blocks_and_is_named_as_such() {
+        let (r, _, sid) = finished_worker(DONE).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        std::fs::write(r.repo.join("feature.txt"), "x").unwrap();
+        std::fs::write(r.repo.join("other.log"), "x").unwrap();
+        let b = crate::git::blocking_dirt(&r.repo, tree.branch.as_deref());
+        assert!(b.tracked.is_empty());
+        assert_eq!(b.colliding, vec!["feature.txt".to_string()]);
+        assert_eq!(b.kind(), "untracked files that would be overwritten");
+        let un = Unshipped::MainDirty(b.kind().to_string(), b.paths());
+        assert_eq!(un.why(), "the main checkout has untracked files that would be overwritten: feature.txt");
+    }
+
+    #[tokio::test]
+    async fn a_modified_tracked_file_blocks_and_the_message_says_tracked_changes() {
+        let r = rig(DONE);
+        std::fs::write(r.repo.join("keep.rs"), "one").unwrap();
+        git_in(&r.repo, &["add", "."]);
+        git_in(&r.repo, &["commit", "-qm", "keep"]);
+        std::fs::write(r.repo.join("keep.rs"), "two").unwrap();
+        std::fs::write(r.repo.join("other.log"), "x").unwrap();
+        let b = crate::git::blocking_dirt(&r.repo, Some("nonexistent"));
+        assert_eq!(b.kind(), "tracked changes");
+        assert_eq!(b.paths(), vec!["keep.rs".to_string()]);
+        let un = Unshipped::MainDirty(b.kind().to_string(), b.paths());
+        assert_eq!(un.why(), "the main checkout has tracked changes: keep.rs");
+    }
+
+    #[tokio::test]
+    async fn stash_without_the_flag_leaves_untracked_files_in_place() {
+        let r = rig(DONE);
+        std::fs::write(r.repo.join("keep.rs"), "one").unwrap();
+        git_in(&r.repo, &["add", "."]);
+        git_in(&r.repo, &["commit", "-qm", "keep"]);
+        std::fs::write(r.repo.join("keep.rs"), "two").unwrap();
+        std::fs::write(r.repo.join("untracked.txt"), "x").unwrap();
+        main_checkout(&r, serde_json::json!({"action": "stash"})).unwrap();
+        assert_eq!(std::fs::read_to_string(r.repo.join("keep.rs")).unwrap(), "one");
+        assert!(r.repo.join("untracked.txt").exists());
+        let e = main_checkout(&r, serde_json::json!({"action": "stash"})).unwrap_err();
+        assert!(e.contains("no tracked changes"), "{e}");
+        main_checkout(&r, serde_json::json!({"action": "stash", "include_untracked": true})).unwrap();
+        assert!(!r.repo.join("untracked.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_big_untracked_directory_is_named_when_stash_refuses() {
+        let r = rig(DONE);
+        std::fs::create_dir(r.repo.join("model")).unwrap();
+        let f = std::fs::File::create(r.repo.join("model/w.bin")).unwrap();
+        f.set_len(60 * 1024 * 1024).unwrap();
+        let e = main_checkout(&r, serde_json::json!({"action": "stash"})).unwrap_err();
+        assert!(e.contains("over 50 MB") && e.contains("model/"), "{e}");
+        assert!(r.repo.join("model/w.bin").exists());
     }
 
     #[tokio::test]
@@ -2968,13 +3042,13 @@ mod tests {
         let (r, a, sid) = finished_worker(DONE).await;
         let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
         commit_in(&tree.path, "feature.txt");
-        std::fs::write(r.repo.join("scratch.txt"), "x").unwrap();
+        std::fs::write(r.repo.join("feature.txt"), "x").unwrap();
         r.ap.tick();
         judge(&r, sid, "concluded_pass", None).unwrap();
         r.ap.tick();
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
-        std::fs::remove_file(r.repo.join("scratch.txt")).unwrap();
+        std::fs::remove_file(r.repo.join("feature.txt")).unwrap();
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
     }
@@ -3049,6 +3123,7 @@ mod tests {
         let (r, a, sid) = finished_worker(DONE).await;
         let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
         commit_in(&tree.path, "feature.txt");
+        commit_in(&tree.path, file);
         std::fs::write(r.repo.join(file), "x").unwrap();
         r.ap.tick();
         idle(&r, r.boss.unwrap()).await;
@@ -3146,7 +3221,7 @@ mod tests {
         let (r, _, _) = blocked_by_dirty_main("lib.rs").await;
         let t = crate::store::now();
         r.ap.tick_at(t);
-        main_checkout(&r, serde_json::json!({"action": "stash"})).unwrap();
+        main_checkout(&r, serde_json::json!({"action": "stash", "include_untracked": true})).unwrap();
         r.ap.tick_at(t + 20 * 60_000);
         std::fs::write(r.repo.join("again.rs"), "x").unwrap();
         r.ap.tick_at(t + 40 * 60_000);
@@ -3158,7 +3233,7 @@ mod tests {
         let (r, a, _) = blocked_by_dirty_main("lib.rs").await;
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
-        let out = main_checkout(&r, serde_json::json!({"action": "stash"})).unwrap();
+        let out = main_checkout(&r, serde_json::json!({"action": "stash", "include_untracked": true})).unwrap();
         let msg = out["stashed"].as_str().unwrap();
         assert!(msg.starts_with(&format!("autopilot: dirty main before merging #{a}, ")), "{msg}");
         assert!(msg.ends_with(&crate::maindirty::date_of(crate::store::now())), "{msg}");
@@ -3294,7 +3369,7 @@ mod tests {
     #[tokio::test]
     async fn a_dirty_main_checkout_stops_the_merge_instead_of_forcing_it() {
         let (r, a, sid) = finished_worker(DONE).await;
-        std::fs::write(r.repo.join("scratch.txt"), "x").unwrap();
+        std::fs::write(r.repo.join("feature.txt"), "x").unwrap();
         passed(&r, sid).await;
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Review);
         assert_eq!(r.store.workers().unwrap()[0].state, "ready");
