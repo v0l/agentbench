@@ -99,6 +99,10 @@ a chat that is already on screen just focuses its tile. The focused tile is the 
 gets dropped or pasted files and that **new chat** fills. Each tile has its own draft.
 Narrow windows show one chat.
 
+## GitHub issues and pull requests
+
+A project can take its work from its GitHub repo instead of the built-in tracker: issues people open there are triaged by the autopilot, ready ones are worked and turned into pull requests, and pull requests are reviewed. Nothing is posted or merged until you approve it in the project's outbox. See [docs/github-flow.md](docs/github-flow.md) for the trust rules, the post modes, the webhook and how to turn it off.
+
 ## Taking control of a supervised session
 
 A session the supervisor or the autopilot started reports to its parent. To work in it yourself, right click it and choose **take control**: it is released, shows as user controlled, and the supervisor and autopilot stop messaging, judging, nudging or merging it. Chatting in it does not release it by itself. **hand back to supervisor** (or the supervisor's `watch_session` with `adopt`) puts it under the supervisor again. The same is `POST /api/sessions/{id}/release` and `/adopt`.
