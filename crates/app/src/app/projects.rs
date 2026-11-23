@@ -257,6 +257,9 @@ impl App {
             line(ui, "deploy", p.deploy.clone().unwrap_or_else(|| "not set".into()));
             Line::new().legend("automation").size(10.0).show(ui);
             self.level_row(ui, &p, if phone { 150.0 } else { 220.0 });
+            if self.server_has(id, agentbench_core::API_MODEL_LEVEL) {
+                self.model_levels_row(ui, &p);
+            }
         });
 
         let vision = o.visions.iter().find(|v| v.project_id == id);

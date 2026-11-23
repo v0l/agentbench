@@ -6,6 +6,9 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Issues carry a model level (`low`, `med`, `high`, or the label `model:high`). The autopilot starts the worker on that level's model from a per-project table, never on a cheaper one. `file_issue`, `update_issue`, the CLI (`agentbench issue`) and the app edit it. API version 9.
+
 ### Fixed
 - The context window is read from a server that lists the model under another name (a provider prefix, other case, or the only model served), and a web page at `/props` no longer counts as an answer. A server that says nothing now gets a 1M window instead of 128k, so compaction stops firing early.
 

@@ -25,6 +25,7 @@
       "labels": [
         "string"
       ],
+      "model_level": "string",
       "off_vision": "bool",
       "priority": "number",
       "project_id": "number",
@@ -107,6 +108,7 @@
         "labels": [
           "string"
         ],
+        "model_level": "string",
         "off_vision": "bool",
         "priority": "number",
         "project_id": "number",
@@ -128,7 +130,11 @@
         "deploy": "null",
         "home": "bool",
         "id": "number",
-        "merge_mode": "string",
+        "model_levels": {
+          "high": "string",
+          "low": "string",
+          "med": "string"
+        },
         "name": "string",
         "path": "string",
         "pinned": "bool",

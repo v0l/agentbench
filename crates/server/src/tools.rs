@@ -140,7 +140,20 @@ fn issue_json(i: &agentbench_core::Issue) -> Value {
         "id": i.id, "title": title, "state": i.state, "body": body, "trust": i.trust,
         "labels": i.labels, "priority": i.priority, "goal": i.goal, "off_vision": i.off_vision,
         "depends_on": i.depends_on, "waiting_on": i.waiting_on, "blocks": i.blocks,
+        "model": i.model_level.map(|l| l.as_str()), "model_label": i.wanted_level().map(|l| l.as_str()),
     })
+}
+
+fn model_arg(args: &Value) -> Result<Option<Option<agentbench_core::ModelLevel>>, String> {
+    match args.get("model") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(s)) if s.trim().is_empty() || s.trim().eq_ignore_ascii_case("default") => Ok(Some(None)),
+        Some(Value::String(s)) => agentbench_core::ModelLevel::parse(s)
+            .map(|l| Some(Some(l)))
+            .ok_or_else(|| "`model` is low, med or high".to_string()),
+        Some(_) => Err("`model` is low, med or high".into()),
+    }
 }
 
 fn depends_on(args: &Value) -> Result<Option<Vec<Id>>, String> {
@@ -826,6 +839,7 @@ impl Api for StoreApi {
                         goal: text(args, "goal"),
                         off_vision: flag(args, "off_vision").unwrap_or(false),
                         depends_on: depends_on(args)?.unwrap_or_default(),
+                        model_level: model_arg(args)?.flatten(),
                     })
                     .map_err(|e| e.0)?;
                 if s.project(target).is_ok_and(|p| p.tracker.is_github()) {
@@ -862,9 +876,10 @@ impl Api for StoreApi {
                     goal: text(args, "goal"),
                     off_vision: flag(args, "off_vision"),
                     depends_on: depends_on(args)?,
+                    model_level: model_arg(args)?,
                 };
                 let i = s.update_issue(issue, &patch).map_err(|e| e.0)?;
-                json!({ "id": i.id, "project": i.project_id, "title": i.title, "state": i.state, "labels": i.labels, "goal": i.goal, "off_vision": i.off_vision, "depends_on": i.depends_on, "waiting_on": i.waiting_on })
+                json!({ "id": i.id, "project": i.project_id, "title": i.title, "state": i.state, "labels": i.labels, "goal": i.goal, "off_vision": i.off_vision, "depends_on": i.depends_on, "waiting_on": i.waiting_on, "model": i.model_level.map(|l| l.as_str()) })
             }
             "get_issue" => {
                 let issue = id(args)?;
@@ -2433,6 +2448,23 @@ mod tests {
         api.call("update_issue", &json!({"id": fid, "labels": ["done-ish"]}), me.id).unwrap();
         assert_eq!(s.issue(fid).unwrap().labels, ["done-ish"]);
         assert!(api.call("file_issue", &json!({"title": "x", "labels": "bug"}), me.id).is_err());
+    }
+
+    #[test]
+    fn the_model_level_round_trips_through_the_tools() {
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/lvl");
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let a = api.call("file_issue", &json!({"title": "A", "model": "high"}), me.id).unwrap()["filed"].as_i64().unwrap();
+        assert_eq!(api.call("get_issue", &json!({"id": a}), me.id).unwrap()["model"], "high");
+        api.call("update_issue", &json!({"id": a, "model": "med"}), me.id).unwrap();
+        assert_eq!(s.issue(a).unwrap().model_level, Some(agentbench_core::ModelLevel::Med));
+        api.call("update_issue", &json!({"id": a, "model": "default"}), me.id).unwrap();
+        assert_eq!(s.issue(a).unwrap().model_level, None);
+        assert!(api.call("file_issue", &json!({"title": "B", "model": "huge"}), me.id).is_err());
+        let listed = api.call("list_issues", &json!({}), me.id).unwrap();
+        assert!(listed[0].get("model").is_some());
     }
 
     #[test]

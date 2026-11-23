@@ -1,0 +1,20 @@
+[
+  {
+    "created_at": 1795461794855,
+    "entry": {
+      "kind": "user",
+      "text": "hello"
+    },
+    "id": 1,
+    "session_id": "07fdbfe1-eafe-413a-aefe-ccab2ab9eafd"
+  },
+  {
+    "created_at": 1795461794857,
+    "entry": {
+      "kind": "assistant",
+      "text": "echo: hello in demo"
+    },
+    "id": 2,
+    "session_id": "07fdbfe1-eafe-413a-aefe-ccab2ab9eafd"
+  }
+]

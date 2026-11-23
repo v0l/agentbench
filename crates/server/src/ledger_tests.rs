@@ -120,6 +120,44 @@ fn a_user_message_closes_only_on_a_supervisor_reply() {
 }
 
 #[test]
+fn file_issue_closes_an_open_user_item() {
+    let w = world();
+    delivered(&w.store, w.boss.id, "user", None, "please track this");
+    closed_by(&w.store, "file_issue", &serde_json::json!({"title": "t"}), w.boss.id);
+    assert!(w.store.open_items(w.boss.id).unwrap().is_empty());
+}
+
+#[test]
+fn file_issue_closes_only_the_oldest_user_item() {
+    let w = world();
+    for t in ["one", "two", "three"] {
+        delivered(&w.store, w.boss.id, "user", None, t);
+    }
+    closed_by(&w.store, "file_issue", &serde_json::json!({"title": "t"}), w.boss.id);
+    let open = w.store.open_items(w.boss.id).unwrap();
+    assert_eq!(open.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(), ["two", "three"]);
+}
+
+#[test]
+fn start_session_closes_one_user_item() {
+    let w = world();
+    delivered(&w.store, w.boss.id, "user", None, "one");
+    delivered(&w.store, w.boss.id, "user", None, "two");
+    closed_by(&w.store, "start_session", &serde_json::json!({}), w.boss.id);
+    assert_eq!(w.store.open_items(w.boss.id).unwrap().len(), 1);
+}
+
+#[test]
+fn update_issue_and_comment_on_issue_close_nothing() {
+    let w = world();
+    delivered(&w.store, w.boss.id, "user", None, "one");
+    delivered(&w.store, w.boss.id, "user", None, "two");
+    closed_by(&w.store, "update_issue", &serde_json::json!({"id": 1}), w.boss.id);
+    closed_by(&w.store, "comment_on_issue", &serde_json::json!({"id": 1}), w.boss.id);
+    assert_eq!(w.store.open_items(w.boss.id).unwrap().len(), 2);
+}
+
+#[test]
 fn the_turn_end_nudges_three_times_then_gives_up_with_the_list() {
     let w = world();
     delivered(&w.store, w.boss.id, "judge", Some(w.worker.id), "judge it");

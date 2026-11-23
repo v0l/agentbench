@@ -1,0 +1,8 @@
+{
+  "agent": "echo",
+  "place": {
+    "kind": "main"
+  },
+  "project_id": 1,
+  "prompt": "hello"
+}

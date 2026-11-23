@@ -35,17 +35,17 @@
   "cursor": 9,
   "host": {
     "cores": 48,
-    "disk_free": 607709048832,
+    "disk_free": 617589424128,
     "disk_total": 3935812239360,
-    "load": 21.42,
+    "load": 19.35,
     "mem_total": 66741600256,
-    "mem_used": 17398185984
+    "mem_used": 40017747968
   },
   "issues": [
     {
       "blocks": [],
       "body": "details",
-      "created_at": 1795460614353,
+      "created_at": 1795459071860,
       "depends_on": [],
       "external_author": null,
       "external_number": null,
@@ -57,6 +57,7 @@
       "labels": [
         "bug"
       ],
+      "model_level": "med",
       "off_vision": false,
       "priority": 3,
       "project_id": 1,
@@ -65,7 +66,7 @@
       "state": "doing",
       "title": "Fix it",
       "trust": "trusted",
-      "updated_at": 1795460614353,
+      "updated_at": 1795459071860,
       "waiting_on": []
     }
   ],
@@ -74,13 +75,17 @@
     {
       "automation": null,
       "branch": "main",
-      "created_at": 1795460614349,
+      "created_at": 1795459071858,
       "deploy": null,
       "home": false,
       "id": 1,
-      "merge_mode": "pr",
+      "model_levels": {
+        "high": "",
+        "low": "",
+        "med": ""
+      },
       "name": "demo",
-      "path": "/tmp/.tmpiA9aIk/demo",
+      "path": "/tmp/.tmpiZoBbW/demo",
       "pinned": false,
       "post_mode": "draft",
       "remote": null,
@@ -96,17 +101,17 @@
     {
       "agent": "echo",
       "agent_session": null,
-      "created_at": 1795460614354,
-      "cwd": "/tmp/.tmpiA9aIk/demo",
+      "created_at": 1795459071860,
+      "cwd": "/tmp/.tmpiZoBbW/demo",
       "effort": null,
-      "id": "8cf7890f-7270-40c8-9bb0-88327919b096",
+      "id": "b42f295b-da85-4f83-b551-a6251ffd459f",
       "issue_id": null,
       "model": null,
       "parent": null,
       "project_id": 1,
       "status": "idle",
       "title": "hello",
-      "updated_at": 1795460614358,
+      "updated_at": 1795459071862,
       "usage": {
         "bash_edits": 0,
         "bash_sleeps": 0,
@@ -150,13 +155,13 @@
   "worktrees": [
     {
       "branch": "main",
-      "created_at": 1795460614350,
-      "head": "eff12d88d245d2cc327019b5c885802388e5ec54",
+      "created_at": 1795459071859,
+      "head": "779581df09c9908142c5426ebfcb1c73809b9f1c",
       "id": 1,
       "main": true,
       "missing": false,
       "owned": false,
-      "path": "/tmp/.tmpiA9aIk/demo",
+      "path": "/tmp/.tmpiZoBbW/demo",
       "project_id": 1
     }
   ]

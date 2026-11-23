@@ -531,6 +531,7 @@ impl Solo {
             deploy: None,
             tracker: Default::default(),
             post_mode: Default::default(),
+            model_levels: Default::default(),
             merge_mode: Default::default(),
         };
         let mut app = App::new(project, vec![info], "native".into());

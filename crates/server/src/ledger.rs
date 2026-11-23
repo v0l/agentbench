@@ -87,6 +87,12 @@ pub fn closed_by(store: &Store, tool: &str, args: &Value, supervisor: SessionId)
         "check_in" => on(&["check_in"]),
         "answer_session" | "escalate_question" => on(&["question"]),
         "unwatch_session" | "read_session" => on(&["watch"]),
+        "file_issue" | "start_session" => {
+            let oldest = store.open_items(supervisor).unwrap_or_default().into_iter().find(|i| i.kind == "user");
+            if let Some(item) = oldest {
+                let _ = store.close_open_items(&[item.id]);
+            }
+        }
         "groom_done" => close_where(store, supervisor, |i| i.kind == "groom"),
         "main_checkout" => close_where(store, supervisor, |i| i.kind == "main_dirty"),
         _ => {}
@@ -215,7 +221,7 @@ pub fn at_turn_end(store: &Store, supervisor: SessionId, now: i64) -> Hold {
     }
     let _ = store.set_setting(&key, &(sent + 1).to_string());
     Hold::Nudge(format!(
-        "You still have {} open items:\n{}\nClose each one with its action (judge_session, check_in, answer_session, a reply, file_issue or start_session), or write what blocks it into a tracker issue, then end the turn.",
+        "You still have {} open items:\n{}\nClose each one by calling one of: judge_session, check_in, answer_session, escalate_question, file_issue or start_session (each closes the oldest user ask), or by replying. A comment on an issue (comment_on_issue) or update_issue does not close an ask. Or write what blocks it into a tracker issue, then end the turn.",
         open.len(),
         lines.join("\n")
     ))

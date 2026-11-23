@@ -346,6 +346,23 @@ with spend as `$1.20 today, $0.80 project`. `GET /api/usage` returns the same.
 - While any model server is exhausted the autopilot starts no workers, logs
   `paused for quota until HH:MM UTC`, and goes on after the reset.
 
+An issue can say which model it needs: `model_level` is `low`, `med`, `high` or
+unset (the default model). The label `model:high` (also `model:low`,
+`model:med`) sets it too, which is how GitHub-mirrored issues carry it; the
+column wins when both exist. The autopilot starts the worker on the model the
+project's level table names (`agentbench issue levels <project> --high <model>`,
+or the model levels fields on the project page). An empty entry means low is the
+server's low model, med is the default model and high is the server's high
+model. A level with no model available, or whose model is out of quota, is never
+swapped for a cheaper one: the issue stays in todo with a note and a feed line
+(an out-of-quota level is skipped for that tick and the next issue is tried).
+Rework and rebase requests go to the same session, so they keep the level.
+`start_session {issue}` without a model uses the issue's level, and an issue
+tagged high refuses a lower model unless `force` is set. Set it with
+`file_issue` and `update_issue` (`model`), `agentbench issue new --model high`,
+`agentbench issue set <id> --model med`, or the level control on the issue page
+and form. Servers with API 9 or later support it.
+
 Every issue session takes one path, whether the autopilot picked the issue or
 the supervisor started it with `start_session {issue}`: the worker finishes,
 the supervisor gets one judge request and answers with `judge_session`, and at

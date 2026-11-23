@@ -4497,6 +4497,44 @@ fn clicking_a_project_opens_its_view_with_goals_agents_and_notes() {
 }
 
 #[test]
+fn the_issue_model_level_is_shown_edited_and_fits_a_phone() {
+    use agentbench_core::{IssueState, ModelLevel};
+    for size in [[1280.0, 800.0], [390.0, 844.0]] {
+        let rig = rig();
+        let p = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+        let id = rig
+            .store
+            .add_issue(&NewIssue {
+                project_id: p.id,
+                title: "Port the kir slice".into(),
+                state: Some(IssueState::Todo),
+                model_level: Some(ModelLevel::High),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let mut h = harness_at(rig.url.clone(), size);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_issue_pane(id);
+        h.run_steps(4);
+        let tag = size[0] as u32;
+        assert!(h.query_by_label("model high").is_some(), "the badge");
+        shot(&mut h, &format!("issue-model-{tag}"));
+        let bad = off_sideways(&h, size);
+        assert!(bad.is_empty(), "at {size:?}: {bad:?}");
+        h.get_by_label("model low").click();
+        let store = rig.store.clone();
+        until(&mut h, "the saved level", |_| store.issue(id).unwrap().model_level == Some(ModelLevel::Low));
+        h.state_mut().open_file_issue_form(p.id);
+        h.run_steps(3);
+        assert!(h.query_all_by_label("model default").count() >= 1, "the form picker");
+        shot(&mut h, &format!("issue-form-model-{tag}"));
+        let bad = off_sideways(&h, size);
+        assert!(bad.is_empty(), "form at {size:?}: {bad:?}");
+    }
+}
+
+#[test]
 fn the_projects_screens_fit_a_phone() {
     for size in [[390.0, 844.0], [412.0, 900.0]] {
         let (rig, id) = project_rig();

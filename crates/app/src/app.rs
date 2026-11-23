@@ -421,6 +421,7 @@ struct FileIssue {
     project: Id,
     title: String,
     body: String,
+    level: Option<agentbench_core::ModelLevel>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -761,6 +762,7 @@ pub struct App {
     comment: String,
     add_project: Option<AddProject>,
     file_issue: Option<FileIssue>,
+    model_drafts: HashMap<Id, [String; 3]>,
     start: Option<Start>,
     help: bool,
     new_worktree: Option<(Id, String)>,
@@ -974,6 +976,7 @@ impl App {
             comment: String::new(),
             add_project: None,
             file_issue: None,
+            model_drafts: HashMap::new(),
             start: None,
             help: false,
             new_worktree: None,
@@ -1293,7 +1296,7 @@ impl App {
     }
 
     pub fn open_file_issue_form(&mut self, project: Id) {
-        self.file_issue = Some(FileIssue { project, title: String::new(), body: String::new() });
+        self.file_issue = Some(FileIssue { project, title: String::new(), body: String::new(), level: None });
     }
 
     pub fn open_new_chat_form(&mut self) {
@@ -2629,6 +2632,9 @@ impl App {
             if let Some(r) = &patch.risky {
                 p.risky = r.clone();
             }
+            if let Some(m) = &patch.model_levels {
+                p.model_levels = m.clone();
+            }
         }
         if let Some(c) = &mut self.client {
             c.update_project(id, &patch);
@@ -2644,6 +2650,26 @@ impl App {
                 default_level: Some(level),
                 ..Default::default()
             });
+        }
+    }
+
+    pub(super) fn model_levels_row(&mut self, ui: &mut Ui, project: &Project) {
+        let saved = &project.model_levels;
+        let draft = self.model_drafts.entry(project.id).or_insert_with(|| [saved.low.clone(), saved.med.clone(), saved.high.clone()]);
+        let mut save = false;
+        Line::new().legend("model levels").size(10.0).show(ui);
+        let hints = ["low: the server's low model", "med: the default model", "high: the server's high model"];
+        for (text, hint) in draft.iter_mut().zip(hints) {
+            let r = field(ui, text, hint);
+            if r.lost_focus() {
+                save = true;
+            }
+        }
+        if save {
+            let levels = agentbench_core::ModelLevels { low: draft[0].clone(), med: draft[1].clone(), high: draft[2].clone() };
+            if levels != *saved {
+                self.patch_project(project.id, ProjectPatch { model_levels: Some(levels), ..Default::default() });
+            }
         }
     }
 
@@ -3145,6 +3171,7 @@ impl App {
         };
         let open = self.issue == Some(issue.id);
         let deps_known = self.server_has(issue.id, agentbench_core::API_ISSUE_DEPS);
+        let level_known = self.server_has(issue.id, agentbench_core::API_MODEL_LEVEL);
         let r = card(
             ui,
             rail,
@@ -3166,6 +3193,11 @@ impl App {
                     .value(&issue.title)
                     .size(12.5)
                     .elided(ui);
+                if issue.wanted_level().is_some() && level_known {
+                    let text = format!("model {}", issue.wanted_level().map_or("", |l| l.as_str()));
+                    let c = chip(ui, &text, TRACE, false);
+                    c.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
+                }
                 if !issue.waiting_on.is_empty() && deps_known {
                     let text = format!(
                         "waiting on {}",
@@ -3453,6 +3485,15 @@ impl App {
 
     fn issue_detail(&mut self, ui: &mut Ui, issue: &Issue) {
         ui.add_space(4.0);
+        if self.server_has(issue.id, agentbench_core::API_MODEL_LEVEL) {
+            Line::new().legend("model level").size(10.0).show(ui);
+            if let Some(level) = widgets::level_picker(ui, issue.model_level)
+                && let Some(c) = &mut self.client
+            {
+                c.update_issue(issue.id, &IssuePatch { model_level: Some(level), ..Default::default() });
+            }
+            ui.add_space(4.0);
+        }
         if issue.body.trim().is_empty() {
             hint(ui, "no description");
         } else {
@@ -3650,6 +3691,7 @@ mod tests {
             trust: Default::default(),
             ready_by: None,
             held: None,
+            model_level: None,
             created_at: 0,
             updated_at: id,
         }
@@ -3694,6 +3736,7 @@ mod tests {
             deploy: None,
             tracker: Default::default(),
             post_mode: Default::default(),
+            model_levels: Default::default(),
             merge_mode: Default::default(),
         }
     }

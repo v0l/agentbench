@@ -2,7 +2,7 @@
   {
     "blocks": [],
     "body": "details",
-    "created_at": 1795460614353,
+    "created_at": 1795459071860,
     "depends_on": [],
     "external_author": null,
     "external_number": null,
@@ -14,6 +14,7 @@
     "labels": [
       "bug"
     ],
+    "model_level": "med",
     "off_vision": false,
     "priority": 3,
     "project_id": 1,
@@ -22,7 +23,7 @@
     "state": "doing",
     "title": "Fix it",
     "trust": "trusted",
-    "updated_at": 1795460614353,
+    "updated_at": 1795459071860,
     "waiting_on": []
   }
 ]

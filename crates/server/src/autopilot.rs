@@ -1473,6 +1473,33 @@ impl Autopilot {
         }
         let mut started = 0;
         for issue in &picked.issues {
+            let level = issue.wanted_level();
+            if let Some(level) = level {
+                match self.runner.level_choice(&agent, issue.project_id, level) {
+                    Err(why) => {
+                        let line = format!("cannot start #{}: {why}", issue.id);
+                        self.log_once(Some(issue.project_id), Some(issue.id), &line);
+                        self.comment_once(issue.id, &format!("autopilot: {why}; left in todo, not started on another model."));
+                        continue;
+                    }
+                    Ok(choice) => {
+                        if let Some(until) = self.runner.quotas.exhausted_until(&choice.quota, now) {
+                            self.log_once(
+                                Some(issue.project_id),
+                                Some(issue.id),
+                                &format!(
+                                    "skipped #{}: the {} model ({}) is out of quota until {}",
+                                    issue.id,
+                                    level.as_str(),
+                                    choice.quota,
+                                    agentbench_core::clock_hm(until)
+                                ),
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
             let comments = store.comments(issue.id).unwrap_or_default();
             let new = NewSession {
                 parent: self.runner.supervisor_session().map(|s| s.id),
@@ -1891,6 +1918,7 @@ mod tests {
             trust: Default::default(),
             ready_by: None,
             held: None,
+            model_level: None,
             created_at: created,
             updated_at: created,
         }
@@ -4263,5 +4291,172 @@ mod tests {
         r.ap.groom(crate::store::now());
         let told = grooms(&r).await;
         assert!(told[0].contains("no vision") && told[0].contains("Ask the user for one"), "{}", told[0]);
+    }
+
+    fn with_levels(r: &Rig) {
+        use crate::agent::native::{Level, Model};
+        r.ap.runner.quotas.set_base(&Model {
+            model: "code".into(),
+            low: Level { model: "code-low".into(), ..Level::default() },
+            high: Level { model: "code-x-high".into(), ..Level::default() },
+            medium: Level { model: "code-high".into(), ..Level::default() },
+            ..Model::default()
+        });
+        r.ap.runner.quotas.set_start_model("code-high");
+    }
+
+    fn level_of_issue(r: &Rig, issue: Id, level: agentbench_core::ModelLevel) {
+        let patch = agentbench_core::IssuePatch { model_level: Some(Some(level)), ..Default::default() };
+        r.store.update_issue(issue, &patch).unwrap();
+    }
+
+    fn model_of(r: &Rig, issue: Id) -> Option<Option<String>> {
+        r.store.sessions().unwrap().into_iter().find(|s| s.issue_id == Some(issue)).map(|s| s.model)
+    }
+
+    #[tokio::test]
+    async fn an_issue_tagged_high_starts_on_the_high_model() {
+        let r = rig(DONE);
+        with_levels(&r);
+        let a = todo(&r, "a", 0, &[]);
+        level_of_issue(&r, a, agentbench_core::ModelLevel::High);
+        on(&r);
+        r.ap.tick();
+        assert_eq!(model_of(&r, a), Some(Some("high".into())));
+    }
+
+    #[tokio::test]
+    async fn a_model_high_label_does_the_same_and_the_column_wins_over_it() {
+        let r = rig(DONE);
+        with_levels(&r);
+        let a = todo(&r, "a", 0, &["model:high"]);
+        let b = todo(&r, "b", 0, &["model:high"]);
+        level_of_issue(&r, b, agentbench_core::ModelLevel::Low);
+        on(&r);
+        r.ap.tick();
+        assert_eq!(model_of(&r, a), Some(Some("high".into())));
+        assert_eq!(model_of(&r, b), Some(Some("low".into())));
+    }
+
+    #[tokio::test]
+    async fn an_untagged_issue_uses_the_default_model() {
+        let r = rig(DONE);
+        with_levels(&r);
+        let a = todo(&r, "a", 0, &[]);
+        on(&r);
+        r.ap.tick();
+        assert_eq!(model_of(&r, a), Some(None));
+    }
+
+    #[tokio::test]
+    async fn the_project_table_names_the_model_for_a_level() {
+        let r = rig(DONE);
+        with_levels(&r);
+        let patch = agentbench_core::ProjectPatch {
+            model_levels: Some(agentbench_core::ModelLevels { low: "tiny".into(), med: String::new(), high: "big".into() }),
+            ..Default::default()
+        };
+        r.store.update_project(r.project, &patch).unwrap();
+        let a = todo(&r, "a", 0, &[]);
+        level_of_issue(&r, a, agentbench_core::ModelLevel::High);
+        on(&r);
+        r.ap.tick();
+        assert_eq!(model_of(&r, a), Some(Some("big".into())));
+    }
+
+    #[tokio::test]
+    async fn a_level_with_no_model_leaves_the_issue_in_todo_with_a_note_and_starts_nothing() {
+        let r = rig(DONE);
+        let a = todo(&r, "a", 0, &[]);
+        level_of_issue(&r, a, agentbench_core::ModelLevel::High);
+        on(&r);
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Todo);
+        assert!(r.store.sessions().unwrap().iter().all(|s| s.issue_id.is_none()));
+        let notes: Vec<_> = r.store.comments(a).unwrap().into_iter().filter(|c| c.body.contains("no model available")).collect();
+        assert_eq!(notes.len(), 1);
+        assert!(feed(&r).iter().any(|l| l.contains("cannot start #") && l.contains("high level")), "{:?}", feed(&r));
+    }
+
+    #[tokio::test]
+    async fn a_level_out_of_quota_skips_to_the_next_issue_instead_of_a_lower_model() {
+        let r = rig(DONE);
+        with_levels(&r);
+        let a = todo(&r, "a", 5, &[]);
+        level_of_issue(&r, a, agentbench_core::ModelLevel::High);
+        let b = todo(&r, "b", 0, &[]);
+        on(&r);
+        r.ap.runner.quotas.block("code-x-high", crate::quota::now() + 3_600_000);
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Todo);
+        assert_eq!(r.store.issue(b).unwrap().state, IssueState::Doing);
+        assert!(feed(&r).iter().any(|l| l.contains("skipped #") && l.contains("out of quota")), "{:?}", feed(&r));
+    }
+
+    #[tokio::test]
+    async fn a_rebase_request_keeps_the_level_of_the_session() {
+        let r = rig(DONE);
+        with_levels(&r);
+        let a = todo(&r, "a", 0, &[]);
+        level_of_issue(&r, a, agentbench_core::ModelLevel::High);
+        on(&r);
+        r.ap.tick();
+        let sid = r.store.workers().unwrap().remove(0).session;
+        settle(&r).await;
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        commit_in(&tree.path, "feature.txt");
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        std::fs::write(r.repo.join("feature.txt"), "other").unwrap();
+        for args in [vec!["add", "."], vec!["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qm", "main work"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&r.repo).args(&args).status().unwrap().success());
+        }
+        passed(&r, sid).await;
+        r.ap.tick();
+        settle(&r).await;
+        assert!(feed(&r).iter().any(|l| l.contains("sent #") && l.contains("conflicts with the main branch")), "{:?}", feed(&r));
+        assert_eq!(r.store.session(sid).unwrap().model.as_deref(), Some("high"));
+        assert_eq!(r.store.sessions().unwrap().iter().filter(|s| s.issue_id == Some(a)).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn start_session_for_a_high_issue_refuses_a_lower_model_without_force() {
+        let r = rig(DONE);
+        with_levels(&r);
+        let a = todo(&r, "a", 0, &[]);
+        level_of_issue(&r, a, agentbench_core::ModelLevel::High);
+        on(&r);
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        let call = |extra: serde_json::Value| {
+            let mut args = serde_json::json!({"project": r.project, "issue": a, "agent": "echo"});
+            args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            r.ap.runner.tools().call("start_session", &args, r.boss.unwrap())
+        };
+        let e = call(serde_json::json!({"model": "low"})).unwrap_err();
+        assert!(e.contains("tagged high"), "{e}");
+        assert!(r.store.sessions().unwrap().iter().all(|s| s.issue_id.is_none()));
+        call(serde_json::json!({})).unwrap();
+        assert_eq!(model_of(&r, a), Some(Some("high".into())));
+        let forced = call(serde_json::json!({"model": "low", "force": true, "branch": "second"}));
+        assert!(forced.is_ok(), "{forced:?}");
+    }
+
+    #[test]
+    fn a_database_from_before_model_levels_keeps_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        {
+            let s = Store::open(&path).unwrap();
+            let (p, _) = testing::project(&s, "/a");
+            s.add_issue(&agentbench_core::NewIssue { project_id: p.id, title: "old".into(), ..Default::default() }).unwrap();
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch("ALTER TABLE issues DROP COLUMN model_level; ALTER TABLE projects DROP COLUMN model_low; ALTER TABLE projects DROP COLUMN model_med; ALTER TABLE projects DROP COLUMN model_high;").unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        let i = s.issues().unwrap().remove(0);
+        assert_eq!((i.title.as_str(), i.model_level), ("old", None));
+        let level = agentbench_core::IssuePatch { model_level: Some(Some(agentbench_core::ModelLevel::High)), ..Default::default() };
+        assert_eq!(s.update_issue(i.id, &level).unwrap().model_level, Some(agentbench_core::ModelLevel::High));
+        assert_eq!(s.project(i.project_id).unwrap().model_levels, Default::default());
     }
 }

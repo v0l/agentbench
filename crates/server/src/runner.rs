@@ -101,6 +101,11 @@ pub struct Runner {
     claims: Arc<Mutex<()>>,
 }
 
+pub struct LevelChoice {
+    pub session: Option<String>,
+    pub quota: String,
+}
+
 pub enum Claim {
     Started(Session),
     Taken(SessionId),
@@ -410,10 +415,60 @@ impl Runner {
         })
     }
 
-    pub fn start_worker(&self, new: NewSession, force: bool) -> Result<Claim, StoreError> {
+    pub fn level_choice(
+        &self,
+        agent: &str,
+        project: Id,
+        level: agentbench_core::ModelLevel,
+    ) -> Result<LevelChoice, String> {
+        use agentbench_core::ModelLevel;
+        let table = self.store.project(project).map(|p| p.model_levels).unwrap_or_default();
+        let named = table.get(level).trim().to_string();
+        let word = match level {
+            ModelLevel::Low => "low",
+            ModelLevel::Med => "medium",
+            ModelLevel::High | ModelLevel::Unknown => "high",
+        };
+        if !named.is_empty() {
+            return Ok(LevelChoice { session: Some(named.clone()), quota: named });
+        }
+        if level == ModelLevel::Med {
+            return Ok(LevelChoice { session: None, quota: self.quotas.start_model() });
+        }
+        let concrete = crate::providers::level_model(&self.store, agent, word)
+            .or_else(|| self.quotas.level_model(word));
+        match concrete {
+            Some(quota) => Ok(LevelChoice { session: Some(word.into()), quota }),
+            None => Err(format!(
+                "the {} level has no model available for agent {agent}; set one in the project's model levels",
+                level.as_str()
+            )),
+        }
+    }
+
+    pub fn start_worker(&self, mut new: NewSession, force: bool) -> Result<Claim, StoreError> {
         let Some(issue) = new.issue_id else {
             return self.start_session(new).map(Claim::Started);
         };
+        if let Some(level) = self.store.issue(issue).ok().and_then(|i| i.wanted_level()) {
+            let choice = self.level_choice(&new.agent, new.project_id, level).map_err(StoreError)?;
+            let asked = new.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+            match asked {
+                None => new.model = choice.session,
+                Some(m)
+                    if level == agentbench_core::ModelLevel::High
+                        && !force
+                        && !m.eq_ignore_ascii_case("high")
+                        && m != choice.quota
+                        && choice.session.as_deref() != Some(m) =>
+                {
+                    return Err(StoreError(format!(
+                        "issue #{issue} is tagged high, so it starts on the high model, not {m}; start it with model=high, or pass force: true"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
         let _claim = self.claims.lock().unwrap_or_else(|e| e.into_inner());
         if !force && let Some(other) = self.issue_worker(issue) {
             return Ok(Claim::Taken(other));
