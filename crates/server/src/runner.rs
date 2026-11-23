@@ -537,9 +537,63 @@ impl Runner {
         if text.is_empty() {
             return Err(StoreError("nothing to send".into()));
         }
+        if origin.source == "judge"
+            && let Some(worker) = origin.worker
+            && self.is_supervisor(session)
+            && crate::ledger::duplicate_judge(&self.store, worker)
+        {
+            return Ok(());
+        }
         self.store.defer(session.id, &origin.source, origin.worker, origin.urgent, text)?;
+        if self.is_supervisor(session) {
+            crate::ledger::delivered(&self.store, session.id, &origin.source, origin.worker, text);
+        }
         self.changed.notify_waiters();
         self.deliver_deferred(session.id)
+    }
+
+    fn is_supervisor(&self, session: &Session) -> bool {
+        self.store.project(session.project_id).is_ok_and(|p| p.supervisor)
+    }
+
+    fn pending_for(&self, session: &Session, mode: Mode) -> Option<String> {
+        if mode != Mode::Chat || !self.is_supervisor(session) {
+            return None;
+        }
+        let block = crate::ledger::pending_block(&self.store, session.id, crate::store::now());
+        (!block.is_empty()).then_some(block)
+    }
+
+    fn hold_for_open_items(&self, session: &Session, inbox: &Arc<Mutex<Vec<Message>>>) -> bool {
+        if !self.is_supervisor(session) {
+            return false;
+        }
+        if !inbox.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+            || self.store.deferred_count(session.id).unwrap_or_default() > 0
+        {
+            return false;
+        }
+        match crate::ledger::at_turn_end(&self.store, session.id, crate::store::now()) {
+            crate::ledger::Hold::Clear => false,
+            crate::ledger::Hold::Nudge(text) => {
+                inbox
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(Message { text, attachments: Vec::new(), from: vec!["ledger".into()] });
+                true
+            }
+            crate::ledger::Hold::GiveUp(lines) => {
+                let text = format!(
+                    "notice: the supervisor left {} items open after {} reminders:\n{}",
+                    lines.len(),
+                    crate::ledger::MAX_NUDGES,
+                    lines.join("\n")
+                );
+                let _ = self.store.add_message(session.id, &Entry::Notice { text: text.clone() });
+                crate::tools::desktop_notice("supervisor", &text);
+                false
+            }
+        }
     }
 
     fn deliver_deferred(&self, id: SessionId) -> Result<(), StoreError> {
@@ -709,6 +763,9 @@ impl Runner {
                 .or_else(|| agentbench_core::mime_for(&name))
                 .unwrap_or("application/octet-stream");
             attachments.push(self.store.add_attachment(session.id, &name, mime, &data)?);
+        }
+        if self.is_supervisor(session) {
+            crate::ledger::delivered(&self.store, session.id, "user", None, if text.is_empty() { "(files)" } else { text });
         }
         self.send_text(session, Message { text: text.to_string(), attachments, from: Vec::new() }, Mode::Chat)
     }
@@ -902,7 +959,12 @@ impl Runner {
             let status = runner
                 .turn(agent.as_ref(), &session, &prompt, &stop, &inbox, &questions, mode)
                 .await;
-            let _ = runner.store.set_status(session_id, status);
+            let held = status == SessionStatus::Idle
+                && mode == Mode::Chat
+                && runner.hold_for_open_items(&session, &inbox);
+            if !held {
+                let _ = runner.store.set_status(session_id, status);
+            }
             runner.changed.notify_waiters();
             if status == SessionStatus::Idle && mode == Mode::Chat {
                 runner.retitle(session_id, false);
@@ -1251,6 +1313,14 @@ impl Runner {
         let fresh_after_summary =
             session.agent_session.is_none() && summary.as_ref().is_some_and(|s| !s.is_empty());
         let prompt = msg.text.as_str();
+        let pending_text;
+        let prompt = match self.pending_for(session, mode) {
+            Some(block) => {
+                pending_text = format!("{block}\n\n{prompt}");
+                pending_text.as_str()
+            }
+            None => prompt,
+        };
         let prompt_text;
         let prompt = if fresh_after_summary && !agent.steerable() {
             prompt_text = format!(
@@ -1356,6 +1426,15 @@ fn label(d: &Deferred) -> String {
 
 /// Messages that waited for an idle session, as one: oldest first, repeats dropped, and only the
 /// newest `DIGEST_MAX` written out.
+fn rank(source: &str) -> u8 {
+    match source.split_whitespace().next().unwrap_or_default() {
+        "user" => 0,
+        "judge" => 1,
+        "check_in" => 2,
+        _ => 3,
+    }
+}
+
 fn digest_of(all: Vec<Deferred>) -> Message {
     let mut kept: Vec<Deferred> = Vec::new();
     for d in all {
@@ -1364,26 +1443,30 @@ fn digest_of(all: Vec<Deferred>) -> Message {
         }
     }
     let folded = kept.len().saturating_sub(DIGEST_MAX);
+    let mut older_labels: Vec<String> = kept[..folded].iter().map(label).collect();
+    let mut shown = kept.split_off(folded);
+    shown.sort_by_key(|d| rank(&d.source));
     let mut from: Vec<String> = Vec::new();
-    for d in &kept {
+    for d in kept.iter().chain(shown.iter()) {
         let l = label(d);
         if !from.contains(&l) {
             from.push(l);
         }
     }
-    let mut lines = match kept.len() {
+    let mut lines = match kept.len() + shown.len() {
         1 => Vec::new(),
-        n => vec![format!("{n} messages for you, sent while you were busy, oldest first:")],
+        n => vec![format!("{n} messages for you, sent while you were busy, numbered with user messages first, then judge requests, then check-ins and the rest, oldest first within each:")],
     };
     if folded > 0 {
-        let older: Vec<String> = kept[..folded].iter().map(label).collect();
         lines.push(format!(
             "({folded} older ones are folded in and not repeated here, from: {})",
-            older.join(", ")
+            std::mem::take(&mut older_labels).join(", ")
         ));
     }
-    for d in &kept[folded..] {
-        lines.push(format!("[{} UTC] {}: {}", clock(d.created_at), label(d), d.text));
+    let numbered = shown.len() > 1;
+    for (n, d) in shown.iter().enumerate() {
+        let at = if numbered { format!("{}. ", n + 1) } else { String::new() };
+        lines.push(format!("{at}[{} UTC] {}: {}", clock(d.created_at), label(d), d.text));
     }
     Message { text: lines.join("\n\n"), attachments: Vec::new(), from }
 }
@@ -4454,6 +4537,7 @@ mod deferred_tests {
     fn rig_in(dir: tempfile::TempDir, store: Store) -> Rig {
         let boss_log = Arc::new(Mutex::new(Vec::new()));
         let worker_log = Arc::new(Mutex::new(Vec::new()));
+        store.set_setting(crate::ledger::HOLD_SETTING, "0").unwrap();
         let sup = match store.supervisor_project().unwrap() {
             Some(p) => p,
             None => crate::projects::ensure_supervisor(&store, &dir.path().join("sup")).unwrap(),
@@ -4604,6 +4688,105 @@ mod deferred_tests {
                 "session".to_string()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_judge_request_holds_the_supervisor_busy_until_the_cap() {
+        let r = rig();
+        r.store.set_setting(crate::ledger::HOLD_SETTING, "1").unwrap();
+        r.runner.tell(&r.boss, "judge worker", Origin::new("judge", Some(r.worker.id))).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let seen = log(&r.boss_log);
+        let nudges = seen.iter().filter(|l| l.contains("You still have 1 open items")).count();
+        assert_eq!(nudges, 3, "{seen:?}");
+        let notices: Vec<String> = r
+            .store
+            .messages(r.boss.id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::Notice { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(notices.iter().any(|n| n.contains("left 1 items open") && n.contains("judge worker")), "{notices:?}");
+        assert_eq!(r.store.session(r.boss.id).unwrap().status, SessionStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_judge_session_call_lets_the_supervisor_go_idle() {
+        let r = rig();
+        r.store.set_setting(crate::ledger::HOLD_SETTING, "1").unwrap();
+        r.runner.tell(&r.boss, "judge worker", Origin::new("judge", Some(r.worker.id))).unwrap();
+        started(&r, &r.boss_log).await;
+        let args = serde_json::json!({"id": r.worker.id.to_string(), "verdict": "concluded_pass", "reason": "ok"});
+        r.runner.api.call("judge_session", &args, r.boss.id).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let seen = log(&r.boss_log);
+        assert!(!seen.iter().any(|l| l.contains("You still have")), "{seen:?}");
+        assert!(r.store.open_items(r.boss.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_second_judge_request_for_a_judged_head_is_not_delivered_again() {
+        let r = rig();
+        r.store.set_setting(crate::ledger::HOLD_SETTING, "1").unwrap();
+        let origin = || Origin::new("judge", Some(r.worker.id));
+        r.runner.tell(&r.boss, "judge worker", origin()).unwrap();
+        started(&r, &r.boss_log).await;
+        let args = serde_json::json!({"id": r.worker.id.to_string(), "verdict": "concluded_pass", "reason": "ok"});
+        r.runner.api.call("judge_session", &args, r.boss.id).unwrap();
+        r.runner.tell(&r.boss, "judge worker again", origin()).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        assert!(!log(&r.boss_log).iter().any(|l| l.contains("again")), "{:?}", log(&r.boss_log));
+        assert!(r.store.open_items(r.boss.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_supervisor_that_ignores_the_second_of_two_queued_messages_is_not_let_go_idle() {
+        let r = rig();
+        r.store.set_setting(crate::ledger::HOLD_SETTING, "1").unwrap();
+        r.runner.send(&r.boss, "go").unwrap();
+        started(&r, &r.boss_log).await;
+        r.runner.tell(&r.boss, "judge worker", Origin::new("judge", Some(r.worker.id))).unwrap();
+        r.runner.tell(&r.boss, "check on worker", Origin::new("check_in", Some(r.worker.id))).unwrap();
+        let args = serde_json::json!({"id": r.worker.id.to_string(), "verdict": "concluded_pass", "reason": "ok"});
+        r.runner.api.call("judge_session", &args, r.boss.id).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let seen = log(&r.boss_log);
+        let reminder = seen.iter().find(|l| l.contains("You still have")).expect("a reminder turn");
+        assert!(reminder.contains("1 open items") && reminder.contains("check_in for session"), "{reminder}");
+        assert!(!reminder.contains("judge for session"), "{reminder}");
+    }
+
+    #[tokio::test]
+    async fn two_judge_requests_for_one_worker_leave_one_open_item() {
+        let r = rig();
+        let origin = || Origin::new("judge", Some(r.worker.id));
+        r.runner.tell(&r.boss, "judge worker", origin()).unwrap();
+        r.runner.tell(&r.boss, "judge worker, newer", origin()).unwrap();
+        assert_eq!(r.store.open_items(r.boss.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_batch_is_numbered_with_user_first_then_judge_then_check_in() {
+        let mk = |i: i64, source: &str, text: &str| Deferred {
+            id: i,
+            source: source.into(),
+            worker: None,
+            urgent: false,
+            text: text.into(),
+            created_at: i,
+        };
+        let m = digest_of(vec![
+            mk(1, "check_in", "c-one"),
+            mk(2, "watch", "w-one"),
+            mk(3, "judge", "j-one"),
+            mk(4, "user", "u-one"),
+        ]);
+        let at = |s: &str| m.text.find(s).unwrap();
+        assert!(at("u-one") < at("j-one") && at("j-one") < at("c-one") && at("c-one") < at("w-one"), "{}", m.text);
+        assert!(m.text.contains("1. [") && m.text.contains("4. ["), "{}", m.text);
     }
 
     #[test]

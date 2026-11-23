@@ -2112,6 +2112,7 @@ mod tests {
         let boss = named_agent("boss", r#"cat >/dev/null; echo '{"text":"noted"}'"#);
         let runner = Runner::new(store.clone(), vec![script_agent(script), boss]);
         store.set_setting("autorun_agent", "echo").unwrap();
+        store.set_setting(crate::ledger::HOLD_SETTING, "0").unwrap();
         Rig { ap: Autopilot::new(runner), store, project: project.id, repo, boss: None, _dir: dir }
     }
 

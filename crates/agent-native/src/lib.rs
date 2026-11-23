@@ -377,6 +377,14 @@ fn supervisor_brief(c: &Context) -> String {
          - Order: for ordered work set `depends_on` (issue numbers, any project) on `file_issue` or `update_issue` instead of parking issues with no goal. A dependent waits until every dependency is done, then moves to todo if it has a goal, or gets an \"unblocked\" comment.\n\
          </role>\n\n\
          <vision>\n{vision}</vision>\n\n\
+         <inbox>\n\
+         - Messages reach you while you work: the user typing in this chat, `judge`, `check_in`, `watch`, `groom`, `main_dirty` and `add_project` notices. When a turn starts with more than one, or a new one arrives mid turn, FIRST write every item into `todo_write` (one line each: who, what, session or issue number), then work the list top to bottom. A user message in this chat always goes first and always gets a reply that says what you did about it.\n\
+         - An item is closed only by an action: `judge_session` for a judge request, `check_in` for a check-in, `answer_session` for a worker's question, `file_issue` or `start_session` for an ask, a reply for a question. Words alone (\"I will queue that\", \"I will check it next\") are not an action: do the thing or write it as a todo item and an issue in the same turn.\n\
+         - Before you end a turn, call `todo_write` once more and read it: nothing may be pending. If something cannot be done now, it becomes a tracker issue or a todo item that names what blocks it. Then re-read the last messages in this chat for anything you did not answer.\n\
+         - Check each judge, check_in and main_dirty message against git or `session_status` before acting: if the work is already merged, the session is gone, or you already judged that head, close it with one line and move on; do not redo the verification.\n\
+         - A session the user has typed into is theirs (see Released sessions): say so in one line, do not judge or message it.\n\
+         - Never leave a finished worker without a verdict. If you cannot finish verifying now, give `needs_followup` with the exact remaining checks so the worker keeps working, instead of leaving it idle.\n\
+         </inbox>\n\n\
          <answering>\n\
          - Be brief. When asked for status, give a short list grouped by project: running, waiting on the user, stuck, asked for and never done. Name sessions by title and id, issues by number.\n\
          - Say what you verified and what you only inferred. Do not report work as done because a session said so; read it.\n\
@@ -653,6 +661,19 @@ mod tests {
         assert!(b.contains("user_asks") && b.contains("watch_session") && b.contains("`autopilot` tool"));
         assert!(b.contains("You are not a coding agent"));
         assert!(!b.contains("demo") && !b.contains("<orchestration>"));
+    }
+
+    #[test]
+    fn the_supervisor_brief_has_an_inbox_block_before_answering() {
+        let b = brief(&Context { supervisor: true, ..context() });
+        let inbox = b.find("<inbox>").expect("inbox block");
+        assert!(inbox < b.find("<answering>").unwrap());
+        assert!(b.contains("</inbox>") && b.contains("`todo_write`") && b.contains("`judge_session` for a judge request"));
+        assert!(b.contains("Before you end a turn") && b.contains("Never leave a finished worker without a verdict"));
+        for kept in ["Follow:", "Conclusion check:", "Check-ins:", "Nudge:"] {
+            assert!(b.contains(kept), "{kept}");
+        }
+        assert!(!b.contains('\u{2014}') && !b.contains('\u{2013}'));
     }
 
     #[test]

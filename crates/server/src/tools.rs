@@ -1595,6 +1595,9 @@ impl Api for StoreApi {
         ) {
             self.touched();
         }
+        if sup {
+            crate::ledger::closed_by(s, tool, args, session);
+        }
         Ok(out)
     }
 }
