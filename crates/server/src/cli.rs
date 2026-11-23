@@ -301,6 +301,172 @@ pub fn github(store: &Store, gh: &str, action: GithubAction) -> Result<serde_jso
     })
 }
 
+pub enum Target {
+    Remote(crate::tui::Server),
+    Local(PathBuf),
+}
+
+pub fn resolve_target(home: &std::path::Path, url: Option<String>, token: Option<String>) -> Result<Target, String> {
+    match (url.filter(|u| !u.trim().is_empty()), token.filter(|t| !t.trim().is_empty())) {
+        (Some(url), Some(token)) => Ok(Target::Remote(crate::tui::Server { url, token })),
+        (Some(url), None) => Err(format!("AGENTBENCH_URL is {url} but AGENTBENCH_TOKEN is not set")),
+        (None, _) => {
+            let local = crate::local::Local::open(Some(home.to_path_buf()))?;
+            if local.running() {
+                Ok(Target::Remote(crate::tui::Server { url: local.url(), token: local.token }))
+            } else {
+                Ok(Target::Local(home.to_path_buf()))
+            }
+        }
+    }
+}
+
+async fn remote_call(
+    server: &crate::tui::Server,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let mut req = crate::http::client()
+        .request(method, format!("{}{path}", server.base()))
+        .bearer_auth(&server.token)
+        .timeout(std::time::Duration::from_secs(120));
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let r = req.send().await.map_err(|e| format!("{}: {e}", server.base()))?;
+    let status = r.status();
+    let text = r.text().await.map_err(|e| e.to_string())?;
+    if status.is_success() {
+        return Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null));
+    }
+    Err(serde_json::from_str::<agentbench_core::ApiError>(&text).map(|e| e.error).unwrap_or_else(|_| status.to_string()))
+}
+
+pub async fn github_remote(server: &crate::tui::Server, action: GithubAction) -> Result<serde_json::Value, String> {
+    use reqwest::Method;
+    const GET: Method = Method::GET;
+    const POST: Method = Method::POST;
+    const PUT: Method = Method::PUT;
+    use serde_json::json;
+    let project_id = |name: String| async move {
+        let all = remote_call(server, GET, "/api/projects", None).await?;
+        let all = all.as_array().cloned().unwrap_or_default();
+        all.iter()
+            .find(|p| p["name"].as_str() == Some(name.as_str()))
+            .or_else(|| name.parse::<i64>().ok().and_then(|id| all.iter().find(|p| p["id"].as_i64() == Some(id))))
+            .and_then(|p| p["id"].as_i64())
+            .ok_or_else(|| format!("no project named {name}"))
+    };
+    let on = || eprintln!("on {}", server.base());
+    Ok(match action {
+        GithubAction::Status { project } => {
+            let id = project_id(project).await?;
+            remote_call(server, GET, &format!("/api/projects/{id}/github"), None).await?
+        }
+        GithubAction::Sync { project } => {
+            let id = project_id(project.clone()).await?;
+            let status = remote_call(server, POST, &format!("/api/projects/{id}/github/sync"), None).await?;
+            json!({"synced": project, "outcome": "synced", "status": status})
+        }
+        GithubAction::Pause => {
+            remote_call(server, POST, "/api/github/pause", Some(json!({"paused": true}))).await?;
+            json!({"paused": true})
+        }
+        GithubAction::Resume => {
+            remote_call(server, POST, "/api/github/pause", Some(json!({"paused": false}))).await?;
+            json!({"paused": false})
+        }
+        GithubAction::Outbox { project, status } => {
+            let path = match project {
+                Some(n) => format!("/api/outbox?project={}", project_id(n).await?),
+                None => "/api/outbox".to_string(),
+            };
+            let list = remote_call(server, GET, &path, None).await?;
+            let items: Vec<_> = list["items"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|o| status.as_deref().is_none_or(|s| o["status"].as_str() == Some(s)))
+                .map(|mut o| {
+                    if let Ok(item) = serde_json::from_value::<agentbench_core::OutboxItem>(o.clone()) {
+                        o["what"] = json!(item.describe());
+                    }
+                    o
+                })
+                .collect();
+            json!({"paused": list["paused"].as_bool().unwrap_or(false), "items": items})
+        }
+        GithubAction::Approve { id, text, all } => match (id, all) {
+            (Some(id), _) => {
+                on();
+                remote_call(server, POST, &format!("/api/outbox/{id}/approve"), Some(json!({"text": text}))).await?;
+                json!({"approved": [id]})
+            }
+            (None, Some(name)) => {
+                let id = project_id(name).await?;
+                on();
+                remote_call(server, POST, &format!("/api/projects/{id}/outbox/approve-all"), None).await?
+            }
+            _ => return Err("give a row id or --all <project>".into()),
+        },
+        GithubAction::Reject { id } => {
+            on();
+            remote_call(server, POST, &format!("/api/outbox/{id}/reject"), None).await?;
+            json!({"rejected": id})
+        }
+        GithubAction::Pulls { project } => {
+            let id = project_id(project).await?;
+            remote_call(server, GET, &format!("/api/projects/{id}/pulls"), None).await?
+        }
+        GithubAction::Review { pr, project } => {
+            let id = project_id(project).await?;
+            remote_call(server, POST, &format!("/api/projects/{id}/pulls/{pr}/review"), None).await?
+        }
+        GithubAction::Merge { pr, project } => {
+            let id = project_id(project).await?;
+            on();
+            remote_call(server, POST, &format!("/api/projects/{id}/pulls/{pr}/merge"), None).await?
+        }
+        GithubAction::Webhook { project, base, secret, create } => {
+            let id = project_id(project).await?;
+            if let Some(b) = base {
+                remote_call(server, PUT, "/api/settings/github", Some(json!({"webhook_base": b.trim()}))).await?;
+            }
+            let status = remote_call(server, GET, &format!("/api/projects/{id}/github"), None).await?;
+            let mut out = json!({"url": status["webhook_url"], "secret_set": status["webhook_secret_set"], "last_delivery": status["webhook_last"]});
+            if secret {
+                let made = remote_call(server, POST, &format!("/api/projects/{id}/github/webhook"), None).await?;
+                out["url"] = made["url"].clone();
+                out["secret"] = made["secret"].clone();
+                out["secret_set"] = json!(true);
+                out["note"] = json!("the secret is shown once; paste it into the webhook on GitHub or run with --create");
+            }
+            if create {
+                out["created"] = remote_call(server, POST, &format!("/api/projects/{id}/github/webhook/create"), None).await?;
+            }
+            out
+        }
+    })
+}
+
+pub async fn github_command(
+    home: &std::path::Path,
+    url: Option<String>,
+    token: Option<String>,
+    action: GithubAction,
+) -> Result<serde_json::Value, String> {
+    match resolve_target(home, url, token)? {
+        Target::Remote(server) => github_remote(&server, action).await,
+        Target::Local(home) => {
+            eprintln!("using the local store at {}", home.join("agentbench.db").display());
+            let store = Store::open_with_memory(&home.join("agentbench.db"), crate::memory::default_root()).map_err(|e| e.0)?;
+            github(&store, &crate::github::gh_program(), action)
+        }
+    }
+}
+
 pub fn logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -355,6 +521,12 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             _ => crate::tui::local(Some(home))?,
         };
         return crate::tui::run(server, opts).await;
+    }
+    if let Some(Command::Github { .. }) = &cli.command {
+        let Some(Command::Github { action }) = cli.command else { unreachable!() };
+        let out = github_command(&home, std::env::var("AGENTBENCH_URL").ok(), std::env::var("AGENTBENCH_TOKEN").ok(), action).await?;
+        println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
+        return Ok(());
     }
     let config = Config::load(&home.join("agentbench.toml"))?;
     let store = Store::open_with_memory(&home.join("agentbench.db"), crate::memory::default_root()).map_err(|e| e.0)?;
@@ -447,11 +619,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                 _ => Ok(()),
             }
         }
-        Command::Github { action } => {
-            let out = github(&store, &crate::github::gh_program(), action)?;
-            println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
-            Ok(())
-        }
+        Command::Github { .. } => unreachable!("handled before the store opens"),
         Command::Chat { .. } => unreachable!("handled before the store opens"),
         Command::Issue { action } => {
             let find = |name: &str| -> Result<agentbench_core::Project, String> {
@@ -546,6 +714,58 @@ mod tests {
     fn comment(r: &Rig, text: &str) -> i64 {
         let ask = Ask { project: r.project, kind: "comment".into(), number: 4, text: text.into(), params: json!({}), asked_by: "supervisor".into(), trusted: true };
         propose(&r.store, ask).unwrap().0
+    }
+
+    #[tokio::test]
+    async fn reject_goes_to_the_server_named_by_the_url_not_the_local_store() {
+        use axum::{Router, extract::Path, routing::post};
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+        let seen = hits.clone();
+        let app = Router::new().route(
+            "/api/outbox/{id}/reject",
+            post(move |Path(id): Path<i64>| async move {
+                seen.lock().unwrap().push(id);
+                axum::Json(json!({"rejected": id}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let home = tempfile::tempdir().unwrap();
+        let local = Store::open_with_memory(&home.path().join("agentbench.db"), crate::memory::default_root()).unwrap();
+        assert!(local.outbox_item(2).is_err());
+        let out = github_command(home.path(), Some(url), Some("t".into()), GithubAction::Reject { id: 2 }).await.unwrap();
+        assert_eq!(out, json!({"rejected": 2}));
+        assert_eq!(*hits.lock().unwrap(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn a_url_without_a_token_never_falls_back_to_the_local_store() {
+        let home = tempfile::tempdir().unwrap();
+        let e = github_command(home.path(), Some("http://127.0.0.1:1".into()), None, GithubAction::Reject { id: 2 }).await.unwrap_err();
+        assert!(e.contains("AGENTBENCH_TOKEN"), "{e}");
+        assert!(!home.path().join("agentbench.db").exists());
+    }
+
+    #[tokio::test]
+    async fn approve_without_a_url_or_a_running_server_uses_the_local_store() {
+        let home = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        std::fs::write(home.path().join("agentbench.toml"), format!("listen = \"127.0.0.1:{port}\"\n")).unwrap();
+        let store = Store::open_with_memory(&home.path().join("agentbench.db"), crate::memory::default_root()).unwrap();
+        let p = store
+            .add_project("demo", home.path().to_str().unwrap(), None, None)
+            .unwrap();
+        store
+            .update_project(p.id, &agentbench_core::ProjectPatch { tracker: Some(agentbench_core::Tracker::Github { repo: "o/r".into() }), post_mode: Some(PostMode::Draft), ..Default::default() })
+            .unwrap();
+        let ask = Ask { project: p.id, kind: "comment".into(), number: 4, text: "hi".into(), params: json!({}), asked_by: "supervisor".into(), trusted: true };
+        let id = propose(&store, ask).unwrap().0;
+        drop(store);
+        assert!(matches!(resolve_target(home.path(), None, None).unwrap(), Target::Local(_)));
+        let out = github_command(home.path(), None, None, GithubAction::Approve { id: Some(id), text: None, all: None }).await.unwrap();
+        assert_eq!(out, json!({"approved": [id]}));
     }
 
     #[test]
