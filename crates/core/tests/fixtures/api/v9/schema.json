@@ -1,0 +1,255 @@
+{
+  "changes": {
+    "changes": [
+      {
+        "id": "number",
+        "kind": "string",
+        "ref": "string"
+      }
+    ],
+    "cursor": "number"
+  },
+  "issues": [
+    {
+      "blocks": [],
+      "body": "string",
+      "created_at": "number",
+      "depends_on": [],
+      "external_author": "null",
+      "external_number": "null",
+      "external_updated_at": "null",
+      "external_url": "null",
+      "goal": "null",
+      "held": "null",
+      "id": "number",
+      "labels": [
+        "string"
+      ],
+      "model_level": "string",
+      "off_vision": "bool",
+      "priority": "number",
+      "project_id": "number",
+      "ready_by": "null",
+      "source": "string",
+      "state": "string",
+      "title": "string",
+      "trust": "string",
+      "updated_at": "number",
+      "waiting_on": []
+    }
+  ],
+  "messages": [
+    {
+      "created_at": "number",
+      "entry": {
+        "kind": "string",
+        "text": "string"
+      },
+      "id": "number",
+      "session_id": "string"
+    }
+  ],
+  "overview": {
+    "agents": [
+      {
+        "about": "string",
+        "available": "bool",
+        "label": "string",
+        "name": "string",
+        "resumable": "bool"
+      }
+    ],
+    "api_version": "number",
+    "autopilot": {
+      "activity": [],
+      "auto_close": "bool",
+      "auto_escalate": "bool",
+      "cap": "number",
+      "check_in_all": "bool",
+      "check_in_minutes": "number",
+      "default_level": "string",
+      "enabled": "bool",
+      "groom": "bool",
+      "groom_hours": "number",
+      "idle": "bool",
+      "intake_per_hour": "number",
+      "max_nudges": "number",
+      "project_cap": "number",
+      "stuck_compactions": "number",
+      "stuck_failed_runs": "number",
+      "stuck_minutes": "number",
+      "stuck_no_commit_minutes": "number",
+      "untrusted_turns_per_day": "number",
+      "untrusted_turns_today": "number",
+      "workers": "number"
+    },
+    "cursor": "number",
+    "host": {
+      "cores": "number",
+      "disk_free": "number",
+      "disk_total": "number",
+      "load": "number",
+      "mem_total": "number",
+      "mem_used": "number"
+    },
+    "issues": [
+      {
+        "blocks": [],
+        "body": "string",
+        "created_at": "number",
+        "depends_on": [],
+        "external_author": "null",
+        "external_number": "null",
+        "external_updated_at": "null",
+        "external_url": "null",
+        "goal": "null",
+        "held": "null",
+        "id": "number",
+        "labels": [
+          "string"
+        ],
+        "model_level": "string",
+        "off_vision": "bool",
+        "priority": "number",
+        "project_id": "number",
+        "ready_by": "null",
+        "source": "string",
+        "state": "string",
+        "title": "string",
+        "trust": "string",
+        "updated_at": "number",
+        "waiting_on": []
+      }
+    ],
+    "min_client_api": "number",
+    "projects": [
+      {
+        "automation": "null",
+        "branch": "string",
+        "created_at": "number",
+        "deploy": "null",
+        "home": "bool",
+        "id": "number",
+        "model_levels": {
+          "high": "string",
+          "low": "string",
+          "med": "string"
+        },
+        "name": "string",
+        "path": "string",
+        "pinned": "bool",
+        "post_mode": "string",
+        "remote": "null",
+        "risky": [],
+        "supervisor": "bool",
+        "tags": [],
+        "tracker": {
+          "kind": "string"
+        }
+      }
+    ],
+    "sessions": [
+      {
+        "agent": "string",
+        "agent_session": "null",
+        "created_at": "number",
+        "cwd": "string",
+        "effort": "null",
+        "id": "string",
+        "issue_id": "null",
+        "model": "null",
+        "parent": "null",
+        "project_id": "number",
+        "status": "string",
+        "title": "string",
+        "updated_at": "number",
+        "usage": {
+          "bash_edits": "number",
+          "bash_sleeps": "number",
+          "cache_read_tokens": "number",
+          "context": "number",
+          "cost_usd": "number",
+          "effort": "string",
+          "file_edits": "number",
+          "host": "string",
+          "input_tokens": "number",
+          "lsp": [],
+          "max_tokens": "number",
+          "model": "string",
+          "output_tokens": "number",
+          "turns": "number",
+          "window": "number"
+        },
+        "worktree_id": "number"
+      }
+    ],
+    "supervisor": "null",
+    "triage": {
+      "budget_tokens": "number",
+      "every_hours": "number",
+      "last_run": "null",
+      "last_status": "string",
+      "notes": [],
+      "proposals": [],
+      "running": "bool"
+    },
+    "usage": {
+      "quotas": [],
+      "spend": {
+        "projects": [],
+        "today_usd": "number",
+        "total_usd": "number"
+      }
+    },
+    "version": "string",
+    "visions": [],
+    "worktrees": [
+      {
+        "branch": "string",
+        "created_at": "number",
+        "head": "string",
+        "id": "number",
+        "main": "bool",
+        "missing": "bool",
+        "owned": "bool",
+        "path": "string",
+        "project_id": "number"
+      }
+    ]
+  },
+  "sessions": [
+    {
+      "agent": "string",
+      "agent_session": "null",
+      "created_at": "number",
+      "cwd": "string",
+      "effort": "null",
+      "id": "string",
+      "issue_id": "null",
+      "model": "null",
+      "parent": "null",
+      "project_id": "number",
+      "status": "string",
+      "title": "string",
+      "updated_at": "number",
+      "usage": {
+        "bash_edits": "number",
+        "bash_sleeps": "number",
+        "cache_read_tokens": "number",
+        "context": "number",
+        "cost_usd": "number",
+        "effort": "string",
+        "file_edits": "number",
+        "host": "string",
+        "input_tokens": "number",
+        "lsp": [],
+        "max_tokens": "number",
+        "model": "string",
+        "output_tokens": "number",
+        "turns": "number",
+        "window": "number"
+      },
+      "worktree_id": "number"
+    }
+  ]
+}

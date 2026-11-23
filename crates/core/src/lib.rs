@@ -302,6 +302,8 @@ pub struct Project {
     pub tracker: Tracker,
     #[serde(default)]
     pub post_mode: PostMode,
+    #[serde(default)]
+    pub model_levels: ModelLevels,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -610,8 +612,73 @@ pub struct Issue {
     pub ready_by: Option<String>,
     #[serde(default)]
     pub held: Option<String>,
+    #[serde(default)]
+    pub model_level: Option<ModelLevel>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelLevel {
+    Low,
+    Med,
+    High,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ModelLevel {
+    pub const ALL: [ModelLevel; 3] = [ModelLevel::Low, ModelLevel::Med, ModelLevel::High];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelLevel::Low => "low",
+            ModelLevel::Med => "med",
+            ModelLevel::High => "high",
+            ModelLevel::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<ModelLevel> {
+        match text.trim().to_lowercase().as_str() {
+            "low" => Some(ModelLevel::Low),
+            "med" | "medium" => Some(ModelLevel::Med),
+            "high" => Some(ModelLevel::High),
+            _ => None,
+        }
+    }
+}
+
+impl Issue {
+    pub fn wanted_level(&self) -> Option<ModelLevel> {
+        self.model_level.filter(|l| *l != ModelLevel::Unknown).or_else(|| {
+            self.labels.iter().find_map(|l| {
+                let (key, value) = l.split_once(':')?;
+                key.trim().eq_ignore_ascii_case("model").then(|| ModelLevel::parse(value)).flatten()
+            })
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelLevels {
+    #[serde(default)]
+    pub low: String,
+    #[serde(default)]
+    pub med: String,
+    #[serde(default)]
+    pub high: String,
+}
+
+impl ModelLevels {
+    pub fn get(&self, level: ModelLevel) -> &str {
+        match level {
+            ModelLevel::Low => &self.low,
+            ModelLevel::Med => &self.med,
+            ModelLevel::High | ModelLevel::Unknown => &self.high,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1661,6 +1728,8 @@ pub struct ProjectPatch {
     pub tracker: Option<Tracker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_mode: Option<PostMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_levels: Option<ModelLevels>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1689,6 +1758,8 @@ pub struct NewIssue {
     pub off_vision: bool,
     #[serde(default)]
     pub depends_on: Vec<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_level: Option<ModelLevel>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1711,6 +1782,8 @@ pub struct IssuePatch {
     pub off_vision: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<Vec<Id>>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub model_level: Option<Option<ModelLevel>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2211,7 +2284,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 8;
+pub const API_VERSION: u32 = 9;
+pub const API_MODEL_LEVEL: u32 = 9;
 pub const API_TRUST: u32 = 8;
 pub const API_GITHUB_FLOW: u32 = 7;
 pub const API_GLOBAL_NOTE: u32 = 6;
@@ -2586,6 +2660,7 @@ mod tests {
             trust: Default::default(),
             ready_by: None,
             held: None,
+            model_level: None,
             created_at: 0,
             updated_at: 0,
         };

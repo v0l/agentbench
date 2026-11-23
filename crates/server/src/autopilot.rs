@@ -1438,6 +1438,33 @@ impl Autopilot {
         }
         let mut started = 0;
         for issue in &picked.issues {
+            let level = issue.wanted_level();
+            if let Some(level) = level {
+                match self.runner.level_choice(&agent, issue.project_id, level) {
+                    Err(why) => {
+                        let line = format!("cannot start #{}: {why}", issue.id);
+                        self.log_once(Some(issue.project_id), Some(issue.id), &line);
+                        self.comment_once(issue.id, &format!("autopilot: {why}; left in todo, not started on another model."));
+                        continue;
+                    }
+                    Ok(choice) => {
+                        if let Some(until) = self.runner.quotas.exhausted_until(&choice.quota, now) {
+                            self.log_once(
+                                Some(issue.project_id),
+                                Some(issue.id),
+                                &format!(
+                                    "skipped #{}: the {} model ({}) is out of quota until {}",
+                                    issue.id,
+                                    level.as_str(),
+                                    choice.quota,
+                                    agentbench_core::clock_hm(until)
+                                ),
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
             let comments = store.comments(issue.id).unwrap_or_default();
             let new = NewSession {
                 parent: self.runner.supervisor_session().map(|s| s.id),
@@ -1824,6 +1851,7 @@ mod tests {
             trust: Default::default(),
             ready_by: None,
             held: None,
+            model_level: None,
             created_at: created,
             updated_at: created,
         }

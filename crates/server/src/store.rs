@@ -326,6 +326,10 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("issues", "trust", "TEXT NOT NULL DEFAULT 'trusted'"),
     ("issues", "ready_by", "TEXT"),
     ("issues", "held", "TEXT"),
+    ("issues", "model_level", "TEXT"),
+    ("projects", "model_low", "TEXT NOT NULL DEFAULT ''"),
+    ("projects", "model_med", "TEXT NOT NULL DEFAULT ''"),
+    ("projects", "model_high", "TEXT NOT NULL DEFAULT ''"),
     ("issues", "ready_status", "TEXT"),
     ("issues", "ready_hash", "TEXT"),
     ("issues", "ready_after", "INTEGER NOT NULL DEFAULT 0"),
@@ -616,6 +620,10 @@ fn issue_row(row: &Row) -> rusqlite::Result<Issue> {
         trust: Trust::parse(&row.get::<_, String>("trust")?),
         ready_by: row.get("ready_by")?,
         held: row.get("held")?,
+        model_level: row
+            .get::<_, Option<String>>("model_level")?
+            .as_deref()
+            .and_then(agentbench_core::ModelLevel::parse),
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -718,6 +726,11 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
             _ => Tracker::Internal,
         },
         post_mode: PostMode::parse(&row.get::<_, String>("post_mode")?).unwrap_or_default(),
+        model_levels: agentbench_core::ModelLevels {
+            low: row.get("model_low")?,
+            med: row.get("model_med")?,
+            high: row.get("model_high")?,
+        },
     })
 }
 
@@ -1184,10 +1197,17 @@ impl Store {
         if let Some(mode) = patch.post_mode {
             project.post_mode = mode;
         }
+        if let Some(levels) = &patch.model_levels {
+            project.model_levels = agentbench_core::ModelLevels {
+                low: levels.low.trim().to_string(),
+                med: levels.med.trim().to_string(),
+                high: levels.high.trim().to_string(),
+            };
+        }
         {
             let db = self.db();
             db.execute(
-                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6, tracker = ?8, github_repo = ?9, post_mode = ?10 WHERE id = ?7",
+                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6, tracker = ?8, github_repo = ?9, post_mode = ?10, model_low = ?11, model_med = ?12, model_high = ?13 WHERE id = ?7",
                 params![
                     project.name,
                     project.pinned,
@@ -1201,7 +1221,10 @@ impl Store {
                         Tracker::Github { repo } => Some(repo.clone()),
                         _ => None,
                     },
-                    project.post_mode.as_str()
+                    project.post_mode.as_str(),
+                    project.model_levels.low,
+                    project.model_levels.med,
+                    project.model_levels.high
                 ],
             )?;
             Store::changed(&db, "project", id)?;
@@ -1429,8 +1452,8 @@ impl Store {
         let id = {
             let db = self.db();
             db.execute(
-                "INSERT INTO issues (project_id, title, body, state, priority, labels, goal, off_vision, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?8, ?9, ?7, ?7)",
+                "INSERT INTO issues (project_id, title, body, state, priority, labels, goal, off_vision, model_level, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?8, ?9, ?10, ?7, ?7)",
                 params![
                     new.project_id,
                     new.title.trim(),
@@ -1440,7 +1463,8 @@ impl Store {
                     serde_json::to_string(&new.labels).unwrap_or_else(|_| "[]".into()),
                     t,
                     goal,
-                    new.off_vision && goal.is_none()
+                    new.off_vision && goal.is_none(),
+                    new.model_level.filter(|l| *l != agentbench_core::ModelLevel::Unknown).map(agentbench_core::ModelLevel::as_str)
                 ],
             )?;
             let id = db.last_insert_rowid();
@@ -1497,6 +1521,9 @@ impl Store {
                 issue.off_vision = false;
             }
         }
+        if let Some(level) = patch.model_level {
+            issue.model_level = level.filter(|l| *l != agentbench_core::ModelLevel::Unknown);
+        }
         if let Some(off) = patch.off_vision {
             issue.off_vision = off;
             if off {
@@ -1507,7 +1534,7 @@ impl Store {
             let db = self.db();
             db.execute(
                 "UPDATE issues SET title = ?1, body = ?2, state = ?3, priority = ?4,
-                 labels = ?5, updated_at = ?6, goal = ?8, off_vision = ?9 WHERE id = ?7",
+                 labels = ?5, updated_at = ?6, goal = ?8, off_vision = ?9, model_level = ?10 WHERE id = ?7",
                 params![
                     issue.title,
                     issue.body,
@@ -1517,7 +1544,8 @@ impl Store {
                     now(),
                     id,
                     issue.goal,
-                    issue.off_vision
+                    issue.off_vision,
+                    issue.model_level.map(agentbench_core::ModelLevel::as_str)
                 ],
             )?;
             Store::changed(&db, "issue", id)?;

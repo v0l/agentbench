@@ -3134,11 +3134,11 @@ mod tests {
                     .unwrap();
             }
         };
-        let new_issue = json!({"project_id": pid, "title": "Fix the thing", "body": "details", "state": "todo", "priority": 3, "labels": ["bug"]});
+        let new_issue = json!({"project_id": pid, "title": "Fix the thing", "body": "details", "state": "todo", "priority": 3, "labels": ["bug"], "model_level": "high"});
         keep("request_new_issue", &new_issue);
         let (s, issue) = call(&f.app, "POST", "/api/issues", Some(new_issue), T).await;
         assert_eq!(s, StatusCode::OK, "{issue}");
-        let patch = json!({"state": "doing", "title": "Fix it"});
+        let patch = json!({"state": "doing", "title": "Fix it", "model_level": "med"});
         keep("request_issue_patch", &patch);
         call(&f.app, "PATCH", &format!("/api/issues/{}", issue["id"]), Some(patch), T).await;
         keep("request_new_project", &json!({"path": f.repo.to_str().unwrap(), "name": "demo"}));

@@ -3650,6 +3650,7 @@ mod tests {
             trust: Default::default(),
             ready_by: None,
             held: None,
+            model_level: None,
             created_at: 0,
             updated_at: id,
         }
@@ -3694,6 +3695,7 @@ mod tests {
             deploy: None,
             tracker: Default::default(),
             post_mode: Default::default(),
+            model_levels: Default::default(),
         }
     }
 
