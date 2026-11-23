@@ -4,6 +4,8 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 pub const FILE: &str = "guards.toml";
+const TRUST_SEEDED: &str = "guards_trust_rules_seeded";
+const TRUST_RULES: [&str; 3] = ["worker-gh-writes", "untrusted-no-github-writes", "worker-git-push-main"];
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
@@ -61,6 +63,36 @@ require_field = "_brief"
 require = '(?i)^\(user chat\)$|\bapproved to post\b'
 action = "refuse"
 message = "A worker posts GitHub comments or reviews only when the supervisor's brief says `approved to post`. Put the review in your reply instead; the supervisor decides whether it is posted."
+
+[[rule]]
+id = "worker-gh-writes"
+tools = ["bash"]
+fields = ["command"]
+pattern = '''(?i)\bgh\s+(issue\s+(create|edit|close|reopen|comment|delete|transfer|lock|unlock|pin|unpin|develop)|pr\s+(create|merge|close|reopen|edit|ready|review|comment|lock|unlock|update-branch)|label\s+(create|edit|delete|clone))\b|\bgh\s+api\b[^\n]*(-X\s*|--method[ =]\s*)(POST|PATCH|PUT|DELETE)\b|\bgh\s+api\b[^\n]*\s(-f|-F|--field|--raw-field|--input)\s'''
+require_field = "_brief"
+require = '(?i)^\(user chat\)$|\bapproved to post\b'
+action = "refuse"
+message = "A worker changes GitHub (issues, pull requests, labels, comments) only when the brief says `approved to post`. Write to the agentbench outbox with comment_on_issue and update_issue instead."
+
+[[rule]]
+id = "untrusted-no-github-writes"
+tools = ["bash"]
+fields = ["command"]
+pattern = '''(?i)\bgh\s+(issue|pr|label|release|repo|workflow|run)\s+(create|edit|close|reopen|comment|delete|transfer|lock|unlock|pin|unpin|develop|merge|ready|review|update-branch|clone|rename|archive|fork|cancel|rerun|enable|disable)\b|\bgh\s+api\b[^\n]*((-X\s*|--method[ =]\s*)(POST|PATCH|PUT|DELETE)\b|\s(-f|-F|--field|--raw-field|--input)\s)|\bgit\s+push\b'''
+require_field = "_untrusted"
+require = '^(|no)$'
+action = "refuse"
+message = "This issue was written by someone who is not a trusted maintainer. Workers on it get no write access to GitHub and no push: commit on your branch and report in your reply; the outbox is the only way out."
+
+[[rule]]
+id = "worker-git-push-main"
+tools = ["bash"]
+fields = ["command"]
+pattern = '''(?i)\bgit\s+push\b[^\n;&|]*(\s(origin\s+)?(main|master)\b|:(main|master)\b|--force|\s-f\b|--mirror|--all\b|--delete|\s:\S)'''
+require_field = "_brief"
+require = '^\(user chat\)$'
+action = "refuse"
+message = "Workers never push to main or master, force push or delete remote branches: they commit on their branch and the supervisor or autopilot merges."
 "#;
 
 pub fn path(store: &Store) -> PathBuf {
@@ -76,7 +108,18 @@ pub fn load(store: &Store) -> Result<Rules, String> {
         let _ = std::fs::write(&p, DEFAULTS);
     }
     let text = std::fs::read_to_string(&p).unwrap_or_else(|_| DEFAULTS.to_string());
-    toml::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))
+    let mut rules: Rules = toml::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
+    if store.setting(TRUST_SEEDED).ok().flatten().is_none() {
+        let seeded: Rules = toml::from_str(DEFAULTS).map_err(|e| e.to_string())?;
+        for r in seeded.rules.into_iter().filter(|r| TRUST_RULES.contains(&r.id.as_str())) {
+            if !rules.rules.iter().any(|x| x.id == r.id) {
+                rules.rules.push(r);
+            }
+        }
+        let _ = save(store, &rules);
+        let _ = store.set_setting(TRUST_SEEDED, "1");
+    }
+    Ok(rules)
 }
 
 pub fn save(store: &Store, rules: &Rules) -> Result<(), String> {
@@ -222,6 +265,55 @@ mod tests {
         for ok in ["gh pr view 41", "gh pr diff 41", "gh api repos/a/b/pulls/4/comments", "cargo test"] {
             assert!(post(ok, "").is_none(), "{ok}");
         }
+    }
+
+    fn bash(cmd: &str, brief: &str, untrusted: &str) -> Option<String> {
+        matches(&rules(), "bash", &json!({"command": cmd, "_brief": brief, "_untrusted": untrusted})).map(|h| h.id)
+    }
+
+    #[test]
+    fn a_worker_is_refused_gh_issue_and_pr_writes_without_an_approved_brief() {
+        let writes = [
+            "gh issue close 4",
+            "gh issue create --title x",
+            "gh issue edit 4 --add-label ready",
+            "gh issue comment 4 -b hi",
+            "gh pr create --fill",
+            "gh pr merge 9 --squash",
+            "gh pr close 9",
+            "gh pr ready 9",
+            "gh label create ready",
+            "gh api repos/o/r/issues/4 -X PATCH -f state=closed",
+            "gh api repos/o/r/issues/4/labels -f labels[]=ready",
+            "gh api --method DELETE repos/o/r/issues/4/labels/ready",
+        ];
+        for w in writes {
+            assert!(bash(w, "Fix the bug", "no").is_some(), "{w}");
+            assert!(bash(w, "Fix it. You are approved to post.", "no").is_none(), "{w}");
+        }
+        for ok in ["gh issue view 4", "gh issue list", "gh pr view 9", "gh pr diff 9", "gh pr checks 9", "gh api repos/o/r/issues/4", "cargo test", "git push -u origin issue-12-fix"] {
+            assert!(bash(ok, "Fix the bug", "no").is_none(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn a_worker_on_an_untrusted_issue_gets_no_github_write_and_no_push_even_when_approved() {
+        let approved = "Fix it. You are approved to post.";
+        for w in ["gh issue close 4", "gh pr create --fill", "gh api repos/o/r/issues/4 -X PATCH -f state=closed", "git push -u origin issue-12-fix", "git push origin HEAD"] {
+            assert_eq!(bash(w, approved, "yes").as_deref(), Some("untrusted-no-github-writes"), "{w}");
+        }
+        for ok in ["gh issue view 4", "git commit -am x", "cargo test", "git status"] {
+            assert!(bash(ok, approved, "yes").is_none(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn workers_never_push_main_force_or_delete_a_remote_branch() {
+        for w in ["git push origin main", "git push origin HEAD:master", "git push --force origin issue-1", "git push -f", "git push origin :old", "git push --delete origin x", "git push --all"] {
+            assert_eq!(bash(w, "Fix the bug", "no").as_deref(), Some("worker-git-push-main"), "{w}");
+        }
+        assert!(bash("git push origin main", "(user chat)", "no").is_none());
+        assert!(bash("git push -u origin issue-12-fix", "Fix the bug", "no").is_none());
     }
 
     #[test]

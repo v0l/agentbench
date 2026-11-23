@@ -334,10 +334,12 @@ pub fn build(store: &Store, raw: &Value) -> Option<(String, Proposal)> {
                     issue_id: d.id,
                     body: format!("Duplicate of #{}: {}", keep.id, keep.title),
                 });
-                changes.push(Change::Update {
-                    issue_id: d.id,
-                    patch: IssuePatch { state: Some(IssueState::Done), ..Default::default() },
-                });
+                if !d.trust.is_untrusted() {
+                    changes.push(Change::Update {
+                        issue_id: d.id,
+                        patch: IssuePatch { state: Some(IssueState::Done), ..Default::default() },
+                    });
+                }
             }
             changes.push(Change::Comment {
                 issue_id: keep.id,
@@ -351,14 +353,21 @@ pub fn build(store: &Store, raw: &Value) -> Option<(String, Proposal)> {
             let issue = known(id(action.get("issue")?)?)?;
             let reason = one_line(action.get("reason").and_then(Value::as_str).unwrap_or(""), 300);
             evidence.push(issue.id);
-            changes.push(Change::Comment {
-                issue_id: issue.id,
-                body: format!("Closed as stale: {reason}"),
-            });
-            changes.push(Change::Update {
-                issue_id: issue.id,
-                patch: IssuePatch { state: Some(IssueState::Done), ..Default::default() },
-            });
+            if issue.trust.is_untrusted() {
+                changes.push(Change::Comment {
+                    issue_id: issue.id,
+                    body: format!("Looks stale (not closed, it is from an untrusted author): {reason}"),
+                });
+            } else {
+                changes.push(Change::Comment {
+                    issue_id: issue.id,
+                    body: format!("Closed as stale: {reason}"),
+                });
+                changes.push(Change::Update {
+                    issue_id: issue.id,
+                    patch: IssuePatch { state: Some(IssueState::Done), ..Default::default() },
+                });
+            }
         }
         ProposalKind::Labels => {
             let issue = known(id(action.get("issue")?)?)?;
@@ -366,6 +375,13 @@ pub fn build(store: &Store, raw: &Value) -> Option<(String, Proposal)> {
                 a.iter().filter_map(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
             });
             let priority = action.get("priority").and_then(Value::as_i64);
+            let labels = labels.map(|l| {
+                if issue.trust.is_untrusted() {
+                    l.into_iter().filter(|x| !x.eq_ignore_ascii_case("ready") && !x.eq_ignore_ascii_case("agent:todo")).collect()
+                } else {
+                    l
+                }
+            });
             let labels = labels.filter(|l| *l != issue.labels);
             let priority = priority.filter(|p| *p != issue.priority);
             if labels.is_none() && priority.is_none() {
@@ -542,6 +558,41 @@ mod tests {
 ]}}
 ```"#
         ))
+    }
+
+    #[test]
+    fn triage_comments_on_an_untrusted_issue_but_never_closes_or_marks_it_ready() {
+        use serde_json::json;
+        let (store, a, _, i1, _) = two_projects();
+        store
+            .mirror_issue(
+                a,
+                &crate::store::MirrorIssue {
+                    number: 5,
+                    title: "spam".into(),
+                    body: "x".into(),
+                    state: IssueState::Backlog,
+                    priority: 0,
+                    labels: vec![],
+                    author: "mallory".into(),
+                    url: "u".into(),
+                    updated_at: 1,
+                    trust: agentbench_core::Trust::Untrusted,
+                },
+            )
+            .unwrap();
+        let stranger = store.mirrored_issue(a, 5).unwrap().unwrap().id;
+        let stale = json!({"kind": "stale", "summary": "old", "issues": [stranger], "action": {"issue": stranger, "reason": "dead"}});
+        let (_, p) = build(&store, &stale).unwrap();
+        assert!(p.changes.iter().all(|c| !matches!(c, Change::Update { .. })), "no state change");
+        assert!(p.changes.iter().any(|c| matches!(c, Change::Comment { .. })));
+        let dup = json!({"kind": "duplicate", "summary": "d", "issues": [i1, stranger], "action": {"keep": i1, "duplicates": [stranger]}});
+        let (_, p) = build(&store, &dup).unwrap();
+        assert!(p.changes.iter().all(|c| !matches!(c, Change::Update { issue_id, .. } if *issue_id == stranger)));
+        let labels = json!({"kind": "labels", "summary": "l", "issues": [stranger], "action": {"issue": stranger, "labels": ["bug", "ready"]}});
+        let (_, p) = build(&store, &labels).unwrap();
+        let set: Vec<String> = p.changes.iter().filter_map(|c| match c { Change::Update { patch, .. } => patch.labels.clone(), _ => None }).flatten().collect();
+        assert_eq!(set, ["bug"]);
     }
 
     #[tokio::test]

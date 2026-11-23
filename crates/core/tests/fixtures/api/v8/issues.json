@@ -2,7 +2,7 @@
   {
     "blocks": [],
     "body": "details",
-    "created_at": 1795453080223,
+    "created_at": 1795453533471,
     "depends_on": [],
     "external_author": null,
     "external_number": null,
@@ -22,7 +22,7 @@
     "state": "doing",
     "title": "Fix it",
     "trust": "trusted",
-    "updated_at": 1795453080223,
+    "updated_at": 1795453533471,
     "waiting_on": []
   }
 ]

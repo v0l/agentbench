@@ -35,17 +35,17 @@
   "cursor": 9,
   "host": {
     "cores": 48,
-    "disk_free": 600909385728,
+    "disk_free": 599766446080,
     "disk_total": 3935812239360,
-    "load": 12.36,
+    "load": 12.43,
     "mem_total": 66741600256,
-    "mem_used": 45412945920
+    "mem_used": 46392578048
   },
   "issues": [
     {
       "blocks": [],
       "body": "details",
-      "created_at": 1795453080223,
+      "created_at": 1795453533471,
       "depends_on": [],
       "external_author": null,
       "external_number": null,
@@ -65,7 +65,7 @@
       "state": "doing",
       "title": "Fix it",
       "trust": "trusted",
-      "updated_at": 1795453080223,
+      "updated_at": 1795453533471,
       "waiting_on": []
     }
   ],
@@ -74,12 +74,12 @@
     {
       "automation": null,
       "branch": "main",
-      "created_at": 1795453080222,
+      "created_at": 1795453533470,
       "deploy": null,
       "home": false,
       "id": 1,
       "name": "demo",
-      "path": "/tmp/.tmp0wmvQc/demo",
+      "path": "/tmp/.tmpakgiQx/demo",
       "pinned": false,
       "post_mode": "draft",
       "remote": null,
@@ -95,17 +95,17 @@
     {
       "agent": "echo",
       "agent_session": null,
-      "created_at": 1795453080223,
-      "cwd": "/tmp/.tmp0wmvQc/demo",
+      "created_at": 1795453533471,
+      "cwd": "/tmp/.tmpakgiQx/demo",
       "effort": null,
-      "id": "a5117cd4-15ca-4983-b00e-3904a29d754b",
+      "id": "d598641b-8867-4049-8ca6-c748702d1ace",
       "issue_id": null,
       "model": null,
       "parent": null,
       "project_id": 1,
       "status": "idle",
       "title": "hello",
-      "updated_at": 1795453080227,
+      "updated_at": 1795453533474,
       "usage": {
         "bash_edits": 0,
         "bash_sleeps": 0,
@@ -149,13 +149,13 @@
   "worktrees": [
     {
       "branch": "main",
-      "created_at": 1795453080223,
-      "head": "c6dd32e8f911523a7014b083e0510a98755b91c8",
+      "created_at": 1795453533470,
+      "head": "b4b4fb7068dc5332e93e451446f40130c077942b",
       "id": 1,
       "main": true,
       "missing": false,
       "owned": false,
-      "path": "/tmp/.tmp0wmvQc/demo",
+      "path": "/tmp/.tmpakgiQx/demo",
       "project_id": 1
     }
   ]
