@@ -120,11 +120,13 @@ fn reserialised(name: &str, json: &Value) -> Result<Value, String> {
         "messages" => via::<Vec<Message>>(name, json),
         "changes" => via::<ChangesFeed>(name, json),
         "pulls" => via::<Vec<PullRequest>>(name, json),
+        "outbox" => via::<OutboxList>(name, json),
+        "github_settings" => via::<GithubSettings>(name, json),
         other => Err(format!("{other} is not a response type")),
     }
 }
 
-const RESPONSES: [&str; 6] = ["overview", "sessions", "issues", "messages", "changes", "pulls"];
+const RESPONSES: [&str; 8] = ["overview", "sessions", "issues", "messages", "changes", "pulls", "outbox", "github_settings"];
 
 fn fixture_dir(version: u32) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/api/v{version}"))
@@ -232,6 +234,8 @@ fn check(name: &str, json: &Value) -> Result<(), String> {
         "messages" => response_still_holds::<Vec<Message>>(name, json),
         "changes" => response_still_holds::<ChangesFeed>(name, json),
         "pulls" => response_still_holds::<Vec<PullRequest>>(name, json),
+        "outbox" => response_still_holds::<OutboxList>(name, json),
+        "github_settings" => response_still_holds::<GithubSettings>(name, json),
         "request_new_project" => decodes::<NewProject>(name, json).map(|_| ()),
         "request_new_issue" => decodes::<NewIssue>(name, json).map(|_| ()),
         "request_issue_patch" => decodes::<IssuePatch>(name, json).map(|_| ()),

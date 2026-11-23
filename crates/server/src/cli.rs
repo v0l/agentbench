@@ -24,12 +24,27 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum GithubAction {
+    /// The GitHub state of a project: gh, repo, sync, webhook and rate limit.
+    Status {
+        project: String,
+    },
+    /// Sync a project's issues and pull requests from GitHub now.
+    Sync {
+        project: String,
+    },
+    /// Stop everything in the outbox from being posted.
     Pause,
+    /// Let the outbox post again.
     Resume,
+    /// List the outbox rows, newest last.
     Outbox {
         #[arg(long)]
         project: Option<String>,
+        /// Only rows with this status: proposed, approved, done, failed, rejected, local.
+        #[arg(long)]
+        status: Option<String>,
     },
+    /// Approve one row (optionally with edited text) or every proposed row of a project.
     Approve {
         id: Option<i64>,
         #[arg(long)]
@@ -53,6 +68,18 @@ pub enum GithubAction {
         pr: i64,
         #[arg(long)]
         project: String,
+    },
+    /// Show or set up the webhook of a project. --secret makes a new secret and prints it once.
+    Webhook {
+        project: String,
+        /// The public address of this server, such as https://bench.example.com.
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        secret: bool,
+        /// Create or update the webhook on GitHub through gh (needs admin rights on the repo).
+        #[arg(long)]
+        create: bool,
     },
 }
 
@@ -177,6 +204,101 @@ impl Cli {
     pub fn interactive(&self) -> bool {
         matches!(self.command, Some(Command::Chat { .. }))
     }
+}
+
+fn project_named(store: &Store, name: &str) -> Result<agentbench_core::Project, String> {
+    let all = store.projects().map_err(|e| e.0)?;
+    all.iter()
+        .find(|p| p.name == name)
+        .or_else(|| name.parse::<i64>().ok().and_then(|id| all.iter().find(|p| p.id == id)))
+        .cloned()
+        .ok_or_else(|| format!("no project named {name}"))
+}
+
+pub fn github(store: &Store, gh: &str, action: GithubAction) -> Result<serde_json::Value, String> {
+    use crate::github::{outbox, webhook};
+    use serde_json::json;
+    let status = |p: &agentbench_core::Project| {
+        let last = store.setting(&format!("github_last_sync_{}", p.id)).ok().flatten().and_then(|v| v.parse().ok());
+        crate::github::status(store, gh, p, last)
+    };
+    Ok(match action {
+        GithubAction::Status { project } => json!(status(&project_named(store, &project)?)),
+        GithubAction::Sync { project } => {
+            let p = project_named(store, &project)?;
+            if !p.tracker.is_github() {
+                return Err(format!("{} does not use GitHub", p.name));
+            }
+            let out = crate::github::sync_project(store, gh, p.id, crate::store::now(), true);
+            if let crate::github::Outcome::Failed(e) = &out {
+                return Err(e.clone());
+            }
+            json!({"synced": p.name, "outcome": format!("{out:?}").to_lowercase(), "status": status(&p)})
+        }
+        GithubAction::Pause => {
+            outbox::set_paused(store, true)?;
+            json!({"paused": true})
+        }
+        GithubAction::Resume => {
+            outbox::set_paused(store, false)?;
+            json!({"paused": false})
+        }
+        GithubAction::Outbox { project, status } => {
+            let id = project.map(|n| project_named(store, &n).map(|p| p.id)).transpose()?;
+            let items: Vec<_> = outbox::linked(store, id)
+                .map_err(|e| e.0)?
+                .into_iter()
+                .filter(|o| status.as_deref().is_none_or(|s| o.status == s))
+                .map(|o| {
+                    let mut v = json!(o);
+                    v["what"] = json!(o.describe());
+                    v
+                })
+                .collect();
+            json!({"paused": outbox::is_paused(store), "items": items})
+        }
+        GithubAction::Approve { id, text, all } => match (id, all) {
+            (Some(id), _) => {
+                outbox::approve(store, id, text.as_deref(), "user")?;
+                json!({"approved": [id]})
+            }
+            (None, Some(name)) => json!({"approved": outbox::approve_all(store, project_named(store, &name)?.id, "user")?}),
+            _ => return Err("give a row id or --all <project>".into()),
+        },
+        GithubAction::Reject { id } => {
+            outbox::reject(store, id)?;
+            json!({"rejected": id})
+        }
+        GithubAction::Pulls { project } => json!(store.pull_requests(project_named(store, &project)?.id).map_err(|e| e.0)?),
+        GithubAction::Review { pr, project } => {
+            let p = project_named(store, &project)?;
+            store.pull_request(p.id, pr).map_err(|e| e.0)?.ok_or_else(|| format!("no mirrored pull request #{pr}"))?;
+            store.ask_pr_review(p.id, pr).map_err(|e| e.0)?;
+            json!({"review_asked": pr})
+        }
+        GithubAction::Merge { pr, project } => {
+            let p = project_named(store, &project)?;
+            let done = crate::github::merge::merge(store, gh, p.id, pr, crate::github::merge::OWNER)?;
+            json!({"merged": pr, "result": done})
+        }
+        GithubAction::Webhook { project, base, secret, create } => {
+            let p = project_named(store, &project)?;
+            if let Some(b) = base {
+                store.set_setting(webhook::BASE_SETTING, b.trim()).map_err(|e| e.0)?;
+            }
+            let mut out = json!({"url": webhook::url(store, p.id), "secret_set": webhook::secret(store, p.id).is_some(), "last_delivery": webhook::last_delivery(store, p.id)});
+            if secret {
+                let made = webhook::rotate(store, p.id)?;
+                out["secret"] = json!(made.secret);
+                out["secret_set"] = json!(true);
+                out["note"] = json!("the secret is shown once; paste it into the webhook on GitHub or run with --create");
+            }
+            if create {
+                out["created"] = webhook::create(store, gh, p.id)?;
+            }
+            out
+        }
+    })
 }
 
 pub fn logging() {
@@ -326,49 +448,9 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             }
         }
         Command::Github { action } => {
-            use crate::github::outbox;
-            match action {
-                GithubAction::Pause => outbox::set_paused(&store, true),
-                GithubAction::Resume => outbox::set_paused(&store, false),
-                GithubAction::Outbox { project } => {
-                    let id = match project {
-                        Some(name) => Some(store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == name).ok_or_else(|| format!("no project named {name}"))?.id),
-                        None => None,
-                    };
-                    for o in store.outbox(id).map_err(|e| e.0)? {
-                        println!("{:<5} {:<9} {:<14} #{:<5} by {:<14} {}", o.id, o.status, o.kind, o.number, o.asked_by, o.text.replace('\n', " "));
-                    }
-                    Ok(())
-                }
-                GithubAction::Approve { id, text, all } => match (id, all) {
-                    (Some(id), _) => outbox::approve(&store, id, text.as_deref(), "user"),
-                    (None, Some(name)) => {
-                        let p = store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == name).ok_or_else(|| format!("no project named {name}"))?;
-                        outbox::approve_all(&store, p.id, "user").map(|ids| println!("approved {}", ids.len()))
-                    }
-                    _ => Err("give a row id or --all <project>".into()),
-                },
-                GithubAction::Reject { id } => outbox::reject(&store, id),
-                GithubAction::Pulls { project } => {
-                    let p = store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == project).ok_or_else(|| format!("no project named {project}"))?;
-                    let prs = store.pull_requests(p.id).map_err(|e| e.0)?;
-                    println!("{}", serde_json::to_string_pretty(&prs).map_err(|e| e.to_string())?);
-                    Ok(())
-                }
-                GithubAction::Review { pr, project } => {
-                    let p = store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == project).ok_or_else(|| format!("no project named {project}"))?;
-                    store.pull_request(p.id, pr).map_err(|e| e.0)?.ok_or_else(|| format!("no mirrored pull request #{pr}"))?;
-                    store.ask_pr_review(p.id, pr).map_err(|e| e.0)?;
-                    println!("{}", serde_json::json!({"review_asked": pr}));
-                    Ok(())
-                }
-                GithubAction::Merge { pr, project } => {
-                    let p = store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == project).ok_or_else(|| format!("no project named {project}"))?;
-                    let done = crate::github::merge::merge(&store, &crate::github::gh_program(), p.id, pr, crate::github::merge::OWNER)?;
-                    println!("{}", serde_json::json!({"merged": pr, "result": done}));
-                    Ok(())
-                }
-            }
+            let out = github(&store, &crate::github::gh_program(), action)?;
+            println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
+            Ok(())
         }
         Command::Chat { .. } => unreachable!("handled before the store opens"),
         Command::Issue { action } => {
@@ -437,5 +519,119 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::github::outbox::{Ask, propose};
+    use crate::github::testing::Rig;
+    use agentbench_core::{PostMode, Trust};
+    use serde_json::json;
+
+    fn parse(args: &[&str]) -> GithubAction {
+        let mut all = vec!["agentbench", "github"];
+        all.extend_from_slice(args);
+        match Cli::try_parse_from(all).unwrap().command {
+            Some(Command::Github { action }) => action,
+            _ => panic!("not a github command"),
+        }
+    }
+
+    fn run(r: &Rig, args: &[&str]) -> Result<serde_json::Value, String> {
+        github(&r.store, &r.gh, parse(args))
+    }
+
+    fn comment(r: &Rig, text: &str) -> i64 {
+        let ask = Ask { project: r.project, kind: "comment".into(), number: 4, text: text.into(), params: json!({}), asked_by: "supervisor".into(), trusted: true };
+        propose(&r.store, ask).unwrap().0
+    }
+
+    #[test]
+    fn every_github_subcommand_parses() {
+        for args in [
+            &["status", "demo"][..],
+            &["sync", "demo"],
+            &["pause"],
+            &["resume"],
+            &["outbox", "--project", "demo", "--status", "proposed"],
+            &["approve", "3", "--text", "edited"],
+            &["approve", "--all", "demo"],
+            &["reject", "3"],
+            &["pulls", "--project", "demo"],
+            &["review", "9", "--project", "demo"],
+            &["merge", "9", "--project", "demo"],
+            &["webhook", "demo", "--base", "https://b.example", "--secret", "--create"],
+        ] {
+            parse(args);
+        }
+    }
+
+    #[test]
+    fn the_outbox_commands_answer_in_json_and_change_the_rows() {
+        let r = Rig::new(PostMode::Draft, "");
+        let a = comment(&r, "first");
+        let b = comment(&r, "second");
+        let c = comment(&r, "third");
+        let listed = run(&r, &["outbox", "--project", "demo"]).unwrap();
+        assert_eq!(listed["paused"], false);
+        assert_eq!(listed["items"].as_array().unwrap().len(), 3);
+        assert_eq!(listed["items"][0]["what"], "comment on #4");
+        assert_eq!(run(&r, &["approve", &a.to_string(), "--text", "edited first"]).unwrap(), json!({"approved": [a]}));
+        assert_eq!(r.store.outbox_item(a).unwrap().text, "edited first");
+        assert_eq!(run(&r, &["reject", &b.to_string()]).unwrap(), json!({"rejected": b}));
+        assert_eq!(run(&r, &["approve", "--all", "demo"]).unwrap(), json!({"approved": [c]}));
+        let proposed = run(&r, &["outbox", "--status", "proposed"]).unwrap();
+        assert!(proposed["items"].as_array().unwrap().is_empty());
+        assert_eq!(run(&r, &["pause"]).unwrap(), json!({"paused": true}));
+        assert!(crate::github::outbox::is_paused(&r.store));
+        assert_eq!(crate::github::outbox::drain(&r.store, &r.gh, crate::store::now()), 0, "paused posts nothing");
+        assert_eq!(run(&r, &["resume"]).unwrap(), json!({"paused": false}));
+        assert_eq!(crate::github::outbox::drain(&r.store, &r.gh, crate::store::now()), 2);
+        let sent = run(&r, &["outbox", "--status", "done"]).unwrap();
+        let urls: Vec<&str> = sent["items"].as_array().unwrap().iter().filter_map(|i| i["url"].as_str()).collect();
+        assert_eq!(urls, vec!["https://github.com/o/r/issues/4#issuecomment-1"; 2]);
+        assert!(run(&r, &["approve"]).unwrap_err().contains("row id"));
+        assert!(run(&r, &["outbox", "--project", "nope"]).unwrap_err().contains("no project named nope"));
+    }
+
+    #[test]
+    fn status_reports_gh_missing_and_sync_refuses_an_internal_project() {
+        let r = Rig::new(PostMode::Draft, "");
+        let missing = github(&r.store, "/nonexistent/gh", parse(&["status", "demo"])).unwrap();
+        assert_eq!(missing["problem"], "gh missing");
+        assert_eq!(missing["repo"], "o/r");
+        assert_eq!(missing["poll_secs"], 60);
+        r.store.update_project(r.project, &agentbench_core::ProjectPatch { tracker: Some(agentbench_core::Tracker::Internal), ..Default::default() }).unwrap();
+        assert!(run(&r, &["sync", "demo"]).unwrap_err().contains("does not use GitHub"));
+    }
+
+    #[test]
+    fn pulls_review_and_merge_go_through_the_owner_rules() {
+        let r = Rig::new(PostMode::Draft, "");
+        r.pr(9, "kieran", Trust::Trusted, &r.head);
+        let pulls = run(&r, &["pulls", "--project", "demo"]).unwrap();
+        assert_eq!(pulls[0]["number"], 9);
+        assert_eq!(run(&r, &["review", "9", "--project", "demo"]).unwrap(), json!({"review_asked": 9}));
+        assert!(r.store.pull_request(r.project, 9).unwrap().unwrap().review_asked > 0);
+        assert!(run(&r, &["review", "10", "--project", "demo"]).unwrap_err().contains("#10"));
+        r.checks(9, &r.head, &["success"]);
+        let e = run(&r, &["merge", "9", "--project", "demo"]).unwrap_err();
+        assert!(e.contains("no review"), "{e}");
+        assert!(!r.calls().iter().any(|c| c.starts_with("pr merge")));
+    }
+
+    #[test]
+    fn webhook_shows_the_secret_once() {
+        let r = Rig::new(PostMode::Draft, "");
+        let made = run(&r, &["webhook", "demo", "--base", "https://bench.example.com", "--secret"]).unwrap();
+        let secret = made["secret"].as_str().unwrap().to_string();
+        assert_eq!(secret.len(), 64);
+        assert_eq!(made["url"], format!("https://bench.example.com/api/github/webhook/{}", r.project));
+        let later = run(&r, &["webhook", "demo"]).unwrap();
+        assert_eq!(later["secret_set"], true);
+        assert!(later.get("secret").is_none(), "the secret is not shown again");
+        assert!(!later.to_string().contains(&secret));
     }
 }

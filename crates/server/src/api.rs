@@ -146,6 +146,10 @@ pub fn router(api: Api) -> Router {
         .route("/api/projects/{id}", delete(delete_project).patch(update_project))
         .route("/api/projects/{id}/sync", post(sync_project))
         .route("/api/projects/{id}/github", get(github_status))
+        .route("/api/projects/{id}/github/webhook", post(webhook_secret))
+        .route("/api/projects/{id}/outbox/approve-all", post(outbox_approve_all))
+        .route("/api/projects/{id}/github/webhook/create", post(webhook_create))
+        .route("/api/settings/github", get(get_github_settings).put(put_github_settings))
         .route("/api/projects/{id}/github/sync", post(github_sync_now))
         .route("/api/projects/{id}/pulls", get(pulls_list))
         .route("/api/projects/{id}/pulls/{number}/review", post(pull_review))
@@ -196,6 +200,10 @@ pub fn router(api: Api) -> Router {
         .layer(middleware::from_fn_with_state(api.clone(), auth));
     Router::new()
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route(
+            "/api/github/webhook/{id}",
+            post(github_webhook).layer(axum::extract::DefaultBodyLimit::max(crate::github::webhook::BODY_MAX)),
+        )
         .merge(protected)
         .layer(middleware::from_fn(nosniff))
         .layer(middleware::from_fn(api_header))
@@ -833,12 +841,84 @@ struct Paused {
     paused: bool,
 }
 
-async fn outbox_list(State(api): State<Api>) -> Reply<serde_json::Value> {
+async fn outbox_list(State(api): State<Api>, Query(q): Query<OutboxQuery>) -> Reply<agentbench_core::OutboxList> {
     let store = api.runner.store();
-    Ok(Json(json!({
-        "paused": crate::github::outbox::is_paused(store),
-        "items": store.outbox(None)?,
-    })))
+    Ok(Json(agentbench_core::OutboxList {
+        paused: crate::github::outbox::is_paused(store),
+        items: crate::github::outbox::linked(store, q.project)?,
+    }))
+}
+
+#[derive(Deserialize, Default)]
+struct OutboxQuery {
+    #[serde(default)]
+    project: Option<Id>,
+}
+
+async fn webhook_secret(State(api): State<Api>, Path(id): Path<Id>) -> Reply<agentbench_core::WebhookSecret> {
+    let made = crate::github::webhook::rotate(api.runner.store(), id).map_err(bad)?;
+    changed(&api);
+    Ok(Json(made))
+}
+
+async fn webhook_create(State(api): State<Api>, Path(id): Path<Id>) -> Reply<serde_json::Value> {
+    let store = api.runner.store().clone();
+    let done = tokio::task::spawn_blocking(move || crate::github::webhook::create(&store, &crate::github::gh_program(), id))
+        .await
+        .map_err(|e| bad(e.to_string()))?
+        .map_err(bad)?;
+    Ok(Json(done))
+}
+
+fn github_settings_now(store: &crate::store::Store) -> agentbench_core::GithubSettings {
+    agentbench_core::GithubSettings {
+        poll_secs: Some(crate::github::poll_secs(store)),
+        webhook_base: crate::github::webhook::base(store),
+    }
+}
+
+async fn get_github_settings(State(api): State<Api>) -> Reply<agentbench_core::GithubSettings> {
+    Ok(Json(github_settings_now(api.runner.store())))
+}
+
+async fn put_github_settings(State(api): State<Api>, Json(s): Json<agentbench_core::GithubSettings>) -> Reply<agentbench_core::GithubSettings> {
+    let store = api.runner.store();
+    if let Some(p) = s.poll_secs {
+        if p < 5 {
+            return Err(bad("the poll interval is at least 5 seconds"));
+        }
+        store.set_setting(crate::github::POLL_SETTING, &p.to_string())?;
+    }
+    if let Some(b) = s.webhook_base {
+        let b = b.trim();
+        if !b.is_empty() && !(b.starts_with("https://") || b.starts_with("http://")) {
+            return Err(bad("the webhook base is an http or https address"));
+        }
+        store.set_setting(crate::github::webhook::BASE_SETTING, b)?;
+    }
+    changed(&api);
+    Ok(Json(github_settings_now(store)))
+}
+
+async fn github_webhook(State(api): State<Api>, Path(id): Path<Id>, headers: HeaderMap, body: axum::body::Bytes) -> StatusCode {
+    use crate::github::webhook::{Delivery, Received, receive};
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let (event, delivery, signature) = (header("x-github-event"), header("x-github-delivery"), header("x-hub-signature-256"));
+    let store = api.runner.store().clone();
+    let got = tokio::task::spawn_blocking(move || {
+        let d = Delivery { event: event.as_deref(), id: delivery.as_deref(), signature: signature.as_deref(), body: &body };
+        receive(&store, &crate::github::gh_program(), id, &d, crate::store::now())
+    })
+    .await;
+    match got {
+        Ok(Received::Unauthorized) => StatusCode::UNAUTHORIZED,
+        Ok(Received::Refetched) => {
+            changed(&api);
+            StatusCode::NO_CONTENT
+        }
+        Ok(Received::Ignored(_)) => StatusCode::ACCEPTED,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 async fn outbox_approve(State(api): State<Api>, Path(id): Path<Id>, body: Option<Json<OutboxApprove>>) -> Reply<serde_json::Value> {
@@ -846,6 +926,12 @@ async fn outbox_approve(State(api): State<Api>, Path(id): Path<Id>, body: Option
     crate::github::outbox::approve(api.runner.store(), id, text.as_deref(), "user").map_err(bad)?;
     changed(&api);
     Ok(Json(json!({ "approved": id })))
+}
+
+async fn outbox_approve_all(State(api): State<Api>, Path(id): Path<Id>) -> Reply<serde_json::Value> {
+    let done = crate::github::outbox::approve_all(api.runner.store(), id, "user").map_err(bad)?;
+    changed(&api);
+    Ok(Json(json!({ "approved": done })))
 }
 
 async fn outbox_reject(State(api): State<Api>, Path(id): Path<Id>) -> Reply<serde_json::Value> {
@@ -857,6 +943,7 @@ async fn outbox_reject(State(api): State<Api>, Path(id): Path<Id>) -> Reply<serd
 async fn github_pause(State(api): State<Api>, body: Option<Json<Paused>>) -> Reply<serde_json::Value> {
     let paused = body.map(|b| b.0.paused).unwrap_or(true);
     crate::github::outbox::set_paused(api.runner.store(), paused).map_err(bad)?;
+    changed(&api);
     Ok(Json(json!({ "paused": paused })))
 }
 
@@ -3073,6 +3160,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_webhook_route_needs_a_signature_not_a_token() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let store = f.api.runner.store().clone();
+        store.update_project(pid, &ProjectPatch { tracker: Some(agentbench_core::Tracker::Github { repo: "o/r".into() }), ..Default::default() }).unwrap();
+        let (s, made) = call(&f.app, "POST", &format!("/api/projects/{pid}/github/webhook"), None, T).await;
+        assert_eq!(s, StatusCode::OK, "{made}");
+        let secret = made["secret"].as_str().unwrap().to_string();
+        let (_, st) = call(&f.app, "GET", &format!("/api/projects/{pid}/github"), None, T).await;
+        assert_eq!(st["webhook_secret_set"], true);
+        assert!(!st.to_string().contains(&secret), "the status never shows the secret");
+        let body = json!({"zen": "hi", "repository": {"full_name": "o/r"}}).to_string();
+        let send = |sig: String, id: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/github/webhook/{pid}"))
+                .header("x-github-event", "ping")
+                .header("x-github-delivery", id)
+                .header("x-hub-signature-256", sig)
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+        let bad = f.app.clone().oneshot(send("sha256=00".into(), "a")).await.unwrap();
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+        assert!(bad.into_body().collect().await.unwrap().to_bytes().is_empty(), "a refusal has no body");
+        let sig = crate::github::webhook::signature(&secret, body.as_bytes());
+        let ok = f.app.clone().oneshot(send(sig.clone(), "b")).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::NO_CONTENT);
+        let again = f.app.clone().oneshot(send(sig, "b")).await.unwrap();
+        assert_eq!(again.status(), StatusCode::ACCEPTED);
+        let big = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/api/github/webhook/{pid}"))
+            .body(Body::from(vec![b'x'; crate::github::webhook::BODY_MAX + 10]))
+            .unwrap();
+        assert_eq!(f.app.clone().oneshot(big).await.unwrap().status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn github_settings_and_the_project_outbox_round_trip() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, s) = call(&f.app, "GET", "/api/settings/github", None, T).await;
+        assert_eq!(s["poll_secs"], 60);
+        let (code, s) = call(&f.app, "PUT", "/api/settings/github", Some(json!({"poll_secs": 120, "webhook_base": "https://b.example/"})), T).await;
+        assert_eq!(code, StatusCode::OK, "{s}");
+        assert_eq!((s["poll_secs"].as_i64(), s["webhook_base"].as_str()), (Some(120), Some("https://b.example")));
+        let (code, _) = call(&f.app, "PUT", "/api/settings/github", Some(json!({"poll_secs": 1})), T).await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let store = f.api.runner.store().clone();
+        store.update_project(pid, &ProjectPatch { tracker: Some(agentbench_core::Tracker::Github { repo: "o/r".into() }), ..Default::default() }).unwrap();
+        let ask = |text: &str| crate::github::outbox::Ask { project: pid, kind: "comment".into(), number: 3, text: text.into(), params: json!({}), asked_by: "supervisor".into(), trusted: true };
+        crate::github::outbox::propose(&store, ask("one")).unwrap();
+        crate::github::outbox::propose(&store, ask("two")).unwrap();
+        let (_, list) = call(&f.app, "GET", &format!("/api/outbox?project={pid}"), None, T).await;
+        assert_eq!(list["items"].as_array().unwrap().len(), 2);
+        let (_, none) = call(&f.app, "GET", &format!("/api/outbox?project={}", pid + 100), None, T).await;
+        assert!(none["items"].as_array().unwrap().is_empty());
+        let (code, done) = call(&f.app, "POST", &format!("/api/projects/{pid}/outbox/approve-all"), None, T).await;
+        assert_eq!(code, StatusCode::OK, "{done}");
+        assert_eq!(done["approved"].as_array().unwrap().len(), 2);
+        let (_, paused) = call(&f.app, "POST", "/api/github/pause", Some(json!({"paused": true})), T).await;
+        assert_eq!(paused["paused"], true);
+        let (_, list) = call(&f.app, "GET", "/api/outbox", None, T).await;
+        assert_eq!(list["paused"], true);
+        assert!(list["items"].as_array().unwrap().iter().all(|i| i["status"] == "approved"));
+    }
+
+    #[tokio::test]
     async fn project_tracker_settings_round_trip_through_the_api() {
         let f = fixture();
         let pid = project(&f).await;
@@ -3220,6 +3376,15 @@ mod tests {
         let (s, pulls) = call(&f.app, "GET", &format!("/api/projects/{pid}/pulls"), None, T).await;
         assert_eq!(s, StatusCode::OK, "{pulls}");
         keep("pulls", &pulls);
+        let ask = crate::github::outbox::Ask { project: pid, kind: "label_add".into(), number: 4, text: String::new(), params: json!({"label": "bug"}), asked_by: "supervisor".into(), trusted: true };
+        crate::github::outbox::propose(f.api.runner.store(), ask).unwrap();
+        let (s, outbox) = call(&f.app, "GET", &format!("/api/outbox?project={pid}"), None, T).await;
+        assert_eq!(s, StatusCode::OK, "{outbox}");
+        keep("outbox", &outbox);
+        let _: agentbench_core::OutboxList = serde_json::from_value(outbox).unwrap();
+        let (_, settings) = call(&f.app, "GET", "/api/settings/github", None, T).await;
+        keep("github_settings", &settings);
+        let _: agentbench_core::GithubSettings = serde_json::from_value(settings).unwrap();
         let _: Vec<agentbench_core::PullRequest> = serde_json::from_value(pulls).unwrap();
         let overview: agentbench_core::Overview = serde_json::from_value(overview).unwrap();
         assert_eq!(overview.api_version, agentbench_core::API_VERSION);

@@ -358,8 +358,9 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 40] = [
+pub const AGENTBENCH_TOOLS: [&str; 41] = [
     "github_post",
+    "github_outbox",
     "list_issues",
     "get_issue",
     "file_issue",
@@ -415,7 +416,7 @@ fn agentbench_specs() -> Vec<Spec> {
     vec![
         Spec::new(
             "list_issues",
-            "List this project's issues with their state. Pass state to filter: backlog, todo, doing, review or done.",
+            "List this project's issues with their state. Pass state to filter: backlog, todo, doing, review or done. Each issue says its source: internal, or github with its GitHub number, url and author.",
             object(
                 json!({ "state": string("Only issues in this state"), "goal": string("Only issues linked to this goal id"), "project": string("Supervisor chat only: the project by name or id. Without it, list tools cover every project"), }),
                 &[],
@@ -510,6 +511,18 @@ fn agentbench_specs() -> Vec<Spec> {
                     "project": string("Supervisor chat only: the project by name or id"),
                 }),
                 &["kind", "number"],
+            ),
+        ),
+        Spec::new(
+            "github_outbox",
+            "Read the GitHub outbox: every comment, label change, close, review and merge that agents proposed, with its status (proposed waits for the owner, approved is queued, done is posted with its GitHub url, failed has the error, rejected, local), who asked and the exact text. Read only: the owner approves rows in the app or the CLI.",
+            object(
+                json!({
+                    "status": string("Only rows with this status: proposed, approved, posting, done, failed, rejected or local"),
+                    "number": id("Only rows for this GitHub issue or pull request number"),
+                    "project": string("Supervisor chat only: the project by name or id. Without it, every project"),
+                }),
+                &[],
             ),
         ),
         Spec::new(

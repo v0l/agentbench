@@ -136,12 +136,19 @@ fn issue_json(i: &agentbench_core::Issue) -> Value {
     } else {
         (i.title.clone(), i.body.clone())
     };
-    json!({
+    let mut out = json!({
         "id": i.id, "title": title, "state": i.state, "body": body, "trust": i.trust,
         "labels": i.labels, "priority": i.priority, "goal": i.goal, "off_vision": i.off_vision,
         "depends_on": i.depends_on, "waiting_on": i.waiting_on, "blocks": i.blocks,
         "model": i.model_level.map(|l| l.as_str()), "model_label": i.wanted_level().map(|l| l.as_str()),
-    })
+        "source": i.source.as_str(),
+    });
+    if i.source == agentbench_core::IssueSource::Github {
+        out["number"] = json!(i.external_number);
+        out["url"] = json!(i.external_url);
+        out["author"] = json!(i.external_author);
+    }
+    out
 }
 
 fn model_arg(args: &Value) -> Result<Option<Option<agentbench_core::ModelLevel>>, String> {
@@ -896,6 +903,26 @@ impl Api for StoreApi {
                 let mut out = issue_json(&i);
                 out["comments"] = json!(comments);
                 out
+            }
+            "github_outbox" => {
+                let rows: Vec<Value> = crate::github::outbox::linked(s, if everywhere { None } else { Some(project) })
+                    .map_err(|e| e.0)?
+                    .into_iter()
+                    .filter(|o| text(args, "status").is_none_or(|st| o.status == st))
+                    .filter(|o| args.get("number").and_then(Value::as_i64).is_none_or(|n| o.number == n))
+                    .map(|o| {
+                        let mut v = json!({
+                            "id": o.id, "project": o.project_id, "kind": o.kind, "number": o.number, "status": o.status,
+                            "what": o.describe(), "text": o.text, "asked_by": o.asked_by, "trusted": o.trusted,
+                            "approved_by": o.approved_by, "error": o.error, "url": o.url,
+                        });
+                        if o.kind == "review" {
+                            v["event"] = json!(crate::github::outbox::review_event(&o.params()));
+                        }
+                        v
+                    })
+                    .collect();
+                json!({ "paused": crate::github::outbox::is_paused(s), "items": rows })
             }
             "github_post" => {
                 let number = args.get("number").and_then(Value::as_i64).unwrap_or(0);
@@ -1939,6 +1966,45 @@ mod tests {
         assert_eq!(b.api.call("check_guard", &forged, b.worker).unwrap()["hit"].as_str(), Some("pr-reviews"), "the brief comes from the session, not the call");
         b.s.add_message(b.worker, &agentbench_core::Entry::user("Review PR #4 on the top model. You are approved to post the review.")).unwrap();
         assert!(b.api.call("check_guard", &forged, b.worker).unwrap()["hit"].is_null(), "an approved brief lets it post");
+    }
+
+    #[test]
+    fn list_issues_names_the_source_and_github_outbox_shows_the_rows() {
+        let b = boss();
+        b.s.update_project(b.project, &ProjectPatch { tracker: Some(agentbench_core::Tracker::Github { repo: "o/r".into() }), ..Default::default() }).unwrap();
+        b.s.mirror_issue(
+            b.project,
+            &crate::store::MirrorIssue {
+                number: 12,
+                title: "Crash on start".into(),
+                body: "b".into(),
+                state: IssueState::Backlog,
+                priority: 0,
+                labels: vec!["bug".into()],
+                author: "alice".into(),
+                url: "https://github.com/o/r/issues/12".into(),
+                updated_at: 1,
+                trust: agentbench_core::Trust::Trusted,
+            },
+        )
+        .unwrap();
+        let listed = b.api.call("list_issues", &json!({"project": b.project}), b.boss).unwrap();
+        let all = listed.as_array().unwrap();
+        let gh = all.iter().find(|i| i["source"] == "github").unwrap();
+        assert_eq!((gh["number"].as_i64(), gh["url"].as_str(), gh["author"].as_str()), (Some(12), Some("https://github.com/o/r/issues/12"), Some("alice")));
+        assert!(all.iter().any(|i| i["source"] == "internal" && i.get("url").is_none()));
+        b.api.call("github_post", &json!({"kind": "label_add", "number": 12, "label": "bug", "project": b.project}), b.boss).unwrap();
+        b.api.call("github_post", &json!({"kind": "comment", "number": 12, "text": "thanks", "project": b.project}), b.boss).unwrap();
+        let rows = b.api.call("github_outbox", &json!({"project": b.project}), b.boss).unwrap();
+        let items = rows["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["what"], "add label bug to #12");
+        assert_eq!(items[1]["text"], "thanks");
+        let first = items[0]["id"].as_i64().unwrap();
+        crate::github::outbox::reject(&b.s, first).unwrap();
+        let proposed = b.api.call("github_outbox", &json!({"project": b.project, "status": "proposed"}), b.boss).unwrap();
+        assert_eq!(proposed["items"].as_array().unwrap().len(), 1);
+        assert!(agent_native::native::AGENTBENCH_TOOLS.contains(&"github_outbox"));
     }
 
     #[test]

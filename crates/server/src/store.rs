@@ -414,25 +414,7 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
-pub struct OutboxItem {
-    pub id: Id,
-    pub project_id: Id,
-    pub kind: String,
-    pub payload: String,
-    pub status: String,
-    pub created_at: i64,
-    pub asked_by: String,
-    pub trusted: bool,
-    pub number: i64,
-    pub text: String,
-    pub attempts: i64,
-    pub next_at: i64,
-    pub external_id: Option<String>,
-    pub error: Option<String>,
-    pub updated_at: i64,
-    pub approved_by: String,
-}
+pub use agentbench_core::OutboxItem;
 
 pub struct NewOutbox<'a> {
     pub project_id: Id,
@@ -463,6 +445,7 @@ fn outbox_row(r: &Row) -> rusqlite::Result<OutboxItem> {
         error: r.get("error")?,
         updated_at: r.get("updated_at")?,
         approved_by: r.get("approved_by")?,
+        url: None,
     })
 }
 

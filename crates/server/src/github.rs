@@ -13,6 +13,7 @@ pub mod sync;
 #[cfg(test)]
 pub mod testing;
 pub mod trust;
+pub mod webhook;
 
 pub use sync::{Outcome, SyncState, load_state, sync_project};
 
@@ -29,12 +30,13 @@ pub fn poll_secs(store: &crate::store::Store) -> i64 {
 }
 
 pub fn sync_due(store: &crate::store::Store, gh: &str, now: i64) -> Vec<(agentbench_core::Id, Outcome)> {
-    let every = poll_secs(store) * 1000;
+    let base = poll_secs(store);
     let mut done = Vec::new();
     for p in store.projects().unwrap_or_default() {
         if !matches!(p.tracker, Tracker::Github { .. }) {
             continue;
         }
+        let every = if webhook::healthy(store, p.id, now) { base.max(webhook::SLOW_POLL_SECS) } else { base } * 1000;
         let state = load_state(store, p.id);
         if state.last_attempt.is_some_and(|t| now - t < every) {
             continue;
@@ -140,6 +142,11 @@ pub fn status(store: &crate::store::Store, gh: &str, project: &Project, last_syn
         repo: project_repo(project),
         last_sync,
         sync_error: load_state(store, project.id).error,
+        poll_secs: Some(poll_secs(store)),
+        webhook_url: webhook::url(store, project.id),
+        webhook_secret_set: webhook::secret(store, project.id).is_some(),
+        webhook_last: webhook::last_delivery(store, project.id),
+        paused: outbox::is_paused(store),
         ..Default::default()
     };
     match run(gh, &["auth", "status"]) {

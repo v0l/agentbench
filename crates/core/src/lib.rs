@@ -584,6 +584,134 @@ pub struct GithubStatus {
     pub problem: Option<String>,
     #[serde(default)]
     pub sync_error: Option<String>,
+    #[serde(default)]
+    pub poll_secs: Option<i64>,
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    #[serde(default)]
+    pub webhook_secret_set: bool,
+    #[serde(default)]
+    pub webhook_last: Option<i64>,
+    #[serde(default)]
+    pub paused: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutboxItem {
+    #[serde(default)]
+    pub id: Id,
+    #[serde(default)]
+    pub project_id: Id,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub payload: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub asked_by: String,
+    #[serde(default)]
+    pub trusted: bool,
+    #[serde(default)]
+    pub number: i64,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub attempts: i64,
+    #[serde(default)]
+    pub next_at: i64,
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub updated_at: i64,
+    #[serde(default)]
+    pub approved_by: String,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+impl OutboxItem {
+    pub fn footer(repo: &str) -> String {
+        let owner = repo.split('/').next().unwrap_or(repo);
+        format!("\n\n---\nposted by agentbench for {owner}")
+    }
+
+    pub fn carries_text(&self) -> bool {
+        matches!(self.kind.as_str(), "comment" | "review" | "issue_create")
+    }
+
+    pub fn link(&self, repo: &str) -> Option<String> {
+        if !self.sent() || repo.is_empty() {
+            return None;
+        }
+        let base = format!("https://github.com/{repo}");
+        let ext = self.external_id.as_deref().filter(|e| !e.is_empty());
+        Some(match (self.kind.as_str(), ext) {
+            ("comment", Some(id)) => format!("{base}/issues/{}#issuecomment-{id}", self.number),
+            ("review", Some(id)) => format!("{base}/pull/{}#pullrequestreview-{id}", self.number),
+            ("review", None) => format!("{base}/pull/{}", self.number),
+            ("issue_create", Some(n)) => format!("{base}/issues/{n}"),
+            _ => format!("{base}/issues/{}", self.number),
+        })
+    }
+    pub fn params(&self) -> Value {
+        serde_json::from_str(&self.payload).unwrap_or(Value::Null)
+    }
+
+    pub fn waiting(&self) -> bool {
+        matches!(self.status.as_str(), "proposed" | "failed")
+    }
+
+    pub fn sent(&self) -> bool {
+        self.status == "done"
+    }
+
+    pub fn describe(&self) -> String {
+        let p = self.params();
+        let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let n = self.number;
+        match self.kind.as_str() {
+            "comment" => format!("comment on #{n}"),
+            "label_add" => format!("add label {} to #{n}", s("label")),
+            "label_remove" => format!("remove label {} from #{n}", s("label")),
+            "assignee" if p.get("remove").and_then(Value::as_bool).unwrap_or(false) => format!("unassign {} from #{n}", s("login")),
+            "assignee" => format!("assign {} to #{n}", s("login")),
+            "issue_state" if s("state") == "open" => format!("reopen #{n}"),
+            "issue_state" => format!("close #{n} as {}", if s("reason") == "not_planned" { "not planned" } else { "completed" }),
+            "review" => format!("{} review on pull request #{n}", s("event").replace('_', " ")),
+            "merge_request" => format!("merge pull request #{n}"),
+            "issue_create" => format!("open issue {}", s("title")),
+            other => format!("{other} on #{n}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutboxList {
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub items: Vec<OutboxItem>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GithubSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_secs: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_base: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WebhookSecret {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub secret: String,
 }
 
 impl Project {
@@ -2456,7 +2584,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 11;
+pub const API_VERSION: u32 = 12;
+pub const API_GITHUB_APP: u32 = 12;
 pub const API_PR_REVIEW: u32 = 11;
 pub const API_GITHUB_WORK: u32 = 10;
 pub const API_MODEL_LEVEL: u32 = 9;

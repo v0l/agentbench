@@ -162,6 +162,18 @@ pub fn approve_all(store: &Store, project: Id, by: &str) -> Result<Vec<Id>, Stri
     Ok(done)
 }
 
+pub fn linked(store: &Store, project: Option<Id>) -> crate::store::Result<Vec<OutboxItem>> {
+    let mut repos = std::collections::HashMap::new();
+    let mut items = store.outbox(project)?;
+    for item in &mut items {
+        let repo = repos
+            .entry(item.project_id)
+            .or_insert_with(|| store.project(item.project_id).ok().and_then(|p| super::project_repo(&p)).unwrap_or_default());
+        item.url = item.link(repo);
+    }
+    Ok(items)
+}
+
 pub fn reject(store: &Store, id: Id) -> Result<(), String> {
     let item = store.outbox_item(id).map_err(|e| e.0)?;
     if store.outbox_transition(id, &["proposed", "approved", "failed", "local"], "rejected", None).map_err(|e| e.0)? {
@@ -172,8 +184,7 @@ pub fn reject(store: &Store, id: Id) -> Result<(), String> {
 }
 
 fn footer(repo: &str) -> String {
-    let owner = repo.split('/').next().unwrap_or(repo);
-    format!("\n\n---\nposted by agentbench for {owner}")
+    OutboxItem::footer(repo)
 }
 
 fn temp_file(id: Id, body: &Value) -> Result<std::path::PathBuf, String> {
