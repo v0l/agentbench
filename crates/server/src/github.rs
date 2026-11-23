@@ -3,6 +3,7 @@ use std::process::{Command, Stdio};
 
 pub mod caps;
 pub mod map;
+pub mod outbox;
 pub mod ready;
 pub mod sync;
 pub mod trust;
@@ -46,7 +47,10 @@ pub fn spawn(runner: crate::runner::Runner) {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             let store = runner.store().clone();
             let result = tokio::task::spawn_blocking(move || {
-                sync_due(&store, &gh_program(), crate::store::now())
+                let gh = gh_program();
+                let now = crate::store::now();
+                outbox::drain(&store, &gh, now);
+                sync_due(&store, &gh, now)
             })
             .await;
             match result {
