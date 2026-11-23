@@ -5,7 +5,7 @@ pub mod files;
 pub mod fold;
 pub mod gate;
 pub mod http;
-pub mod limits;
+pub use agent_core::limits;
 pub mod media;
 pub mod native;
 mod process;

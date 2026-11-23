@@ -3,6 +3,7 @@ use std::time::Duration;
 
 const POLL: Duration = Duration::from_secs(1);
 pub const DEFAULT_MEMORY_MB: u64 = 1024;
+pub const DEFAULT_BACKGROUND_MEMORY_MB: u64 = 8192;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Limits {
@@ -11,8 +12,16 @@ pub struct Limits {
 
 impl Limits {
     pub fn from_args(args: &Value) -> Limits {
+        Limits::with_default(args, DEFAULT_MEMORY_MB)
+    }
+
+    pub fn background_from_args(args: &Value) -> Limits {
+        Limits::with_default(args, DEFAULT_BACKGROUND_MEMORY_MB)
+    }
+
+    fn with_default(args: &Value, default_mb: u64) -> Limits {
         let memory_mb = match args.get("memory_mb").and_then(Value::as_f64) {
-            None => Some(DEFAULT_MEMORY_MB),
+            None => Some(default_mb),
             Some(m) if m >= 1.0 => Some(m as u64),
             Some(_) => None,
         };

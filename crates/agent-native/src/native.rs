@@ -952,7 +952,7 @@ fn bash_spec() -> Spec {
             json!({
                 "command": string("The command line, run by bash -c"),
                 "timeout_s": { "type": "integer", "description": "Seconds before it is killed, default 120, at most 600" },
-                "memory_mb": { "type": "integer", "description": "Memory cap in MB for the command and every process it starts, default 1024. The whole tree is killed when it goes over. Raise it for builds, tests and anything heavy (cargo, vLLM); 0 removes the cap. Not applied with background" },
+                "memory_mb": { "type": "integer", "description": "Memory cap in MB for the command and every process it starts, default 1024. The whole tree is killed when it goes over. Raise it for builds, tests and anything heavy (cargo, vLLM); 0 removes the cap. With background the default is 8192 and the job runs in its own systemd scope: cargo test of a big workspace needs 12000 to 16000" },
                 "background": { "type": "boolean", "description": "Start it and answer at once with a handle. Use it for anything that may take more than a few minutes (long builds, tests, GPU runs, remote work like `ssh host 'cd x && cmd'`, which ends when the remote command does), and for dev servers and watchers. Wait for it with bash_output `until`, which wakes the moment it finishes; read it with bash_output and stop it with bash_kill. Needs no timeout. Never sleep to wait: `sleep 30` or more is refused" },
             }),
             &["command"],
@@ -3106,8 +3106,13 @@ impl Native {
             "bash" if args.get("background").and_then(Value::as_bool).unwrap_or(false) => {
                 let command = files::text(args, &["command", "cmd"]).ok_or("missing `command`")?;
                 let confine = agent_core::spawn::Confine::Open { env: cx.env() };
-                let handle =
-                    self.jobs.start(&cx.session.to_string(), ws.root(), command, &confine)?;
+                let handle = self.jobs.start_limited(
+                    &cx.session.to_string(),
+                    ws.root(),
+                    command,
+                    &confine,
+                    super::limits::Limits::background_from_args(args),
+                )?;
                 Ok(format!(
                     "started in the background as {handle}. bash_output {handle} reads what it prints; bash_kill {handle} stops it.{}",
                     steer_note(command, io)
@@ -5439,6 +5444,26 @@ for line in sys.stdin:
             .await
             .unwrap_err();
         assert!(bad.contains("until"), "{bad}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_bash_tool_caps_background_jobs_by_memory_mb() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = TestIo::new(Arc::new(FakeApi));
+        let native = Native::default();
+        let ws = Workspace::open(dir.path()).unwrap();
+        let c = context();
+        let grab = "python3 -c 'b = bytearray(300 << 20); import time; time.sleep(30)'";
+        native
+            .tool("bash", &json!({"command": grab, "background": true, "memory_mb": 64}), &ws, &c, &io)
+            .await
+            .unwrap();
+        let out = native
+            .tool("bash_output", &json!({"handle": "job-1", "until": "exit", "wait_s": 30}), &ws, &c, &io)
+            .await
+            .unwrap();
+        assert!(out.contains("killed: used") && out.contains("over memory_mb 64"), "{out}");
     }
 
     #[cfg(unix)]
