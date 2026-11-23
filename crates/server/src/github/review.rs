@@ -56,6 +56,26 @@ pub struct Ran {
     pub command: String,
     pub ok: bool,
     pub tail: String,
+    pub spawn_failed: bool,
+}
+
+static MISSING_INTERPRETER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^sh: (?:\d+: )?(python3?|pip3?): not found$").unwrap());
+
+fn is_install_segment(segment: &str) -> bool {
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    match words.as_slice() {
+        ["pip" | "pip3" | "apt" | "apt-get" | "conda", ..] => true,
+        ["python" | "python3", "-m", "pip", ..] => true,
+        ["cargo", "install", ..] => true,
+        ["npm", "install" | "i" | "ci", ..] => true,
+        ["uv", "pip" | "sync" | "add", ..] => true,
+        _ => false,
+    }
+}
+
+fn is_install_command(command: &str) -> bool {
+    let segments: Vec<&str> = command.split(['\n', ';', '&', '|']).map(str::trim).filter(|s| !s.is_empty()).collect();
+    !segments.is_empty() && segments.iter().all(|s| is_install_segment(s))
 }
 
 impl Ran {
@@ -63,13 +83,18 @@ impl Ran {
         if self.ok {
             return false;
         }
-        let command = self.command.to_lowercase();
-        let tail = self.tail.to_lowercase();
-        let setup = ["install", "pip ", "pip3 ", "apt-get", "apt ", "npm ci", "setup"].iter().any(|w| command.contains(w));
-        let blocked = ["externally-managed-environment", "command not found", ": not found", "could not run", "no matching distribution"]
-            .iter()
-            .any(|m| tail.contains(m));
-        blocked || (setup && (tail.contains("error") || tail.contains("failed")))
+        if self.spawn_failed {
+            return true;
+        }
+        let lines: Vec<&str> = self.tail.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        let Some(last) = lines.last() else { return false };
+        if MISSING_INTERPRETER.is_match(last) {
+            return true;
+        }
+        if !is_install_command(&self.command) {
+            return false;
+        }
+        lines.iter().any(|l| l.starts_with("ERROR: ") || l.starts_with("error: ") || l.starts_with("E: "))
     }
 }
 
@@ -189,7 +214,7 @@ fn run_one(dir: &Path, command: &str, env: &[(String, String)], limit: Duration)
         .spawn();
     let mut child = match child {
         Ok(c) => c,
-        Err(e) => return Ran { command: command.into(), ok: false, tail: format!("could not run: {e}") },
+        Err(e) => return Ran { command: command.into(), ok: false, tail: format!("could not run: {e}"), spawn_failed: true },
     };
     let started = Instant::now();
     loop {
@@ -198,18 +223,18 @@ fn run_one(dir: &Path, command: &str, env: &[(String, String)], limit: Duration)
             Ok(None) if started.elapsed() >= limit => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Ran { command: command.into(), ok: false, tail: format!("stopped after {} seconds", limit.as_secs()) };
+                return Ran { command: command.into(), ok: false, tail: format!("stopped after {} seconds", limit.as_secs()), spawn_failed: false };
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => return Ran { command: command.into(), ok: false, tail: e.to_string() },
+            Err(e) => return Ran { command: command.into(), ok: false, tail: e.to_string(), spawn_failed: false },
         }
     }
     match child.wait_with_output() {
         Ok(out) => {
             let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            Ran { command: command.into(), ok: out.status.success(), tail: sanitize(&clip_tail(&text, OUTPUT_CLIP)) }
+            Ran { command: command.into(), ok: out.status.success(), tail: sanitize(&clip_tail(&text, OUTPUT_CLIP)), spawn_failed: false }
         }
-        Err(e) => Ran { command: command.into(), ok: false, tail: e.to_string() },
+        Err(e) => Ran { command: command.into(), ok: false, tail: e.to_string(), spawn_failed: false },
     }
 }
 
@@ -314,7 +339,7 @@ pub fn prompt(store: &Store, pr: &PullRequest, g: &Gathered) -> String {
         None => out.push_str(&format!("{}\n", g.note)),
     }
     if g.checks_green {
-        out.push_str("\nGitHub's own checks for this exact head commit all passed, which is real evidence the tests pass.\n");
+        out.push_str("\nGitHub's own checks for this exact head commit all passed, which is real evidence the tests pass. If a step above is INCONCLUSIVE you may approve; the code review still has to find no problem.\n");
     }
     out.push_str(&format!("\nDiff:\n{}\n", untrusted_block(&pr.author, &clip_head(&g.diff, DIFF_CLIP))));
     out
@@ -616,11 +641,38 @@ mod tests {
     }
 
     #[test]
+    fn only_a_step_that_could_not_start_or_install_is_an_environment_failure() {
+        let rows: [(&str, bool, &str, bool); 14] = [
+            ("pip install pytest", false, "error: externally-managed-environment\n\n× This environment is externally managed", true),
+            ("python -m pytest", false, "sh: 1: python: not found", true),
+            ("pip install -r requirements.txt", false, "ERROR: Could not find a version that satisfies the requirement x==9.9\nERROR: No matching distribution found for x==9.9", true),
+            ("apt-get install -y libfoo-dev", false, "E: Unable to locate package libfoo-dev", true),
+            ("python3 -m pip install pytest", false, "error: externally-managed-environment", true),
+            ("cargo test", false, "sh: 1: cargo: not found", false),
+            ("cargo test", false, "assertion failed: left: \"user: not found\"\ntest result: FAILED. 1 failed", false),
+            ("pytest -q", false, "AssertionError: expected 200, got: not found\nFAILED test_a.py::test_a", false),
+            ("make setup-and-test", false, "3 tests failed", false),
+            ("python setup.py test", false, "FAILED (failures=2)", false),
+            ("npm test", false, "ERROR: expected 2 got 3\ncommand not found", false),
+            ("pip install pytest && pytest", false, "ERROR: assert 1 == 2", false),
+            ("pip install pytest", false, "Successfully installed pytest\n1 warning, tests did not run", false),
+            ("cargo test", true, "", false),
+        ];
+        for (command, ok, tail, expected) in rows {
+            let ran = Ran { command: command.into(), ok, tail: tail.into(), spawn_failed: false };
+            assert_eq!(ran.environment_failure(), expected, "{command} / {tail}");
+        }
+        let spawn = Ran { command: "cargo test".into(), ok: false, tail: "could not run: No such file or directory".into(), spawn_failed: true };
+        assert!(spawn.environment_failure());
+    }
+
+    #[test]
     fn a_failed_environment_step_is_inconclusive_and_green_github_checks_allow_approval() {
-        let ran = |command: &str, ok: bool, tail: &str| Ran { command: command.into(), ok, tail: tail.into() };
+        let ran = |command: &str, ok: bool, tail: &str| Ran { command: command.into(), ok, tail: tail.into(), spawn_failed: false };
         let pip = ran("pip install pytest", false, "error: externally-managed-environment");
         let python = ran("python -m pytest", false, "sh: 1: python: not found");
         let real = ran("cargo test", false, "test result: FAILED. 1 failed; 3 passed");
+        let lookalike = ran("cargo test", false, "assertion failed: left: \"user: not found\"");
         assert!(pip.environment_failure() && python.environment_failure(), "environment steps are inconclusive");
         assert!(!real.environment_failure(), "a real test failure is not an environment failure");
         let pr = PullRequest { trust: Trust::Trusted, ..Default::default() };
@@ -630,6 +682,8 @@ mod tests {
         assert!(may_approve(&pr, &g), "the real GitHub checks pass for this head, so the reviewer may approve");
         g.ran = Some(vec![pip, real]);
         assert!(!may_approve(&pr, &g), "a real failure still blocks approval");
+        g.ran = Some(vec![lookalike]);
+        assert!(!may_approve(&pr, &g), "a test whose output mentions not found is a real failure");
         g.ran = Some(vec![python]);
         let store = Store::memory().unwrap();
         let text = prompt(&store, &pr, &g);
