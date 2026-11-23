@@ -537,9 +537,63 @@ impl Runner {
         if text.is_empty() {
             return Err(StoreError("nothing to send".into()));
         }
+        if origin.source == "judge"
+            && let Some(worker) = origin.worker
+            && self.is_supervisor(session)
+            && crate::ledger::duplicate_judge(&self.store, session.id, worker)
+        {
+            return Ok(());
+        }
         self.store.defer(session.id, &origin.source, origin.worker, origin.urgent, text)?;
+        if self.is_supervisor(session) {
+            crate::ledger::delivered(&self.store, session.id, &origin.source, origin.worker, text);
+        }
         self.changed.notify_waiters();
         self.deliver_deferred(session.id)
+    }
+
+    fn is_supervisor(&self, session: &Session) -> bool {
+        self.store.project(session.project_id).is_ok_and(|p| p.supervisor)
+    }
+
+    fn pending_for(&self, session: &Session, mode: Mode) -> Option<String> {
+        if mode != Mode::Chat || !self.is_supervisor(session) {
+            return None;
+        }
+        let block = crate::ledger::pending_block(&self.store, session.id, crate::store::now());
+        (!block.is_empty()).then_some(block)
+    }
+
+    fn hold_for_open_items(&self, session: &Session, inbox: &Arc<Mutex<Vec<Message>>>) -> bool {
+        if !self.is_supervisor(session) {
+            return false;
+        }
+        if !inbox.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+            || self.store.deferred_count(session.id).unwrap_or_default() > 0
+        {
+            return false;
+        }
+        match crate::ledger::at_turn_end(&self.store, session.id, crate::store::now()) {
+            crate::ledger::Hold::Clear => false,
+            crate::ledger::Hold::Nudge(text) => {
+                inbox
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(Message { text, attachments: Vec::new(), from: vec!["ledger".into()] });
+                true
+            }
+            crate::ledger::Hold::GiveUp(lines) => {
+                let text = format!(
+                    "notice: the supervisor left {} items open after {} reminders:\n{}",
+                    lines.len(),
+                    crate::ledger::MAX_NUDGES,
+                    lines.join("\n")
+                );
+                let _ = self.store.add_message(session.id, &Entry::Notice { text: text.clone() });
+                crate::tools::desktop_notice("supervisor", &text);
+                false
+            }
+        }
     }
 
     fn deliver_deferred(&self, id: SessionId) -> Result<(), StoreError> {
@@ -709,6 +763,9 @@ impl Runner {
                 .or_else(|| agentbench_core::mime_for(&name))
                 .unwrap_or("application/octet-stream");
             attachments.push(self.store.add_attachment(session.id, &name, mime, &data)?);
+        }
+        if self.is_supervisor(session) {
+            crate::ledger::delivered(&self.store, session.id, "user", None, if text.is_empty() { "(files)" } else { text });
         }
         self.send_text(session, Message { text: text.to_string(), attachments, from: Vec::new() }, Mode::Chat)
     }
@@ -902,7 +959,12 @@ impl Runner {
             let status = runner
                 .turn(agent.as_ref(), &session, &prompt, &stop, &inbox, &questions, mode)
                 .await;
-            let _ = runner.store.set_status(session_id, status);
+            let held = status == SessionStatus::Idle
+                && mode == Mode::Chat
+                && runner.hold_for_open_items(&session, &inbox);
+            if !held {
+                let _ = runner.store.set_status(session_id, status);
+            }
             runner.changed.notify_waiters();
             if status == SessionStatus::Idle && mode == Mode::Chat {
                 runner.retitle(session_id, false);
@@ -1251,6 +1313,14 @@ impl Runner {
         let fresh_after_summary =
             session.agent_session.is_none() && summary.as_ref().is_some_and(|s| !s.is_empty());
         let prompt = msg.text.as_str();
+        let pending_text;
+        let prompt = match self.pending_for(session, mode) {
+            Some(block) => {
+                pending_text = format!("{block}\n\n{prompt}");
+                pending_text.as_str()
+            }
+            None => prompt,
+        };
         let prompt_text;
         let prompt = if fresh_after_summary && !agent.steerable() {
             prompt_text = format!(

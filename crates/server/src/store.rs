@@ -283,6 +283,18 @@ CREATE TABLE issue_deps (
 CREATE INDEX issue_deps_on ON issue_deps(depends_on);
 "#,
     "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS note_versions; DROP TABLE IF EXISTS global_notes;",
+    r#"
+CREATE TABLE open_items (
+    id INTEGER PRIMARY KEY,
+    session TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    target TEXT,
+    head TEXT,
+    text TEXT NOT NULL,
+    delivered_at INTEGER NOT NULL
+);
+CREATE INDEX open_items_session ON open_items(session, id);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -372,6 +384,16 @@ pub struct Deferred {
     pub urgent: bool,
     pub text: String,
     pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenItem {
+    pub id: Id,
+    pub kind: String,
+    pub target: Option<String>,
+    pub head: Option<String>,
+    pub text: String,
+    pub delivered_at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1829,6 +1851,50 @@ impl Store {
             db.execute("DELETE FROM deferred WHERE session = ?1 AND id = ?2", params![session, id])?;
         }
         Store::changed(&db, "session", session)
+    }
+
+    pub fn add_open_item(
+        &self,
+        session: SessionId,
+        kind: &str,
+        target: Option<&str>,
+        head: Option<&str>,
+        text: &str,
+    ) -> Result<Id> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO open_items (session, kind, target, head, text, delivered_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![session, kind, target, head, text, now()],
+        )?;
+        Ok(db.last_insert_rowid())
+    }
+
+    pub fn open_items(&self, session: SessionId) -> Result<Vec<OpenItem>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT id, kind, target, head, text, delivered_at FROM open_items
+             WHERE session = ?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([session], |r| {
+            Ok(OpenItem {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                target: r.get(2)?,
+                head: r.get(3)?,
+                text: r.get(4)?,
+                delivered_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn close_open_items(&self, ids: &[Id]) -> Result<()> {
+        let db = self.db();
+        for id in ids {
+            db.execute("DELETE FROM open_items WHERE id = ?1", params![id])?;
+        }
+        Ok(())
     }
 
     pub fn sessions_with_deferred(&self) -> Result<Vec<SessionId>> {
