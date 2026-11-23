@@ -130,8 +130,14 @@ fn labels(args: &Value) -> Result<Option<Vec<String>>, String> {
 }
 
 fn issue_json(i: &agentbench_core::Issue) -> Value {
+    let (title, body) = if i.trust.is_untrusted() {
+        let who = i.external_author.as_deref().unwrap_or("unknown");
+        (agentbench_core::untrusted_block(who, &i.title), agentbench_core::untrusted_block(who, &i.body))
+    } else {
+        (i.title.clone(), i.body.clone())
+    };
     json!({
-        "id": i.id, "title": i.title, "state": i.state, "body": i.body,
+        "id": i.id, "title": title, "state": i.state, "body": body, "trust": i.trust,
         "labels": i.labels, "priority": i.priority, "goal": i.goal, "off_vision": i.off_vision,
         "depends_on": i.depends_on, "waiting_on": i.waiting_on, "blocks": i.blocks,
     })
@@ -821,7 +827,10 @@ impl Api for StoreApi {
                     .comments(issue)
                     .map_err(|e| e.0)?
                     .into_iter()
-                    .map(|c| json!({ "author": c.author, "body": c.body, "at": c.created_at }))
+                    .map(|c| {
+                        let body = if c.trust.is_untrusted() { agentbench_core::untrusted_block(&c.author, &c.body) } else { c.body };
+                        json!({ "author": c.author, "body": body, "at": c.created_at, "trust": c.trust })
+                    })
                     .collect();
                 let mut out = issue_json(&i);
                 out["comments"] = json!(comments);

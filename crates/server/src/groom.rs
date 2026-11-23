@@ -50,8 +50,12 @@ pub fn done(store: &Store, project: &Project, summary: &str, now: i64) -> Result
     store.log_autopilot(Some(project.id), None, &line)
 }
 
-fn issue_line(i: &Issue, now: i64) -> String {
-    let mut line = format!("- #{} {}", i.id, i.title.trim());
+pub(crate) fn issue_line(i: &Issue, now: i64) -> String {
+    let mut line = if i.trust.is_untrusted() {
+        format!("- #{} {}", i.id, agentbench_core::untrusted_block(i.external_author.as_deref().unwrap_or("unknown"), &clip(i.title.trim(), 200)))
+    } else {
+        format!("- #{} {}", i.id, i.title.trim())
+    };
     if !i.labels.is_empty() {
         line.push_str(&format!(" [{}]", i.labels.join(", ")));
     }
@@ -64,7 +68,13 @@ fn issue_line(i: &Issue, now: i64) -> String {
     }
     let body = i.body.split_whitespace().collect::<Vec<_>>().join(" ");
     if !body.is_empty() {
-        line.push_str(&format!("\n    {}", clip(&body, BODY_CHARS)));
+        let shown = clip(&body, BODY_CHARS);
+        let shown = if i.trust.is_untrusted() {
+            agentbench_core::untrusted_block(i.external_author.as_deref().unwrap_or("unknown"), &shown)
+        } else {
+            shown
+        };
+        line.push_str(&format!("\n    {shown}"));
     }
     line
 }

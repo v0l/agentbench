@@ -10,6 +10,7 @@ pub mod git;
 pub mod github;
 pub mod groom;
 pub mod guards;
+mod injection;
 pub mod host;
 pub mod ledger;
 pub mod local;

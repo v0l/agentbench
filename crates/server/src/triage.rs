@@ -143,7 +143,12 @@ fn session_text(store: &Store, s: &Session) -> String {
     text
 }
 
-fn issue_text(store: &Store, i: &Issue) -> String {
+pub(crate) fn issue_text(store: &Store, i: &Issue) -> String {
+    let title = if i.trust.is_untrusted() {
+        agentbench_core::untrusted_block(i.external_author.as_deref().unwrap_or("unknown"), &one_line(&i.title, 200))
+    } else {
+        i.title.clone()
+    };
     let mut out = format!(
         "#{} [{}] priority {} labels [{}] idle {}d: {}\n",
         i.id,
@@ -151,14 +156,23 @@ fn issue_text(store: &Store, i: &Issue) -> String {
         i.priority,
         i.labels.join(", "),
         days_ago(i.updated_at),
-        i.title
+        title
     );
     if !i.body.trim().is_empty() {
-        out.push_str(&format!("  {}\n", one_line(&i.body, BODY_CLIP)));
+        if i.trust.is_untrusted() {
+            let who = i.external_author.as_deref().unwrap_or("unknown");
+            out.push_str(&format!("  {}\n", agentbench_core::untrusted_block(who, &one_line(&i.body, BODY_CLIP))));
+        } else {
+            out.push_str(&format!("  {}\n", one_line(&i.body, BODY_CLIP)));
+        }
     }
     let comments = store.comments(i.id).unwrap_or_default();
     for c in comments.iter().rev().take(3).rev() {
-        out.push_str(&format!("  comment by {}: {}\n", c.author, one_line(&c.body, COMMENT_CLIP)));
+        if c.trust.is_untrusted() {
+            out.push_str(&format!("  comment by {}: {}\n", c.author, agentbench_core::untrusted_block(&c.author, &one_line(&c.body, COMMENT_CLIP))));
+        } else {
+            out.push_str(&format!("  comment by {}: {}\n", c.author, one_line(&c.body, COMMENT_CLIP)));
+        }
     }
     out
 }

@@ -510,8 +510,14 @@ pub fn judge_request(store: &Store, session: &Session) -> String {
         Some(i) => format!(
             "Issue #{}: {}\n\nAcceptance criteria (the issue body):\n{}",
             i.id,
-            i.title,
-            if i.body.trim().is_empty() { "(empty)" } else { i.body.trim() }
+            if i.trust.is_untrusted() { agentbench_core::untrusted_block(i.external_author.as_deref().unwrap_or("unknown"), &i.title) } else { i.title.clone() },
+            if i.body.trim().is_empty() {
+                "(empty)".to_string()
+            } else if i.trust.is_untrusted() {
+                agentbench_core::untrusted_block(i.external_author.as_deref().unwrap_or("unknown"), &i.body)
+            } else {
+                i.body.trim().to_string()
+            }
         ),
         None => "No issue.".into(),
     };
@@ -535,7 +541,7 @@ pub fn judge_request(store: &Store, session: &Session) -> String {
     )
 }
 
-fn worker_prompt(issue: &Issue, comments: &[agentbench_core::Comment]) -> String {
+pub(crate) fn worker_prompt(issue: &Issue, comments: &[agentbench_core::Comment]) -> String {
     format!(
         "{}\nThis is an unattended autopilot run. Stay in your worktree and on this issue, commit your work on your branch, and run the tests. \
          Finish the work: do every test, verification and follow-up you can do yourself before you reply. Your last reply must be a conclusion: \
