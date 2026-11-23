@@ -240,6 +240,32 @@ pub(super) fn level_slider(
 }
 
 /// One choice on its own row, with a tick box for several picks or a dot for one.
+pub(super) fn level_picker(
+    ui: &mut Ui,
+    current: Option<agentbench_core::ModelLevel>,
+) -> Option<Option<agentbench_core::ModelLevel>> {
+    use agentbench_core::ModelLevel;
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        let options = [
+            (Some(ModelLevel::Low), "low"),
+            (Some(ModelLevel::Med), "med"),
+            (Some(ModelLevel::High), "high"),
+            (None, "default"),
+        ];
+        for (level, text) in options {
+            let on = current.filter(|l| *l != ModelLevel::Unknown) == level;
+            let label = format!("model {text}");
+            let r = ui.scope(|ui| tab_chip(ui, text, READOUT, on)).inner;
+            r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, label.clone()));
+            if r.clicked() && !on {
+                picked = Some(level);
+            }
+        }
+    });
+    picked
+}
+
 pub(super) fn tab_chip(ui: &mut Ui, text: &str, tint: egui::Color32, on: bool) -> egui::Response {
     let font = egui::FontId::proportional(11.5);
     let galley = ui.painter().layout_no_wrap(text.to_string(), font, tint);

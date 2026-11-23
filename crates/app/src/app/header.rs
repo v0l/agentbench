@@ -161,7 +161,7 @@ impl App {
                 && let Some(p) = self.project
             {
                 self.file_issue =
-                    Some(FileIssue { project: p, title: String::new(), body: String::new() });
+                    Some(FileIssue { project: p, title: String::new(), body: String::new(), level: None });
                 ui.close();
             }
         });
@@ -179,7 +179,7 @@ impl App {
             && let Some(p) = self.project
         {
             self.file_issue =
-                Some(FileIssue { project: p, title: String::new(), body: String::new() });
+                Some(FileIssue { project: p, title: String::new(), body: String::new(), level: None });
         }
     }
 

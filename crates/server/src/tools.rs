@@ -2430,6 +2430,23 @@ mod tests {
     }
 
     #[test]
+    fn the_model_level_round_trips_through_the_tools() {
+        let s = Store::memory().unwrap();
+        let (_, main) = crate::store::testing::project(&s, "/lvl");
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let a = api.call("file_issue", &json!({"title": "A", "model": "high"}), me.id).unwrap()["filed"].as_i64().unwrap();
+        assert_eq!(api.call("get_issue", &json!({"id": a}), me.id).unwrap()["model"], "high");
+        api.call("update_issue", &json!({"id": a, "model": "med"}), me.id).unwrap();
+        assert_eq!(s.issue(a).unwrap().model_level, Some(agentbench_core::ModelLevel::Med));
+        api.call("update_issue", &json!({"id": a, "model": "default"}), me.id).unwrap();
+        assert_eq!(s.issue(a).unwrap().model_level, None);
+        assert!(api.call("file_issue", &json!({"title": "B", "model": "huge"}), me.id).is_err());
+        let listed = api.call("list_issues", &json!({}), me.id).unwrap();
+        assert!(listed[0].get("model").is_some());
+    }
+
+    #[test]
     fn depends_on_round_trips_through_the_tools() {
         let s = Store::memory().unwrap();
         let (_, main) = crate::store::testing::project(&s, "/dep");

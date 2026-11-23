@@ -613,8 +613,8 @@ fn s_workspace_drawer(r: &Rich, cfg: Cfg) -> Built {
 fn s_out_of_date(r: &Rich, cfg: Cfg) -> Built {
     let _ = r;
     let mut o = recorded_overview();
-    o["api_version"] = 9.into();
-    o["min_client_api"] = 9.into();
+    o["api_version"] = 99.into();
+    o["min_client_api"] = 99.into();
     let mut h = harness_cfg(storage(&canned_server(o.to_string())), cfg);
     until(&mut h, "the banner", |h| {
         h.query_by_label_contains("This app is older than the server").is_some()

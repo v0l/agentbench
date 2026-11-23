@@ -4329,13 +4329,13 @@ fn an_unknown_session_state_shows_as_unknown() {
 #[test]
 fn a_server_that_needs_a_newer_app_shows_the_update_the_app_banner() {
     let mut o = recorded_overview();
-    o["api_version"] = 9.into();
-    o["min_client_api"] = 9.into();
+    o["api_version"] = 99.into();
+    o["min_client_api"] = 99.into();
     let mut h = harness(canned_server(o.to_string()));
     until(&mut h, "the banner", |h| {
         h.query_by_label_contains("This app is older than the server").is_some()
     });
-    assert!(h.query_by_label_contains(&format!("app v{}, server v9", agentbench_core::API_VERSION)).is_some());
+    assert!(h.query_by_label_contains(&format!("app v{}, server v99", agentbench_core::API_VERSION)).is_some());
     assert!(h.query_by_label_contains("Update the app").is_some());
     assert!(h.query_by_label_contains("cargo install --git https://github.com/v0l/agentbench agentbench").is_some());
 }
@@ -4494,6 +4494,44 @@ fn clicking_a_project_opens_its_view_with_goals_agents_and_notes() {
     h.get_by_label("all projects").click();
     h.run_steps(2);
     assert_eq!(h.state().project_view(), None);
+}
+
+#[test]
+fn the_issue_model_level_is_shown_edited_and_fits_a_phone() {
+    use agentbench_core::{IssueState, ModelLevel};
+    for size in [[1280.0, 800.0], [390.0, 844.0]] {
+        let rig = rig();
+        let p = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+        let id = rig
+            .store
+            .add_issue(&NewIssue {
+                project_id: p.id,
+                title: "Port the kir slice".into(),
+                state: Some(IssueState::Todo),
+                model_level: Some(ModelLevel::High),
+                ..Default::default()
+            })
+            .unwrap()
+            .id;
+        let mut h = harness_at(rig.url.clone(), size);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_issue_pane(id);
+        h.run_steps(4);
+        let tag = size[0] as u32;
+        assert!(h.query_by_label("model high").is_some(), "the badge");
+        shot(&mut h, &format!("issue-model-{tag}"));
+        let bad = off_sideways(&h, size);
+        assert!(bad.is_empty(), "at {size:?}: {bad:?}");
+        h.get_by_label("model low").click();
+        let store = rig.store.clone();
+        until(&mut h, "the saved level", |_| store.issue(id).unwrap().model_level == Some(ModelLevel::Low));
+        h.state_mut().open_file_issue_form(p.id);
+        h.run_steps(3);
+        assert!(h.query_all_by_label("model default").count() >= 1, "the form picker");
+        shot(&mut h, &format!("issue-form-model-{tag}"));
+        let bad = off_sideways(&h, size);
+        assert!(bad.is_empty(), "form at {size:?}: {bad:?}");
+    }
 }
 
 #[test]

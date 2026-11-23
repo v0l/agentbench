@@ -43,8 +43,47 @@ pub enum GithubAction {
 }
 
 #[derive(Subcommand)]
+pub enum IssueAction {
+    New {
+        title: String,
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    Set {
+        id: i64,
+        #[arg(long)]
+        model: String,
+    },
+    Levels {
+        project: String,
+        #[arg(long)]
+        low: Option<String>,
+        #[arg(long)]
+        med: Option<String>,
+        #[arg(long)]
+        high: Option<String>,
+    },
+}
+
+fn level_flag(text: &str) -> Result<Option<agentbench_core::ModelLevel>, String> {
+    if text.trim().eq_ignore_ascii_case("default") || text.trim().is_empty() {
+        return Ok(None);
+    }
+    agentbench_core::ModelLevel::parse(text).map(Some).ok_or_else(|| "--model is low, med, high or default".to_string())
+}
+
+#[derive(Subcommand)]
 pub enum Command {
     Serve,
+    /// Create issues, set their model level, or show and set a project's level table.
+    Issue {
+        #[command(subcommand)]
+        action: IssueAction,
+    },
     Token {
         #[arg(long)]
         rotate: bool,
@@ -299,6 +338,59 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             }
         }
         Command::Chat { .. } => unreachable!("handled before the store opens"),
+        Command::Issue { action } => {
+            let find = |name: &str| -> Result<agentbench_core::Project, String> {
+                store
+                    .projects()
+                    .map_err(|e| e.0)?
+                    .into_iter()
+                    .find(|p| p.name == name)
+                    .ok_or_else(|| format!("no project named {name}"))
+            };
+            match action {
+                IssueAction::New { title, project, body, model } => {
+                    let level = model.as_deref().map(level_flag).transpose()?.flatten();
+                    let i = store
+                        .add_issue(&agentbench_core::NewIssue {
+                            project_id: find(&project)?.id,
+                            title,
+                            body: body.unwrap_or_default(),
+                            model_level: level,
+                            ..Default::default()
+                        })
+                        .map_err(|e| e.0)?;
+                    println!("#{} {} model {}", i.id, i.title, i.model_level.map_or("default", |l| l.as_str()));
+                    Ok(())
+                }
+                IssueAction::Set { id, model } => {
+                    let patch = agentbench_core::IssuePatch { model_level: Some(level_flag(&model)?), ..Default::default() };
+                    let i = store.update_issue(id, &patch).map_err(|e| e.0)?;
+                    println!("#{} model {}", i.id, i.model_level.map_or("default", |l| l.as_str()));
+                    Ok(())
+                }
+                IssueAction::Levels { project, low, med, high } => {
+                    let p = find(&project)?;
+                    let mut table = p.model_levels.clone();
+                    if let Some(v) = low {
+                        table.low = v;
+                    }
+                    if let Some(v) = med {
+                        table.med = v;
+                    }
+                    if let Some(v) = high {
+                        table.high = v;
+                    }
+                    let p = store
+                        .update_project(p.id, &agentbench_core::ProjectPatch { model_levels: Some(table), ..Default::default() })
+                        .map_err(|e| e.0)?;
+                    let shown = |m: &str, fallback: &str| if m.is_empty() { fallback.to_string() } else { m.to_string() };
+                    println!("low  {}", shown(&p.model_levels.low, "(the server's low model)"));
+                    println!("med  {}", shown(&p.model_levels.med, "(the default model)"));
+                    println!("high {}", shown(&p.model_levels.high, "(the server's high model)"));
+                    Ok(())
+                }
+            }
+        }
         Command::Agents => {
             let model = crate::agent::native::Shared::new(saved_model(&store, &config.model));
             for a in config.agents_with(model) {

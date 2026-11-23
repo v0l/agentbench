@@ -311,6 +311,7 @@ impl App {
             return;
         };
         let f = &mut form;
+        let model_level_known = self.server_has(f.project, agentbench_core::API_MODEL_LEVEL);
         let mut slot = crate::hub::slot_of(f.project);
         let name = self
             .overview
@@ -334,6 +335,12 @@ impl App {
                         field(ui, &mut f.title, "fix the login loop");
                     });
                     prose(ui, &mut f.body, "details, steps, what done looks like", 6);
+                    if model_level_known {
+                        Line::new().legend("model level").size(10.0).show(ui);
+                        if let Some(l) = super::widgets::level_picker(ui, f.level) {
+                            f.level = l;
+                        }
+                    }
                 });
                 footer(ui, |ui| {
                     if ui
@@ -366,6 +373,7 @@ impl App {
                 project_id: f.project,
                 title: f.title.trim().to_string(),
                 body: f.body.trim().to_string(),
+                model_level: f.level,
                 ..Default::default()
             };
             if let Some(c) = &mut self.client {
