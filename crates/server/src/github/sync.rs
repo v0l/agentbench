@@ -452,8 +452,8 @@ if [ -f "$D/exit" ]; then echo "$(cat "$D/exit_msg" 2>/dev/null)" >&2; exit "$(c
 for a in "$@"; do last="$a"; done
 case "$last" in
   *per_page=1) cat "$D/probe" ;;
-  */pulls?*) cat "$D/pulls.json" ;;
   */pulls/[0-9]*) cat "$D/pull_${last##*/}.json" ;;
+  */pulls?*) cat "$D/pulls.json" ;;
   */issues/comments?*) cat "$D/comments.json" ;;
   */issues/[0-9]*) f="$D/issue_${last##*/}.json"; if [ -f "$f" ]; then cat "$f"; else echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi ;;
   */issues?state*) cat "$D/issues.json" ;;
@@ -774,8 +774,6 @@ esac
         sync(&store, p, &stub, 1_000);
         stub.put("pulls.json", "[]");
         stub.put("pull_9.json", "{\"number\":9,\"state\":\"closed\",\"merged\":true,\"merged_at\":\"2025-01-01T00:00:00Z\"}");
-        stub.put("issues.json", "[]");
-        stub.put("issue_4.json", &issue_json(4, "A", &["ready"], T1, "").replace("\"open\"", "\"closed\""));
         stub.probe("200 OK", "\"e2\"", 4000, 4_000_000_000);
         sync(&store, p, &stub, 200_000);
         assert_eq!(all_issues(&store, p)[0].state, IssueState::Done);
