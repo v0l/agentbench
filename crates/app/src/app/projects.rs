@@ -26,7 +26,7 @@ pub fn last_activity(project: &Project, issues: &[Issue], sessions: &[Session]) 
     issue.max(session).unwrap_or(project.created_at)
 }
 
-fn state_tint(state: IssueState) -> egui::Color32 {
+pub(super) fn state_tint(state: IssueState) -> egui::Color32 {
     match state {
         IssueState::Doing => TRACE,
         IssueState::Review => READOUT,
@@ -44,6 +44,16 @@ fn count_chips(ui: &mut Ui, counts: &[usize; 5], skip_done: bool) {
             chip(ui, &format!("{n} {}", state.as_str()), state_tint(state), *n > 0);
         }
     });
+}
+
+pub(super) fn clickable_row(ui: &mut Ui, id: impl std::fmt::Debug + std::hash::Hash, body: impl FnOnce(&mut Ui)) -> egui::Response {
+    clickable(ui, id, |ui| {
+        section_panel(ui, |ui| {
+            ui.add_space(4.0);
+            body(ui);
+            ui.add_space(4.0);
+        })
+    })
 }
 
 fn clickable(ui: &mut Ui, id: impl std::fmt::Debug + std::hash::Hash, body: impl FnOnce(&mut Ui)) -> egui::Response {
@@ -200,6 +210,9 @@ impl App {
                         let running = format!("{} running", row.running);
                         chip(ui, &running, TRACE, row.running > 0);
                         chip(ui, if row.vision { "vision" } else { "no vision" }, if row.vision { OK } else { LEGEND }, row.vision);
+                        if row.project.tracker.is_github() {
+                            chip(ui, "github", VALUE, true).widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, "github project"));
+                        }
                     });
                     count_chips(ui, &row.counts, true);
                     Line::new().note(format!("last activity {}", ago(row.last))).size(10.5).elided(ui);
@@ -231,6 +244,9 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             back = ui.add(Key::new("all projects").outline(VALUE)).clicked();
             Line::new().value(&p.name).size(15.0).elided(ui);
+            if p.tracker.is_github() {
+                chip(ui, "github", VALUE, true).widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, "github project"));
+            }
         });
 
         let trees: Vec<&Worktree> = o.worktrees.iter().filter(|w| w.project_id == id).collect();
@@ -263,6 +279,9 @@ impl App {
         });
 
         let vision = o.visions.iter().find(|v| v.project_id == id);
+        if !p.builtin() {
+            self.github_section(ui, &p);
+        }
         section(ui, "vision", "what the project is for", |ui| {
             match vision.filter(|v| !v.body.summary.trim().is_empty() || !v.body.goals.is_empty()) {
                 None => note(ui, "No vision yet. Write one so agents know what to work on.", LEGEND),

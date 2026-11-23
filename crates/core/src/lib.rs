@@ -714,7 +714,49 @@ pub struct WebhookSecret {
     pub secret: String,
 }
 
+fn valid_part(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn owner_repo(path: &str) -> Option<String> {
+    let path = path.trim().trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    (valid_part(owner) && valid_part(repo)).then(|| format!("{owner}/{repo}"))
+}
+
+pub fn repo_from_remote(remote: Option<&str>, override_repo: Option<&str>) -> Option<String> {
+    if let Some(o) = override_repo.map(str::trim).filter(|o| !o.is_empty()) {
+        return owner_repo(o);
+    }
+    let remote = remote?.trim();
+    let rest = ["https://", "http://", "ssh://", "git://"]
+        .iter()
+        .find_map(|p| remote.strip_prefix(p))
+        .map(|r| {
+            let r = r.split_once('@').map_or(r, |(_, h)| h);
+            r.split_once('/').map(|(host, path)| (host.split(':').next().unwrap_or(host), path))
+        });
+    match rest {
+        Some(Some((host, path))) => host.eq_ignore_ascii_case("github.com").then(|| owner_repo(path)).flatten(),
+        Some(None) => None,
+        None => {
+            let (host, path) = remote.split_once(':')?;
+            let host = host.split_once('@').map_or(host, |(_, h)| h);
+            host.eq_ignore_ascii_case("github.com").then(|| owner_repo(path)).flatten()
+        }
+    }
+}
+
 impl Project {
+    pub fn github_repo(&self) -> Option<String> {
+        let own = match &self.tracker {
+            Tracker::Github { repo } => Some(repo.as_str()),
+            Tracker::Internal => None,
+        };
+        repo_from_remote(self.remote.as_deref(), own)
+    }
+
     pub fn builtin(&self) -> bool {
         self.home || self.supervisor
     }

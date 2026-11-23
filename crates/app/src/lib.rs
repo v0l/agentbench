@@ -9,7 +9,7 @@ pub mod scan;
 pub mod system;
 pub mod voice;
 
-pub use app::{App, LocalServer, status_counts, waiting_on_you, window_title};
+pub use app::{App, GhTab, LocalServer, status_counts, waiting_on_you, window_title};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn runtime() -> &'static tokio::runtime::Runtime {

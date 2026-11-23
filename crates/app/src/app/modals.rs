@@ -911,6 +911,11 @@ impl App {
                 "Its comments go with it. Sessions that worked on it are kept.",
                 "delete",
             ),
+            Confirm::Merge(_, n, name) => (
+                format!("Merge pull request #{n}, {name}?"),
+                "GitHub merges it with the project's merge method. The server checks first that the checks pass and that you approved its review; branch protection still applies.",
+                "merge",
+            ),
         };
         let mut done = false;
         let mut gone = None;
@@ -921,7 +926,8 @@ impl App {
                 modal_title(ui, &title);
                 note(ui, body, LEGEND);
                 footer(ui, |ui| {
-                    if ui.add(Key::new(key).solid(FAULT).min_width(100.0)).clicked() {
+                    let tint = if matches!(c, Confirm::Merge(..)) { READOUT } else { FAULT };
+                    if ui.add(Key::new(key).solid(tint).min_width(100.0)).clicked() {
                         if let Some(client) = &mut self.client {
                             match c {
                                 Confirm::Project(id, _) => client.remove_project(*id),
@@ -931,6 +937,7 @@ impl App {
                                     gone = Some(*id);
                                 }
                                 Confirm::Issue(id, _) => client.delete_issue(*id),
+                                Confirm::Merge(pid, n, _) => client.pull_merge(*pid, *n),
                             }
                         }
                         done = true;

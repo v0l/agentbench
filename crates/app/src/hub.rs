@@ -424,6 +424,24 @@ impl Hub {
                         }
                         out.push(Reply::VisionVersions(tag(slot, id), list));
                     }
+                    Reply::GithubStatus(id, s) => out.push(Reply::GithubStatus(tag(slot, id), s)),
+                    Reply::GithubSettings(id, s) => out.push(Reply::GithubSettings(tag(slot, id), s)),
+                    Reply::WebhookSecret(id, s) => out.push(Reply::WebhookSecret(tag(slot, id), s)),
+                    Reply::Outbox(id, mut list) => {
+                        for i in &mut list.items {
+                            i.id = tag(slot, i.id);
+                            i.project_id = tag(slot, i.project_id);
+                        }
+                        out.push(Reply::Outbox(tag(slot, id), list));
+                    }
+                    Reply::Pulls(id, mut list) => {
+                        for p in &mut list {
+                            p.project_id = tag(slot, p.project_id);
+                            p.issue_id = p.issue_id.map(|i| tag(slot, i));
+                            p.review_row = p.review_row.map(|i| tag(slot, i));
+                        }
+                        out.push(Reply::Pulls(tag(slot, id), list));
+                    }
                     other => out.push(other),
                 }
             }
@@ -552,6 +570,76 @@ impl Hub {
     pub fn sync_project(&mut self, id: Id) {
         let (c, id) = self.by_id(id);
         c.sync_project(id);
+    }
+
+    pub fn github_status(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.github_status(id);
+    }
+
+    pub fn github_sync(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.github_sync(id);
+    }
+
+    pub fn outbox(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.outbox(id);
+    }
+
+    pub fn outbox_approve(&mut self, row: Id, text: Option<&str>) {
+        let (c, id) = self.by_id(row);
+        c.outbox_approve(id, text);
+    }
+
+    pub fn outbox_reject(&mut self, row: Id) {
+        let (c, id) = self.by_id(row);
+        c.outbox_reject(id);
+    }
+
+    pub fn outbox_approve_all(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.outbox_approve_all(id);
+    }
+
+    pub fn github_pause(&mut self, project: Id, paused: bool) {
+        let (c, _) = self.by_id(project);
+        c.github_pause(paused);
+    }
+
+    pub fn pulls(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.pulls(id);
+    }
+
+    pub fn pull_review(&mut self, project: Id, number: i64) {
+        let (c, id) = self.by_id(project);
+        c.pull_review(id, number);
+    }
+
+    pub fn pull_merge(&mut self, project: Id, number: i64) {
+        let (c, id) = self.by_id(project);
+        c.pull_merge(id, number);
+    }
+
+    pub fn github_settings(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.github_settings(id);
+    }
+
+    pub fn set_github_settings(&mut self, project: Id, s: &agentbench_core::GithubSettings) {
+        let (c, id) = self.by_id(project);
+        c.set_github_settings(id, s);
+    }
+
+    pub fn webhook_secret(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.webhook_secret(id);
+    }
+
+    pub fn webhook_create(&mut self, project: Id) {
+        let (c, id) = self.by_id(project);
+        c.webhook_create(id);
     }
 
     pub fn add_worktree(&mut self, project: Id, new: &NewWorktree) {

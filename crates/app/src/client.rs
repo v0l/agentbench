@@ -58,6 +58,11 @@ pub enum Reply {
     Notes(Id, Vec<agentbench_core::NoteHistory>),
     Prompts(Id, Vec<agentbench_core::prompts::Template>),
     VisionVersions(Id, Vec<agentbench_core::Vision>),
+    GithubStatus(Id, agentbench_core::GithubStatus),
+    Outbox(Id, agentbench_core::OutboxList),
+    Pulls(Id, Vec<agentbench_core::PullRequest>),
+    GithubSettings(Id, agentbench_core::GithubSettings),
+    WebhookSecret(Id, agentbench_core::WebhookSecret),
     Done(String),
     Failed(String),
     Offline(String),
@@ -378,6 +383,80 @@ impl Client {
 
     pub fn sync_project(&mut self, id: Id) {
         self.act::<()>(Method::POST, &format!("/api/projects/{id}/sync"), None, "");
+    }
+
+    pub fn github_status(&mut self, project: Id) {
+        let req = self.request(Method::GET, &format!("/api/projects/{project}/github"), None).timeout(Duration::from_secs(45));
+        self.send(req, move |s| Reply::GithubStatus(project, s));
+    }
+
+    pub fn github_sync(&mut self, project: Id) {
+        let req = self.request(Method::POST, &format!("/api/projects/{project}/github/sync"), None).timeout(Duration::from_secs(120));
+        self.send(req, move |s| Reply::GithubStatus(project, s));
+    }
+
+    pub fn outbox(&mut self, project: Id) {
+        let req = self.request(Method::GET, &format!("/api/outbox?project={project}"), None);
+        self.send(req, move |mut list: agentbench_core::OutboxList| {
+            list.items.retain(|i| i.project_id == project);
+            Reply::Outbox(project, list)
+        });
+    }
+
+    pub fn outbox_approve(&mut self, id: Id, text: Option<&str>) {
+        let body = serde_json::json!({ "text": text });
+        self.act(Method::POST, &format!("/api/outbox/{id}/approve"), Some(&body), "approved");
+    }
+
+    pub fn outbox_reject(&mut self, id: Id) {
+        self.act::<()>(Method::POST, &format!("/api/outbox/{id}/reject"), None, "rejected");
+    }
+
+    pub fn outbox_approve_all(&mut self, project: Id) {
+        self.act::<()>(Method::POST, &format!("/api/projects/{project}/outbox/approve-all"), None, "approved all");
+    }
+
+    pub fn github_pause(&mut self, paused: bool) {
+        let body = serde_json::json!({ "paused": paused });
+        self.act(Method::POST, "/api/github/pause", Some(&body), if paused { "posting paused" } else { "posting resumed" });
+    }
+
+    pub fn pulls(&mut self, project: Id) {
+        let req = self.request(Method::GET, &format!("/api/projects/{project}/pulls"), None);
+        self.send(req, move |p| Reply::Pulls(project, p));
+    }
+
+    pub fn pull_review(&mut self, project: Id, number: i64) {
+        self.act::<()>(Method::POST, &format!("/api/projects/{project}/pulls/{number}/review"), None, "review asked");
+    }
+
+    pub fn pull_merge(&mut self, project: Id, number: i64) {
+        let req = self
+            .request(Method::POST, &format!("/api/projects/{project}/pulls/{number}/merge"), None)
+            .timeout(Duration::from_secs(120));
+        self.send(req, move |_: serde_json::Value| Reply::Done(format!("merged #{number}")));
+    }
+
+    pub fn github_settings(&mut self, project: Id) {
+        let req = self.request(Method::GET, "/api/settings/github", None);
+        self.send(req, move |s| Reply::GithubSettings(project, s));
+    }
+
+    pub fn set_github_settings(&mut self, project: Id, s: &agentbench_core::GithubSettings) {
+        let req = self.request(Method::PUT, "/api/settings/github", Self::json(s));
+        self.send(req, move |s| Reply::GithubSettings(project, s));
+    }
+
+    pub fn webhook_secret(&mut self, project: Id) {
+        let req = self.request(Method::POST, &format!("/api/projects/{project}/github/webhook"), None);
+        self.send(req, move |s| Reply::WebhookSecret(project, s));
+    }
+
+    pub fn webhook_create(&mut self, project: Id) {
+        let req = self
+            .request(Method::POST, &format!("/api/projects/{project}/github/webhook/create"), None)
+            .timeout(Duration::from_secs(60));
+        self.send(req, |_: serde_json::Value| Reply::Done("webhook set up on GitHub".into()));
     }
 
     pub fn add_worktree(&mut self, project: Id, new: &NewWorktree) {

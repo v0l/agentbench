@@ -19,6 +19,7 @@ use web_time::{Duration, Instant};
 mod bar;
 mod chat;
 mod composer;
+mod github;
 mod header;
 mod modals;
 mod onboarding;
@@ -31,6 +32,7 @@ mod viewer;
 mod widgets;
 
 use self::settings::{model_input, pairing_of};
+pub use self::github::{GhTab, GithubView};
 pub use self::widgets::{status_counts, usage_labels};
 use self::widgets::*;
 use agent_ui::widgets::{code_block, spinner};
@@ -611,6 +613,7 @@ enum Confirm {
     Worktree(Id, String, bool),
     Session(SessionId, String),
     Issue(Id, String),
+    Merge(Id, i64, String),
 }
 
 #[derive(Default)]
@@ -800,6 +803,9 @@ pub struct App {
     alerts: bool,
     issues_first: bool,
     triage_open: bool,
+    github: HashMap<Id, github::GithubView>,
+    gh_tab: github::GhTab,
+    outbox_shown: github::Sent,
     detail: Option<Id>,
     /// Put the cursor back in this tile's composer: set when speech lands in its draft.
     refocus: Option<Tile>,
@@ -1018,6 +1024,9 @@ impl App {
                 == Some("true"),
             triage_open: storage.and_then(|s| s.get_string("triage_open")).as_deref()
                 == Some("true"),
+            github: HashMap::new(),
+            gh_tab: github::GhTab::Issues,
+            outbox_shown: github::Sent::Waiting,
             detail: None,
             pairing_file,
             failures: 0,
@@ -2167,11 +2176,17 @@ impl App {
             }
             Reply::Changed(cursor) => {
                 self.watching = false;
+                if Some(cursor) != self.cursor {
+                    self.github_stale();
+                }
                 if Some(cursor) != self.cursor
                     && let Some(c) = &mut self.client
                 {
                     c.overview();
                 }
+            }
+            r @ (Reply::GithubStatus(..) | Reply::Outbox(..) | Reply::Pulls(..) | Reply::GithubSettings(..) | Reply::WebhookSecret(..)) => {
+                self.github_replied(r);
             }
             Reply::Older(sid, msgs, limit) => {
                 let t = self.transcripts.entry(sid).or_default();
@@ -2342,6 +2357,7 @@ impl App {
                 }
             }
             Reply::Done(said) => {
+                self.github_stale();
                 if !said.is_empty() {
                     self.notice = Some((true, said));
                 }
@@ -2831,6 +2847,12 @@ impl App {
         };
         let Some(pid) = self.project else {
             note(ui, "Add a project to file issues against it.", LEGEND);
+            return;
+        };
+        if self.scope == Scope::Project && self.github_mode(pid) && self.github_issues_page(ui, pid) {
+            return;
+        }
+        let Some(o) = &self.overview else {
             return;
         };
         let everything = self.scope == Scope::Everything;
@@ -3485,6 +3507,7 @@ impl App {
 
     fn issue_detail(&mut self, ui: &mut Ui, issue: &Issue) {
         ui.add_space(4.0);
+        self.github_issue_block(ui, issue);
         if self.server_has(issue.id, agentbench_core::API_MODEL_LEVEL) {
             Line::new().legend("model level").size(10.0).show(ui);
             if let Some(level) = widgets::level_picker(ui, issue.model_level)
