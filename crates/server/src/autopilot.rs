@@ -25,6 +25,10 @@ pub(crate) const STUCK_NO_COMMIT_MINUTES: &str = "autopilot_stuck_no_commit_minu
 pub(crate) const GROOM: &str = "autopilot_groom";
 pub(crate) const GROOM_HOURS: &str = "autopilot_groom_hours";
 pub const DEFAULT_GROOM_HOURS: u64 = 24;
+pub const INTAKE_PER_HOUR: &str = "autopilot_intake_per_hour";
+pub const DEFAULT_INTAKE_PER_HOUR: u64 = 20;
+pub const UNTRUSTED_TURNS: &str = "autopilot_untrusted_turns_per_day";
+pub const DEFAULT_UNTRUSTED_TURNS: u64 = 50;
 pub const DEFAULT_CHECK_IN_MINUTES: u64 = 30;
 pub const DEFAULT_STUCK_FAILED_RUNS: u32 = 3;
 pub const DEFAULT_STUCK_COMPACTIONS: u32 = 2;
@@ -193,6 +197,9 @@ pub fn state(store: &Store) -> AutopilotState {
         stuck_compactions: number(store, STUCK_COMPACTIONS, DEFAULT_STUCK_COMPACTIONS),
         stuck_no_commit_minutes: number(store, STUCK_NO_COMMIT_MINUTES, DEFAULT_STUCK_NO_COMMIT_MINUTES),
         groom: crate::groom::groom_on(store),
+        intake_per_hour: number(store, INTAKE_PER_HOUR, DEFAULT_INTAKE_PER_HOUR) as u32,
+        untrusted_turns_per_day: number(store, UNTRUSTED_TURNS, DEFAULT_UNTRUSTED_TURNS) as u32,
+        untrusted_turns_today: crate::github::caps::turns_today(store, crate::store::now()) as u32,
         groom_hours: crate::groom::groom_hours(store),
         workers: workers.iter().filter(|w| is_active(&w.state)).count() as u32,
         activity: store.autopilot_log(30).unwrap_or_default(),
@@ -228,6 +235,12 @@ pub fn apply(store: &Store, patch: &AutopilotPatch) -> Result<AutopilotState, St
     }
     if let Some(n) = patch.stuck_no_commit_minutes {
         store.set_setting(STUCK_NO_COMMIT_MINUTES, &n.to_string())?;
+    }
+    if let Some(n) = patch.intake_per_hour {
+        store.set_setting(INTAKE_PER_HOUR, &n.to_string())?;
+    }
+    if let Some(n) = patch.untrusted_turns_per_day {
+        store.set_setting(UNTRUSTED_TURNS, &n.to_string())?;
     }
     if let Some(n) = patch.groom_hours {
         store.set_setting(GROOM_HOURS, &n.to_string())?;
@@ -1802,6 +1815,9 @@ mod tests {
             external_url: None,
             external_author: None,
             external_updated_at: None,
+            trust: Default::default(),
+            ready_by: None,
+            held: None,
             created_at: created,
             updated_at: created,
         }

@@ -1454,6 +1454,8 @@ impl Api for StoreApi {
                     stuck_failed_runs: num("stuck_failed_runs"),
                     stuck_compactions: num("stuck_compactions"),
                     stuck_no_commit_minutes: args.get("stuck_no_commit_minutes").and_then(Value::as_u64),
+                    intake_per_hour: num("intake_per_hour"),
+                    untrusted_turns_per_day: num("untrusted_turns_per_day"),
                 };
                 let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
                 json!(state)

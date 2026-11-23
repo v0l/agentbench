@@ -1,5 +1,5 @@
 use agentbench_core::{
-    Automation, Comment, Entry, Id, Issue, IssuePatch, IssueSource, IssueState, Message, PostMode, Tracker, NewComment, NewIssue,
+    Automation, Comment, Entry, Id, Issue, IssuePatch, IssueSource, IssueState, Message, PostMode, Tracker, Trust, NewComment, NewIssue,
     Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Vision, VisionBody, Worktree,
 };
 use crate::memory::{Memory, Scope};
@@ -323,6 +323,13 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("comments", "external_id", "TEXT"),
     ("comments", "external_author", "TEXT"),
     ("comments", "external_url", "TEXT"),
+    ("issues", "trust", "TEXT NOT NULL DEFAULT 'trusted'"),
+    ("issues", "ready_by", "TEXT"),
+    ("issues", "held", "TEXT"),
+    ("issues", "ready_status", "TEXT"),
+    ("issues", "ready_hash", "TEXT"),
+    ("issues", "ready_after", "INTEGER NOT NULL DEFAULT 0"),
+    ("comments", "trust", "TEXT NOT NULL DEFAULT 'trusted'"),
 ];
 
 const AFTER_COLUMNS: &str = r#"
@@ -398,6 +405,14 @@ pub struct MirrorIssue {
     pub author: String,
     pub url: String,
     pub updated_at: i64,
+    pub trust: Trust,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReadyRow {
+    pub status: Option<String>,
+    pub hash: Option<String>,
+    pub after: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -540,6 +555,9 @@ fn issue_row(row: &Row) -> rusqlite::Result<Issue> {
         external_url: row.get("external_url")?,
         external_author: row.get("external_author")?,
         external_updated_at: row.get("external_updated_at")?,
+        trust: Trust::parse(&row.get::<_, String>("trust")?),
+        ready_by: row.get("ready_by")?,
+        held: row.get("held")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -704,6 +722,7 @@ fn comment_row(row: &Row) -> rusqlite::Result<Comment> {
         external_id: row.get("external_id")?,
         external_author: row.get("external_author")?,
         external_url: row.get("external_url")?,
+        trust: Trust::parse(&row.get::<_, String>("trust")?),
     })
 }
 
@@ -1483,9 +1502,9 @@ impl Store {
         let Some(old) = existing else {
             let t = now();
             db.execute(
-                "INSERT INTO issues (project_id, title, body, state, priority, labels, source, external_number, external_url, external_author, external_updated_at, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'github', ?7, ?8, ?9, ?10, ?11, ?11)",
-                params![project_id, m.title, m.body, m.state.as_str(), m.priority, labels, m.number, m.url, m.author, m.updated_at, t],
+                "INSERT INTO issues (project_id, title, body, state, priority, labels, source, external_number, external_url, external_author, external_updated_at, created_at, updated_at, trust)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'github', ?7, ?8, ?9, ?10, ?11, ?11, ?12)",
+                params![project_id, m.title, m.body, m.state.as_str(), m.priority, labels, m.number, m.url, m.author, m.updated_at, t, m.trust.as_str()],
             )?;
             let id = db.last_insert_rowid();
             Store::changed(&db, "issue", id)?;
@@ -1493,15 +1512,49 @@ impl Store {
         };
         let same = old.external_updated_at == Some(m.updated_at)
             && old.external_url.as_deref() == Some(m.url.as_str())
-            && old.external_author.as_deref() == Some(m.author.as_str());
+            && old.external_author.as_deref() == Some(m.author.as_str())
+            && old.trust == m.trust;
         if !same {
             db.execute(
-                "UPDATE issues SET title = ?1, body = ?2, state = ?3, priority = ?4, labels = ?5, external_url = ?6, external_author = ?7, external_updated_at = ?8, updated_at = ?9 WHERE id = ?10",
-                params![m.title, m.body, m.state.as_str(), m.priority, labels, m.url, m.author, m.updated_at, now(), old.id],
+                "UPDATE issues SET title = ?1, body = ?2, state = ?3, priority = ?4, labels = ?5, external_url = ?6, external_author = ?7, external_updated_at = ?8, updated_at = ?9, trust = ?11 WHERE id = ?10",
+                params![m.title, m.body, m.state.as_str(), m.priority, labels, m.url, m.author, m.updated_at, now(), old.id, m.trust.as_str()],
             )?;
             Store::changed(&db, "issue", old.id)?;
         }
         Ok(old.id)
+    }
+
+    pub fn ready_row(&self, id: Id) -> Result<ReadyRow> {
+        Ok(self.db().query_row(
+            "SELECT ready_status, ready_hash, ready_after FROM issues WHERE id = ?1",
+            [id],
+            |r| Ok(ReadyRow { status: r.get(0)?, hash: r.get(1)?, after: r.get(2)? }),
+        )?)
+    }
+
+    pub fn set_ready(&self, id: Id, status: Option<&str>, by: Option<&str>, hash: Option<&str>, after: i64) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "UPDATE issues SET ready_status = ?1, ready_by = ?2, ready_hash = ?3, ready_after = ?4 WHERE id = ?5",
+            params![status, by, hash, after, id],
+        )?;
+        Store::changed(&db, "issue", id)
+    }
+
+    pub fn set_held(&self, id: Id, held: Option<&str>) -> Result<()> {
+        let db = self.db();
+        db.execute("UPDATE issues SET held = ?1 WHERE id = ?2", params![held, id])?;
+        Store::changed(&db, "issue", id)
+    }
+
+    pub fn set_mirror_state(&self, id: Id, state: IssueState) -> Result<()> {
+        let db = self.db();
+        db.execute("UPDATE issues SET state = ?1 WHERE id = ?2", params![state.as_str(), id])?;
+        Store::changed(&db, "issue", id)
+    }
+
+    pub fn mirrored_issues(&self, project_id: Id) -> Result<Vec<Issue>> {
+        Ok(self.issues()?.into_iter().filter(|i| i.project_id == project_id && i.source == IssueSource::Github).collect())
     }
 
     pub fn mirrored_issue(&self, project_id: Id, number: i64) -> Result<Option<Issue>> {
@@ -1533,6 +1586,7 @@ impl Store {
         body: &str,
         url: &str,
         created_at: i64,
+        trust: Trust,
     ) -> Result<bool> {
         let db = self.db();
         let old: Option<(Id, String)> = db
@@ -1551,8 +1605,8 @@ impl Store {
             }
             None => {
                 db.execute(
-                    "INSERT INTO comments (issue_id, author, body, created_at, external_id, external_author, external_url) VALUES (?1, ?2, ?3, ?4, ?5, ?2, ?6)",
-                    params![issue_id, author, body, created_at, external_id, url],
+                    "INSERT INTO comments (issue_id, author, body, created_at, external_id, external_author, external_url, trust) VALUES (?1, ?2, ?3, ?4, ?5, ?2, ?6, ?7)",
+                    params![issue_id, author, body, created_at, external_id, url, trust.as_str()],
                 )?;
                 Store::changed(&db, "issue", issue_id)?;
                 Ok(true)
@@ -1656,7 +1710,7 @@ impl Store {
         Ok(comment)
     }
 
-    fn add_comment_local(&self, issue_id: Id, new: &NewComment) -> Result<Comment> {
+    pub(crate) fn add_comment_local(&self, issue_id: Id, new: &NewComment) -> Result<Comment> {
         if new.body.trim().is_empty() {
             return Err(StoreError("a comment needs a body".into()));
         }

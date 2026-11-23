@@ -3647,6 +3647,9 @@ mod tests {
             external_url: None,
             external_author: None,
             external_updated_at: None,
+            trust: Default::default(),
+            ready_by: None,
+            held: None,
             created_at: 0,
             updated_at: id,
         }

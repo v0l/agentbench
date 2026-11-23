@@ -1,8 +1,10 @@
 use agentbench_core::{GithubStatus, Project, Tracker};
 use std::process::{Command, Stdio};
 
+pub mod caps;
 pub mod map;
 pub mod sync;
+pub mod trust;
 
 pub use sync::{Outcome, SyncState, load_state, sync_project};
 

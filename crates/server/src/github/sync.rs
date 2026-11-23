@@ -63,13 +63,13 @@ enum Fail {
     Error(String),
 }
 
-struct Reply {
-    ok: bool,
-    stdout: String,
-    stderr: String,
+pub(super) struct Reply {
+    pub ok: bool,
+    pub stdout: String,
+    pub stderr: String,
 }
 
-fn call(gh: &str, args: &[&str]) -> Reply {
+pub(super) fn call(gh: &str, args: &[&str]) -> Reply {
     match Command::new(gh).args(args).stdin(Stdio::null()).output() {
         Ok(o) => Reply {
             ok: o.status.success(),
@@ -226,7 +226,8 @@ fn fetch(gh: &str, repo: &str, store: &Store, project: Id, since: Option<i64>) -
     Ok(Fetched { issues, gone, prs, comments })
 }
 
-fn apply(store: &Store, project: Id, f: &Fetched) -> crate::store::Result<()> {
+fn apply(store: &Store, project: Id, f: &Fetched, gh: &str, repo: &str, now: i64) -> crate::store::Result<()> {
+    let trust_of = |user: &str, assoc: &str| super::trust::resolve(store, gh, repo, user, assoc, now);
     let bot = store.setting("github_bot").ok().flatten().filter(|b| !b.trim().is_empty());
     let mut pr_numbers: Vec<i64> = Vec::new();
     let mut linked: HashSet<i64> = HashSet::new();
@@ -250,7 +251,8 @@ fn apply(store: &Store, project: Id, f: &Fetched) -> crate::store::Result<()> {
                     store.delete_issue(old.id)?;
                 }
             }
-            Mapped::Keep(m) => {
+            Mapped::Keep(mut m) => {
+                m.trust = trust_of(&i.author, &i.association);
                 let before = store.mirrored_issue(project, i.number)?;
                 let id = store.mirror_issue(project, &m)?;
                 if m.state == IssueState::Done && before.is_none_or(|b| b.state != IssueState::Done) {
@@ -308,7 +310,8 @@ fn apply(store: &Store, project: Id, f: &Fetched) -> crate::store::Result<()> {
         };
         let s = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or_default();
         let author = c.get("user").and_then(|u| u.get("login")).and_then(Value::as_str).unwrap_or_default();
-        store.mirror_comment(issue_id, &ext.to_string(), author, s("body"), s("html_url"), parse_time(s("created_at")))?;
+        let assoc = c.get("author_association").and_then(Value::as_str).unwrap_or_default();
+        store.mirror_comment(issue_id, &ext.to_string(), author, s("body"), s("html_url"), parse_time(s("created_at")), trust_of(author, assoc))?;
     }
     Ok(())
 }
@@ -388,7 +391,7 @@ fn run_sync(store: &Store, gh: &str, project_id: Id, now: i64, state: &mut SyncS
         Err(Fail::Limited(_)) => return Outcome::RateLimited(now + MAX_BACKOFF_MS),
         Err(Fail::Error(e)) => return Outcome::Failed(e),
     };
-    if let Err(e) = apply(store, project_id, &fetched) {
+    if let Err(e) = apply(store, project_id, &fetched, gh, &repo, now) {
         return Outcome::Failed(e.0);
     }
     state.etag = probe.etag;

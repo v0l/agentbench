@@ -15,6 +15,7 @@ pub struct GhIssue {
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
     pub author: String,
+    pub association: String,
     pub url: String,
     pub updated_at: i64,
     pub parent: Option<i64>,
@@ -94,6 +95,7 @@ pub fn gh_issue(v: &Value) -> Option<GhIssue> {
         labels,
         assignees,
         author: login(v, "user"),
+        association: text(v, "author_association"),
         url: text(v, "html_url"),
         updated_at: parse_time(&text(v, "updated_at")),
         parent: v.get("parent_issue_url").and_then(Value::as_str).and_then(trailing_number),
@@ -140,6 +142,7 @@ pub fn map_issue(i: &GhIssue, has_open_pr: bool, bot: Option<&str>) -> Mapped {
         author: i.author.clone(),
         url: i.url.clone(),
         updated_at: i.updated_at,
+        trust: agentbench_core::Trust::Trusted,
     })
 }
 
