@@ -1231,7 +1231,7 @@ impl Api for StoreApi {
                 }
                 if me.parent == Some(other.id) && body.trim_start().starts_with("DONE") {
                     crate::autopilot::keep_final_message(s, me.id, &body).map_err(|e| e.0)?;
-                    return Ok(json!({ "sent": other.id, "delivered": "with your turn-end report", "note": "delivered: your parent gets this line with your reply, diff and test runs when your turn ends. End your turn now." }));
+                    return Ok(json!({ "sent": other.id, "delivered": "with your turn-end report", "note": "delivered: your parent gets this line with your reply, diff and test runs when your turn ends. Next time do not send DONE with send_message: make it the last line of your final reply. End your turn now." }));
                 }
                 // The prefix also keeps a message that starts with a slash from running as a command.
                 let body = crate::runner::expand_prompt(&other.cwd, &body).map_or(body, |e| e.text);

@@ -334,7 +334,7 @@ Before any edit, read context, then plan the steps.\n\n\
 const ORCHESTRATION: &str = "<orchestration>\n\
 When you start sub-sessions, you are the parent.\n\n\
 - Put your own session id (`$AGENTBENCH_SESSION`) in every worker prompt as `PARENT=<id>`.\n\
-- Do not block on `wait_for_session`. After `start_session`, start the next worker or do your own work. Finished workers report to you by message.\n\
+- Do not block on `wait_for_session`. After `start_session`, start the next worker or do your own work. Finished workers report in the reply that ends their turn.\n\
 - Keep N workers running (default 3). When a report arrives, start the next todo issue straight away.\n\
 - If nothing is runnable and workers are still busy, use `wait_for_session` on the oldest one as a fallback, with a long timeout.\n\
 - Verify a report with `read_session` before moving the issue to `review`.\n\
@@ -342,9 +342,8 @@ When you start sub-sessions, you are the parent.\n\n\
 - Record the queue state in an issue comment or `remember` so a fresh parent can resume.\n\n\
 When your prompt contains `PARENT=<id>`, you are a worker.\n\n\
 - Stay in your worktree and on your issue. File out-of-scope work with `file_issue`.\n\
-- When finished, `update_issue state=review`, then as your last action `send_message id=<PARENT>` with one line: `DONE #<issue> <branch> tests:<pass|fail> <one-line result>`.\n\
-- If blocked, send `BLOCKED #<issue> <reason>` instead and stop.\n\
-- Always send exactly one final message, including when you fail.\n\
+- When finished, `update_issue state=review`, then end your turn with a normal reply whose LAST line is `DONE #<issue> <branch> tests:<pass|fail> <one-line result>` (or `BLOCKED #<issue> <reason>`). Do NOT send it with send_message: the parent receives your reply, diff stat and test runs when your turn ends.\n\
+- Your last reply is the one final report, including when you fail.\n\
  - When your prompt names a PARENT, questions go to that supervisor, not the user. Decide yourself when you can, and ask only when you cannot. Secrets still go to the user.\n\
 - Finish the work. Do the tests, the verification and every follow-up you can do yourself before reporting. End with a conclusion in one of two states: rigid (verified, tests pass, nothing left) or needs more work, listing only what you genuinely could not do (a user decision, credentials, hardware or real-world action, or out of scope). Never end with a todo list of things you could have done.\n\
 </orchestration>\n\n\
@@ -597,6 +596,14 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), agents.len());
+    }
+
+    #[test]
+    fn workers_report_in_their_last_reply_not_by_send_message() {
+        let b = brief(&context());
+        assert!(!b.contains("send_message id=<PARENT>"));
+        assert!(b.contains("LAST line") && b.contains("Do NOT send it with send_message"));
+        assert!(!b.contains("exactly one final message"));
     }
 
     #[test]
