@@ -1906,6 +1906,21 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_reaches_github_only_through_the_outbox_tool() {
+        let b = boss();
+        b.s.update_project(b.project, &ProjectPatch { tracker: Some(agentbench_core::Tracker::Github { repo: "o/r".into() }), ..Default::default() }).unwrap();
+        b.s.set_parent(b.worker, Some(b.boss)).unwrap();
+        let direct = json!({"tool": "bash", "args": {"command": "gh issue comment 7 --body hi"}});
+        assert_eq!(b.api.call("check_guard", &direct, b.worker).unwrap()["hit"].as_str(), Some("pr-reviews"));
+        let queued = b.api.call("github_post", &json!({"kind": "comment", "number": 7, "text": "hello"}), b.worker).unwrap();
+        assert_eq!(queued["status"], "proposed");
+        let row = &b.s.outbox(Some(b.project)).unwrap()[0];
+        assert_eq!((row.asked_by.as_str(), row.text.as_str(), row.status.as_str()), (&format!("session {}", b.worker)[..], "hello", "proposed"));
+        let leak = b.api.call("github_post", &json!({"kind": "comment", "number": 7, "text": "key sk-abcdefghijklmnopqrstuv123456"}), b.worker);
+        assert!(leak.unwrap_err().contains("secret"));
+    }
+
+    #[test]
     fn start_session_send_message_and_file_issue_each_consult_the_guard_rules() {
         let b = boss();
         let push = "then git push origin main";

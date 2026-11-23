@@ -159,7 +159,9 @@ fn footer(repo: &str) -> String {
 }
 
 fn temp_file(id: Id, body: &Value) -> Result<std::path::PathBuf, String> {
-    let path = std::env::temp_dir().join(format!("agentbench-post-{}-{id}.json", std::process::id()));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("agentbench-post-{}-{id}-{seq}.json", std::process::id()));
     std::fs::write(&path, body.to_string()).map_err(|e| e.to_string())?;
     Ok(path)
 }
@@ -324,4 +326,202 @@ pub fn drain(store: &Store, gh: &str, now: i64) -> usize {
         }
     }
     posted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agentbench_core::{ProjectPatch, Tracker};
+
+    struct Stub {
+        dir: tempfile::TempDir,
+        gh: String,
+    }
+
+    impl Stub {
+        fn new() -> Stub {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = dir.path().join("gh");
+            let script = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo "$@" >> "$D/calls"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--input" ]; then cat "$a" >> "$D/bodies"; echo >> "$D/bodies"; fi
+  prev="$a"
+done
+if [ -f "$D/failures" ] && [ "$(cat "$D/failures")" -gt 0 ]; then
+  echo $(( $(cat "$D/failures") - 1 )) > "$D/failures"
+  cat "$D/msg" >&2
+  exit 1
+fi
+echo '{"id": 4242}'
+"#;
+            crate::testing_stub::write_script(&gh, script);
+            Stub { gh: gh.to_string_lossy().into_owned(), dir }
+        }
+
+        fn fail(&self, times: u32, msg: &str) {
+            std::fs::write(self.dir.path().join("failures"), times.to_string()).unwrap();
+            std::fs::write(self.dir.path().join("msg"), msg).unwrap();
+        }
+
+        fn calls(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.path().join("calls")).map(|c| c.lines().map(str::to_string).collect()).unwrap_or_default()
+        }
+
+        fn bodies(&self) -> String {
+            std::fs::read_to_string(self.dir.path().join("bodies")).unwrap_or_default()
+        }
+    }
+
+    fn setup(mode: PostMode) -> (Store, Id, Stub) {
+        let store = Store::memory().unwrap();
+        let p = store.add_project("demo", "/tmp/demo-outbox", Some("main"), None).unwrap();
+        store
+            .update_project(p.id, &ProjectPatch { tracker: Some(Tracker::Github { repo: "o/r".into() }), post_mode: Some(mode), ..Default::default() })
+            .unwrap();
+        (store, p.id, Stub::new())
+    }
+
+    fn comment(project: Id, text: &str, trusted: bool) -> Ask {
+        Ask { project, kind: "comment".into(), number: 7, text: text.into(), params: json!({}), asked_by: "session 1".into(), trusted }
+    }
+
+    #[test]
+    fn draft_mode_posts_nothing_until_approved() {
+        let (store, p, stub) = setup(PostMode::Draft);
+        let (id, status) = propose(&store, comment(p, "hello", true)).unwrap();
+        assert_eq!(status, "proposed");
+        assert_eq!(drain(&store, &stub.gh, 1_000), 0);
+        assert!(stub.calls().is_empty());
+        approve(&store, id, None, "user").unwrap();
+        assert_eq!(drain(&store, &stub.gh, 2_000), 1);
+        assert_eq!(stub.calls().len(), 1);
+    }
+
+    #[test]
+    fn approval_posts_exactly_the_edited_text_once() {
+        let (store, p, stub) = setup(PostMode::Draft);
+        let (id, _) = propose(&store, comment(p, "first draft", true)).unwrap();
+        approve(&store, id, Some("final words"), "user").unwrap();
+        drain(&store, &stub.gh, 1_000);
+        drain(&store, &stub.gh, 2_000);
+        assert_eq!(stub.calls().len(), 1, "posted once");
+        let bodies = stub.bodies();
+        assert!(bodies.contains("final words") && !bodies.contains("first draft"), "{bodies}");
+        assert!(bodies.contains("posted by agentbench for o"), "{bodies}");
+        let row = store.outbox_item(id).unwrap();
+        assert_eq!((row.status.as_str(), row.external_id.as_deref(), row.text.as_str()), ("done", Some("4242"), "final words"));
+        assert!(approve(&store, id, None, "user").is_err(), "a done row is not approved again");
+    }
+
+    #[test]
+    fn auto_mode_posts_a_trusted_comment_and_holds_an_untrusted_one() {
+        let (store, p, stub) = setup(PostMode::Auto);
+        let (trusted, s1) = propose(&store, comment(p, "from trusted work", true)).unwrap();
+        let (untrusted, s2) = propose(&store, comment(p, "from a stranger's issue", false)).unwrap();
+        assert_eq!((s1.as_str(), s2.as_str()), ("approved", "proposed"));
+        let merge = Ask { kind: "merge_request".into(), ..comment(p, "", true) };
+        assert_eq!(propose(&store, merge).unwrap().1, "proposed", "never a merge");
+        drain(&store, &stub.gh, 1_000);
+        assert_eq!(store.outbox_item(trusted).unwrap().status, "done");
+        assert_eq!(store.outbox_item(untrusted).unwrap().status, "proposed");
+        assert_eq!(stub.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_row_approved_by_nobody_for_untrusted_input_is_held_at_send() {
+        let (store, p, stub) = setup(PostMode::Auto);
+        let (id, _) = propose(&store, comment(p, "x", false)).unwrap();
+        store.outbox_transition(id, &["proposed"], "approved", None).unwrap();
+        drain(&store, &stub.gh, 1_000);
+        assert!(stub.calls().is_empty());
+        assert_eq!(store.outbox_item(id).unwrap().status, "proposed");
+    }
+
+    #[test]
+    fn off_mode_keeps_rows_as_local_notes() {
+        let (store, p, stub) = setup(PostMode::Off);
+        let (id, status) = propose(&store, comment(p, "note", true)).unwrap();
+        assert_eq!(status, "local");
+        assert!(approve(&store, id, None, "user").is_err());
+        drain(&store, &stub.gh, 1_000);
+        assert!(stub.calls().is_empty());
+    }
+
+    #[test]
+    fn pause_stops_the_drain_and_resume_lets_it_go() {
+        let (store, p, stub) = setup(PostMode::Draft);
+        let (id, _) = propose(&store, comment(p, "hello", true)).unwrap();
+        approve(&store, id, None, "user").unwrap();
+        set_paused(&store, true).unwrap();
+        assert_eq!(drain(&store, &stub.gh, 1_000), 0);
+        assert!(stub.calls().is_empty());
+        set_paused(&store, false).unwrap();
+        assert_eq!(drain(&store, &stub.gh, 2_000), 1);
+    }
+
+    #[test]
+    fn a_502_retries_with_backoff_and_then_posts() {
+        let (store, p, stub) = setup(PostMode::Draft);
+        stub.fail(1, "gh: Bad Gateway (HTTP 502)");
+        let (id, _) = propose(&store, comment(p, "hello", true)).unwrap();
+        approve(&store, id, None, "user").unwrap();
+        assert_eq!(drain(&store, &stub.gh, 1_000), 0);
+        let row = store.outbox_item(id).unwrap();
+        assert_eq!((row.status.as_str(), row.attempts), ("approved", 1));
+        assert!(row.error.unwrap().contains("502"));
+        assert_eq!(drain(&store, &stub.gh, 1_001), 0, "not before the backoff");
+        assert_eq!(stub.calls().len(), 1);
+        assert_eq!(drain(&store, &stub.gh, 1_000 + BACKOFF_MS + 1), 1);
+        assert_eq!(store.outbox_item(id).unwrap().status, "done");
+    }
+
+    #[test]
+    fn a_422_fails_visibly_and_is_not_retried() {
+        let (store, p, stub) = setup(PostMode::Draft);
+        stub.fail(5, "gh: Validation Failed (HTTP 422)");
+        let (id, _) = propose(&store, comment(p, "hello", true)).unwrap();
+        approve(&store, id, None, "user").unwrap();
+        drain(&store, &stub.gh, 1_000);
+        drain(&store, &stub.gh, 10_000_000);
+        let row = store.outbox_item(id).unwrap();
+        assert_eq!(row.status, "failed");
+        assert!(row.error.unwrap().contains("422"));
+        assert_eq!(stub.calls().len(), 1);
+    }
+
+    #[test]
+    fn the_secret_filter_refuses_a_token_in_the_body() {
+        let (store, p, stub) = setup(PostMode::Auto);
+        let err = propose(&store, comment(p, "use ghp_abcdefghijklmnopqrstuvwxyz0123 to log in", true)).unwrap_err();
+        assert!(err.contains("secret"), "{err}");
+        let err = propose(&store, comment(p, "see /home/kieran/.ssh/config", true)).unwrap_err();
+        assert!(err.contains("path"), "{err}");
+        let (id, _) = propose(&store, comment(p, "fine", true)).unwrap();
+        assert!(approve(&store, id, Some("password: hunter2hunter2"), "user").is_err());
+        assert!(store.outbox(Some(p)).unwrap().iter().all(|o| !o.text.contains("ghp_")));
+        drain(&store, &stub.gh, 1_000);
+        assert_eq!(stub.calls().len(), 1);
+    }
+
+    #[test]
+    fn labels_state_assignee_and_reviews_use_gh() {
+        let (store, p, stub) = setup(PostMode::Auto);
+        let ask = |kind: &str, params: Value, text: &str| Ask { kind: kind.into(), params, ..comment(p, text, true) };
+        propose(&store, ask("label_add", json!({"label": "bug"}), "")).unwrap();
+        propose(&store, ask("issue_state", json!({"state": "closed", "reason": "not_planned"}), "")).unwrap();
+        propose(&store, ask("assignee", json!({"login": "alice"}), "")).unwrap();
+        propose(&store, ask("review", json!({"event": "request_changes", "comments": [{"path": "a.rs", "line": 3, "body": "fix"}]}), "needs work")).unwrap();
+        assert!(propose(&store, ask("label_add", json!({}), "")).is_err());
+        assert_eq!(drain(&store, &stub.gh, 1_000), 4);
+        let calls = stub.calls().join("\n");
+        assert!(calls.contains("issue edit 7 -R o/r --add-label bug"), "{calls}");
+        assert!(calls.contains("issue close 7 -R o/r --reason not planned"), "{calls}");
+        assert!(calls.contains("--add-assignee alice"), "{calls}");
+        assert!(calls.contains("pulls/7/reviews"), "{calls}");
+        let bodies = stub.bodies();
+        assert!(bodies.contains("REQUEST_CHANGES") && bodies.contains("a.rs"), "{bodies}");
+    }
 }

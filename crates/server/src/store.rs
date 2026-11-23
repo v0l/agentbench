@@ -330,6 +330,9 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("issues", "ready_hash", "TEXT"),
     ("issues", "ready_after", "INTEGER NOT NULL DEFAULT 0"),
     ("comments", "trust", "TEXT NOT NULL DEFAULT 'trusted'"),
+];
+
+const LATE_COLUMNS: &[(&str, &str, &str)] = &[
     ("outbox", "asked_by", "TEXT NOT NULL DEFAULT ''"),
     ("outbox", "trusted", "INTEGER NOT NULL DEFAULT 1"),
     ("outbox", "number", "INTEGER NOT NULL DEFAULT 0"),
@@ -932,6 +935,15 @@ impl Store {
             }
         }
         conn.execute_batch(AFTER_COLUMNS)?;
+        for (table, column, definition) in LATE_COLUMNS {
+            let present = conn
+                .prepare(&format!("PRAGMA table_info({table})"))?
+                .query_map([], |r| r.get::<_, String>(1))?
+                .any(|name| name.map(|n| n == *column).unwrap_or(false));
+            if !present {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition};"))?;
+            }
+        }
         let pr_trust = conn
             .prepare("PRAGMA table_info(pull_requests)")?
             .query_map([], |r| r.get::<_, String>(1))?
