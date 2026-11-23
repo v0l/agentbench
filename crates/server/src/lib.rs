@@ -13,6 +13,10 @@ pub mod guards;
 mod injection;
 #[cfg(test)]
 mod testing_stub;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
+mod raw_rows_guard;
 pub mod host;
 pub mod ledger;
 pub mod local;

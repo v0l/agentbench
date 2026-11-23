@@ -177,6 +177,18 @@ fn update_issue_and_comment_on_issue_close_nothing() {
 }
 
 #[test]
+fn a_wire_logged_user_message_after_the_verdict_needs_a_new_one() {
+    let w = world();
+    let s = w.store.session(w.worker.id).unwrap();
+    let head = crate::autopilot::head_of(&w.store, &s);
+    w.store.add_verdict(s.id, None, head.as_deref(), "concluded_pass", "x", None, "", w.boss.id).unwrap();
+    assert!(crate::autopilot::already_judged(&w.store, &s));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    crate::test_support::wire_user(&w.store, s.id, "one more thing");
+    assert!(!crate::autopilot::already_judged(&w.store, &s));
+}
+
+#[test]
 fn the_turn_end_nudges_three_times_then_gives_up_with_the_list() {
     let w = world();
     delivered(&w.store, w.boss.id, "judge", Some(w.worker.id), "judge it");

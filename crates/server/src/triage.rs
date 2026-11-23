@@ -114,7 +114,7 @@ fn days_ago(at: i64) -> i64 {
 }
 
 fn session_text(store: &Store, s: &Session) -> String {
-    let messages = store.messages(s.id, 0).unwrap_or_default();
+    let messages = agentbench_core::shown(&store.messages(s.id, 0).unwrap_or_default());
     let skip = messages.len().saturating_sub(SESSION_ENTRIES);
     let mut lines = Vec::new();
     for m in messages.into_iter().skip(skip) {
@@ -637,6 +637,22 @@ mod tests {
         let big = gather(&store, 24_000);
         assert!(small.text.len() < big.text.len());
         assert!(small.issues < big.issues, "{} vs {}", small.issues, big.issues);
+    }
+
+    #[test]
+    fn a_wire_logged_session_is_read_as_its_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let store = Store::memory().unwrap();
+        let p = crate::projects::add(&store, &main, None, false).unwrap();
+        let tree = store.main_worktree(p.id).unwrap();
+        let s = store.add_session(tree.id, "w", "w", None, None).unwrap();
+        crate::test_support::wire_user(&store, s.id, "fix the login loop");
+        crate::test_support::wire_reply(&store, s.id, "found it in auth");
+        let text = session_text(&store, &s);
+        assert!(text.contains("user: fix the login loop"), "{text}");
+        assert!(text.contains("agent: found it in auth"), "{text}");
     }
 
     #[test]

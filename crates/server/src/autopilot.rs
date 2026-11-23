@@ -480,7 +480,8 @@ pub fn current_verdict(store: &Store, session: &Session) -> Option<Judged> {
 
 pub fn already_judged(store: &Store, session: &Session) -> bool {
     let Some(v) = current_verdict(store, session) else { return false };
-    !store.messages(session.id, 0).unwrap_or_default().iter().any(|m| {
+    let rows = store.messages(session.id, 0).unwrap_or_default();
+    !agentbench_core::shown(&rows).iter().any(|m| {
         m.created_at > v.created_at && matches!(m.entry, Entry::User { .. })
     })
 }
@@ -2248,9 +2249,7 @@ mod tests {
 
     async fn boss_told(r: &Rig) -> Vec<String> {
         idle(r, r.boss.unwrap()).await;
-        r.store
-            .messages(r.boss.unwrap(), 0)
-            .unwrap()
+        agentbench_core::shown(&r.store.messages(r.boss.unwrap(), 0).unwrap())
             .into_iter()
             .filter_map(|m| match m.entry {
                 Entry::User { text, .. } => Some(text),
@@ -2261,9 +2260,7 @@ mod tests {
     }
 
     fn said_to_boss(r: &Rig) -> Vec<String> {
-        r.store
-            .messages(r.boss.unwrap(), 0)
-            .unwrap()
+        agentbench_core::shown(&r.store.messages(r.boss.unwrap(), 0).unwrap())
             .into_iter()
             .filter_map(|m| match m.entry {
                 Entry::User { text, .. } => Some(text),
@@ -2750,10 +2747,7 @@ mod tests {
         assert!(ask.contains(&sid.to_string()) && ask.contains("judge_session"), "{ask}");
         assert!(ask.contains("Let me know if you want X"), "the full reply: {ask}");
         assert!(ask.contains("Diff stat") && ask.contains("Test runs"), "{ask}");
-        let froms: Vec<Vec<String>> = r
-            .store
-            .messages(r.boss.unwrap(), 0)
-            .unwrap()
+        let froms: Vec<Vec<String>> = agentbench_core::shown(&r.store.messages(r.boss.unwrap(), 0).unwrap())
             .into_iter()
             .filter_map(|m| match m.entry {
                 Entry::User { text, from, .. } if text.contains("Judge worker ") => Some(from),
@@ -3140,9 +3134,7 @@ mod tests {
     }
 
     fn told(r: &Rig, sid: agentbench_core::SessionId) -> Vec<String> {
-        r.store
-            .messages(sid, 0)
-            .unwrap()
+        agentbench_core::shown(&r.store.messages(sid, 0).unwrap())
             .into_iter()
             .filter_map(|m| match m.entry {
                 Entry::User { text, .. } => Some(text),
@@ -3903,7 +3895,7 @@ mod tests {
         let w = r.store.workers().unwrap().remove(0);
         let tree = r.store.worktree(r.store.session(w.session).unwrap().worktree_id).unwrap();
         for _ in 0..200 {
-            if r.store.messages(w.session, 0).unwrap().iter().any(|m| matches!(m.entry, Entry::User { .. })) {
+            if agentbench_core::shown(&r.store.messages(w.session, 0).unwrap()).iter().any(|m| matches!(m.entry, Entry::User { .. })) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
