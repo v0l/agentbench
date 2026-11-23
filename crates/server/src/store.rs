@@ -1,5 +1,5 @@
 use agentbench_core::{
-    Automation, Comment, Entry, Id, Issue, IssuePatch, IssueSource, IssueState, Message, PostMode, Tracker, Trust, NewComment, NewIssue,
+    Automation, Comment, Entry, Id, Issue, IssuePatch, IssueSource, IssueState, Message, MergeMode, PostMode, Tracker, Trust, NewComment, NewIssue,
     Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Vision, VisionBody, Worktree,
 };
 use crate::memory::{Memory, Scope};
@@ -315,6 +315,7 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("projects", "tracker", "TEXT NOT NULL DEFAULT 'internal'"),
     ("projects", "github_repo", "TEXT"),
     ("projects", "post_mode", "TEXT NOT NULL DEFAULT 'draft'"),
+    ("projects", "merge_mode", "TEXT NOT NULL DEFAULT 'pr'"),
     ("issues", "source", "TEXT NOT NULL DEFAULT 'internal'"),
     ("issues", "external_number", "INTEGER"),
     ("issues", "external_url", "TEXT"),
@@ -718,6 +719,7 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
             _ => Tracker::Internal,
         },
         post_mode: PostMode::parse(&row.get::<_, String>("post_mode")?).unwrap_or_default(),
+        merge_mode: MergeMode::parse(&row.get::<_, String>("merge_mode")?).unwrap_or_default(),
     })
 }
 
@@ -1184,10 +1186,13 @@ impl Store {
         if let Some(mode) = patch.post_mode {
             project.post_mode = mode;
         }
+        if let Some(mode) = patch.merge_mode {
+            project.merge_mode = mode;
+        }
         {
             let db = self.db();
             db.execute(
-                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6, tracker = ?8, github_repo = ?9, post_mode = ?10 WHERE id = ?7",
+                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6, tracker = ?8, github_repo = ?9, post_mode = ?10, merge_mode = ?11 WHERE id = ?7",
                 params![
                     project.name,
                     project.pinned,
@@ -1201,7 +1206,8 @@ impl Store {
                         Tracker::Github { repo } => Some(repo.clone()),
                         _ => None,
                     },
-                    project.post_mode.as_str()
+                    project.post_mode.as_str(),
+                    project.merge_mode.as_str()
                 ],
             )?;
             Store::changed(&db, "project", id)?;

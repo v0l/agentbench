@@ -302,6 +302,30 @@ pub struct Project {
     pub tracker: Tracker,
     #[serde(default)]
     pub post_mode: PostMode,
+    #[serde(default)]
+    pub merge_mode: MergeMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMode {
+    Direct,
+    #[default]
+    #[serde(other)]
+    Pr,
+}
+
+impl MergeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMode::Direct => "direct",
+            MergeMode::Pr => "pr",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<MergeMode> {
+        [MergeMode::Pr, MergeMode::Direct].into_iter().find(|m| m.as_str() == s)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1661,6 +1685,8 @@ pub struct ProjectPatch {
     pub tracker: Option<Tracker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_mode: Option<PostMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_mode: Option<MergeMode>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2211,7 +2237,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 8;
+pub const API_VERSION: u32 = 9;
+pub const API_GITHUB_WORK: u32 = 9;
 pub const API_TRUST: u32 = 8;
 pub const API_GITHUB_FLOW: u32 = 7;
 pub const API_GLOBAL_NOTE: u32 = 6;

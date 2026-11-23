@@ -767,6 +767,7 @@ pub mod tests {
             deploy: None,
             tracker: Default::default(),
             post_mode: Default::default(),
+            merge_mode: Default::default(),
         }
     }
 
