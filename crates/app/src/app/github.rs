@@ -15,7 +15,7 @@ pub enum GhTab {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Sent {
     Waiting,
-    Sent,
+    Posted,
     All,
 }
 
@@ -362,13 +362,13 @@ impl App {
             note(ui, "Posting is paused everywhere. Approved rows wait until you turn it back on.", WARN);
         }
         ui.add_space(4.0);
-        segments(ui, &mut self.outbox_shown, &[(Sent::Waiting, "waiting", Some(waiting.len())), (Sent::Sent, "sent", Some(sent)), (Sent::All, "all", Some(items.len()))]);
+        segments(ui, &mut self.outbox_shown, &[(Sent::Waiting, "waiting", Some(waiting.len())), (Sent::Posted, "sent", Some(sent)), (Sent::All, "all", Some(items.len()))]);
         ui.add_space(6.0);
         let shown: Vec<&OutboxItem> = items
             .iter()
             .filter(|i| match self.outbox_shown {
                 Sent::Waiting => i.waiting(),
-                Sent::Sent => i.sent(),
+                Sent::Posted => i.sent(),
                 Sent::All => true,
             })
             .rev()
@@ -498,11 +498,11 @@ impl App {
                 c.outbox_reject(item.id);
             }
         }
-        if approve || reject {
-            if let Some(v) = self.github.get_mut(&pid) {
-                v.edits.remove(&item.id);
-                v.asked = None;
-            }
+        if (approve || reject)
+            && let Some(v) = self.github.get_mut(&pid)
+        {
+            v.edits.remove(&item.id);
+            v.asked = None;
         }
     }
 
@@ -548,7 +548,7 @@ impl App {
                     }
                     let failed: Vec<&str> = pr.checks.iter().filter(|c| c.failed()).map(|c| c.name.as_str()).collect();
                     if !failed.is_empty() {
-                        note(ui, &format!("failing: {}", failed.join(", ")), FAULT);
+                        note(ui, format!("failing: {}", failed.join(", ")), FAULT);
                     }
                     Line::new().note(format!("by {}  {} into {}  updated {}", pr.author, pr.head_ref, pr.base_ref, ago(pr.updated_at))).size(10.5).wrapped(ui);
                     ui.horizontal_wrapped(|ui| {
