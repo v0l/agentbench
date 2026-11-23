@@ -306,6 +306,148 @@ pub struct Project {
     pub model_levels: ModelLevels,
     #[serde(default)]
     pub merge_mode: MergeMode,
+    #[serde(default)]
+    pub automerge: AutoMerge,
+    #[serde(default)]
+    pub merge_method: MergeMethod,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoMerge {
+    Trusted,
+    #[default]
+    #[serde(other)]
+    Off,
+}
+
+impl AutoMerge {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutoMerge::Off => "off",
+            AutoMerge::Trusted => "trusted",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<AutoMerge> {
+        [AutoMerge::Off, AutoMerge::Trusted].into_iter().find(|m| m.as_str() == s)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeMethod {
+    Squash,
+    Rebase,
+    #[default]
+    #[serde(other)]
+    Merge,
+}
+
+impl MergeMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<MergeMethod> {
+        [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase].into_iter().find(|m| m.as_str() == s)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrCheck {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub conclusion: Option<String>,
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    #[serde(default)]
+    pub url: String,
+}
+
+impl PrCheck {
+    pub fn done(&self) -> bool {
+        self.status == "completed"
+    }
+
+    pub fn failed(&self) -> bool {
+        self.done() && !matches!(self.conclusion.as_deref(), Some("success" | "neutral" | "skipped"))
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PullRequest {
+    #[serde(default)]
+    pub project_id: Id,
+    #[serde(default)]
+    pub number: i64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub head_ref: String,
+    #[serde(default)]
+    pub base_ref: String,
+    #[serde(default)]
+    pub head_sha: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub checks: Vec<PrCheck>,
+    #[serde(default)]
+    pub checks_sha: Option<String>,
+    #[serde(default)]
+    pub issue_id: Option<Id>,
+    #[serde(default)]
+    pub reviewed_sha: Option<String>,
+    #[serde(default)]
+    pub review_verdict: Option<String>,
+    #[serde(default)]
+    pub review_row: Option<Id>,
+    #[serde(default)]
+    pub review_asked: i64,
+    #[serde(default)]
+    pub review_answered: i64,
+    #[serde(default)]
+    pub trust: Trust,
+    #[serde(default)]
+    pub by_agentbench: bool,
+    #[serde(default)]
+    pub ci_reworks: u32,
+    #[serde(default)]
+    pub ci_sent_sha: Option<String>,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+impl PullRequest {
+    pub fn checks_known(&self) -> bool {
+        self.checks_sha.as_deref() == Some(self.head_sha.as_str()) && !self.head_sha.is_empty()
+    }
+
+    pub fn checks_green(&self) -> bool {
+        self.checks_known() && self.checks.iter().all(|c| c.done() && !c.failed())
+    }
+
+    pub fn checks_red(&self) -> bool {
+        self.checks_known() && self.checks.iter().all(PrCheck::done) && self.checks.iter().any(PrCheck::failed)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1756,6 +1898,10 @@ pub struct ProjectPatch {
     pub model_levels: Option<ModelLevels>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_mode: Option<MergeMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automerge: Option<AutoMerge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_method: Option<MergeMethod>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2310,7 +2456,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 10;
+pub const API_VERSION: u32 = 11;
+pub const API_PR_REVIEW: u32 = 11;
 pub const API_GITHUB_WORK: u32 = 10;
 pub const API_MODEL_LEVEL: u32 = 9;
 pub const API_TRUST: u32 = 8;

@@ -40,6 +40,20 @@ pub enum GithubAction {
     Reject {
         id: i64,
     },
+    Pulls {
+        #[arg(long)]
+        project: String,
+    },
+    Review {
+        pr: i64,
+        #[arg(long)]
+        project: String,
+    },
+    Merge {
+        pr: i64,
+        #[arg(long)]
+        project: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -335,6 +349,25 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                     _ => Err("give a row id or --all <project>".into()),
                 },
                 GithubAction::Reject { id } => outbox::reject(&store, id),
+                GithubAction::Pulls { project } => {
+                    let p = store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == project).ok_or_else(|| format!("no project named {project}"))?;
+                    let prs = store.pull_requests(p.id).map_err(|e| e.0)?;
+                    println!("{}", serde_json::to_string_pretty(&prs).map_err(|e| e.to_string())?);
+                    Ok(())
+                }
+                GithubAction::Review { pr, project } => {
+                    let p = store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == project).ok_or_else(|| format!("no project named {project}"))?;
+                    store.pull_request(p.id, pr).map_err(|e| e.0)?.ok_or_else(|| format!("no mirrored pull request #{pr}"))?;
+                    store.ask_pr_review(p.id, pr).map_err(|e| e.0)?;
+                    println!("{}", serde_json::json!({"review_asked": pr}));
+                    Ok(())
+                }
+                GithubAction::Merge { pr, project } => {
+                    let p = store.projects().map_err(|e| e.0)?.into_iter().find(|p| p.name == project).ok_or_else(|| format!("no project named {project}"))?;
+                    let done = crate::github::merge::merge(&store, &crate::github::gh_program(), p.id, pr, crate::github::merge::OWNER)?;
+                    println!("{}", serde_json::json!({"merged": pr, "result": done}));
+                    Ok(())
+                }
             }
         }
         Command::Chat { .. } => unreachable!("handled before the store opens"),

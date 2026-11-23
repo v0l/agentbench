@@ -2,11 +2,16 @@ use agentbench_core::{GithubStatus, Project, Tracker};
 use std::process::{Command, Stdio};
 
 pub mod caps;
+pub mod ci;
 pub mod flow;
 pub mod map;
+pub mod merge;
 pub mod outbox;
 pub mod ready;
+pub mod review;
 pub mod sync;
+#[cfg(test)]
+pub mod testing;
 pub mod trust;
 
 pub use sync::{Outcome, SyncState, load_state, sync_project};
@@ -47,11 +52,18 @@ pub fn spawn(runner: crate::runner::Runner) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             let store = runner.store().clone();
+            let worker = runner.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let gh = gh_program();
                 let now = crate::store::now();
                 outbox::drain(&store, &gh, now);
-                sync_due(&store, &gh, now)
+                let synced = sync_due(&store, &gh, now);
+                let tell = |s: &agentbench_core::Session, text: &str| {
+                    worker.tell(s, text, crate::runner::Origin::new("autopilot", Some(s.id))).map_err(|e| e.0)
+                };
+                ci::rework(&store, &gh, &tell);
+                merge::automerge(&store, &gh);
+                synced
             })
             .await;
             if let Some(target) = runner.titles().and_then(|t| t.target()) {

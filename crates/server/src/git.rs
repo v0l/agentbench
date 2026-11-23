@@ -231,12 +231,25 @@ pub struct TempTree {
 
 impl TempTree {
     pub fn add(main: &Path, branch: &str) -> Result<TempTree, String> {
+        TempTree::make(main, &[branch])
+    }
+
+    pub fn detached(main: &Path, rev: &str) -> Result<TempTree, String> {
+        TempTree::make(main, &["--detach", rev])
+    }
+
+    fn make(main: &Path, what: &[&str]) -> Result<TempTree, String> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!("agentbench-merge-{}-{nanos}", std::process::id()));
-        git(main, &["worktree", "add", &path.to_string_lossy(), branch])?;
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("agentbench-merge-{}-{nanos}-{seq}", std::process::id()));
+        let path_text = path.to_string_lossy().into_owned();
+        let mut args = vec!["worktree", "add", path_text.as_str()];
+        args.extend_from_slice(what);
+        git(main, &args)?;
         Ok(TempTree { main: main.to_path_buf(), path })
     }
 }

@@ -114,12 +114,14 @@ pub fn pr_title_and_body(issue: Option<&Issue>, branch: &str) -> (String, String
 pub fn pr_opened(store: &Store, issue_id: Id, url: &str, branch: &str, base: &str, reply: &str, target: Option<Target>) {
     let Ok(issue) = store.issue(issue_id) else { return };
     let key = format!("gh_pr_noted_{issue_id}");
-    if store.setting(&key).ok().flatten().as_deref() == Some(url) {
-        return;
-    }
+    let noted = store.setting(&key).ok().flatten().as_deref() == Some(url);
     let _ = store.set_setting(&key, url);
+    let issue = store.issue(issue_id).unwrap_or(issue);
     if issue.state != IssueState::Review {
         let _ = store.set_mirror_state(issue_id, IssueState::Review);
+    }
+    if noted {
+        return;
     }
     let _ = store.add_comment_local(issue_id, &NewComment { author: Some(BOT_AUTHOR.into()), body: format!("Pull request opened: {url} (branch {branch})") });
     let Some(number) = issue.external_number else { return };
@@ -145,6 +147,7 @@ pub fn pr_opened(store: &Store, issue_id: Id, url: &str, branch: &str, base: &st
                 trust: Trust::Trusted,
             },
         );
+        let _ = store.set_pr_by_agentbench(issue.project_id, pr);
         let _ = store.link_pr(issue.project_id, pr, Some(number));
     }
     let summary = summary_blocking(target, reply);
@@ -182,7 +185,7 @@ fn triage_key(issue: Id) -> String {
     format!("gh_triage_{issue}")
 }
 
-fn bot_names(store: &Store) -> Vec<String> {
+pub fn bot_names(store: &Store) -> Vec<String> {
     let mut names = vec![BOT_AUTHOR.to_string()];
     if let Some(b) = store.setting("github_bot").ok().flatten().filter(|b| !b.trim().is_empty()) {
         names.push(b.to_ascii_lowercase());
@@ -257,7 +260,7 @@ fn is_reserved(label: &str) -> bool {
     ["ready", "agent:todo", "in progress", "in-progress", "agentbench"].iter().any(|r| label.eq_ignore_ascii_case(r))
 }
 
-fn parse_object(raw: &str) -> Option<Value> {
+pub fn parse_object(raw: &str) -> Option<Value> {
     let text = crate::titles::without_thinking(raw);
     let (a, b) = (text.find('{')?, text.rfind('}')?);
     serde_json::from_str(text.get(a..=b)?).ok()
@@ -405,16 +408,22 @@ mod tests {
         store.issue(id).unwrap()
     }
 
+    fn repo_labels_with_reserved(store: &Store, p: Id) -> Vec<String> {
+        let mut all: Vec<String> = store.mirrored_issues(p).unwrap().into_iter().flat_map(|i| i.labels).collect();
+        all.dedup();
+        all
+    }
+
     #[test]
     fn triage_of_an_untrusted_issue_proposes_in_the_outbox_and_changes_no_state() {
         let (store, p) = setup(PostMode::Auto);
-        mirror(&store, p, 1, Trust::Trusted, &["bug", "docs"]);
+        mirror(&store, p, 1, Trust::Trusted, &["bug", "docs", "ready", "in progress"]);
         let issue = mirror(&store, p, 2, Trust::Untrusted, &[]);
         let known = repo_labels(&store, p);
         assert_eq!(known, ["bug", "docs"]);
-        let reply = r#"{"type":"bug","labels":["bug","invented","ready"],"priority":3,"duplicate_of":1,"question":"Which version?","note":"x"}"#;
+        let reply = r#"{"type":"bug","labels":["bug","invented","ready","in progress"],"priority":3,"duplicate_of":1,"question":"Which version?","note":"x"}"#;
         assert!(needs_triage(&store, &issue));
-        let queued = apply_triage(&store, &issue, &known, reply, false);
+        let queued = apply_triage(&store, &issue, &repo_labels_with_reserved(&store, p), reply, false);
         assert!(queued >= 3);
         let rows = store.outbox(Some(p)).unwrap();
         assert!(rows.iter().all(|r| r.status == "proposed"), "{rows:?}");

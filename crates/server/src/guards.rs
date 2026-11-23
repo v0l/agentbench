@@ -6,6 +6,8 @@ use std::path::PathBuf;
 pub const FILE: &str = "guards.toml";
 const TRUST_SEEDED: &str = "guards_trust_rules_seeded";
 const TRUST_RULES: [&str; 3] = ["worker-gh-writes", "untrusted-no-github-writes", "worker-git-push-main"];
+const OWNER_SEEDED: &str = "guards_owner_rules_seeded";
+const OWNER_RULES: [&str; 1] = ["owner-approves-and-merges"];
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
@@ -93,6 +95,16 @@ require_field = "_brief"
 require = '^\(user chat\)$'
 action = "refuse"
 message = "Workers never push to main or master, force push or delete remote branches: they commit on their branch and the supervisor or autopilot merges."
+
+[[rule]]
+id = "owner-approves-and-merges"
+tools = ["bash"]
+fields = ["command"]
+pattern = '''(?i)/api/outbox/[^/\s]+/approve|/api/projects/[^/\s]+/pulls/[^/\s]+/merge|\bagentbench(-server)?\s+github\s+(approve|merge)\b|\bgh\s+pr\s+merge\b'''
+require_field = "_brief"
+require = '^\(user chat\)$'
+action = "refuse"
+message = "Only the owner approves outbox rows and merges pull requests. Say in your reply what should be approved or merged; the owner does it in the app or with agentbench github."
 "#;
 
 pub fn path(store: &Store) -> PathBuf {
@@ -109,15 +121,18 @@ pub fn load(store: &Store) -> Result<Rules, String> {
     }
     let text = std::fs::read_to_string(&p).unwrap_or_else(|_| DEFAULTS.to_string());
     let mut rules: Rules = toml::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?;
-    if store.setting(TRUST_SEEDED).ok().flatten().is_none() {
+    for (key, ids) in [(TRUST_SEEDED, &TRUST_RULES[..]), (OWNER_SEEDED, &OWNER_RULES[..])] {
+        if store.setting(key).ok().flatten().is_some() {
+            continue;
+        }
         let seeded: Rules = toml::from_str(DEFAULTS).map_err(|e| e.to_string())?;
-        for r in seeded.rules.into_iter().filter(|r| TRUST_RULES.contains(&r.id.as_str())) {
+        for r in seeded.rules.into_iter().filter(|r| ids.contains(&r.id.as_str())) {
             if !rules.rules.iter().any(|x| x.id == r.id) {
                 rules.rules.push(r);
             }
         }
         let _ = save(store, &rules);
-        let _ = store.set_setting(TRUST_SEEDED, "1");
+        let _ = store.set_setting(key, "1");
     }
     Ok(rules)
 }
@@ -279,7 +294,6 @@ mod tests {
             "gh issue edit 4 --add-label ready",
             "gh issue comment 4 -b hi",
             "gh pr create --fill",
-            "gh pr merge 9 --squash",
             "gh pr close 9",
             "gh pr ready 9",
             "gh label create ready",
@@ -305,6 +319,35 @@ mod tests {
         for ok in ["gh issue view 4", "git commit -am x", "cargo test", "git status"] {
             assert!(bash(ok, approved, "yes").is_none(), "{ok}");
         }
+    }
+
+    #[test]
+    fn only_the_owner_approves_outbox_rows_and_merges_pull_requests() {
+        let agent = [
+            "curl -X POST -H \"Authorization: Bearer $AGENTBENCH_TOKEN\" $AGENTBENCH_URL/api/outbox/12/approve",
+            "curl -X POST http://127.0.0.1:7420/api/projects/14/pulls/9/merge",
+            "agentbench github merge 9 --project demo",
+            "agentbench github approve 12",
+            "gh pr merge 9 --squash",
+        ];
+        for w in agent {
+            assert_eq!(bash(w, "Fix it. You are approved to post.", "no").as_deref(), Some("owner-approves-and-merges"), "{w}");
+        }
+        assert!(bash(agent[0], "(user chat)", "no").is_none());
+        for ok in ["curl $AGENTBENCH_URL/api/outbox", "curl $AGENTBENCH_URL/api/projects/14/pulls", "agentbench github outbox"] {
+            assert!(bash(ok, "Fix the bug", "no").is_none(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn the_owner_rule_is_seeded_into_a_file_that_already_had_the_trust_rules() {
+        let s = Store::memory().unwrap();
+        let file = path(&s);
+        let old = DEFAULTS.split("[[rule]]\nid = \"owner-approves-and-merges\"").next().unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, old).unwrap();
+        s.set_setting(TRUST_SEEDED, "1").unwrap();
+        assert!(load(&s).unwrap().rules.iter().any(|r| r.id == "owner-approves-and-merges"));
     }
 
     #[test]

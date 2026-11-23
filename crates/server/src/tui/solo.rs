@@ -533,6 +533,8 @@ impl Solo {
             post_mode: Default::default(),
             model_levels: Default::default(),
             merge_mode: Default::default(),
+            automerge: Default::default(),
+            merge_method: Default::default(),
         };
         let mut app = App::new(project, vec![info], "native".into());
         app.standalone = true;

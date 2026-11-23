@@ -102,6 +102,14 @@ impl Values for Value {
     }
 }
 
+pub fn review_event(params: &Value) -> &str {
+    params.get("event").and_then(Value::as_str).unwrap_or("comment")
+}
+
+fn needs_owner(kind: &str, params: &Value) -> bool {
+    kind == "review" && review_event(params) != "comment"
+}
+
 pub fn propose(store: &Store, ask: Ask) -> Result<(Id, String), String> {
     let project = store.project(ask.project).map_err(|e| e.0)?;
     if !project.tracker.is_github() {
@@ -113,7 +121,7 @@ pub fn propose(store: &Store, ask: Ask) -> Result<(Id, String), String> {
     }
     let status = match project.post_mode {
         PostMode::Off => "local",
-        PostMode::Auto if ask.trusted && ask.kind != "merge_request" => "approved",
+        PostMode::Auto if ask.trusted && ask.kind != "merge_request" && !needs_owner(&ask.kind, &ask.params) => "approved",
         _ => "proposed",
     };
     let payload = ask.params.to_string();
@@ -291,6 +299,9 @@ fn allowed_to_send(store: &Store, item: &OutboxItem, now: i64) -> Result<(), Str
         }
         if item.kind == "merge_request" {
             return Err("held: a merge is never posted without approval".into());
+        }
+        if needs_owner(&item.kind, &serde_json::from_str(&item.payload).unwrap_or(Value::Null)) {
+            return Err("held: only the owner approves or requests changes on a pull request".into());
         }
     }
     let recent = store
@@ -567,9 +578,12 @@ echo '{"id": 4242, "number": 4242}'
         propose(&store, ask("label_add", json!({"label": "bug"}), "")).unwrap();
         propose(&store, ask("issue_state", json!({"state": "closed", "reason": "not_planned"}), "")).unwrap();
         propose(&store, ask("assignee", json!({"login": "alice"}), "")).unwrap();
-        propose(&store, ask("review", json!({"event": "request_changes", "comments": [{"path": "a.rs", "line": 3, "body": "fix"}]}), "needs work")).unwrap();
+        let (review, status) = propose(&store, ask("review", json!({"event": "request_changes", "comments": [{"path": "a.rs", "line": 3, "body": "fix"}]}), "needs work")).unwrap();
+        assert_eq!(status, "proposed", "request changes waits for the owner even in auto mode");
         assert!(propose(&store, ask("label_add", json!({}), "")).is_err());
-        assert_eq!(drain(&store, &stub.gh, 1_000), 4);
+        assert_eq!(drain(&store, &stub.gh, 1_000), 3);
+        approve(&store, review, None, "user").unwrap();
+        assert_eq!(drain(&store, &stub.gh, 2_000), 1);
         let calls = stub.calls().join("\n");
         assert!(calls.contains("issue edit 7 -R o/r --add-label bug"), "{calls}");
         assert!(calls.contains("issue close 7 -R o/r --reason not planned"), "{calls}");

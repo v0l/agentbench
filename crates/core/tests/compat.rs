@@ -119,11 +119,12 @@ fn reserialised(name: &str, json: &Value) -> Result<Value, String> {
         "issues" => via::<Vec<Issue>>(name, json),
         "messages" => via::<Vec<Message>>(name, json),
         "changes" => via::<ChangesFeed>(name, json),
+        "pulls" => via::<Vec<PullRequest>>(name, json),
         other => Err(format!("{other} is not a response type")),
     }
 }
 
-const RESPONSES: [&str; 5] = ["overview", "sessions", "issues", "messages", "changes"];
+const RESPONSES: [&str; 6] = ["overview", "sessions", "issues", "messages", "changes", "pulls"];
 
 fn fixture_dir(version: u32) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/api/v{version}"))
@@ -169,6 +170,9 @@ fn todays_serialised_responses_keep_every_recorded_schema() {
         seen += 1;
         let schema: Value = serde_json::from_slice(&bytes).unwrap();
         for name in RESPONSES {
+            if schema.get(name).is_none() {
+                continue;
+            }
             let now = match reserialised(name, &current_fixture(name)) {
                 Ok(v) => v,
                 Err(e) => {
@@ -227,6 +231,7 @@ fn check(name: &str, json: &Value) -> Result<(), String> {
         "issues" => response_still_holds::<Vec<Issue>>(name, json),
         "messages" => response_still_holds::<Vec<Message>>(name, json),
         "changes" => response_still_holds::<ChangesFeed>(name, json),
+        "pulls" => response_still_holds::<Vec<PullRequest>>(name, json),
         "request_new_project" => decodes::<NewProject>(name, json).map(|_| ()),
         "request_new_issue" => decodes::<NewIssue>(name, json).map(|_| ()),
         "request_issue_patch" => decodes::<IssuePatch>(name, json).map(|_| ()),

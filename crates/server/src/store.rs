@@ -1,5 +1,5 @@
 use agentbench_core::{
-    Automation, Comment, Entry, Id, Issue, IssuePatch, IssueSource, IssueState, Message, MergeMode, PostMode, Tracker, Trust, NewComment, NewIssue,
+    AutoMerge, Automation, Comment, Entry, Id, Issue, IssuePatch, IssueSource, IssueState, Message, MergeMethod, MergeMode, PostMode, PrCheck, PullRequest, Tracker, Trust, NewComment, NewIssue,
     Project, ProjectPatch, Risky, Session, SessionId, SessionStatus, Usage, Vision, VisionBody, Worktree,
 };
 use crate::memory::{Memory, Scope};
@@ -335,6 +335,8 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("issues", "ready_hash", "TEXT"),
     ("issues", "ready_after", "INTEGER NOT NULL DEFAULT 0"),
     ("comments", "trust", "TEXT NOT NULL DEFAULT 'trusted'"),
+    ("projects", "automerge", "TEXT NOT NULL DEFAULT 'off'"),
+    ("projects", "merge_method", "TEXT NOT NULL DEFAULT 'merge'"),
 ];
 
 const LATE_COLUMNS: &[(&str, &str, &str)] = &[
@@ -348,6 +350,15 @@ const LATE_COLUMNS: &[(&str, &str, &str)] = &[
     ("outbox", "error", "TEXT"),
     ("outbox", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
     ("outbox", "approved_by", "TEXT NOT NULL DEFAULT ''"),
+    ("pull_requests", "checks_sha", "TEXT"),
+    ("pull_requests", "review_verdict", "TEXT"),
+    ("pull_requests", "review_row", "INTEGER"),
+    ("pull_requests", "review_asked", "INTEGER NOT NULL DEFAULT 0"),
+    ("pull_requests", "review_answered", "INTEGER NOT NULL DEFAULT 0"),
+    ("pull_requests", "review_seen", "INTEGER NOT NULL DEFAULT 0"),
+    ("pull_requests", "by_agentbench", "INTEGER NOT NULL DEFAULT 0"),
+    ("pull_requests", "ci_reworks", "INTEGER NOT NULL DEFAULT 0"),
+    ("pull_requests", "ci_sent_sha", "TEXT"),
 ];
 
 const AFTER_COLUMNS: &str = r#"
@@ -452,6 +463,36 @@ fn outbox_row(r: &Row) -> rusqlite::Result<OutboxItem> {
         error: r.get("error")?,
         updated_at: r.get("updated_at")?,
         approved_by: r.get("approved_by")?,
+    })
+}
+
+fn pull_request_row(r: &Row) -> rusqlite::Result<PullRequest> {
+    Ok(PullRequest {
+        project_id: r.get("project_id")?,
+        number: r.get("number")?,
+        title: r.get("title")?,
+        body: r.get("body")?,
+        author: r.get("author")?,
+        head_ref: r.get("head_ref")?,
+        base_ref: r.get("base_ref")?,
+        head_sha: r.get("head_sha")?,
+        state: r.get("state")?,
+        draft: r.get("draft")?,
+        url: r.get("url")?,
+        checks: serde_json::from_str(&r.get::<_, String>("checks")?).unwrap_or_default(),
+        checks_sha: r.get("checks_sha")?,
+        issue_id: r.get("issue_id")?,
+        reviewed_sha: r.get("reviewed_sha")?,
+        review_verdict: r.get("review_verdict")?,
+        review_row: r.get("review_row")?,
+        review_asked: r.get("review_asked")?,
+        review_answered: r.get("review_answered")?,
+        trust: Trust::parse(&r.get::<_, String>("trust")?),
+        by_agentbench: r.get("by_agentbench")?,
+        ci_reworks: r.get("ci_reworks")?,
+        ci_sent_sha: r.get("ci_sent_sha")?,
+        created_at: r.get("created_at")?,
+        updated_at: r.get("updated_at")?,
     })
 }
 
@@ -728,6 +769,8 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
         },
         post_mode: PostMode::parse(&row.get::<_, String>("post_mode")?).unwrap_or_default(),
         merge_mode: MergeMode::parse(&row.get::<_, String>("merge_mode")?).unwrap_or_default(),
+        automerge: AutoMerge::parse(&row.get::<_, String>("automerge")?).unwrap_or_default(),
+        merge_method: MergeMethod::parse(&row.get::<_, String>("merge_method")?).unwrap_or_default(),
         model_levels: agentbench_core::ModelLevels {
             low: row.get("model_low")?,
             med: row.get("model_med")?,
@@ -1202,6 +1245,12 @@ impl Store {
         if let Some(mode) = patch.merge_mode {
             project.merge_mode = mode;
         }
+        if let Some(mode) = patch.automerge {
+            project.automerge = mode;
+        }
+        if let Some(method) = patch.merge_method {
+            project.merge_method = method;
+        }
         if let Some(levels) = &patch.model_levels {
             project.model_levels = agentbench_core::ModelLevels {
                 low: levels.low.trim().to_string(),
@@ -1212,7 +1261,7 @@ impl Store {
         {
             let db = self.db();
             db.execute(
-                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6, tracker = ?8, github_repo = ?9, post_mode = ?10, model_low = ?11, model_med = ?12, model_high = ?13, merge_mode = ?14 WHERE id = ?7",
+                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6, tracker = ?8, github_repo = ?9, post_mode = ?10, model_low = ?11, model_med = ?12, model_high = ?13, merge_mode = ?14, automerge = ?15, merge_method = ?16 WHERE id = ?7",
                 params![
                     project.name,
                     project.pinned,
@@ -1230,7 +1279,9 @@ impl Store {
                     project.model_levels.low,
                     project.model_levels.med,
                     project.model_levels.high,
-                    project.merge_mode.as_str()
+                    project.merge_mode.as_str(),
+                    project.automerge.as_str(),
+                    project.merge_method.as_str()
                 ],
             )?;
             Store::changed(&db, "project", id)?;
@@ -1893,6 +1944,66 @@ impl Store {
             params![project_id, state],
             |r| r.get(0),
         )?)
+    }
+
+    pub fn pull_requests(&self, project_id: Id) -> Result<Vec<PullRequest>> {
+        let db = self.db();
+        let mut stmt = db.prepare("SELECT * FROM pull_requests WHERE project_id = ?1 ORDER BY number")?;
+        let rows = stmt.query_map([project_id], pull_request_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn pull_request(&self, project_id: Id, number: i64) -> Result<Option<PullRequest>> {
+        Ok(self
+            .db()
+            .query_row("SELECT * FROM pull_requests WHERE project_id = ?1 AND number = ?2", params![project_id, number], pull_request_row)
+            .optional()?)
+    }
+
+    fn pr_update(&self, project_id: Id, number: i64, set: &str, values: &[&dyn rusqlite::ToSql]) -> Result<()> {
+        let db = self.db();
+        let mut all: Vec<&dyn rusqlite::ToSql> = vec![&project_id, &number];
+        all.extend_from_slice(values);
+        db.execute(&format!("UPDATE pull_requests SET {set} WHERE project_id = ?1 AND number = ?2"), all.as_slice())?;
+        Store::changed(&db, "pull_request", number)
+    }
+
+    pub fn set_pr_checks(&self, project_id: Id, number: i64, sha: &str, checks: &[PrCheck]) -> Result<()> {
+        let json = serde_json::to_string(checks).unwrap_or_else(|_| "[]".into());
+        self.pr_update(project_id, number, "checks = ?3, checks_sha = ?4", &[&json, &sha])
+    }
+
+    pub fn set_pr_review(&self, project_id: Id, number: i64, sha: &str, verdict: &str, row: Id, answered: i64) -> Result<()> {
+        self.pr_update(
+            project_id,
+            number,
+            "reviewed_sha = ?3, review_verdict = ?4, review_row = ?5, review_answered = ?6",
+            &[&sha, &verdict, &row, &answered],
+        )
+    }
+
+    pub fn ask_pr_review(&self, project_id: Id, number: i64) -> Result<()> {
+        self.pr_update(project_id, number, "review_asked = review_asked + 1", &[])
+    }
+
+    pub fn pr_review_command(&self, project_id: Id, number: i64, comment_id: i64) -> Result<bool> {
+        let db = self.db();
+        let n = db.execute(
+            "UPDATE pull_requests SET review_seen = ?3, review_asked = review_asked + 1 WHERE project_id = ?1 AND number = ?2 AND review_seen < ?3",
+            params![project_id, number, comment_id],
+        )?;
+        if n > 0 {
+            Store::changed(&db, "pull_request", number)?;
+        }
+        Ok(n > 0)
+    }
+
+    pub fn set_pr_by_agentbench(&self, project_id: Id, number: i64) -> Result<()> {
+        self.pr_update(project_id, number, "by_agentbench = 1", &[])
+    }
+
+    pub fn set_pr_ci_sent(&self, project_id: Id, number: i64, sha: &str) -> Result<()> {
+        self.pr_update(project_id, number, "ci_reworks = ci_reworks + 1, ci_sent_sha = ?3", &[&sha])
     }
 
     pub fn delete_issue(&self, id: Id) -> Result<()> {
