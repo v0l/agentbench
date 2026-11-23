@@ -294,6 +294,7 @@ static TURNS: LazyLock<Mutex<HashMap<SessionId, (Id, u32)>>> = LazyLock::new(Def
 fn turn_of(store: &Store, session: SessionId) -> Id {
     store
         .messages(session, 0)
+        .map(|rows| agentbench_core::shown(&rows))
         .unwrap_or_default()
         .iter()
         .rev()
@@ -667,6 +668,17 @@ mod tests {
         assert!(e.contains("at most 3"), "{e}");
         s.add_message(w.id, &agentbench_core::Entry::User { text: "next".into(), attachments: vec![], from: vec![] }).unwrap();
         assert!(report(&s, &rep("delta model looped again and again here", ""), &w).is_ok(), "a new turn resets it");
+    }
+
+    #[test]
+    fn a_wire_logged_user_turn_resets_the_rate_limit() {
+        let (s, w) = setup();
+        for t in ["alpha ports collide", "bravo credentials missing", "charlie brief unclear"] {
+            report(&s, &rep(&format!("{t} again and again here"), ""), &w).unwrap();
+        }
+        assert!(report(&s, &rep("delta model looped again and again here", ""), &w).is_err());
+        crate::test_support::wire_user(&s, w.id, "next");
+        assert!(report(&s, &rep("delta model looped again and again here", ""), &w).is_ok());
     }
 
     #[test]

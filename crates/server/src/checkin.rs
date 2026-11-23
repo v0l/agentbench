@@ -1,6 +1,6 @@
 use crate::autopilot::{self, Autopilot, clip, flag, number};
 use crate::runner::{Origin, Runner};
-use crate::store::{StoreError, Worker};
+use crate::store::{Store, StoreError, Worker};
 use agentbench_core::{Entry, Id, Message, NewSession, Place, Session, SessionId, clock_hm, span};
 use std::collections::HashSet;
 use std::path::Path;
@@ -52,6 +52,10 @@ fn run_of(input: &serde_json::Value, output: Option<&str>, error: bool) -> Optio
         || exit.is_some_and(|c| c != 0)
         || results.iter().any(|l| l.contains("FAILED"));
     Some(Run { command, exit, failed, results })
+}
+
+pub fn read_session(store: &Store, session: &Session) -> Transcript {
+    read(&agentbench_core::shown(&store.messages(session.id, 0).unwrap_or_default()), session.created_at)
 }
 
 pub fn read(messages: &[Message], fallback: i64) -> Transcript {
@@ -272,7 +276,7 @@ impl Autopilot {
         let quiet_limit = minutes(autopilot::STUCK_NO_COMMIT_MINUTES, autopilot::DEFAULT_STUCK_NO_COMMIT_MINUTES);
         let failed_limit = number(store, autopilot::STUCK_FAILED_RUNS, autopilot::DEFAULT_STUCK_FAILED_RUNS);
         let compaction_limit = number(store, autopilot::STUCK_COMPACTIONS, autopilot::DEFAULT_STUCK_COMPACTIONS);
-        let t = read(&store.messages(session.id, 0).unwrap_or_default(), session.created_at);
+        let t = read_session(store, session);
         let f = facts(Path::new(&tree.path), t.turn_started);
 
         let mut signals: Vec<(&'static str, String)> = Vec::new();
@@ -431,5 +435,21 @@ mod tests {
         let s = |id| Message { entry: Entry::Summary { text: "s".into() }, ..said(id, &[]) };
         let m = [said(1, &[]), s(2), said(3, &["judge"]), s(4), said(5, &[]), s(6), s(7)];
         assert_eq!(read(&m, 0).compactions, 2);
+    }
+
+    #[test]
+    fn a_wire_logged_typed_message_starts_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        crate::git::testing::repo(&main);
+        let store = Store::memory().unwrap();
+        let p = crate::projects::add(&store, &main, None, false).unwrap();
+        let tree = store.main_worktree(p.id).unwrap();
+        let s = store.add_session(tree.id, "w", "w", None, None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        crate::test_support::wire_user(&store, s.id, "go");
+        let rows = store.messages(s.id, 0).unwrap();
+        let at = rows[0].created_at;
+        assert_eq!(read_session(&store, &s).turn_started, at);
     }
 }
