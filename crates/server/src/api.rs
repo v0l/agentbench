@@ -3406,6 +3406,13 @@ mod tests {
         let (_, settings) = call(&f.app, "GET", "/api/settings/github", None, T).await;
         keep("github_settings", &settings);
         let _: agentbench_core::GithubSettings = serde_json::from_value(settings).unwrap();
+        let (s, restart) = call(&f.app, "PUT", "/api/settings/restart", Some(json!({"drain_secs": 90})), T).await;
+        assert_eq!(s, StatusCode::OK, "{restart}");
+        assert_eq!(restart, json!({"drain_secs": 90, "supervisor_may_restart": false}));
+        keep("restart_settings", &restart);
+        let _: agentbench_core::RestartSettings = serde_json::from_value(restart).unwrap();
+        keep("request_restart", &json!({"drain_secs": 0}));
+        keep("restarted", &json!(agentbench_core::Restarted { waited: 2, finished: 1, interrupted: 1, restarting: true }));
         let _: Vec<agentbench_core::PullRequest> = serde_json::from_value(pulls).unwrap();
         let overview: agentbench_core::Overview = serde_json::from_value(overview).unwrap();
         assert_eq!(overview.api_version, agentbench_core::API_VERSION);

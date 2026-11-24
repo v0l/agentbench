@@ -1,0 +1,37 @@
+[
+  {
+    "author": "agentbench",
+    "base_ref": "main",
+    "body": "Closes #4",
+    "by_agentbench": false,
+    "checks": [
+      {
+        "conclusion": "success",
+        "name": "test",
+        "run_id": 5,
+        "status": "completed",
+        "url": "u"
+      }
+    ],
+    "checks_sha": "abc",
+    "ci_reworks": 0,
+    "ci_sent_sha": null,
+    "created_at": 1,
+    "draft": false,
+    "head_ref": "issue-4",
+    "head_sha": "abc",
+    "issue_id": null,
+    "number": 9,
+    "project_id": 1,
+    "review_answered": 0,
+    "review_asked": 0,
+    "review_row": 1,
+    "review_verdict": "approve",
+    "reviewed_sha": "abc",
+    "state": "open",
+    "title": "Fix",
+    "trust": "trusted",
+    "updated_at": 2,
+    "url": "https://github.com/o/r/pull/9"
+  }
+]
