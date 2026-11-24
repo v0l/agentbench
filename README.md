@@ -60,6 +60,44 @@ database.
 Data lives in `$AGENTBENCH_HOME` (default `~/.local/share/agentbench`):
 `agentbench.db` and an optional `agentbench.toml`.
 
+### Restarting without cutting turns
+
+When the server is told to stop (SIGTERM, which `systemctl stop` and `systemctl restart`
+send, or Ctrl-C) it stops starting new turns and lets the running ones finish, for up to
+`restart_drain_secs` (120 by default, set under **settings**). A message sent meanwhile
+waits and starts after the restart. A turn still running at the limit is stopped, and when
+the server is back it is resumed with the note "The server restarted at HH:MM; continue
+where you left off". A second signal stops at once.
+
+To restart, use the command rather than `systemctl restart`:
+
+```sh
+agentbench-server restart                # waits for running turns, then restarts
+agentbench-server restart --drain-secs 30
+```
+
+It prints how many turns it waited for, how many finished and how many it interrupted.
+The **restart server** key under settings does the same, and the supervisor has a
+`restart_server` tool that asks you first unless you switch it on in settings. Under
+systemd the server exits with code 75 and systemd starts it again; elsewhere it runs
+itself again in place.
+
+The systemd user unit needs `TimeoutStopSec` at least the drain plus 30 seconds, or
+systemd kills the turns before they finish, and `Restart=on-failure` so the exit code 75
+brings it back:
+
+```ini
+[Service]
+ExecStart=%h/.cargo/bin/agentbench-server --listen 0.0.0.0:7420 serve
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=150
+```
+
+`KillMode=mixed` sends SIGTERM to the server only, so the agents it runs keep working
+through the drain; whatever is left gets SIGKILL when the timeout passes.
+
 ## Chatting in a terminal
 
 ```sh

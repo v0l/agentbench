@@ -131,9 +131,16 @@ pub fn program() -> std::path::PathBuf {
 }
 
 #[cfg(unix)]
+fn under_systemd() -> bool {
+    let parent = std::os::unix::process::parent_id();
+    std::env::var_os("INVOCATION_ID").is_some()
+        && std::fs::read_to_string(format!("/proc/{parent}/comm")).is_ok_and(|c| c.trim() == "systemd")
+}
+
+#[cfg(unix)]
 pub fn relaunch() -> String {
     use std::os::unix::process::CommandExt;
-    if std::env::var_os("INVOCATION_ID").is_some() {
+    if under_systemd() {
         tracing::info!("exiting with {SYSTEMD_RESTART} so systemd starts the server again");
         std::process::exit(SYSTEMD_RESTART);
     }
