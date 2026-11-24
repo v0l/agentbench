@@ -130,6 +130,12 @@ pub enum Command {
         rotate: bool,
     },
     Agents,
+    /// Restart the server once no turn is running, or once the drain limit passes.
+    Restart {
+        /// Seconds to wait for running turns; default the `restart_drain_secs` setting (120).
+        #[arg(long)]
+        drain_secs: Option<u64>,
+    },
     /// Sync the open issues and pull requests of a GitHub project now.
     GithubSync {
         /// The project, by name.
@@ -467,6 +473,53 @@ pub async fn github_command(
     }
 }
 
+pub async fn ask_restart(server: &crate::tui::Server, drain_secs: Option<u64>) -> Result<agentbench_core::Restarted, String> {
+    let session = std::env::var("AGENTBENCH_SESSION").ok().and_then(|s| s.parse().ok());
+    let ask = agentbench_core::RestartRequest { drain_secs, session };
+    let patience = drain_secs.unwrap_or(crate::restart::DRAIN_MAX) + 60;
+    let r = crate::http::client()
+        .post(format!("{}/api/server/restart", server.base()))
+        .bearer_auth(&server.token)
+        .json(&ask)
+        .timeout(std::time::Duration::from_secs(patience))
+        .send()
+        .await
+        .map_err(|e| format!("{}: {e}", server.base()))?;
+    let status = r.status();
+    let text = r.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(serde_json::from_str::<agentbench_core::ApiError>(&text).map(|e| e.error).unwrap_or_else(|_| status.to_string()));
+    }
+    serde_json::from_str(&text).map_err(|e| format!("{e}: {text}"))
+}
+
+pub async fn restart_command(
+    home: &std::path::Path,
+    url: Option<String>,
+    token: Option<String>,
+    drain_secs: Option<u64>,
+) -> Result<String, String> {
+    let Target::Remote(server) = resolve_target(home, url, token)? else {
+        return Err("the agentbench server is not running, so there is nothing to restart".into());
+    };
+    eprintln!("waiting for running turns to finish before restarting {}", server.base());
+    let done = ask_restart(&server, drain_secs).await?;
+    println!("{}", done.summary());
+    let health = format!("{}/health", server.base());
+    let gone = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < gone && crate::http::client().get(&health).send().await.is_ok() {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let back = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < back {
+        if crate::http::client().get(&health).send().await.is_ok_and(|r| r.status().is_success()) {
+            return Ok(format!("the server is back at {}", server.base()));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    Err(format!("the server did not come back at {} within a minute", server.base()))
+}
+
 pub fn logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -528,6 +581,11 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
         return Ok(());
     }
+    if let Some(Command::Restart { drain_secs }) = &cli.command {
+        let out = restart_command(&home, std::env::var("AGENTBENCH_URL").ok(), std::env::var("AGENTBENCH_TOKEN").ok(), *drain_secs).await?;
+        println!("{out}");
+        return Ok(());
+    }
     let config = Config::load(&home.join("agentbench.toml"))?;
     let store = Store::open_with_memory(&home.join("agentbench.db"), crate::memory::default_root()).map_err(|e| e.0)?;
     match cli.command.unwrap_or(Command::Serve) {
@@ -538,10 +596,11 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                 .or(config.listen)
                 .unwrap_or_else(|| DEFAULT_LISTEN.parse().expect("default listen address"));
             let web = cli.web.or(config.web.clone());
-            serve_config(store, &config, listen, web, async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await
+            let again = serve_config(store, &config, listen, web, crate::restart::terminated()).await?;
+            if again {
+                return Err(crate::restart::relaunch());
+            }
+            Ok(())
         }
         Command::Token { rotate } => {
             if rotate {
@@ -621,6 +680,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Github { .. } => unreachable!("handled before the store opens"),
         Command::Chat { .. } => unreachable!("handled before the store opens"),
+        Command::Restart { .. } => unreachable!("handled before the store opens"),
         Command::Issue { action } => {
             let find = |name: &str| -> Result<agentbench_core::Project, String> {
                 store

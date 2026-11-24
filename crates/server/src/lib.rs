@@ -26,6 +26,7 @@ pub mod process;
 pub mod projects;
 pub mod quota;
 pub mod providers;
+pub mod restart;
 pub mod runner;
 pub mod speech;
 pub mod store;
@@ -196,7 +197,7 @@ pub async fn serve_config(
     listen: SocketAddr,
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let model = agent::native::Shared::new(saved_model(&store, &config.model));
     let titles = titles::Titles::new(saved_title_model(&store, &config.title_model), model.clone());
     // One Whisper for the transcription endpoint and the agent's read_file, so it loads once.
@@ -233,7 +234,7 @@ pub async fn serve_with(
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    serve_inner(store, agents, None, None, None, bind(listen).await?, web, shutdown).await
+    serve_inner(store, agents, None, None, None, bind(listen).await?, web, shutdown).await.map(|_| ())
 }
 
 /// Serve with these agents, keeping downloaded models in `models` rather than the data folder:
@@ -248,7 +249,7 @@ pub async fn serve_agents(
 ) -> Result<(), String> {
     let speech = speech::Speech::new(models.clone(), &speech_model(&store));
     let voice = voice::Voice::new(models.join("phonon"));
-    serve_inner(store, agents, model, None, Some((speech, voice)), listener, None, shutdown).await
+    serve_inner(store, agents, model, None, Some((speech, voice)), listener, None, shutdown).await.map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -261,7 +262,7 @@ async fn serve_inner(
     listener: tokio::net::TcpListener,
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let listen = listener.local_addr().map_err(|e| e.to_string())?;
     let stale = store.reset_running().map_err(|e| e.0)?;
     if !stale.is_empty() {
@@ -305,12 +306,33 @@ async fn serve_inner(
     fold_watch(api.runner.clone());
     api::watch_worktrees(api.clone(), std::time::Duration::from_secs(15));
     tracing::info!("listening on http://{}", listener.local_addr().map_err(|e| e.to_string())?);
+    let runner = api.runner.clone();
     let mut app = api::router(api);
     if let Some(dir) = web.filter(|d| d.join("index.html").is_file()) {
         tracing::info!("serving the web app from {}", dir.display());
         app = app.fallback_service(tower_http::services::ServeDir::new(dir));
     }
-    axum::serve(listener, app).with_graceful_shutdown(shutdown).await.map_err(|e| e.to_string())
+    let (tell, told) = tokio::sync::watch::channel(false);
+    let drain = restart::stopped(runner.clone(), shutdown);
+    tokio::spawn(async move {
+        drain.await;
+        let _ = tell.send(true);
+    });
+    let mut quit = told.clone();
+    let serving = async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = quit.wait_for(|v| *v).await;
+            })
+            .await
+            .map_err(|e| e.to_string())
+    };
+    let mut stopping = told;
+    restart::serve_until(serving, async move {
+        let _ = stopping.wait_for(|v| *v).await;
+    })
+    .await?;
+    Ok(restart::relaunching(&runner))
 }
 
 fn fold_watch(runner: runner::Runner) {

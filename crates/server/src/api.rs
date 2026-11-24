@@ -132,6 +132,8 @@ pub fn router(api: Api) -> Router {
         .route("/api/onboarding/login/screen", get(login_screen).post(login_input).delete(login_close))
         .route("/api/settings/cross-project", get(get_cross).delete(clear_cross))
         .route("/api/settings/autorun", get(get_autorun).put(put_autorun))
+        .route("/api/settings/restart", get(get_restart).put(put_restart))
+        .route("/api/server/restart", post(restart_server))
         .route("/api/global-notes", get(get_global_notes).put(put_global_note))
         .route("/api/autopilot", get(get_autopilot).patch(patch_autopilot))
         .route("/api/triage", get(get_triage).patch(patch_triage))
@@ -1412,6 +1414,25 @@ async fn put_global_note(
     crate::compact::after_write(&api.runner, crate::memory::Scope::Global);
     changed(&api);
     get_global_notes(State(api)).await
+}
+
+async fn get_restart(State(api): State<Api>) -> Reply<agentbench_core::RestartSettings> {
+    Ok(Json(crate::restart::settings(api.runner.store())))
+}
+
+async fn put_restart(
+    State(api): State<Api>,
+    Json(body): Json<agentbench_core::RestartSettings>,
+) -> Reply<agentbench_core::RestartSettings> {
+    crate::restart::save(api.runner.store(), &body).map(Json).map_err(bad)
+}
+
+async fn restart_server(
+    State(api): State<Api>,
+    body: Option<Json<agentbench_core::RestartRequest>>,
+) -> Reply<agentbench_core::Restarted> {
+    let ask = body.map(|b| b.0).unwrap_or_default();
+    Ok(Json(crate::restart::restart(&api.runner, ask.drain_secs, ask.session).await))
 }
 
 async fn get_autorun(State(api): State<Api>) -> Reply<serde_json::Value> {

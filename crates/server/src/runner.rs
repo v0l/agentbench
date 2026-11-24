@@ -101,7 +101,9 @@ pub struct Runner {
     claims: Arc<Mutex<()>>,
     draining: Arc<std::sync::atomic::AtomicBool>,
     held: Arc<Mutex<()>>,
-    restart: Arc<Notify>,
+    drained: Arc<tokio::sync::Mutex<Option<agentbench_core::Restarted>>>,
+    pub(crate) relaunch: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) restart: Arc<Notify>,
 }
 
 const HELD_SETTING: &str = "restart_held";
@@ -179,6 +181,8 @@ impl Runner {
             claims: Default::default(),
             draining: Default::default(),
             held: Default::default(),
+            drained: Default::default(),
+            relaunch: Default::default(),
             restart: Default::default(),
         };
         runner.me.set(runner.clone());
@@ -567,6 +571,10 @@ impl Runner {
 
     pub fn is_running(&self, session: SessionId) -> bool {
         self.live().contains_key(&session)
+    }
+
+    pub fn running_turns(&self) -> Vec<SessionId> {
+        self.live().keys().copied().collect()
     }
 
     pub fn queued(&self, session: SessionId) -> Vec<String> {
@@ -971,7 +979,11 @@ impl Runner {
         let note = restart_note(crate::store::now());
         for id in &all {
             let Ok(session) = self.store.session(*id) else { continue };
-            let msg = Message { text: note.clone(), attachments: Vec::new(), from: vec!["server".into()] };
+            let note = match crate::restart::report_for(&self.store, *id) {
+                Some(report) => format!("{note} The restart you asked for {report}."),
+                None => note.clone(),
+            };
+            let msg = Message { text: note, attachments: Vec::new(), from: vec!["server".into()] };
             if let Err(e) = self.send_text(&session, msg, Mode::Chat) {
                 tracing::warn!("could not resume session {id}: {}", e.0);
             }
@@ -1001,8 +1013,14 @@ impl Runner {
         self.draining.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn restart_signal(&self) -> Arc<Notify> {
-        self.restart.clone()
+    pub async fn shut_down(&self, limit: Duration, except: Option<SessionId>) -> agentbench_core::Restarted {
+        let mut done = self.drained.lock().await;
+        if let Some(d) = done.clone() {
+            return d;
+        }
+        let d = self.drain(limit, except).await;
+        *done = Some(d.clone());
+        d
     }
 
     fn hold(&self, session: SessionId, msg: Message) {
@@ -1038,8 +1056,14 @@ impl Runner {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let cut = left();
+        let mut resumed = cut.clone();
+        if let Some(me) = except {
+            resumed.push(me);
+        }
+        if !resumed.is_empty() {
+            let _ = self.store.set_setting(INTERRUPTED_SETTING, &serde_json::to_string(&resumed).unwrap_or_default());
+        }
         if !cut.is_empty() {
-            let _ = self.store.set_setting(INTERRUPTED_SETTING, &serde_json::to_string(&cut).unwrap_or_default());
             let text = format!(
                 "this turn was interrupted by the server restart after {} s; it resumes when the server is back",
                 limit.as_secs()

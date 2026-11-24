@@ -358,7 +358,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 41] = [
+pub const AGENTBENCH_TOOLS: [&str; 42] = [
     "github_post",
     "github_outbox",
     "list_issues",
@@ -394,6 +394,7 @@ pub const AGENTBENCH_TOOLS: [&str; 41] = [
     "set_vision",
     "merge_branch",
     "risky_action",
+    "restart_server",
     "answer_session",
     "escalate_question",
     "judge_session",
@@ -843,6 +844,19 @@ fn agentbench_specs() -> Vec<Spec> {
                     "reason": string("What exactly you would do, for the user"),
                 }),
                 &["project", "action"],
+            ),
+        ),
+        Spec::new(
+            "restart_server",
+            "Supervisor chat only. Restart the agentbench server, for example after installing a new build. Use it instead of systemctl restart or pkill. \
+             It waits until no other turn is running or the drain limit passes (restart_drain_secs, default 120 s), then restarts; turns that outlive the drain are interrupted and resumed afterwards. \
+             Off by default: the user is asked each time unless they switched it on in settings. Your own turn ends with the restart and resumes with a note saying how many turns finished and how many were interrupted.",
+            object(
+                json!({
+                    "reason": string("Why, for the user"),
+                    "drain_secs": json!({ "type": "integer", "description": "Seconds to wait for running turns; default the server's setting" }),
+                }),
+                &[],
             ),
         ),
         Spec::new(

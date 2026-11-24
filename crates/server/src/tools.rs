@@ -492,6 +492,35 @@ impl StoreApi {
         Ok(json!({ "allowed": true, "action": action.as_str(), "project": p.name, "cwd": p.path, "run": run }))
     }
 
+    fn restart_server(&self, args: &Value, me: SessionId) -> Result<Value, String> {
+        let settings = crate::restart::settings(&self.store);
+        if !settings.supervisor_may_restart && !self.take_approval(me, 0, "restart_server") {
+            let why = text(args, "reason").map(|r| format!(": {}", clip(r.trim(), 300))).unwrap_or_default();
+            let level = crate::autopilot::default_level(&self.store);
+            return Err(proposal(
+                &format!("restart the agentbench server{why}"),
+                "restart_server",
+                None,
+                "the user's yes, or `supervisor may restart` switched on in settings",
+                level,
+            ));
+        }
+        let runner = self.runner.get()?;
+        let rt = tokio::runtime::Handle::try_current().map_err(|_| "no runtime to restart from".to_string())?;
+        let drain = args.get("drain_secs").and_then(Value::as_u64);
+        let running = runner.running_turns().into_iter().filter(|id| *id != me).count();
+        let limit = crate::restart::drain_limit(&self.store, drain).as_secs();
+        rt.spawn(async move {
+            crate::restart::restart(&runner, drain, Some(me)).await;
+        });
+        Ok(json!({
+            "restarting": true,
+            "running_turns": running,
+            "drain_secs": limit,
+            "note": "the server waits for the running turns (up to drain_secs), then restarts; this turn ends with it and resumes afterwards with how many turns finished and how many were interrupted. End your turn now.",
+        }))
+    }
+
     fn approve(&self, args: &Value, me: SessionId) -> Result<Value, String> {
         let tool = text(args, "tool").ok_or("missing `tool`")?;
         let project = match args.get("project").filter(|v| !v.is_null()) {
@@ -594,7 +623,7 @@ impl StoreApi {
             id: "restart-drains-turns".into(),
             ask: true,
             message: format!(
-                "stopping or restarting agentbench now cuts off {} running turn(s): {}. Wait until list_sessions shows them idle, then restart.",
+                "stopping or restarting agentbench now cuts off {} running turn(s): {}. Use `agentbench-server restart` (or the restart_server tool), which waits for them to finish first.",
                 busy.len(),
                 busy.join(", ")
             ),
@@ -1581,7 +1610,7 @@ impl Api for StoreApi {
                 let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
                 json!(state)
             }
-            "merge_branch" | "set_automation" | "risky_action" | "approve_action" | "set_vision" | "main_checkout" if !sup => {
+            "merge_branch" | "set_automation" | "risky_action" | "restart_server" | "approve_action" | "set_vision" | "main_checkout" if !sup => {
                 return Err(format!("only the supervisor chat can use {tool}"));
             }
             "main_checkout" => {
@@ -1675,6 +1704,7 @@ impl Api for StoreApi {
             },
             "set_vision" => self.set_vision(args, project, session)?,
             "risky_action" => self.risky_action(args, session)?,
+            "restart_server" => self.restart_server(args, session)?,
             "approve_action" => self.approve(args, session)?,
             "add_project" => {
                 let home = dirs::home_dir().ok_or("no home folder")?;
@@ -1859,6 +1889,22 @@ mod tests {
     }
 
     #[test]
+    fn restart_server_is_off_by_default_and_needs_the_users_yes_once() {
+        let b = boss();
+        for level in Automation::ALL {
+            b.s.update_project(b.project, &ProjectPatch { automation: Some(Some(level)), risky: Some(Risky::ALL.to_vec()), ..Default::default() }).unwrap();
+            assert!(proposed(&b.api.call("restart_server", &json!({"reason": "new build"}), b.boss)), "{level:?}");
+        }
+        assert!(b.api.call("restart_server", &json!({}), b.worker).unwrap_err().contains("only the supervisor"));
+        b.api.call("approve_action", &json!({"tool": "restart_server", "scope": "once"}), b.boss).unwrap();
+        let once = b.api.call("restart_server", &json!({}), b.boss);
+        assert!(!proposed(&once), "{once:?}");
+        assert!(proposed(&b.api.call("restart_server", &json!({}), b.boss)), "a yes is for one restart");
+        crate::restart::save(&b.s, &agentbench_core::RestartSettings { drain_secs: 30, supervisor_may_restart: true }).unwrap();
+        assert!(!proposed(&b.api.call("restart_server", &json!({}), b.boss)), "switched on in settings");
+    }
+
+    #[test]
     fn restarting_agentbench_with_a_turn_running_is_held_and_names_the_turn() {
         let b = boss();
         let restart = json!({"tool": "bash", "args": {"command": "cargo install --path crates/server --locked && systemctl --user restart agentbench"}});
@@ -1868,6 +1914,7 @@ mod tests {
         assert_eq!(held["hit"], "restart-drains-turns", "{held}");
         assert_eq!(held["ask"], true);
         assert!(held["message"].as_str().unwrap().contains(&b.worker.to_string()), "{held}");
+        assert!(held["message"].as_str().unwrap().contains("agentbench-server restart"), "{held}");
         let stop = json!({"tool": "bash", "args": {"command": "pkill -f agentbench-server"}});
         assert_eq!(b.api.call("check_guard", &stop, b.boss).unwrap()["hit"], "restart-drains-turns");
         let status = json!({"tool": "bash", "args": {"command": "systemctl --user status agentbench"}});
