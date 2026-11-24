@@ -142,6 +142,66 @@ fn off_screen(h: &Harness<'_, App>, size: [f32; 2]) -> Vec<String> {
 
 const SIZES: [[f32; 2]; 2] = [[1280.0, 800.0], [390.0, 844.0]];
 
+fn tab_chip_rects(h: &Harness<'_, App>) -> Vec<(String, egui::Rect)> {
+    h.root()
+        .children_recursive()
+        .filter(|n| n.accesskit_node().bounding_box().is_some())
+        .filter_map(|n| {
+            let label = n.accesskit_node().label()?;
+            let first = label.split_whitespace().next()?;
+            matches!(first, "issues" | "outbox" | "pull" | "board").then(|| (label.clone(), n.rect()))
+        })
+        .collect()
+}
+
+#[test]
+fn the_github_tabs_fit_a_phone() {
+    let g = gh_rig();
+    g.rig
+        .store
+        .update_project(g.project, &ProjectPatch { tracker: Some(Tracker::Github { repo: "o/a-repository-name-long-enough-to-fill-a-phone-row".into() }), ..Default::default() })
+        .unwrap();
+    let failed = g.rig.store.outbox(Some(g.project)).unwrap().into_iter().find(|i| i.kind == "label_add").unwrap().id;
+    g.rig.store.outbox_set_approver(failed, "reviewer").unwrap();
+    g.rig.store.outbox_result(failed, "failed", None, Some("gh: Service Unavailable (HTTP 503)"), 2, 0).unwrap();
+    g.rig.store.outbox_set_approver(g.comment_row, "user").unwrap();
+    for size in [[390.0, 844.0], [412.0, 900.0], [1280.0, 800.0]] {
+        for tab in [GhTab::Issues, GhTab::Outbox, GhTab::Pulls] {
+            let mut h = harness_at(g.rig.url.clone(), size);
+            open_github(&mut h, g.project, tab);
+            h.run_steps(4);
+            shot(&mut h, &format!("github-fit-{:?}-{}", tab, size[0] as u32).to_lowercase());
+            let bad: Vec<String> = h
+                .root()
+                .children_recursive()
+                .filter(|n| n.accesskit_node().bounding_box().is_some())
+                .filter(|n| {
+                    let r = n.rect();
+                    r.left() < -4.0 || r.right() > size[0] + 4.0
+                })
+                .map(|n| format!("{:?} {:?} {:?}", n.accesskit_node().role(), n.accesskit_node().label(), n.rect()))
+                .collect();
+            assert!(bad.is_empty(), "{tab:?} at {size:?}: {bad:?}");
+            let toggle = h.get_by_label("project scope toggle").rect();
+            assert!(toggle.width() >= 120.0, "{tab:?} at {size:?}: the scope toggle is squeezed to {} px wide, so its labels wrap", toggle.width());
+            let chips = tab_chip_rects(&h);
+            assert!(!chips.is_empty(), "{tab:?} at {size:?}: no tab chips found");
+            for (label, r) in &chips {
+                assert!(!toggle.intersects(*r), "{tab:?} at {size:?}: the scope toggle {toggle:?} sits over the tab chip {label:?} {r:?}");
+            }
+            if tab == GhTab::Outbox {
+                let by = |h: &Harness<'_, App>, who: &str| h.query_all_by_label_contains(&format!("approved by {who}")).count();
+                assert_eq!(by(&h, "reviewer"), 0, "{size:?}: the failed row still carries the approver tag");
+                assert!(by(&h, "user") >= 1, "{size:?}: a proposed row with an approver lost its tag too");
+                assert!(
+                    h.query_all_by_label_contains("gh: Service Unavailable (HTTP 503)").count() >= 1,
+                    "{size:?}: the failed row does not show its error, so it is not the row being read"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_github_project_lists_its_issues_with_trust_labels_and_the_internal_group() {
     let g = gh_rig();
