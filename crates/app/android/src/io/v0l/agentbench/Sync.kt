@@ -28,6 +28,7 @@ class Config(ctx: Context, private val target: Target? = null, private val sever
     val url get() = (target?.url ?: prefs.getString("url", "").orEmpty()).trim().trimEnd('/')
     val token get() = (target?.token ?: prefs.getString("token", "").orEmpty()).trim()
     val ready get() = on && url.isNotEmpty() && token.isNotEmpty()
+    val alertManaged get() = prefs.getBoolean("alert_managed", false)
 
     /** The workspace name to put in a notification, only when more than one is watched. */
     val label get() = if (several) target?.name.orEmpty() else ""
@@ -147,14 +148,14 @@ object Watcher {
         for (id in o.keys()) {
             if (id == "v2") continue
             val a = o.optJSONArray(id) ?: continue
-            out[id] = Row(a.optString(0), a.optString(1), a.optString(2))
+            out[id] = Row(a.optString(0), a.optString(1), a.optString(2), a.optBoolean(3, false))
         }
         return out
     }
 
     private fun save(cfg: Config, rows: Map<String, Row>) {
         val o = JSONObject().put("v2", 1)
-        for ((id, r) in rows) o.put(id, JSONArray().put(r.status).put(r.title).put(r.project))
+        for ((id, r) in rows) o.put(id, JSONArray().put(r.status).put(r.title).put(r.project).put(r.managed))
         cfg.known = o.toString()
     }
 
@@ -185,10 +186,11 @@ object Watcher {
                     if (d.has("status")) d.getString("status") else null,
                     if (d.has("title")) d.getString("title") else null,
                     if (d.has("project")) d.getString("project") else null,
+                    if (d.has("managed")) d.getBoolean("managed") else null,
                 )
             )
         }
-        val state = AttentionState(load(cfg))
+        val state = AttentionState(load(cfg), cfg.alertManaged)
         val reset = r.optBoolean("reset", false)
         val events = state.apply(deltas, reset)
         val show = events.isNotEmpty() && !visible(ctx)

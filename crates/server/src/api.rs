@@ -3144,6 +3144,7 @@ mod tests {
         assert_eq!(first["reset"], true);
         assert_eq!(first["changes"].as_array().unwrap().len(), 1);
         assert_eq!(first["changes"][0]["title"], "chat");
+        assert_eq!(first["changes"][0]["managed"], false);
         let (cursor, epoch) = (first["cursor"].as_i64().unwrap(), first["epoch"].as_u64().unwrap());
         let uri = format!("/api/changes?kinds=attention&since={cursor}&epoch={epoch}&wait=1");
         let app2 = f.app.clone();

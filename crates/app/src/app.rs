@@ -471,6 +471,7 @@ struct Settings {
     thinking: bool,
     /// Whether a phone tells you in the background when a chat needs you or finishes.
     alerts: bool,
+    alerts_managed: bool,
     issues_first: bool,
     /// Set by the scan key, for the window to open the camera.
     scan: bool,
@@ -803,6 +804,7 @@ pub struct App {
     fonts_loaded: u32,
     /// Whether a phone tells you in the background when a chat needs you or finishes.
     alerts: bool,
+    alerts_managed: bool,
     issues_first: bool,
     triage_open: bool,
     github: HashMap<Id, github::GithubView>,
@@ -1022,6 +1024,8 @@ impl App {
             fonts_loaded: 0,
             thinking: storage.and_then(|s| s.get_string("thinking")).as_deref() != Some("false"),
             alerts: storage.and_then(|s| s.get_string("alerts")).as_deref() != Some("false"),
+            alerts_managed: storage.and_then(|s| s.get_string("alerts_managed")).as_deref()
+                == Some("true"),
             issues_first: storage.and_then(|s| s.get_string("issues_first")).as_deref()
                 == Some("true"),
             triage_open: storage.and_then(|s| s.get_string("triage_open")).as_deref()
@@ -1059,6 +1063,7 @@ impl App {
         storage.set_string("home_supervisor", self.home_supervisor.to_string());
         storage.set_string("thinking", self.thinking.to_string());
         storage.set_string("alerts", self.alerts.to_string());
+        storage.set_string("alerts_managed", self.alerts_managed.to_string());
         storage.set_string("issues_first", self.issues_first.to_string());
         storage.set_string("triage_open", self.triage_open.to_string());
         self.speech.save(storage);
@@ -1150,12 +1155,12 @@ impl App {
 
     fn sync_alerts(&self) {
         if let Some(c) = &self.client {
-            crate::notify::watch(&self.watch_targets(&c.server), self.alerts);
+            crate::notify::watch(&self.watch_targets(&c.server), self.alerts, self.alerts_managed);
         }
     }
 
     fn connect_to(&mut self, ctx: &egui::Context, server: Server) {
-        crate::notify::watch(&self.watch_targets(&server), self.alerts);
+        crate::notify::watch(&self.watch_targets(&server), self.alerts, self.alerts_managed);
         self.keep_pairing(&server);
         let ctx = ctx.clone();
         let client =

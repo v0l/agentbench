@@ -38,7 +38,7 @@ mod android {
     }
 
     /// Point the service at a server, or stop it when `on` is false or there is no server.
-    pub fn watch(url: &str, token: &str, servers: &str, on: bool) {
+    pub fn watch(url: &str, token: &str, servers: &str, on: bool, managed: bool) {
         let on = on && !url.trim().is_empty() && !token.trim().is_empty();
         if on && !allowed(POST_NOTIFICATIONS) {
             // Android 13 and later ask first; the answer arrives later, and the next call (the
@@ -68,13 +68,15 @@ mod android {
             put(env, "url", url.trim())?;
             put(env, "token", token.trim())?;
             put(env, "servers", servers)?;
-            let k = env.new_string("on")?;
-            env.call_method(
-                &edit,
-                jni_str!("putBoolean"),
-                jni_sig!("(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;"),
-                &[(&k).into(), on.into()],
-            )?;
+            for (key, value) in [("on", on), ("alert_managed", managed)] {
+                let k = env.new_string(key)?;
+                env.call_method(
+                    &edit,
+                    jni_str!("putBoolean"),
+                    jni_sig!("(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;"),
+                    &[(&k).into(), value.into()],
+                )?;
+            }
             env.call_method(&edit, jni_str!("commit"), jni_sig!("()Z"), &[])?;
 
             let i = intent(env, ctx)?;
@@ -132,14 +134,14 @@ pub fn watch_json(list: &[Watched]) -> String {
 }
 
 /// Watch every server in `list` in the background, or stop watching.
-pub fn watch(list: &[Watched], on: bool) {
+pub fn watch(list: &[Watched], on: bool, managed: bool) {
     #[cfg(target_os = "android")]
     {
         let (url, token) = list.first().map(|w| (w.url.as_str(), w.token.as_str())).unwrap_or(("", ""));
-        android::watch(url, token, &watch_json(list), on);
+        android::watch(url, token, &watch_json(list), on, managed);
     }
     #[cfg(not(target_os = "android"))]
-    let _ = (list, on);
+    let _ = (list, on, managed);
 }
 
 /// Whether this device can raise notifications while the app is closed.

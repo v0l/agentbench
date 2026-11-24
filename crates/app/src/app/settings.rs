@@ -27,6 +27,7 @@ impl App {
             external: self.external.clone(),
             thinking: self.thinking,
             alerts: self.alerts,
+            alerts_managed: self.alerts_managed,
             issues_first: self.issues_first,
             scan: false,
             pair_token: self.client.as_ref().map(|c| c.server.token.clone()).unwrap_or_default(),
@@ -207,6 +208,18 @@ impl App {
                                     }
                                 },
                             );
+                            if st.alerts {
+                                row_help(
+                                    ui,
+                                    "handled chats",
+                                    "Alert for chats the supervisor or autopilot handles. Off keeps the phone quiet for them, since they judge, answer or send them back.",
+                                    |ui| {
+                                        if tap_toggle(ui, if st.alerts_managed { "on" } else { "off" }, st.alerts_managed).clicked() {
+                                            st.alerts_managed = !st.alerts_managed;
+                                        }
+                                    },
+                                );
+                            }
                         }
                         row_help(ui, "show thinking", "Show the model's reasoning in the transcript.", |ui| {
                             if tap_toggle(ui, if st.thinking { "on" } else { "off" }, st.thinking).clicked() {
@@ -533,8 +546,9 @@ impl App {
         // Only this device uses it, so it is kept as it is typed rather than on save.
         self.thinking = st.thinking;
         self.issues_first = st.issues_first;
-        if self.alerts != st.alerts {
+        if self.alerts != st.alerts || self.alerts_managed != st.alerts_managed {
             self.alerts = st.alerts;
+            self.alerts_managed = st.alerts_managed;
             self.sync_alerts();
         }
         if self.external != st.external.trim() {

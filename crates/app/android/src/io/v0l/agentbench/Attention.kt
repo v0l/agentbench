@@ -1,6 +1,6 @@
 package io.v0l.agentbench
 
-data class Row(val status: String, val title: String, val project: String)
+data class Row(val status: String, val title: String, val project: String, val managed: Boolean = false)
 
 sealed class Event {
     data class Cancel(val id: String) : Event()
@@ -13,10 +13,11 @@ class Delta(
     val status: String?,
     val title: String?,
     val project: String?,
+    val managed: Boolean? = null,
 )
 
 /** What the phone knows about each chat: status, title and project only, never any content. */
-class AttentionState(start: Map<String, Row>?) {
+class AttentionState(start: Map<String, Row>?, private val alertManaged: Boolean = false) {
     val rows = HashMap<String, Row>(start ?: emptyMap())
     private var seeded = start != null
 
@@ -34,6 +35,7 @@ class AttentionState(start: Map<String, Row>?) {
                 d.status ?: old?.status ?: "idle",
                 d.title ?: old?.title ?: "",
                 d.project ?: old?.project ?: "",
+                d.managed ?: old?.managed ?: false,
             )
         }
         val touched = if (reset) rows.keys + before.keys else deltas.map { it.id }.toSet()
@@ -44,9 +46,11 @@ class AttentionState(start: Map<String, Row>?) {
                 if (was == "waiting" || was == "failed") events.add(Event.Cancel(id))
                 continue
             }
-            if (was == now.status) continue
-            if (was == "waiting" || was == "failed") events.add(Event.Cancel(id))
+            val released = before[id]?.managed == true && !now.managed
+            if (was == now.status && !(released && seeded && (was == "waiting" || was == "failed"))) continue
+            if (was != now.status && (was == "waiting" || was == "failed")) events.add(Event.Cancel(id))
             if (!seeded) continue
+            if (now.managed && !alertManaged) continue
             val title = now.title.ifBlank { "chat" }
             when {
                 now.status == "waiting" -> events.add(Event.Alert(id, "needs", title, now.project))

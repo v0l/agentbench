@@ -26,6 +26,7 @@ All notable changes to Agentbench are listed here. The format follows
 - A 400 that lists the accepted `reasoning_effort` values is retried with the nearest accepted one.
 
 ### Fixed
+- Android: no alerts for chats the supervisor or autopilot handles. Each row of the attention feed (`/api/changes?kinds=attention`) carries an optional `managed` boolean, true when the chat has a parent session or is an autopilot worker; older apps ignore it. A new setting, "handled chats", brings the alerts back.
 - Android: the background watcher polls a status-only diff feed (`/api/changes?kinds=attention`) instead of re-downloading the full overview on every session change; about 200 bytes a minute while agents run, where it was megabytes a minute. Needs a v0.9.1 server.
 - Done and merged sessions are closed by default at ship and above, with their worktree and merged branch.
 - Sessions started with `start_session {issue}` join the autopilot, so one path runs judge, review, merge, done and close. `merge_branch` marks the issue done and closes the session too, and says "already merged" instead of a push error when the branch is already in origin.
