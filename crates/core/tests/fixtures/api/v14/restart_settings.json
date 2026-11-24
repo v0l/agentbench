@@ -1,0 +1,4 @@
+{
+  "drain_secs": 90,
+  "supervisor_may_restart": false
+}
