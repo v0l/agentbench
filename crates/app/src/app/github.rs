@@ -213,9 +213,12 @@ impl App {
             }
         });
         ui.add_space(4.0);
-        ui.push_id("scope", |ui| {
-            segments(ui, &mut self.scope, &[(Scope::Project, "this project", None), (Scope::Everything, "all projects", None)]);
-        });
+        let scope = ui
+            .push_id("scope", |ui| {
+                segments(ui, &mut self.scope, &[(Scope::Project, "this project", None), (Scope::Everything, "all projects", None)]);
+            })
+            .response;
+        scope.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Group, true, "project scope toggle"));
         ui.add_space(6.0);
         let pulls_known = self.server_has(pid, API_PR_REVIEW);
         let mut tabs: Vec<(GhTab, String)> = vec![(GhTab::Issues, format!("issues {issues_n}"))];
