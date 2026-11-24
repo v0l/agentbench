@@ -534,6 +534,7 @@ That script is the only Android build (needs `cargo-ndk`, the SDK and NDK). `car
 |---|---|
 | `GET /api/overview` | projects, worktrees, issues, sessions, agents and the change cursor |
 | `GET /api/changes?since=N&wait=20` | long poll, returns when something changed |
+| `GET /api/changes?kinds=attention&since=N&epoch=E&wait=20` | the status-only attention feed: each row is `{kind, id, status, title, project, managed}`, `managed` true when a parent session or the autopilot handles the chat, so a phone can stay quiet for it |
 | `POST /api/projects` `{path, name?, create?}` | add a repository; `create` makes the folder and runs `git init` when it is missing or not a repo |
 | `POST /api/projects/{id}/worktrees` `{branch}` | make a worktree |
 | `DELETE /api/worktrees/{id}?force=true` | remove one, the branch is kept |
