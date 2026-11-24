@@ -65,6 +65,8 @@ impl App {
             title_asking: false,
             supervisor_model: String::new(),
             supervisor_loaded: false,
+            restart: None,
+            restart_asked: false,
             audio: None,
             voices: None,
             speech_models: None,
@@ -80,6 +82,12 @@ impl App {
         {
             c.supervisor_model();
             c.model();
+        }
+        if !cfg!(target_os = "android")
+            && self.client.as_ref().is_some_and(|h| h.server_has(h.focus().unwrap_or(0), agentbench_core::API_RESTART))
+            && let Some(c) = &mut self.client
+        {
+            c.restart_settings();
         }
     }
 
@@ -102,6 +110,7 @@ impl App {
             return;
         };
         let (mut save, mut close, mut probe, mut probe_title) = (false, false, false, false);
+        let mut restart_now = false;
         let mut providers = false;
         let can_close = self.client.is_some() || self.starting.is_some();
         let has_local = self.local.is_some();
@@ -169,6 +178,10 @@ impl App {
                                 }
                             }
                         });
+                        ui.add_space(14.0);
+                    }
+                    if let Some(r) = st.restart.as_mut() {
+                        restart_now = restart_section(ui, r, &mut st.restart_asked);
                         ui.add_space(14.0);
                     }
                     server_section(ui, &mut st, has_local);
@@ -491,6 +504,13 @@ impl App {
             Some(ProjectAction::DefaultLevel(level)) => self.set_default_level(level),
             None => {}
         }
+        if restart_now
+            && let (Some(c), Some(r)) = (&mut self.client, st.restart.as_ref())
+        {
+            c.set_restart_settings(r);
+            c.restart_server(r.drain_secs);
+            self.notice = Some((true, format!("the server restarts once running turns finish, up to {} s", r.drain_secs)));
+        }
         if probe {
             st.asking = true;
             if let Some(c) = &mut self.client {
@@ -534,6 +554,9 @@ impl App {
                 if st.supervisor_loaded {
                     c.set_supervisor_model(&st.supervisor_model);
                 }
+                if let Some(r) = &st.restart {
+                    c.set_restart_settings(r);
+                }
                 if st.title_loaded {
                     c.set_title(&st.title);
                 }
@@ -563,6 +586,44 @@ impl App {
             self.settings = Some(st);
         }
     }
+}
+
+pub(super) fn restart_section(ui: &mut Ui, r: &mut agentbench_core::RestartSettings, asked: &mut bool) -> bool {
+    let mut go = false;
+    section(ui, "restart", "restart the server without cutting running turns", |ui| {
+        row_help(ui, "drain", "Seconds a restart waits for running turns to finish. A turn still running after that is interrupted and resumed when the server is back.", |ui| {
+            ui.add(egui::DragValue::new(&mut r.drain_secs).range(0..=3600).suffix(" s"));
+        });
+        row_help(ui, "supervisor", "Let the supervisor restart the server without asking you each time.", |ui| {
+            let label = if r.supervisor_may_restart { "may restart" } else { "asks first" };
+            let t = tap_toggle(ui, label, r.supervisor_may_restart);
+            t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, r.supervisor_may_restart, "supervisor may restart"));
+            if t.clicked() {
+                r.supervisor_may_restart = !r.supervisor_may_restart;
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if *asked {
+                note(ui, "Restart once running turns finish?", LEGEND);
+                let yes = ui.add(Key::new("yes, restart").solid(READOUT));
+                yes.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "yes, restart"));
+                if yes.clicked() {
+                    go = true;
+                    *asked = false;
+                }
+                if ui.add(Key::new("no").outline(VALUE)).clicked() {
+                    *asked = false;
+                }
+            } else {
+                let k = ui.add(Key::new("restart server").outline(VALUE));
+                k.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "restart server"));
+                if k.clicked() {
+                    *asked = true;
+                }
+            }
+        });
+    });
+    go
 }
 
 pub(super) fn server_section(ui: &mut Ui, st: &mut Settings, has_local: bool) {

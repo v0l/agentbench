@@ -33,6 +33,7 @@ pub enum Reply {
     Model(agentbench_core::ModelSettings),
     Title(agentbench_core::TitleSettings),
     SupervisorModel(String),
+    RestartSettings(agentbench_core::RestartSettings),
     /// Where the server runs its speech models. `None` when the server is too old to say.
     Audio(Option<agentbench_core::AudioStatus>),
     /// The voices the server reads aloud in, as (id, label). `None` when it cannot say.
@@ -636,6 +637,27 @@ impl Client {
     pub fn set_supervisor_model(&mut self, model: &str) {
         let body = serde_json::json!({ "model": model });
         self.act(Method::PUT, "/api/settings/supervisor-model", Some(&body), "");
+    }
+
+    pub fn restart_settings(&mut self) {
+        let req = self.request(Method::GET, "/api/settings/restart", None);
+        self.dispatch(req, |res| match res.ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+            Some(r) => Reply::RestartSettings(r),
+            None => Reply::Done(String::new()),
+        });
+    }
+
+    pub fn set_restart_settings(&mut self, s: &agentbench_core::RestartSettings) {
+        let req = self.request(Method::PUT, "/api/settings/restart", Self::json(s));
+        self.send(req, Reply::RestartSettings);
+    }
+
+    pub fn restart_server(&mut self, drain_secs: u64) {
+        let body = agentbench_core::RestartRequest { drain_secs: Some(drain_secs), session: None };
+        let req = self
+            .request(Method::POST, "/api/server/restart", Self::json(&body))
+            .timeout(Duration::from_secs(drain_secs + 60));
+        self.send(req, |r: agentbench_core::Restarted| Reply::Done(format!("restarting the server: {}", r.summary())));
     }
 
     pub fn title(&mut self) {

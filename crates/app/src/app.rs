@@ -491,6 +491,8 @@ struct Settings {
     title_asking: bool,
     supervisor_model: String,
     supervisor_loaded: bool,
+    restart: Option<agentbench_core::RestartSettings>,
+    restart_asked: bool,
     /// Where the server runs speech: `None` until it answers, `Some(None)` when it cannot say.
     audio: Option<Option<agentbench_core::AudioStatus>>,
     /// The voices the server reads aloud in: `None` until it answers.
@@ -1411,6 +1413,10 @@ impl App {
         }
     }
 
+    pub fn settings_restart(&self) -> Option<agentbench_core::RestartSettings> {
+        self.settings.as_ref().and_then(|s| s.restart.clone())
+    }
+
     /// Fill in one model level (low, medium or high) as the settings dialog would.
     pub fn settings_set_level(&mut self, level: &str, url: &str, model: &str) {
         if let Some(st) = &mut self.settings {
@@ -2285,6 +2291,11 @@ impl App {
                 if let Some(st) = self.settings.as_mut().filter(|s| !s.supervisor_loaded) {
                     st.supervisor_model = model;
                     st.supervisor_loaded = true;
+                }
+            }
+            Reply::RestartSettings(r) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.restart = Some(r);
                 }
             }
             Reply::Onboarding(o) => self.onboarding_reply(o),

@@ -4535,6 +4535,32 @@ fn the_issue_model_level_is_shown_edited_and_fits_a_phone() {
 }
 
 #[test]
+fn the_settings_restart_the_server_after_asking_and_fit_a_phone() {
+    for size in [[1280.0, 800.0], [390.0, 844.0], [412.0, 900.0]] {
+        let rig = rig();
+        let mut h = harness_at(rig.url.clone(), size);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_settings_page("general");
+        h.run_steps(2);
+        until(&mut h, "the restart settings", |h| h.state().settings_restart().is_some());
+        h.run_steps(3);
+        assert_eq!(h.state().settings_restart().unwrap().drain_secs, 120);
+        let tag = size[0] as u32;
+        h.get_by_label("restart server").click();
+        h.run_steps(3);
+        shot(&mut h, &format!("settings-restart-{tag}"));
+        for label in ["yes, restart", "supervisor may restart"] {
+            let r = h.get_by_label(label).rect();
+            assert!(r.min.x >= 0.0 && r.max.x <= size[0], "{label} at {size:?}: {r:?}");
+        }
+        h.get_by_label("yes, restart").click();
+        let addr = rig.url.trim_start_matches("http://").to_string();
+        until(&mut h, "the server to stop for the restart", |_| std::net::TcpStream::connect(&addr).is_err());
+        assert_eq!(rig.store.setting("restart_drain_secs").unwrap().as_deref(), Some("120"));
+    }
+}
+
+#[test]
 fn the_projects_screens_fit_a_phone() {
     for size in [[390.0, 844.0], [412.0, 900.0]] {
         let (rig, id) = project_rig();
