@@ -459,6 +459,23 @@ with the `groom_done` tool, whose one-line summary goes to the autopilot feed.
 A project is groomed at most once per `groom_hours` (24) and again only after its
 backlog changed. `groom` (on) and `groom_hours` are in the `autopilot` tool.
 
+A `backlog` or `todo` issue with no goal and not marked off vision is never
+started. It gets the `needs-judgement` label and, 15 minutes after it is filed or
+loses its goal, the supervisor gets one `judge_issues <project>:` message listing
+up to 10 such issues, newest first, with the vision. At most one message per
+project every 15 minutes and five an hour in all; the first run sends the existing
+backlog in batches the same way. The supervisor answers each issue with the
+`judge_issue` tool: `serves_goal` (sets an active goal and keeps the state, so
+a todo issue becomes startable), `off_vision` (flags it and moves it to backlog),
+`needs_user` (labels it), `duplicate` (closes it, pointing at the other issue) or
+`not_worth_doing` (closes it). Each verdict leaves a comment with the reason.
+Issues labelled `parked`, or in backlog with `needs-gpu`, `needs-spark`,
+`needs-both-gpus` or `blocked`, are left alone. Issues from untrusted GitHub
+authors are fenced in the message and can be closed or labelled, never given a
+goal. A project with no vision gets one line a day asking for one.
+`judge_unset_goals` (on) is in the `autopilot` tool and on the settings page;
+a project can override it with `set_automation` or its row on the projects page.
+
 When a server sends no cost, it is worked out from a price table, in USD per
 million tokens. Claude models have defaults; a model with no entry, such as a
 local one, costs 0. Entries match the start of the model name, the longest wins,

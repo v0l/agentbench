@@ -2909,6 +2909,36 @@ fn the_settings_projects_page_sets_a_level_and_risky_toggles_that_persist() {
 }
 
 #[test]
+fn the_settings_projects_page_switches_judging_goalless_issues_at_desktop_and_phone_width() {
+    for (size, tag) in [([1280.0, 800.0], "desktop"), ([390.0, 844.0], "phone"), ([412.0, 900.0], "phone412")] {
+        let rig = rig();
+        let project = rig.store.projects().unwrap().into_iter().find(|p| !p.builtin()).unwrap();
+        let mut h = harness_at(rig.url.clone(), size);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_settings_page("projects");
+        h.run_steps(3);
+        shot(&mut h, &format!("judge-goalless-{tag}"));
+        for label in ["judge goalless issues".to_string()] {
+            let r = h.get_by_label(&label).rect();
+            assert!(r.min.x >= 0.0 && r.max.x <= size[0], "{label} at {size:?}: {r:?}");
+        }
+        assert!(h.state().autopilot().is_some_and(|a| a.judge_unset_goals), "on by default");
+        h.get_by_label("judge goalless issues").click();
+        until(&mut h, "global off", |_| rig.store.setting("autopilot_judge_unset_goals").unwrap().as_deref() == Some("0"));
+        h.get_by_label(&format!("{} judge goalless on", project.name)).scroll_to_me();
+        h.run_steps(3);
+        shot(&mut h, &format!("judge-goalless-{tag}-project"));
+        let r = h.get_by_label(&format!("{} judge goalless default (off)", project.name)).rect();
+        assert!(r.min.x >= 0.0 && r.max.x <= size[0], "project row at {size:?}: {r:?}");
+        h.get_by_label(&format!("{} judge goalless on", project.name)).click();
+        until(&mut h, "project on", |_| rig.store.project(project.id).unwrap().judge_unset_goals == Some(true));
+        h.run_steps(5);
+        h.get_by_label(&format!("{} judge goalless default (off)", project.name)).click();
+        until(&mut h, "project default", |_| rig.store.project(project.id).unwrap().judge_unset_goals.is_none());
+    }
+}
+
+#[test]
 fn the_supervisor_chat_shows_and_sets_the_levels() {
     use agentbench_core::Automation;
     let rig = rig();

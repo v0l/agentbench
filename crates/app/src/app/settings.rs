@@ -129,6 +129,10 @@ impl App {
             .collect();
         let mut project_action: Option<ProjectAction> = None;
         let default_level = self.default_level();
+        let judge_default = self
+            .autopilot()
+            .filter(|_| self.client.as_ref().is_some_and(|h| h.server_has(h.focus().unwrap_or(0), agentbench_core::API_JUDGE_GOALS)))
+            .map(|a| a.judge_unset_goals);
         let m = egui::Modal::new(egui::Id::unique("settings"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
@@ -226,6 +230,7 @@ impl App {
                         &mut st.renaming,
                         &mut st.deploying,
                         default_level,
+                        judge_default,
                     );
                 } else if !can_close && st.place == Where::Remote {
                     hint(ui, "Connect to a server to set up its agents.");
@@ -497,6 +502,8 @@ impl App {
                 self.confirm = Some(Confirm::Worktree(w.id, w.label(), w.missing));
             }
             Some(ProjectAction::Level(id, level)) => self.set_project_level(id, level),
+            Some(ProjectAction::JudgeDefault(on)) => self.set_judge_unset_goals(on),
+            Some(ProjectAction::Judge(id, on)) => self.set_project_judge(id, on),
             Some(ProjectAction::Risky(id, risky)) => self.set_project_risky(id, risky),
             Some(ProjectAction::Deploy(id, deploy)) => {
                 self.patch_project(id, agentbench_core::ProjectPatch { deploy: Some(deploy), ..Default::default() });
@@ -1106,6 +1113,8 @@ enum ProjectAction {
     Risky(Id, Vec<Risky>),
     Deploy(Id, String),
     DefaultLevel(Automation),
+    JudgeDefault(bool),
+    Judge(Id, Option<bool>),
 }
 
 fn automation_rows(
@@ -1203,6 +1212,22 @@ fn automation_rows(
     }
 }
 
+fn judge_row(ui: &mut Ui, p: &agentbench_core::Project, global: bool, action: &mut Option<ProjectAction>) {
+    row_help(ui, "judge goalless", "Whether the supervisor judges this project's goalless issues against its vision.", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let choices = [(Some(true), "on".to_string()), (Some(false), "off".to_string()), (None, format!("default ({})", if global { "on" } else { "off" }))];
+            for (value, word) in choices {
+                let picked = p.judge_unset_goals == value;
+                let t = tap_toggle(ui, &word, picked);
+                t.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, picked, format!("{} judge goalless {word}", p.name)));
+                if t.clicked() && !picked {
+                    *action = Some(ProjectAction::Judge(p.id, value));
+                }
+            }
+        });
+    });
+}
+
 fn projects_section(
     ui: &mut Ui,
     rows: &[(agentbench_core::Project, Vec<Worktree>)],
@@ -1210,6 +1235,7 @@ fn projects_section(
     renaming: &mut Option<(Id, String)>,
     deploying: &mut Option<(Id, String)>,
     default: Automation,
+    judge_default: Option<bool>,
 ) -> Option<ProjectAction> {
     let mut action = None;
     let phone = ui.ctx().content_rect().width() < 720.0;
@@ -1223,6 +1249,15 @@ fn projects_section(
             Line::new().set(default.label()).size(11.0).show(ui);
         });
         hint(ui, default.about());
+        if let Some(on) = judge_default {
+            row_help(ui, "judge goalless", "Ask the supervisor to judge backlog and todo issues with no goal against the vision.", |ui| {
+                let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
+                t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "judge goalless issues"));
+                if t.clicked() {
+                    action = Some(ProjectAction::JudgeDefault(!on));
+                }
+            });
+        }
     });
     ui.add_space(8.0);
     field(ui, filter, "filter projects");
@@ -1237,6 +1272,9 @@ fn projects_section(
         }
         section(ui, &p.name, &short_path(&p.path), |ui| {
             automation_rows(ui, p, default, deploying, &mut action);
+            if let Some(global) = judge_default {
+                judge_row(ui, p, global, &mut action);
+            }
             ui.add_space(4.0);
             for w in trees {
                 ui.horizontal(|ui| {

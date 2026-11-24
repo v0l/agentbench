@@ -2651,6 +2651,19 @@ impl App {
         self.patch_project(id, ProjectPatch { risky: Some(risky), ..Default::default() });
     }
 
+    pub fn set_project_judge(&mut self, id: Id, on: Option<bool>) {
+        self.patch_project(id, ProjectPatch { judge_unset_goals: Some(on), ..Default::default() });
+    }
+
+    pub fn set_judge_unset_goals(&mut self, on: bool) {
+        if let Some(a) = self.overview.as_mut().and_then(|o| o.autopilot.as_mut()) {
+            a.judge_unset_goals = on;
+        }
+        if let Some(c) = &mut self.client {
+            c.autopilot(&agentbench_core::AutopilotPatch { judge_unset_goals: Some(on), ..Default::default() });
+        }
+    }
+
     fn patch_project(&mut self, id: Id, patch: ProjectPatch) {
         if let Some(p) = self.overview.as_mut().and_then(|o| o.projects.iter_mut().find(|p| p.id == id)) {
             if let Some(l) = patch.automation {
@@ -2658,6 +2671,9 @@ impl App {
             }
             if let Some(r) = &patch.risky {
                 p.risky = r.clone();
+            }
+            if let Some(j) = patch.judge_unset_goals {
+                p.judge_unset_goals = j;
             }
             if let Some(m) = &patch.model_levels {
                 p.model_levels = m.clone();
@@ -3774,6 +3790,7 @@ mod tests {
             merge_mode: Default::default(),
             automerge: Default::default(),
             merge_method: Default::default(),
+            judge_unset_goals: None,
         }
     }
 
