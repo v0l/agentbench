@@ -1925,6 +1925,33 @@ fn hold_harness(size: [f32; 2], url: String) -> Harness<'static, App> {
 }
 
 #[test]
+fn the_voice_conversation_row_fits_at_both_sizes() {
+    let rig = rig();
+    for (tag, size) in [("desktop", [1280.0, 800.0]), ("phone", [390.0, 844.0])] {
+        let _build = build_lock();
+        let url = rig.url.clone();
+        let mut h = Harness::builder().with_size(size).wgpu_setup(gpu_setup()).build_eframe(move |cc| {
+            let mut storage = Mem::default();
+            storage.0.insert("url".into(), url);
+            storage.0.insert("token".into(), TOKEN.into());
+            storage.0.insert("voice_converse".into(), "1".into());
+            App::new(&cc.egui_ctx, Some(&storage), None)
+        });
+        drop(_build);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_settings_page("speech");
+        h.run_steps(2);
+        until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
+        h.run_steps(4);
+        shot(&mut h, &format!("converse-settings-{tag}"));
+        for label in ["voice mode", "F9"] {
+            let n = h.get_by_label(label);
+            assert!(n.rect().right() <= size[0], "{label} runs off a {tag} screen");
+        }
+    }
+}
+
+#[test]
 fn hold_to_talk_is_a_speech_setting_at_both_sizes() {
     let rig = rig();
     for (tag, size) in [("desktop", [1280.0, 800.0]), ("phone", [412.0, 900.0])] {

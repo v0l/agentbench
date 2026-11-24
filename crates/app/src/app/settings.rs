@@ -939,13 +939,13 @@ pub(super) fn speech_section(
     section(ui, "conversation", "talk to the supervisor, kept on this device", |ui| {
         row_help(
             ui,
-            "voice conversation",
+            "voice mode",
             "Press the talk key in the supervisor chat, speak, and its reply is read aloud a sentence at a time. Press the key again while it talks to cut it off. Audio is never stored.",
             |ui| {
                 let on = sp.converse;
                 let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
                 t.widget_info(|| {
-                    egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "voice conversation")
+                    egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "voice mode")
                 });
                 if t.clicked() {
                     sp.converse = !on;
