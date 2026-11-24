@@ -4546,6 +4546,8 @@ fn the_settings_restart_the_server_after_asking_and_fit_a_phone() {
         h.run_steps(3);
         assert_eq!(h.state().settings_restart().unwrap().drain_secs, 120);
         let tag = size[0] as u32;
+        h.get_by_label("restart server").scroll_to_me();
+        h.run_steps(3);
         h.get_by_label("restart server").click();
         h.run_steps(3);
         shot(&mut h, &format!("settings-restart-{tag}"));

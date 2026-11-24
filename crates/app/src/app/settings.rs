@@ -180,10 +180,6 @@ impl App {
                         });
                         ui.add_space(14.0);
                     }
-                    if let Some(r) = st.restart.as_mut() {
-                        restart_now = restart_section(ui, r, &mut st.restart_asked);
-                        ui.add_space(14.0);
-                    }
                     server_section(ui, &mut st, has_local);
                     ui.add_space(14.0);
                     servers_section(ui, &mut st);
@@ -214,6 +210,10 @@ impl App {
                             }
                         });
                     });
+                    if let Some(r) = st.restart.as_mut() {
+                        ui.add_space(14.0);
+                        restart_now = restart_section(ui, r, &mut st.restart_asked);
+                    }
                 } else if st.page == Page::Speech {
                     speech_section(ui, &mut st.speech, st.voices.as_ref(), st.speech_models.as_ref());
                     ui.add_space(8.0);
@@ -619,6 +619,7 @@ pub(super) fn restart_section(ui: &mut Ui, r: &mut agentbench_core::RestartSetti
                 k.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "restart server"));
                 if k.clicked() {
                     *asked = true;
+                    k.scroll_to_me(Some(egui::Align::Center));
                 }
             }
         });
