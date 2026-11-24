@@ -1592,15 +1592,10 @@ impl App {
             self.reading = None;
             return;
         }
-        let Some(c) = &self.client else {
+        let Some(from) = self.reading_source() else {
             self.notice =
-                Some((false, "not connected to an agentbench server to read aloud".into()));
+                Some((false, "no server to read aloud from; set one in settings".into()));
             return;
-        };
-        let from = crate::voice::Source {
-            url: c.server.base(),
-            token: c.server.token.clone(),
-            voice: self.speech.reply_voice.clone(),
         };
         let ctx = ctx.clone();
         match self.reader.start(text, from, move || ctx.request_repaint()) {
@@ -1610,6 +1605,58 @@ impl App {
                 self.notice = Some((false, e));
             }
         }
+    }
+
+    /// Where a reply is read from: the agentbench server this window is connected to, unless the
+    /// voice settings point reading at a server of their own.
+    fn reading_source(&self) -> Option<crate::voice::Source> {
+        if self.speech.mode == crate::voice::Mode::Server && !self.speech.url.trim().is_empty() {
+            let url = self.speech.url.trim_end_matches('/').trim_end_matches("/v1");
+            return Some(crate::voice::Source {
+                url: url.trim_end_matches('/').to_string(),
+                token: self.speech.key.clone(),
+                voice: self.speech.reply_voice.clone(),
+            });
+        }
+        let c = self.client.as_ref()?;
+        Some(crate::voice::Source {
+            url: c.server.base(),
+            token: c.server.token.clone(),
+            voice: self.speech.reply_voice.clone(),
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_silent(&mut self) {
+        self.reader.silent();
+    }
+
+    /// Feed a recorded take through the same reader a microphone take uses, as the speak key
+    /// would after a finished take.
+    #[doc(hidden)]
+    pub fn voice_test_take(&mut self, wav: &[u8], ctx: &egui::Context) -> Result<(), String> {
+        let ctx = ctx.clone();
+        self.voice.read_take(wav, &self.speech_now(), move || ctx.request_repaint())
+    }
+
+    /// The lines the voice has been asked to read since this was last called.
+    #[doc(hidden)]
+    pub fn voice_test_spoken(&mut self) -> Vec<String> {
+        self.reader.spoken()
+    }
+
+    /// Speak over the reply being read and start a new take, as the talk key does: the audio stops
+    /// at once and the rest of that reply is dropped.
+    #[doc(hidden)]
+    pub fn voice_test_barge(&mut self, wav: &[u8], ctx: &egui::Context) -> Result<(), String> {
+        self.barge_in();
+        self.voice_test_take(wav, ctx)
+    }
+
+    /// Send what was said as a spoken turn to the supervisor, as a finished take does.
+    #[doc(hidden)]
+    pub fn voice_test_send(&mut self, said: &str) {
+        self.say_to_supervisor(said);
     }
 
     /// The talk key: with the conversation on and the supervisor chat open, it cuts off what is
@@ -1683,13 +1730,8 @@ impl App {
         if !self.reader.busy()
             && !self.voice.listening()
             && let Some(sentence) = self.converse.next()
-            && let Some(c) = &self.client
+            && let Some(from) = self.reading_source()
         {
-            let from = crate::voice::Source {
-                url: c.server.base(),
-                token: c.server.token.clone(),
-                voice: self.speech.reply_voice.clone(),
-            };
             let ctx = ctx.clone();
             if let Err(e) = self.reader.start(&sentence, from, move || ctx.request_repaint()) {
                 self.notice = Some((false, e));

@@ -245,6 +245,27 @@ impl Voice {
         self.read(pcm, settings, None, wake);
     }
 
+    /// Read a take that was recorded elsewhere, through the same reader a microphone take uses.
+    pub fn read_take(
+        &mut self,
+        bytes: &[u8],
+        settings: &Settings,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        if self.busy() {
+            return Err("already reading a take".into());
+        }
+        let (pcm, rate) = super::read_wav(bytes)?;
+        let pcm = super::to_whisper_rate(&pcm, rate);
+        if let Some(p) = settings.problem() {
+            return Err(p.into());
+        }
+        self.state = State::Reading;
+        self.status = "reading".into();
+        self.read(pcm, settings, None, wake);
+        Ok(())
+    }
+
     /// Read `pcm` on a worker thread. A partial reading carries its take's id and busy flag and
     /// reports `Event::Partial`; the last one reports `Event::Text` or `Event::Failed`.
     fn read(

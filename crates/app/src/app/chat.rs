@@ -938,8 +938,13 @@ impl App {
                     }
                 }
                 _ => {
+                    let talking = self.speech.converse && self.supervisor_chat() == Some(s.id);
                     if let Some(c) = &mut self.client {
-                        c.send_with(s.id, &text, files);
+                        if talking {
+                            c.send_spoken(s.id, &text);
+                        } else {
+                            c.send_with(s.id, &text, files);
+                        }
                     }
                 }
             }

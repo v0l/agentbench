@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 const PREBUFFER_DIVISOR: usize = 4;
 
 /// What the worker shares with the sound card's callback.
-struct Shared {
+pub(crate) struct Shared {
     queue: Mutex<VecDeque<f32>>,
     /// The worker has nothing more to add.
     done: AtomicBool,
@@ -40,11 +40,53 @@ pub struct Source {
 
 #[derive(Default)]
 pub struct Reader {
-    playing: Option<(Arc<Shared>, cpal::Stream)>,
-    errors: Option<Receiver<String>>,
+    pub(crate) playing: Option<(Arc<Shared>, Output)>,
+    pub(crate) errors: Option<Receiver<String>>,
+    silent: bool,
+    /// The lines a silent reader has been asked to read, in the order they were queued.
+    lines: Vec<String>,
+}
+
+pub(crate) enum Output {
+    #[allow(dead_code)]
+    Device(cpal::Stream),
+    /// No sound card is opened and the samples are thrown away as they would have played. For a
+    /// test that reads the queue without making a noise on the machine running it.
+    Silent,
+}
+
+impl Default for Output {
+    fn default() -> Self {
+        Output::Silent
+    }
 }
 
 impl Reader {
+    /// Throw the samples away instead of opening a sound card, so a test can watch what would
+    /// have been played without a speaker making a noise.
+    #[doc(hidden)]
+    pub fn silent(&mut self) {
+        self.silent = true;
+    }
+
+    /// The lines a silent reader has been asked to read since this was last called, in the order
+    /// they were queued. Empty for a reader with a real sound card, since those were heard.
+    #[doc(hidden)]
+    pub fn spoken(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.lines)
+    }
+
+    /// Everything still waiting to be played, for a test that wants the whole reply at once.
+    #[doc(hidden)]
+    pub fn queued(&self) -> Vec<f32> {
+        match &self.playing {
+            Some((shared, Output::Silent)) => {
+                shared.queue.lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Whether anything is being made or played.
     pub fn busy(&self) -> bool {
         self.playing.is_some()
@@ -77,24 +119,38 @@ impl Reader {
             prebuffer: AtomicUsize::new(usize::MAX),
             started: AtomicBool::new(false),
         });
-        let (stream, rate) = open(shared.clone())?;
+        let (output, rate) = if self.silent {
+            (Output::Silent, agent_voice::voice::audio::SPEECH_RATE)
+        } else {
+            let (stream, rate) = open(shared.clone())?;
+            (Output::Device(stream), rate)
+        };
         shared.prebuffer.store(rate as usize / PREBUFFER_DIVISOR, Ordering::Relaxed);
         let (tx, rx) = channel();
         let (worker, wake) = (shared.clone(), Arc::new(wake));
+        if self.silent {
+            self.lines.push(text.clone());
+        }
         crate::spawn(async move {
             produce(&text, &from, rate, &worker, &tx, &*wake).await;
             worker.done.store(true, Ordering::Relaxed);
             wake();
         });
-        self.playing = Some((shared, stream));
+        self.playing = Some((shared, output));
         self.errors = Some(rx);
         Ok(())
     }
 
-    /// Once a frame: drop the stream when everything has been played, and hand back why a piece
-    /// could not be made.
+    /// Once a frame: play out what has been made, drop the stream when everything has been
+    /// played, and hand back why a piece could not be made.
     pub fn tick(&mut self) -> Vec<String> {
         let errors: Vec<String> = self.errors.iter().flat_map(|rx| rx.try_iter()).collect();
+        if self.silent
+            && let Some((shared, Output::Silent)) = &self.playing
+        {
+            let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+            queue.clear();
+        }
         let finished = self.playing.as_ref().is_some_and(|(s, _)| {
             s.done.load(Ordering::Relaxed)
                 && s.queue.lock().unwrap_or_else(|e| e.into_inner()).is_empty()

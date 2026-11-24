@@ -48,6 +48,10 @@ struct Message {
 
 pub const VOICE_STYLE: &str = "The user is talking to you and hears your reply read aloud. Speak in short plain sentences. No tables, no code blocks, no lists, no issue numbers or ids read out. Say what changed in plain words. When you start workers, say so in one sentence and stay free to talk. Never read results out as a wall of text.";
 
+/// The supervisor chat's voice mode, kept on the server so the turns the server starts itself (a
+/// worker report, a check in) are spoken too, and not only the turns the user typed.
+pub const VOICE_SETTING: &str = "supervisor_voice";
+
 fn styled_for_voice(prompt: &str, voice: bool, supervisor: bool) -> String {
     if voice && supervisor {
         format!("{prompt}\n\n[voice mode] {VOICE_STYLE}")
@@ -653,6 +657,28 @@ impl Runner {
         self.store.project(session.project_id).is_ok_and(|p| p.supervisor)
     }
 
+    fn remember_voice(&self, voice: bool) {
+        let setting = if voice {
+            self.store.set_setting(VOICE_SETTING, "1")
+        } else {
+            self.store.delete_setting(VOICE_SETTING)
+        };
+        if let Err(e) = setting {
+            tracing::warn!("could not remember the supervisor's voice mode: {}", e.0);
+        }
+    }
+
+    /// Whether this turn is spoken: the message itself says so, or the supervisor's voice mode is
+    /// on and this is a turn the server started (a worker report carries no voice flag of its own).
+    fn spoken(&self, session: &Session, msg: &Message) -> bool {
+        if !self.is_supervisor(session) {
+            return false;
+        }
+        msg.voice
+            || (!msg.from.is_empty()
+                && self.store.setting(VOICE_SETTING).ok().flatten().as_deref() == Some("1"))
+    }
+
     fn pending_for(&self, session: &Session, mode: Mode) -> Option<String> {
         if mode != Mode::Chat || !self.is_supervisor(session) {
             return None;
@@ -808,6 +834,18 @@ impl Runner {
         self.send_with(session, text, &[])
     }
 
+    /// Send a typed message, saying whether the user is talking rather than typing. A supervisor
+    /// turn remembers it, so its later worker report turns are spoken too.
+    pub fn send_spoken(
+        &self,
+        session: &Session,
+        text: &str,
+        uploads: &[Upload],
+        voice: bool,
+    ) -> Result<(), StoreError> {
+        self.send_inner(session, text, uploads, voice)
+    }
+
     /// Send a message with files attached. The files are kept with the session.
     pub fn send_with(
         &self,
@@ -815,10 +853,10 @@ impl Runner {
         text: &str,
         uploads: &[Upload],
     ) -> Result<(), StoreError> {
-        self.send_spoken(session, text, uploads, false)
+        self.send_inner(session, text, uploads, false)
     }
 
-    pub fn send_spoken(
+    fn send_inner(
         &self,
         session: &Session,
         text: &str,
@@ -839,6 +877,9 @@ impl Runner {
             )?;
         }
         let text = expanded.as_ref().map_or(text, |e| e.text.trim());
+        if self.is_supervisor(session) {
+            self.remember_voice(voice);
+        }
         if uploads.len() > agentbench_core::ATTACHMENTS_MAX {
             return Err(StoreError(format!(
                 "at most {} files go with one message",
@@ -1569,7 +1610,7 @@ impl Runner {
         };
         let spoken_text = styled_for_voice(
             prompt,
-            msg.voice && mode == Mode::Chat,
+            mode == Mode::Chat && self.spoken(session, msg),
             self.is_supervisor(session),
         );
         let prompt = spoken_text.as_str();
@@ -4888,6 +4929,29 @@ mod deferred_tests {
         let context = r.runner.context(&r.worker);
         assert_eq!(context.notes, [("tests".to_string(), "edited on disk".to_string())]);
         assert_eq!(context.global_notes, [("style".to_string(), "plain words".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn a_worker_report_turn_is_spoken_while_the_supervisors_voice_mode_is_on() {
+        let r = rig();
+        let report = || Origin::new("watch", Some(r.worker.id));
+        r.runner.tell(&r.boss, "worker finished", report()).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let plain = log(&r.boss_log);
+        assert!(!plain[0].contains(VOICE_STYLE), "voice mode is off: {:?}", plain[0]);
+
+        r.store.set_setting(VOICE_SETTING, "1").unwrap();
+        r.runner.tell(&r.boss, "worker finished again", report()).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let spoken = log(&r.boss_log);
+        assert!(spoken[1].contains(VOICE_STYLE), "voice mode is on: {:?}", spoken[1]);
+
+        r.runner.send_spoken(&r.boss, "carry on", &[], false).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        r.runner.tell(&r.boss, "one more report", report()).unwrap();
+        idle(&r.runner, r.boss.id).await;
+        let off = log(&r.boss_log);
+        assert!(!off[3].contains(VOICE_STYLE), "a typed turn said voice off: {:?}", off[3]);
     }
 
     #[tokio::test]

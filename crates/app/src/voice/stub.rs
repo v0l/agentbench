@@ -37,6 +37,14 @@ impl Voice {
     pub fn start_on(&mut self, _: impl Fn() + Send + Sync + 'static, _: &str) -> Result<(), String> {
         Err("voice input is not available on this platform".into())
     }
+    pub fn read_take(
+        &mut self,
+        _: &[u8],
+        _: &Settings,
+        _: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        Err("voice input is not available on this platform".into())
+    }
     pub fn cancel(&mut self) {}
     pub fn finish(&mut self, _: &Settings, _: impl Fn() + Send + Sync + 'static) {}
     pub fn tick(&mut self, _: &Settings, _: impl Fn() + Send + Sync + Clone + 'static) {}
