@@ -131,7 +131,7 @@ impl Net {
     }
 
     pub async fn send(&self, id: SessionId, text: &str) -> Result<(), String> {
-        let body = SendMessage { text: text.to_string(), attachments: Vec::new() };
+        let body = SendMessage { text: text.to_string(), attachments: Vec::new(), voice: false };
         done(self.post(&format!("/api/sessions/{id}/messages"), Some(&body)).await?).await
     }
 

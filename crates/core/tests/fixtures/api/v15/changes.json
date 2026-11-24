@@ -1,0 +1,50 @@
+{
+  "changes": [
+    {
+      "id": 1,
+      "kind": "project",
+      "ref": "1"
+    },
+    {
+      "id": 2,
+      "kind": "project",
+      "ref": "1"
+    },
+    {
+      "id": 3,
+      "kind": "issue",
+      "ref": "1"
+    },
+    {
+      "id": 4,
+      "kind": "issue",
+      "ref": "1"
+    },
+    {
+      "id": 5,
+      "kind": "session",
+      "ref": "6434ebe9-380e-4bff-a1ea-92e4cdcf5eed"
+    },
+    {
+      "id": 6,
+      "kind": "message",
+      "ref": "6434ebe9-380e-4bff-a1ea-92e4cdcf5eed"
+    },
+    {
+      "id": 7,
+      "kind": "session",
+      "ref": "6434ebe9-380e-4bff-a1ea-92e4cdcf5eed"
+    },
+    {
+      "id": 8,
+      "kind": "message",
+      "ref": "6434ebe9-380e-4bff-a1ea-92e4cdcf5eed"
+    },
+    {
+      "id": 9,
+      "kind": "session",
+      "ref": "6434ebe9-380e-4bff-a1ea-92e4cdcf5eed"
+    }
+  ],
+  "cursor": 9
+}

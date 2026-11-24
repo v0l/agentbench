@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "approved_by": "",
+      "asked_by": "supervisor",
+      "attempts": 0,
+      "created_at": 1795562069935,
+      "error": null,
+      "external_id": null,
+      "id": 1,
+      "kind": "label_add",
+      "next_at": 0,
+      "number": 4,
+      "payload": "{\"label\":\"bug\"}",
+      "project_id": 1,
+      "status": "proposed",
+      "text": "",
+      "trusted": true,
+      "updated_at": 1795562069935,
+      "url": null
+    }
+  ],
+  "paused": false
+}

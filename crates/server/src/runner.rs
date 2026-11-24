@@ -43,6 +43,17 @@ struct Message {
     text: String,
     attachments: Vec<Attachment>,
     from: Vec<String>,
+    voice: bool,
+}
+
+pub const VOICE_STYLE: &str = "The user is talking to you and hears your reply read aloud. Speak in short plain sentences. No tables, no code blocks, no lists, no issue numbers or ids read out. Say what changed in plain words. When you start workers, say so in one sentence and stay free to talk. Never read results out as a wall of text.";
+
+fn styled_for_voice(prompt: &str, voice: bool, supervisor: bool) -> String {
+    if voice && supervisor {
+        format!("{prompt}\n\n[voice mode] {VOICE_STYLE}")
+    } else {
+        prompt.to_string()
+    }
 }
 
 impl Message {
@@ -665,7 +676,7 @@ impl Runner {
                 inbox
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push(Message { text, attachments: Vec::new(), from: vec!["ledger".into()] });
+                    .push(Message { text, attachments: Vec::new(), from: vec!["ledger".into()], voice: false });
                 true
             }
             crate::ledger::Hold::GiveUp(lines) => {
@@ -804,6 +815,16 @@ impl Runner {
         text: &str,
         uploads: &[Upload],
     ) -> Result<(), StoreError> {
+        self.send_spoken(session, text, uploads, false)
+    }
+
+    pub fn send_spoken(
+        &self,
+        session: &Session,
+        text: &str,
+        uploads: &[Upload],
+        voice: bool,
+    ) -> Result<(), StoreError> {
         let text = text.trim();
         if uploads.is_empty()
             && let Some((cmd, arg)) = agentbench_core::parse_slash(text)
@@ -856,7 +877,11 @@ impl Runner {
         if self.is_supervisor(session) {
             crate::ledger::delivered(&self.store, session.id, "user", None, if text.is_empty() { "(files)" } else { text });
         }
-        self.send_text(session, Message { text: text.to_string(), attachments, from: Vec::new() }, Mode::Chat)
+        self.send_text(
+            session,
+            Message { text: text.to_string(), attachments, from: Vec::new(), voice },
+            Mode::Chat,
+        )
     }
 
     /// The files of a message, written to a folder of this session's so an agent can read them.
@@ -983,7 +1008,7 @@ impl Runner {
                 Some(report) => format!("{note} The restart you asked for {report}."),
                 None => note.clone(),
             };
-            let msg = Message { text: note, attachments: Vec::new(), from: vec!["server".into()] };
+            let msg = Message { text: note, attachments: Vec::new(), from: vec!["server".into()], voice: false };
             if let Err(e) = self.send_text(&session, msg, Mode::Chat) {
                 tracing::warn!("could not resume session {id}: {}", e.0);
             }
@@ -994,7 +1019,7 @@ impl Runner {
         };
         for h in held {
             let Ok(session) = self.store.session(h.session) else { continue };
-            let msg = Message { text: h.text, attachments: h.attachments, from: h.from };
+            let msg = Message { text: h.text, attachments: h.attachments, from: h.from, voice: false };
             if let Err(e) = self.send_text(&session, msg, Mode::Chat) {
                 tracing::warn!("could not send the held message to {}: {}", h.session, e.0);
             }
@@ -1240,6 +1265,7 @@ impl Runner {
             self.digest(session_id, |_| true)
         } else {
             Some(Message {
+                voice: queued.iter().any(|m| m.voice),
                 text: queued.iter().map(|m| m.text.as_str()).collect::<Vec<_>>().join("\n\n"),
                 attachments: queued.into_iter().flat_map(|m| m.attachments).collect(),
                 from: Vec::new(),
@@ -1541,6 +1567,12 @@ impl Runner {
             }
             None => prompt,
         };
+        let spoken_text = styled_for_voice(
+            prompt,
+            msg.voice && mode == Mode::Chat,
+            self.is_supervisor(session),
+        );
+        let prompt = spoken_text.as_str();
         let prompt_text;
         let prompt = if fresh_after_summary && !agent.steerable() {
             prompt_text = format!(
@@ -1688,7 +1720,7 @@ fn digest_of(all: Vec<Deferred>) -> Message {
         let at = if numbered { format!("{}. ", n + 1) } else { String::new() };
         lines.push(format!("{at}[{} UTC] {}: {}", clock(d.created_at), label(d), d.text));
     }
-    Message { text: lines.join("\n\n"), attachments: Vec::new(), from }
+    Message { text: lines.join("\n\n"), attachments: Vec::new(), from, voice: false }
 }
 
 /// A name safe to write to disk and show: the last part of what was sent, never empty.
@@ -2229,6 +2261,15 @@ impl Io for Sink {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_voice_instruction_is_added_only_for_a_spoken_supervisor_turn() {
+        use super::{VOICE_STYLE, styled_for_voice};
+        assert_eq!(styled_for_voice("hi", false, true), "hi");
+        assert_eq!(styled_for_voice("hi", true, false), "hi");
+        let on = styled_for_voice("hi", true, true);
+        assert!(on.starts_with("hi") && on.contains(VOICE_STYLE));
+    }
+
     use super::*;
     use crate::agent::JsonCommand;
     use agentbench_core::Usage;

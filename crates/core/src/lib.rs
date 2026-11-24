@@ -2185,6 +2185,8 @@ pub struct SendMessage {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Upload>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub voice: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2674,7 +2676,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 14;
+pub const API_VERSION: u32 = 15;
+pub const API_VOICE_MODE: u32 = 15;
 pub const API_JUDGE_GOALS: u32 = 14;
 pub const API_RESTART: u32 = 13;
 pub const API_GITHUB_APP: u32 = 12;
