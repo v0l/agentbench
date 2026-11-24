@@ -594,7 +594,7 @@ pub(super) fn restart_section(ui: &mut Ui, r: &mut agentbench_core::RestartSetti
         row_help(ui, "drain", "Seconds a restart waits for running turns to finish. A turn still running after that is interrupted and resumed when the server is back.", |ui| {
             ui.add(egui::DragValue::new(&mut r.drain_secs).range(0..=3600).suffix(" s"));
         });
-        row_help(ui, "supervisor", "Let the supervisor restart the server without asking you each time.", |ui| {
+        row_help(ui, "agents", "Let the supervisor restart the server without asking you each time.", |ui| {
             let label = if r.supervisor_may_restart { "may restart" } else { "asks first" };
             let t = tap_toggle(ui, label, r.supervisor_may_restart);
             t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, r.supervisor_may_restart, "supervisor may restart"));
