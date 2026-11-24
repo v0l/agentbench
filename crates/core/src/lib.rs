@@ -2202,6 +2202,46 @@ pub struct Interrupted {
     pub queued: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Restarted {
+    #[serde(default)]
+    pub waited: usize,
+    #[serde(default)]
+    pub finished: usize,
+    #[serde(default)]
+    pub interrupted: usize,
+    #[serde(default)]
+    pub restarting: bool,
+}
+
+impl Restarted {
+    pub fn summary(&self) -> String {
+        let turns = if self.waited == 1 { "turn" } else { "turns" };
+        format!(
+            "waited for {} running {turns}: {} finished, {} interrupted by the restart",
+            self.waited, self.finished, self.interrupted
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartRequest {
+    #[serde(default)]
+    pub drain_secs: Option<u64>,
+    #[serde(default)]
+    pub session: Option<SessionId>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartSettings {
+    #[serde(default)]
+    pub drain_secs: u64,
+    #[serde(default)]
+    pub supervisor_may_restart: bool,
+}
+
+pub const RESTART_DRAIN_DEFAULT: u64 = 120;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     pub handle: String,
@@ -2626,7 +2666,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 12;
+pub const API_VERSION: u32 = 13;
+pub const API_RESTART: u32 = 13;
 pub const API_GITHUB_APP: u32 = 12;
 pub const API_PR_REVIEW: u32 = 11;
 pub const API_GITHUB_WORK: u32 = 10;

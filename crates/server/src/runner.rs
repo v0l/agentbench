@@ -99,6 +99,23 @@ pub struct Runner {
     /// This runner, as the tracker tools see it, for starting and messaging sessions.
     me: crate::tools::Handle,
     claims: Arc<Mutex<()>>,
+    draining: Arc<std::sync::atomic::AtomicBool>,
+    held: Arc<Mutex<()>>,
+    restart: Arc<Notify>,
+}
+
+const HELD_SETTING: &str = "restart_held";
+const INTERRUPTED_SETTING: &str = "restart_interrupted";
+const WIND_DOWN: Duration = Duration::from_secs(10);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Held {
+    session: SessionId,
+    text: String,
+    #[serde(default)]
+    attachments: Vec<Attachment>,
+    #[serde(default)]
+    from: Vec<String>,
 }
 
 pub struct LevelChoice {
@@ -160,6 +177,9 @@ impl Runner {
             quotas: Default::default(),
             me,
             claims: Default::default(),
+            draining: Default::default(),
+            held: Default::default(),
+            restart: Default::default(),
         };
         runner.me.set(runner.clone());
         runner
@@ -655,6 +675,9 @@ impl Runner {
     }
 
     fn deliver_deferred(&self, id: SessionId) -> Result<(), StoreError> {
+        if self.draining() {
+            return Ok(());
+        }
         let session = self.store.session(id)?;
         self.dispatch(&session, Mode::Chat, |running| {
             if running { None } else { self.digest(id, |_| true) }
@@ -938,12 +961,106 @@ impl Runner {
     }
 
     pub fn resume(&self, sessions: &[SessionId]) {
-        crate::process::restarted(&self.store, sessions.len());
-        for id in sessions {
+        let mut all: Vec<SessionId> = sessions.to_vec();
+        for id in self.take_setting::<SessionId>(INTERRUPTED_SETTING) {
+            if !all.contains(&id) {
+                all.push(id);
+            }
+        }
+        crate::process::restarted(&self.store, all.len());
+        let note = restart_note(crate::store::now());
+        for id in &all {
             let Ok(session) = self.store.session(*id) else { continue };
-            if let Err(e) = self.send(&session, RESUME_PROMPT) {
+            let msg = Message { text: note.clone(), attachments: Vec::new(), from: vec!["server".into()] };
+            if let Err(e) = self.send_text(&session, msg, Mode::Chat) {
                 tracing::warn!("could not resume session {id}: {}", e.0);
             }
+        }
+        let held = {
+            let _lock = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            self.take_setting::<Held>(HELD_SETTING)
+        };
+        for h in held {
+            let Ok(session) = self.store.session(h.session) else { continue };
+            let msg = Message { text: h.text, attachments: h.attachments, from: h.from };
+            if let Err(e) = self.send_text(&session, msg, Mode::Chat) {
+                tracing::warn!("could not send the held message to {}: {}", h.session, e.0);
+            }
+        }
+    }
+
+    fn take_setting<T: serde::de::DeserializeOwned>(&self, key: &str) -> Vec<T> {
+        let found = self.store.setting(key).ok().flatten();
+        if found.is_some() {
+            let _ = self.store.delete_setting(key);
+        }
+        found.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or_default()
+    }
+
+    pub fn draining(&self) -> bool {
+        self.draining.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn restart_signal(&self) -> Arc<Notify> {
+        self.restart.clone()
+    }
+
+    fn hold(&self, session: SessionId, msg: Message) {
+        {
+            let _lock = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            let mut held: Vec<Held> = self
+                .store
+                .setting(HELD_SETTING)
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_str(&v).ok())
+                .unwrap_or_default();
+            held.push(Held { session, text: msg.text, attachments: msg.attachments, from: msg.from });
+            let _ = self.store.set_setting(HELD_SETTING, &serde_json::to_string(&held).unwrap_or_default());
+        }
+        let text = "the server is restarting: this message waits and starts after the server restarts".to_string();
+        let _ = self.store.add_message(session, &Entry::Notice { text });
+        self.changed.notify_waiters();
+    }
+
+    pub async fn drain(&self, limit: Duration, except: Option<SessionId>) -> agentbench_core::Restarted {
+        self.draining.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.changed.notify_waiters();
+        let busy = |id: &SessionId| self.store.session(*id).is_ok_and(|s| s.status.busy());
+        let waited: Vec<SessionId> =
+            self.live().keys().copied().filter(|id| Some(*id) != except).filter(busy).collect();
+        let deadline = Instant::now() + limit;
+        let left = || -> Vec<SessionId> {
+            let live = self.live();
+            waited.iter().copied().filter(|id| live.contains_key(id)).collect()
+        };
+        while !left().is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let cut = left();
+        if !cut.is_empty() {
+            let _ = self.store.set_setting(INTERRUPTED_SETTING, &serde_json::to_string(&cut).unwrap_or_default());
+            let text = format!(
+                "this turn was interrupted by the server restart after {} s; it resumes when the server is back",
+                limit.as_secs()
+            );
+            for id in &cut {
+                let _ = self.store.add_message(*id, &Entry::Notice { text: text.clone() });
+                if let Some(l) = self.live().get(id) {
+                    l.stop.cancel();
+                }
+            }
+            let wind_down = Instant::now() + WIND_DOWN;
+            while !left().is_empty() && Instant::now() < wind_down {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        self.changed.notify_waiters();
+        agentbench_core::Restarted {
+            waited: waited.len(),
+            finished: waited.len() - cut.len(),
+            interrupted: cut.len(),
+            restarting: false,
         }
     }
 
@@ -976,6 +1093,14 @@ impl Runner {
             return Ok(());
         }
         let Some(first) = make(false) else { return Ok(()) };
+        if self.draining() {
+            drop(all);
+            if mode == Mode::Compact {
+                return Err(StoreError("the server is restarting; compact once it is back".into()));
+            }
+            self.hold(session.id, first);
+            return Ok(());
+        }
         let live = Live {
             stop: CancellationToken::new(),
             inbox: Arc::new(Mutex::new(Vec::new())),
@@ -1045,6 +1170,11 @@ impl Runner {
                 }
             }
             next = runner.next_message(session_id, &inbox, &mut gone);
+            if runner.draining()
+                && let Some(msg) = next.take()
+            {
+                runner.hold(session_id, msg);
+            }
         }
         // A turn that failed or was stopped never reads what was waiting.
         let left: Vec<Message> =
@@ -1052,7 +1182,11 @@ impl Runner {
         if !gone {
             runner.live().remove(&session_id);
         }
-        if !left.is_empty() {
+        if runner.draining() {
+            for msg in left {
+                runner.hold(session_id, msg);
+            }
+        } else if !left.is_empty() {
             runner.not_sent(session_id, "the turn ended first", left);
         }
         runner.changed.notify_waiters();
@@ -1095,6 +1229,9 @@ impl Runner {
     }
 
     pub fn fold_idle(&self, now: i64) -> usize {
+        if self.draining() {
+            return 0;
+        }
         let Ok(sessions) = self.store.sessions() else { return 0 };
         let mut started = 0;
         for session in sessions {
@@ -1538,8 +1675,9 @@ fn file_name(name: &str) -> String {
     if clean.is_empty() || clean == "." || clean == ".." { "file".to_string() } else { clean }
 }
 
-const RESUME_PROMPT: &str =
-    "The agentbench server was restarted and stopped your turn. Carry on where you left off.";
+fn restart_note(at: i64) -> String {
+    format!("The server restarted at {} UTC; continue where you left off.", &clock(at)[..5])
+}
 
 const COMPACT_PROMPT: &str = "Summarise this conversation so another agent can carry on from it without the transcript. \
 Keep: what the user asked for, decisions made and why, files changed, what is done, what is left, and anything you were about to do. \
@@ -3391,7 +3529,9 @@ mod tests {
         runner.resume(&stale);
         assert_eq!(wait_idle(&runner, busy.id).await.status, SessionStatus::Idle);
         let last = runner.store().messages(busy.id, 0).unwrap().pop().unwrap().entry;
-        assert_eq!(last, Entry::Assistant { text: format!("resumed: {RESUME_PROMPT}") });
+        let Entry::Assistant { text } = last else { panic!("{last:?}") };
+        assert!(text.starts_with("resumed: The server restarted at "), "{text}");
+        assert!(text.ends_with(" UTC; continue where you left off."), "{text}");
         assert!(runner.store().messages(idle.id, 0).unwrap().is_empty());
     }
 
@@ -5107,5 +5247,122 @@ mod deferred_tests {
         idle(&r.runner, r.boss.id).await;
         let from = said_to(&r, r.boss.id).pop().unwrap().1;
         assert_eq!(from, [format!("judge {id}")]);
+    }
+
+    fn notices(r: &Rig, id: SessionId) -> Vec<String> {
+        r.store
+            .messages(id, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::Notice { text } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn reopened(path: &std::path::Path) -> Rig {
+        let store = Store::open(path).unwrap();
+        let stale = store.reset_running().unwrap();
+        let r = rig_in(tempfile::tempdir().unwrap(), store);
+        r.runner.resume(&stale);
+        r
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_finishes_within_the_drain_completes_and_is_not_interrupted() {
+        let r = rig();
+        r.runner.send(&r.worker, "build").unwrap();
+        started(&r, &r.worker_log).await;
+        let done = r.runner.drain(Duration::from_secs(5), None).await;
+        assert_eq!((done.waited, done.finished, done.interrupted), (1, 1, 0), "{done:?}");
+        let worker = r.store.session(r.worker.id).unwrap();
+        assert_eq!(worker.status, SessionStatus::Idle);
+        assert!(notices(&r, r.worker.id).iter().all(|n| !n.contains("restart")), "{:?}", notices(&r, r.worker.id));
+        assert!(matches!(
+            r.store.messages(r.worker.id, 0).unwrap().last().map(|m| &m.entry),
+            Some(Entry::Assistant { text }) if text == "ok"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_outlives_the_drain_is_interrupted_and_resumed_with_the_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let boss = {
+            let r = rig_in(tempfile::tempdir_in(dir.path()).unwrap(), Store::open(&path).unwrap());
+            r.runner.send(&r.worker, "build").unwrap();
+            r.runner.send(&r.boss, "plan").unwrap();
+            started(&r, &r.boss_log).await;
+            let done = r.runner.drain(Duration::from_millis(500), None).await;
+            assert_eq!((done.waited, done.finished, done.interrupted), (2, 1, 1), "{done:?}");
+            assert_eq!(done.summary(), "waited for 2 running turns: 1 finished, 1 interrupted by the restart");
+            assert!(notices(&r, r.boss.id).iter().any(|n| n.contains("interrupted by the server restart")));
+            assert_eq!(r.store.session(r.worker.id).unwrap().status, SessionStatus::Idle);
+            r.boss.id
+        };
+        let r = reopened(&path);
+        started(&r, &r.boss_log).await;
+        idle(&r.runner, boss).await;
+        let seen = log(&r.boss_log);
+        assert!(seen[0].starts_with("turn: The server restarted at "), "{seen:?}");
+        assert!(seen[0].ends_with("; continue where you left off."), "{seen:?}");
+        assert!(log(&r.worker_log).is_empty(), "the finished turn is not resumed");
+    }
+
+    #[tokio::test]
+    async fn a_turn_started_during_the_drain_waits_and_starts_after_the_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let worker = {
+            let r = rig_in(tempfile::tempdir_in(dir.path()).unwrap(), Store::open(&path).unwrap());
+            r.runner.send(&r.boss, "plan").unwrap();
+            started(&r, &r.boss_log).await;
+            let runner = r.runner.clone();
+            let draining = tokio::spawn(async move { runner.drain(Duration::from_secs(5), None).await });
+            for _ in 0..100 {
+                if r.runner.draining() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            r.runner.send(&r.worker, "later").unwrap();
+            assert!(!r.runner.is_running(r.worker.id), "no new turn starts while draining");
+            let done = draining.await.unwrap();
+            assert_eq!((done.waited, done.finished, done.interrupted), (1, 1, 0), "{done:?}");
+            assert!(log(&r.worker_log).is_empty(), "{:?}", log(&r.worker_log));
+            assert!(notices(&r, r.worker.id).iter().any(|n| n.contains("after the server restarts")));
+            r.worker.id
+        };
+        let r = reopened(&path);
+        started(&r, &r.worker_log).await;
+        idle(&r.runner, worker).await;
+        assert_eq!(log(&r.worker_log), ["turn: later"]);
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_cut_by_a_restart_resumes_with_its_open_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let boss = {
+            let r = rig_in(tempfile::tempdir_in(dir.path()).unwrap(), Store::open(&path).unwrap());
+            r.runner.send(&r.boss, "plan").unwrap();
+            started(&r, &r.boss_log).await;
+            crate::ledger::delivered(&r.store, r.boss.id, "judge", Some(r.worker.id), "judge the worker");
+            r.store
+                .db_for_test()
+                .execute("UPDATE open_items SET delivered_at = delivered_at - 120000", [])
+                .unwrap();
+            r.runner.drain(Duration::from_millis(100), None).await;
+            r.boss.id
+        };
+        let r = reopened(&path);
+        started(&r, &r.boss_log).await;
+        idle(&r.runner, boss).await;
+        let seen = log(&r.boss_log);
+        assert!(seen[0].contains("judge the worker") && seen[0].contains("<pending>"), "{seen:?}");
+        assert!(seen[0].contains("The server restarted at "), "{seen:?}");
+        let open = r.store.open_items(boss).unwrap();
+        assert_eq!(open.iter().map(|i| i.kind.as_str()).collect::<Vec<_>>(), ["judge"], "the note is not a new user ask");
     }
 }

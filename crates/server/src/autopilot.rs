@@ -1875,7 +1875,9 @@ pub fn spawn(runner: Runner) {
         loop {
             let woken = runner.changed.notified();
             let this = ap.clone();
-            let _ = tokio::task::spawn_blocking(move || this.tick()).await;
+            if !runner.draining() {
+                let _ = tokio::task::spawn_blocking(move || this.tick()).await;
+            }
             tokio::select! {
                 _ = woken => {}
                 _ = tokio::time::sleep(TICK_EVERY) => {}
