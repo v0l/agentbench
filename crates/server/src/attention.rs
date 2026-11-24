@@ -11,6 +11,7 @@ pub struct Row {
     pub status: String,
     pub title: String,
     pub project: String,
+    pub managed: bool,
 }
 
 impl Row {
@@ -21,6 +22,7 @@ impl Row {
         m.insert("status".into(), json!(self.status));
         m.insert("title".into(), json!(self.title));
         m.insert("project".into(), json!(self.project));
+        m.insert("managed".into(), json!(self.managed));
         m
     }
 
@@ -39,6 +41,9 @@ impl Row {
         }
         if self.project != old.project {
             m.insert("project".into(), json!(self.project));
+        }
+        if self.managed != old.managed {
+            m.insert("managed".into(), json!(self.managed));
         }
         Some(m)
     }
@@ -164,7 +169,7 @@ mod tests {
     use super::*;
 
     fn row(id: &str, status: &str) -> Row {
-        Row { id: id.into(), status: status.into(), title: format!("chat {id}"), project: "demo".into() }
+        Row { id: id.into(), status: status.into(), title: format!("chat {id}"), project: "demo".into(), managed: false }
     }
 
     #[test]
@@ -178,6 +183,23 @@ mod tests {
         let f = a.feed(first.cursor, Some(first.epoch));
         assert!(!f.reset);
         assert_eq!(f.changes, vec![json!({"kind": "attention", "id": "a", "status": "waiting"})]);
+    }
+
+    #[test]
+    fn the_full_row_and_the_diff_carry_managed() {
+        let a = Attention::new();
+        a.refresh(vec![row("a", "running")]);
+        let first = a.feed(0, None);
+        assert_eq!(first.changes[0]["managed"], json!(false));
+        let mut managed = row("a", "running");
+        managed.managed = true;
+        a.refresh(vec![managed.clone()]);
+        let f = a.feed(first.cursor, Some(first.epoch));
+        assert_eq!(f.changes, vec![json!({"kind": "attention", "id": "a", "managed": true})]);
+        let cursor = f.cursor;
+        a.refresh(vec![row("a", "running")]);
+        let f = a.feed(cursor, Some(first.epoch));
+        assert_eq!(f.changes, vec![json!({"kind": "attention", "id": "a", "managed": false})]);
     }
 
     #[test]

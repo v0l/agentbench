@@ -1052,7 +1052,10 @@ impl Store {
     pub fn attention_rows(&self) -> Result<Vec<crate::attention::Row>> {
         let db = self.db();
         let mut stmt = db.prepare(
-            "SELECT s.id, s.status, s.title, COALESCE(p.name, '') FROM sessions s
+            "SELECT s.id, s.status, s.title, COALESCE(p.name, ''),
+                    (s.parent IS NOT NULL AND EXISTS (SELECT 1 FROM sessions b WHERE b.id = s.parent))
+                    OR EXISTS (SELECT 1 FROM autopilot_workers w WHERE w.session = s.id)
+             FROM sessions s
              LEFT JOIN projects p ON p.id = s.project_id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1061,6 +1064,7 @@ impl Store {
                 status: r.get(1)?,
                 title: r.get(2)?,
                 project: r.get(3)?,
+                managed: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2978,6 +2982,41 @@ mod tests {
             .collect();
         found.sort();
         found
+    }
+
+    fn managed_for(s: &Store, id: SessionId) -> bool {
+        s.attention_rows().unwrap().into_iter().find(|r| r.id == id.to_string()).unwrap().managed
+    }
+
+    #[test]
+    fn a_session_is_managed_by_a_parent_or_the_autopilot_until_released() {
+        let s = Store::memory().unwrap();
+        let (p, main) = project(&s, "/a");
+        let boss = s.add_session(main.id, "native", "boss", None, None).unwrap();
+        let child = s.add_session(main.id, "native", "child", None, None).unwrap();
+        let plain = s.add_session(main.id, "native", "plain", None, None).unwrap();
+        let worker = s.add_session(main.id, "native", "worker", None, None).unwrap();
+        let issue = s
+            .add_issue(&agentbench_core::NewIssue { project_id: p.id, title: "t".into(), ..Default::default() })
+            .unwrap();
+        s.set_parent(child.id, Some(boss.id)).unwrap();
+        s.add_worker(worker.id, issue.id, p.id).unwrap();
+        assert!(managed_for(&s, child.id));
+        assert!(managed_for(&s, worker.id));
+        assert!(!managed_for(&s, plain.id));
+        assert!(!managed_for(&s, boss.id));
+
+        let feed = crate::attention::Attention::new();
+        feed.refresh(s.attention_rows().unwrap());
+        let first = feed.feed(0, None);
+        crate::autopilot::release(&s, child.id, "user").unwrap();
+        crate::autopilot::release(&s, worker.id, "user").unwrap();
+        assert!(!managed_for(&s, child.id));
+        assert!(!managed_for(&s, worker.id));
+        feed.refresh(s.attention_rows().unwrap());
+        let diff = feed.feed(first.cursor, Some(first.epoch));
+        let flips: Vec<_> = diff.changes.iter().map(|c| c["managed"].clone()).collect();
+        assert_eq!(flips, vec![serde_json::json!(false), serde_json::json!(false)]);
     }
 
     #[test]
