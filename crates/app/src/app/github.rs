@@ -435,7 +435,8 @@ impl App {
                         chip(ui, "from untrusted input", WARN, true);
                     }
                     if !item.approved_by.is_empty() && item.status != "failed" {
-                        chip(ui, &format!("approved by {}", item.approved_by), LEGEND, false);
+                        let by = format!("approved by {}", item.approved_by);
+                        chip(ui, &by, LEGEND, false).widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, by.clone()));
                     }
                 });
                 let params = item.params();

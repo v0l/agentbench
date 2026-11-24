@@ -162,8 +162,9 @@ fn the_github_tabs_fit_a_phone() {
         .update_project(g.project, &ProjectPatch { tracker: Some(Tracker::Github { repo: "o/a-repository-name-long-enough-to-fill-a-phone-row".into() }), ..Default::default() })
         .unwrap();
     let failed = g.rig.store.outbox(Some(g.project)).unwrap().into_iter().find(|i| i.kind == "label_add").unwrap().id;
-    g.rig.store.outbox_set_approver(failed, "user").unwrap();
+    g.rig.store.outbox_set_approver(failed, "reviewer").unwrap();
     g.rig.store.outbox_result(failed, "failed", None, Some("gh: Service Unavailable (HTTP 503)"), 2, 0).unwrap();
+    g.rig.store.outbox_set_approver(g.comment_row, "user").unwrap();
     for size in [[390.0, 844.0], [412.0, 900.0], [1280.0, 800.0]] {
         for tab in [GhTab::Issues, GhTab::Outbox, GhTab::Pulls] {
             let mut h = harness_at(g.rig.url.clone(), size);
@@ -189,10 +190,12 @@ fn the_github_tabs_fit_a_phone() {
                 assert!(!toggle.intersects(*r), "{tab:?} at {size:?}: the scope toggle {toggle:?} sits over the tab chip {label:?} {r:?}");
             }
             if tab == GhTab::Outbox {
-                assert!(h.query_by_label_contains("approved by").is_none(), "{size:?}: a failed row still carries the approver tag");
+                let by = |h: &Harness<'_, App>, who: &str| h.query_all_by_label_contains(&format!("approved by {who}")).count();
+                assert_eq!(by(&h, "reviewer"), 0, "{size:?}: the failed row still carries the approver tag");
+                assert!(by(&h, "user") >= 1, "{size:?}: a proposed row with an approver lost its tag too");
                 assert!(
-                    h.query_by_label_contains("gh: Service Unavailable (HTTP 503)").is_some(),
-                    "{size:?}: the failed row does not show its error"
+                    h.query_all_by_label_contains("gh: Service Unavailable (HTTP 503)").count() >= 1,
+                    "{size:?}: the failed row does not show its error, so it is not the row being read"
                 );
             }
         }
