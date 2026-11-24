@@ -868,7 +868,7 @@ impl Api for StoreApi {
                         project_id: target,
                         title,
                         body: text(args, "body").unwrap_or_default(),
-                        state: state(args)?,
+                        state: Some(state(args)?.unwrap_or(IssueState::Backlog)),
                         priority: args.get("priority").and_then(Value::as_i64),
                         labels: labels(args)?.unwrap_or_default(),
                         goal: text(args, "goal"),
@@ -2402,6 +2402,18 @@ mod tests {
         assert_eq!(sessions.as_array().unwrap().len(), 1);
         assert_eq!(sessions[0]["you"], true);
         assert!(api.call("read_session", &json!({"id": elsewhere.id}), me.id).is_err());
+    }
+
+    #[test]
+    fn file_issue_defaults_to_backlog_and_honours_a_given_state() {
+        let s = Store::memory().unwrap();
+        let (_p, main) = crate::store::testing::project(&s, "/a");
+        let me = s.add_session(main.id, "native", "me", None, None).unwrap();
+        let api = StoreApi::new(s.clone());
+        let bare = api.call("file_issue", &json!({"title": "a"}), me.id).unwrap()["filed"].as_i64().unwrap();
+        let todo = api.call("file_issue", &json!({"title": "b", "state": "todo"}), me.id).unwrap()["filed"].as_i64().unwrap();
+        assert_eq!(s.issue(bare).unwrap().state, IssueState::Backlog);
+        assert_eq!(s.issue(todo).unwrap().state, IssueState::Todo);
     }
 
     #[test]

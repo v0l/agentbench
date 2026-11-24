@@ -2950,6 +2950,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_issue_filed_by_the_tool_without_a_state_is_never_started() {
+        let r = rig(DONE);
+        with_vision(&r);
+        let tree = r.store.main_worktree(r.project).unwrap();
+        let me = r.store.add_session(tree.id, "native", "me", None, None).unwrap();
+        let api = crate::tools::StoreApi::new(r.store.clone());
+        let filed = agent_native::Api::call(&api,"file_issue", &serde_json::json!({"title": "follow up", "goal": "g1"}), me.id)
+            .unwrap()["filed"]
+            .as_i64()
+            .unwrap();
+        on(&r);
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(r.store.issue(filed).unwrap().state, IssueState::Backlog);
+        assert!(r.store.sessions().unwrap().iter().all(|s| s.issue_id != Some(filed)));
+    }
+
+    #[tokio::test]
     async fn the_loop_starts_only_goal_linked_issues_and_idles_without_a_vision() {
         let r = rig(DONE);
         let plain = r

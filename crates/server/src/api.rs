@@ -2606,6 +2606,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_issue_posted_without_a_state_over_rest_stays_todo() {
+        let f = fixture();
+        let pid = project(&f).await;
+        let (_, issue) =
+            call(&f.app, "POST", "/api/issues", Some(json!({"project_id": pid, "title": "Plain"})), T).await;
+        assert_eq!(issue["state"], "todo");
+    }
+
+    #[tokio::test]
     async fn issues_and_comments_over_http() {
         let f = fixture();
         let pid = project(&f).await;
