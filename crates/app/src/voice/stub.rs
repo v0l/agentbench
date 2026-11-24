@@ -34,6 +34,9 @@ impl Voice {
     pub fn start(&mut self, _: impl Fn() + Send + Sync + 'static) -> Result<(), String> {
         Err("voice input is not available on this platform".into())
     }
+    pub fn start_on(&mut self, _: impl Fn() + Send + Sync + 'static, _: &str) -> Result<(), String> {
+        Err("voice input is not available on this platform".into())
+    }
     pub fn cancel(&mut self) {}
     pub fn finish(&mut self, _: &Settings, _: impl Fn() + Send + Sync + 'static) {}
     pub fn tick(&mut self, _: &Settings, _: impl Fn() + Send + Sync + Clone + 'static) {}
@@ -73,6 +76,10 @@ impl Reader {
     pub fn tick(&mut self) -> Vec<String> {
         Vec::new()
     }
+}
+
+pub fn input_devices() -> Vec<String> {
+    Vec::new()
 }
 
 pub fn local_device() -> String {

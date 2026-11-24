@@ -30,7 +30,12 @@ pub struct Settings {
     /// agentbench server speaks them.
     pub reply_voice: String,
     pub hold_to_talk: bool,
+    pub converse: bool,
+    pub input_device: String,
+    pub talk_key: String,
 }
+
+pub const DEFAULT_TALK_KEY: &str = "F9";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -47,6 +52,9 @@ impl Default for Settings {
             server_model: String::new(),
             reply_voice: agent_voice::voice::DEFAULT_SPOKEN_VOICE.into(),
             hold_to_talk: cfg!(target_os = "android"),
+            converse: false,
+            input_device: String::new(),
+            talk_key: DEFAULT_TALK_KEY.into(),
         }
     }
 }
@@ -76,6 +84,11 @@ impl Settings {
         if let Some(h) = st.get_string("voice_hold") {
             s.hold_to_talk = h == "1";
         }
+        s.converse = st.get_string("voice_converse").as_deref() == Some("1");
+        s.input_device = st.get_string("voice_input").unwrap_or_default();
+        if let Some(k) = st.get_string("voice_talk_key").filter(|k| !k.trim().is_empty()) {
+            s.talk_key = k;
+        }
         s.url = st.get_string("voice_url").unwrap_or_default();
         s.key = st.get_string("voice_key").unwrap_or_default();
         s.server_model = st.get_string("voice_server_model").unwrap_or_default();
@@ -104,6 +117,13 @@ impl Settings {
         st.set_string("voice_server_model", self.server_model.clone());
         st.set_string("voice_reply", self.reply_voice.clone());
         st.set_string("voice_hold", if self.hold_to_talk { "1" } else { "0" }.into());
+        st.set_string("voice_converse", if self.converse { "1" } else { "0" }.into());
+        st.set_string("voice_input", self.input_device.clone());
+        st.set_string("voice_talk_key", self.talk_key.clone());
+    }
+
+    pub fn talk_key(&self) -> Option<eframe::egui::Key> {
+        eframe::egui::Key::from_name(self.talk_key.trim())
     }
 
     /// What is missing before speech can be read, or `None` when it can.
@@ -196,6 +216,25 @@ mod tests {
             Settings { hold_to_talk: !Settings::default().hold_to_talk, ..Default::default() };
         flipped.save(&mut m);
         assert_eq!(Settings::load(Some(&m)).hold_to_talk, flipped.hold_to_talk);
+    }
+
+    #[test]
+    fn the_conversation_is_off_by_default_and_its_settings_are_kept() {
+        let s = Settings::default();
+        assert!(!s.converse);
+        assert_eq!(s.talk_key(), Some(eframe::egui::Key::F9));
+        let mut m = Mem::default();
+        Settings {
+            converse: true,
+            input_device: "USB mic".into(),
+            talk_key: "F8".into(),
+            ..Default::default()
+        }
+        .save(&mut m);
+        let back = Settings::load(Some(&m));
+        assert!(back.converse);
+        assert_eq!(back.input_device, "USB mic");
+        assert_eq!(back.talk_key(), Some(eframe::egui::Key::F8));
     }
 
     #[test]

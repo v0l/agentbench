@@ -791,6 +791,9 @@ pub struct App {
     /// Reading a reply aloud, and the message being read.
     reader: crate::voice::Reader,
     reading: Option<Id>,
+    converse: crate::voice::Converse,
+    conversing: Option<SessionId>,
+    talk_turn: bool,
     /// Models on the server the native agent is saved to use. None until asked.
     agent_models: HashMap<String, Result<Vec<String>, String>>,
     asking_models: HashSet<String>,
@@ -1007,6 +1010,9 @@ impl App {
             hint: None,
             reader: Default::default(),
             reading: None,
+            converse: Default::default(),
+            conversing: None,
+            talk_turn: false,
             speech: crate::voice::Settings::load(storage),
             agent_models: HashMap::new(),
             asking_models: HashSet::new(),
@@ -1603,6 +1609,94 @@ impl App {
                 self.reading = None;
                 self.notice = Some((false, e));
             }
+        }
+    }
+
+    /// The talk key: with the conversation on and the supervisor chat open, it cuts off what is
+    /// being said and opens the microphone, and what is heard is sent as a spoken turn.
+    fn talk(&mut self, ctx: &egui::Context) {
+        let Some(sid) = self.conversing.filter(|s| self.session == Some(*s)) else { return };
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        };
+        self.barge_in();
+        if self.voice.listening() {
+            self.voice.finish(&self.speech_now(), wake);
+            return;
+        }
+        if self.voice.busy() {
+            return;
+        }
+        if let Some(p) = self.speech.problem() {
+            self.notice = Some((false, p.into()));
+        } else if let Err(e) = self.voice.start_on(wake, &self.speech.input_device.clone()) {
+            self.notice = Some((false, e));
+        } else {
+            self.talk_turn = true;
+        }
+    }
+
+    /// Stop speaking at once and drop the rest of the reply being read.
+    pub fn barge_in(&mut self) {
+        self.reader.stop();
+        self.reading = None;
+        self.converse.barge_in();
+    }
+
+    /// Send what was said as a spoken turn to the conversation's chat.
+    pub fn say_to_supervisor(&mut self, text: &str) {
+        let Some(sid) = self.conversing else { return };
+        let last = self.transcripts.get(&sid).map_or(0, |t| t.last);
+        self.converse.begin(last);
+        if let Some(c) = &mut self.client {
+            c.send_spoken(sid, text.trim());
+        }
+    }
+
+    /// Once a frame while the conversation is on: find the supervisor chat, and speak its replies a
+    /// sentence at a time as they arrive.
+    fn converse_tick(&mut self, ctx: &egui::Context) {
+        let supervisor = self.supervisor_chat().filter(|_| self.speech.converse);
+        if supervisor != self.conversing {
+            self.reader.stop();
+            self.conversing = None;
+            self.talk_turn = false;
+        }
+        let Some(sid) = supervisor else { return };
+        if self.conversing.is_none() {
+            let Some(t) = self.transcripts.get(&sid).filter(|t| !t.loading && t.last > 0) else {
+                return;
+            };
+            self.converse.begin(t.last);
+            self.conversing = Some(sid);
+        }
+        let busy = self.session_by_id(sid).is_some_and(|s| s.status.busy());
+        if let Some(t) = self.transcripts.get(&sid) {
+            for m in &t.rows {
+                if let Entry::Assistant { text } = &m.entry {
+                    let last = t.rows.last().map(|l| l.id) == Some(m.id);
+                    self.converse.feed(m.id, text, !busy || !last);
+                }
+            }
+        }
+        if !self.reader.busy()
+            && !self.voice.listening()
+            && let Some(sentence) = self.converse.next()
+            && let Some(c) = &self.client
+        {
+            let from = crate::voice::Source {
+                url: c.server.base(),
+                token: c.server.token.clone(),
+                voice: self.speech.reply_voice.clone(),
+            };
+            let ctx = ctx.clone();
+            if let Err(e) = self.reader.start(&sentence, from, move || ctx.request_repaint()) {
+                self.notice = Some((false, e));
+            }
+        }
+        if self.converse.pending() || self.reader.busy() {
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
 
@@ -2477,6 +2571,12 @@ impl App {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::M)) {
             self.toggle_speech(ctx);
         }
+        if let Some(key) = self.speech.talk_key()
+            && self.speech.converse
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key))
+        {
+            self.talk(ctx);
+        }
         let wake = {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -2487,9 +2587,21 @@ impl App {
         if !self.reader.busy() {
             self.reading = None;
         }
+        self.converse_tick(ctx);
         let speech = self.speech_now();
         self.voice.tick(&speech, wake);
         for said in self.voice.poll() {
+            if self.talk_turn && !matches!(said, crate::voice::Said::Partial(_)) {
+                self.talk_turn = false;
+                if let crate::voice::Said::Final(text) = &said
+                    && !text.trim().is_empty()
+                {
+                    self.say_to_supervisor(text);
+                    continue;
+                }
+            } else if self.talk_turn {
+                continue;
+            }
             match said {
                 crate::voice::Said::Partial(text) => self.add_speech(&text, false),
                 crate::voice::Said::Final(text) if text.trim().is_empty() => {

@@ -137,6 +137,14 @@ impl Voice {
 
     /// Open the microphone.
     pub fn start(&mut self, wake: impl Fn() + Send + Sync + 'static) -> Result<(), String> {
+        self.start_on(wake, "")
+    }
+
+    pub fn start_on(
+        &mut self,
+        wake: impl Fn() + Send + Sync + 'static,
+        device: &str,
+    ) -> Result<(), String> {
         if self.busy() {
             return Ok(());
         }
@@ -148,7 +156,7 @@ impl Voice {
                 "allow the microphone in the box that just opened, then press speak again".into()
             );
         }
-        self.state = State::Listening(Box::new(open()?));
+        self.state = State::Listening(Box::new(open(device)?));
         self.take_id += 1;
         self.status.clear();
         Ok(())
@@ -338,7 +346,8 @@ fn models_dir() -> std::path::PathBuf {
 }
 
 /// Open the default microphone and start collecting mono samples.
-fn open() -> Result<Take, String> {
+fn open(device: &str) -> Result<Take, String> {
+    let _ = device;
     #[cfg(target_os = "android")]
     {
         let heard = Arc::new(Mutex::new(Vec::with_capacity(RATE as usize * 10)));
@@ -362,14 +371,30 @@ fn open() -> Result<Take, String> {
         })
     }
     #[cfg(not(target_os = "android"))]
-    open_cpal()
+    open_cpal(device)
+}
+
+pub fn input_devices() -> Vec<String> {
+    cpal::default_host()
+        .input_devices()
+        .map(|d| {
+            d.filter_map(|d| d.description().ok().map(|d| d.name().to_string())).collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg_attr(target_os = "android", allow(dead_code))]
-fn open_cpal() -> Result<Take, String> {
+fn open_cpal(wanted: &str) -> Result<Take, String> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
+    let named = (!wanted.is_empty())
+        .then(|| {
+            host.input_devices().ok()?.find(|d| {
+                d.description().is_ok_and(|d| d.name() == wanted)
+            })
+        })
+        .flatten();
+    let device = named
+        .or_else(|| host.default_input_device())
         .ok_or_else(|| "no microphone found; plug one in or check its permissions".to_string())?;
     let name =
         device.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "microphone".into());

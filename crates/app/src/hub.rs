@@ -711,6 +711,10 @@ impl Hub {
         self.by_session(session).send_with(session, text, attachments);
     }
 
+    pub fn send_spoken(&mut self, session: SessionId, text: &str) {
+        self.by_session(session).send_spoken(session, text);
+    }
+
     pub fn answer(&mut self, session: SessionId, question: &str, answers: &[String]) {
         self.by_session(session).answer(session, question, answers);
     }

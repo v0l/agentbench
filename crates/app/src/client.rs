@@ -538,7 +538,12 @@ impl Client {
         text: &str,
         attachments: Vec<agentbench_core::Upload>,
     ) {
-        let body = SendMessage { text: text.to_string(), attachments };
+        let body = SendMessage { text: text.to_string(), attachments, voice: false };
+        self.act(Method::POST, &format!("/api/sessions/{session}/messages"), Some(&body), "");
+    }
+
+    pub fn send_spoken(&mut self, session: SessionId, text: &str) {
+        let body = SendMessage { text: text.to_string(), attachments: Vec::new(), voice: true };
         self.act(Method::POST, &format!("/api/sessions/{session}/messages"), Some(&body), "");
     }
 

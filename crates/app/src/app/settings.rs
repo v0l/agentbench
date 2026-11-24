@@ -936,6 +936,42 @@ pub(super) fn speech_section(
         }
     });
     ui.add_space(8.0);
+    section(ui, "conversation", "talk to the supervisor, kept on this device", |ui| {
+        row_help(
+            ui,
+            "voice conversation",
+            "Press the talk key in the supervisor chat, speak, and its reply is read aloud a sentence at a time. Press the key again while it talks to cut it off. Audio is never stored.",
+            |ui| {
+                let on = sp.converse;
+                let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
+                t.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "voice conversation")
+                });
+                if t.clicked() {
+                    sp.converse = !on;
+                }
+            },
+        );
+        if sp.converse {
+            row_help(ui, "input device", "The microphone to listen on. Empty uses the default.", |ui| {
+                let mut options = vec![(String::new(), "default".to_string())];
+                options.extend(crate::voice::input_devices().into_iter().map(|d| (d.clone(), d)));
+                choice_fit(ui, "input-device", &mut sp.input_device, options);
+            });
+            row_help(
+                ui,
+                "talk key",
+                "The key that starts and stops listening. A key name such as F9.",
+                |ui| {
+                    field(ui, &mut sp.talk_key, "F9");
+                },
+            );
+            if sp.talk_key().is_none() {
+                status(ui, false, "that is not a key name");
+            }
+        }
+    });
+    ui.add_space(8.0);
     section(ui, "read aloud", "the agentbench server speaks replies", |ui| {
         row_help(
             ui,

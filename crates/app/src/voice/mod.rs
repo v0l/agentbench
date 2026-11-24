@@ -15,10 +15,13 @@
 mod settings;
 pub use settings::{LOCAL_MODELS, Mode, Settings};
 
+mod converse;
+pub use converse::Converse;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Voice, local_device};
+pub use native::{Voice, input_devices, local_device};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod reader;
@@ -31,7 +34,7 @@ pub(crate) mod android;
 #[cfg(target_arch = "wasm32")]
 mod stub;
 #[cfg(target_arch = "wasm32")]
-pub use stub::{Reader, Source, Voice, local_device};
+pub use stub::{Reader, Source, Voice, input_devices, local_device};
 
 /// What Whisper was trained on, and what a server is sent.
 pub const RATE: u32 = agent_voice::voice::audio::SPEECH_RATE;
