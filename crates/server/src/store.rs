@@ -337,6 +337,9 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("comments", "trust", "TEXT NOT NULL DEFAULT 'trusted'"),
     ("projects", "automerge", "TEXT NOT NULL DEFAULT 'off'"),
     ("projects", "merge_method", "TEXT NOT NULL DEFAULT 'merge'"),
+    ("projects", "judge_unset_goals", "INTEGER"),
+    ("issues", "judge_state", "TEXT NOT NULL DEFAULT ''"),
+    ("issues", "judge_at", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 const LATE_COLUMNS: &[(&str, &str, &str)] = &[
@@ -754,6 +757,7 @@ fn project_row(row: &Row) -> rusqlite::Result<Project> {
         merge_mode: MergeMode::parse(&row.get::<_, String>("merge_mode")?).unwrap_or_default(),
         automerge: AutoMerge::parse(&row.get::<_, String>("automerge")?).unwrap_or_default(),
         merge_method: MergeMethod::parse(&row.get::<_, String>("merge_method")?).unwrap_or_default(),
+        judge_unset_goals: row.get("judge_unset_goals")?,
         model_levels: agentbench_core::ModelLevels {
             low: row.get("model_low")?,
             med: row.get("model_med")?,
@@ -1234,6 +1238,9 @@ impl Store {
         if let Some(method) = patch.merge_method {
             project.merge_method = method;
         }
+        if let Some(judge) = patch.judge_unset_goals {
+            project.judge_unset_goals = judge;
+        }
         if let Some(levels) = &patch.model_levels {
             project.model_levels = agentbench_core::ModelLevels {
                 low: levels.low.trim().to_string(),
@@ -1244,7 +1251,7 @@ impl Store {
         {
             let db = self.db();
             db.execute(
-                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6, tracker = ?8, github_repo = ?9, post_mode = ?10, model_low = ?11, model_med = ?12, model_high = ?13, merge_mode = ?14, automerge = ?15, merge_method = ?16 WHERE id = ?7",
+                "UPDATE projects SET name = ?1, pinned = ?2, tags = ?3, automation = ?4, risky = ?5, deploy = ?6, tracker = ?8, github_repo = ?9, post_mode = ?10, model_low = ?11, model_med = ?12, model_high = ?13, merge_mode = ?14, automerge = ?15, merge_method = ?16, judge_unset_goals = ?17 WHERE id = ?7",
                 params![
                     project.name,
                     project.pinned,
@@ -1264,7 +1271,8 @@ impl Store {
                     project.model_levels.high,
                     project.merge_mode.as_str(),
                     project.automerge.as_str(),
-                    project.merge_method.as_str()
+                    project.merge_method.as_str(),
+                    project.judge_unset_goals
                 ],
             )?;
             Store::changed(&db, "project", id)?;
@@ -1593,6 +1601,10 @@ impl Store {
         }
         if issue.state == IssueState::Done && !was_done {
             self.unblock_dependents(id)?;
+        }
+        let waiting = |i: &Issue| matches!(i.state, IssueState::Backlog | IssueState::Todo) && i.goal.is_none() && !i.off_vision;
+        if waiting(&issue) && !waiting(&before) || issue.project_id != before.project_id {
+            self.set_judge_mark(id, "", 0)?;
         }
         let issue = self.issue(id)?;
         if issue.source == IssueSource::Github {
@@ -2426,6 +2438,18 @@ impl Store {
             &format!("UPDATE autopilot_workers SET {column} = {column} + 1 WHERE session = ?1"),
             [session],
         )?;
+        Ok(())
+    }
+
+    pub fn judge_marks(&self) -> Result<std::collections::HashMap<Id, (String, i64)>> {
+        let db = self.db();
+        let mut stmt = db.prepare("SELECT id, judge_state, judge_at FROM issues WHERE judge_state != ''")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_judge_mark(&self, id: Id, state: &str, at: i64) -> Result<()> {
+        self.db().execute("UPDATE issues SET judge_state = ?2, judge_at = ?3 WHERE id = ?1", params![id, state, at])?;
         Ok(())
     }
 

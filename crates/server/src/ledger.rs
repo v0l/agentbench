@@ -23,7 +23,7 @@ fn kind_of(source: &str) -> &str {
 }
 
 fn is_tracked(kind: &str) -> bool {
-    matches!(kind, "judge" | "check_in" | "watch" | "groom" | "main_dirty" | "question" | "user")
+    matches!(kind, "judge" | "check_in" | "watch" | "groom" | "judge_issues" | "main_dirty" | "question" | "user")
 }
 
 fn clip(text: &str) -> String {
@@ -94,6 +94,7 @@ pub fn closed_by(store: &Store, tool: &str, args: &Value, supervisor: SessionId)
             }
         }
         "groom_done" => close_where(store, supervisor, |i| i.kind == "groom"),
+        "judge_issue" if crate::judging::all_answered(store) => close_where(store, supervisor, |i| i.kind == "judge_issues"),
         "main_checkout" => close_where(store, supervisor, |i| i.kind == "main_dirty"),
         _ => {}
     }

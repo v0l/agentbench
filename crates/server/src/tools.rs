@@ -366,10 +366,16 @@ impl StoreApi {
             Some(_) => return Err("`risky` is a list of action names".into()),
         };
         let deploy = text(args, "deploy");
+        let judge = match args.get("judge_unset_goals") {
+            None | Some(Value::Null) => None,
+            Some(Value::Bool(b)) => Some(Some(*b)),
+            Some(Value::String(t)) if t.trim() == "default" => Some(None),
+            Some(_) => return Err("`judge_unset_goals` is true, false or \"default\"".into()),
+        };
         let default = crate::autopilot::default_level(s);
         let Some(v) = args.get("project").filter(|v| !v.is_null()) else {
-            if risky.is_some() || deploy.is_some() {
-                return Err("risky actions and the deploy command are set per project; name the `project`".into());
+            if risky.is_some() || deploy.is_some() || judge.is_some() {
+                return Err("risky actions, the deploy command and judge_unset_goals are set per project here; name the `project` (the global switch is in the autopilot tool)".into());
             }
             return match level {
                 None => Ok(json!({ "summary": crate::autopilot::summary(s) })),
@@ -397,7 +403,7 @@ impl StoreApi {
         if p.builtin() {
             return Err(format!("{} is built in and has no automation level", p.name));
         }
-        if level.is_none() && risky.is_none() && deploy.is_none() {
+        if level.is_none() && risky.is_none() && deploy.is_none() && judge.is_none() {
             return Ok(json!({ "summary": crate::autopilot::summary(s) }));
         }
         let before = p.level(default);
@@ -418,7 +424,7 @@ impl StoreApi {
             }
             return Err(proposal(&what.join(" and "), SET_AUTOMATION, Some(&p), "the user's confirmation", before));
         }
-        let patch = ProjectPatch { automation: level, risky, deploy, ..Default::default() };
+        let patch = ProjectPatch { automation: level, risky, deploy, judge_unset_goals: judge, ..Default::default() };
         let p = crate::autopilot::set_project(s, p.id, &patch).map_err(|e| e.0)?;
         Ok(json!({
             "project": p.name,
@@ -426,6 +432,7 @@ impl StoreApi {
             "own_level": p.automation.is_some(),
             "risky": p.risky.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
             "deploy": p.deploy,
+            "judge_unset_goals": crate::judging::on_for(s, &p),
         }))
     }
 
@@ -1606,6 +1613,7 @@ impl Api for StoreApi {
                     stuck_no_commit_minutes: args.get("stuck_no_commit_minutes").and_then(Value::as_u64),
                     intake_per_hour: num("intake_per_hour"),
                     untrusted_turns_per_day: num("untrusted_turns_per_day"),
+                    judge_unset_goals: flag("judge_unset_goals"),
                 };
                 let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
                 json!(state)
@@ -1697,6 +1705,23 @@ impl Api for StoreApi {
                 crate::groom::done(s, &p, &summary, crate::store::now()).map_err(|e| e.0)?;
                 json!({ "groomed": p.name })
             }
+            "judge_issue" => {
+                if !sup {
+                    return Err("only the supervisor chat can use judge_issue".into());
+                }
+                let verdict = text(args, "verdict").ok_or("judge_issue needs `verdict`")?;
+                let goal = text(args, "goal");
+                let reason = text(args, "reason").unwrap_or_default();
+                let j = crate::judging::Judgement {
+                    issue: id(args)?,
+                    verdict: verdict.trim(),
+                    goal: goal.as_deref(),
+                    duplicate_of: args.get("duplicate_of").and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().trim_start_matches('#').parse().ok()))),
+                    reason: &reason,
+                };
+                let i = crate::judging::judge(s, &j)?;
+                json!({ "id": i.id, "verdict": j.verdict, "state": i.state, "goal": i.goal, "off_vision": i.off_vision, "labels": i.labels })
+            }
             "set_automation" => self.set_automation(args, session)?,
             "get_vision" => match s.vision(project).map_err(|e| e.0)? {
                 Some(v) => vision_json(&v),
@@ -1741,6 +1766,7 @@ impl Api for StoreApi {
                 | "judge_session"
                 | "check_in"
                 | "groom_done"
+                | "judge_issue"
                 | "set_automation"
                 | "approve_action"
                 | "add_project"

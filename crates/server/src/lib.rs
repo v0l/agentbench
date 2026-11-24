@@ -11,6 +11,7 @@ pub mod github;
 pub mod groom;
 pub mod guards;
 mod injection;
+pub mod judging;
 #[cfg(test)]
 mod testing_stub;
 #[cfg(test)]

@@ -771,6 +771,7 @@ pub mod tests {
             merge_mode: Default::default(),
             automerge: Default::default(),
             merge_method: Default::default(),
+            judge_unset_goals: None,
         }
     }
 

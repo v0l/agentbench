@@ -310,6 +310,8 @@ pub struct Project {
     pub automerge: AutoMerge,
     #[serde(default)]
     pub merge_method: MergeMethod,
+    #[serde(default)]
+    pub judge_unset_goals: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2072,6 +2074,8 @@ pub struct ProjectPatch {
     pub automerge: Option<AutoMerge>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_method: Option<MergeMethod>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    pub judge_unset_goals: Option<Option<bool>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2489,6 +2493,8 @@ pub struct AutopilotState {
     #[serde(default)]
     pub untrusted_turns_today: u32,
     #[serde(default)]
+    pub judge_unset_goals: bool,
+    #[serde(default)]
     pub activity: Vec<Activity>,
 }
 
@@ -2528,6 +2534,8 @@ pub struct AutopilotPatch {
     pub intake_per_hour: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub untrusted_turns_per_day: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_unset_goals: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2666,7 +2674,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 13;
+pub const API_VERSION: u32 = 14;
+pub const API_JUDGE_GOALS: u32 = 14;
 pub const API_RESTART: u32 = 13;
 pub const API_GITHUB_APP: u32 = 12;
 pub const API_PR_REVIEW: u32 = 11;

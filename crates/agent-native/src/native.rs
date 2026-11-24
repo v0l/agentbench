@@ -358,7 +358,7 @@ impl Native {
 }
 
 /// The tools the tracker answers, through `Api`.
-pub const AGENTBENCH_TOOLS: [&str; 42] = [
+pub const AGENTBENCH_TOOLS: [&str; 43] = [
     "github_post",
     "github_outbox",
     "list_issues",
@@ -400,6 +400,7 @@ pub const AGENTBENCH_TOOLS: [&str; 42] = [
     "judge_session",
     "check_in",
     "groom_done",
+    "judge_issue",
     "main_checkout",
 ];
 
@@ -581,6 +582,20 @@ fn agentbench_specs() -> Vec<Spec> {
                     "verdict": json!({ "type": "string", "enum": ["concluded_pass", "concluded_fail", "needs_followup", "waiting_on_user", "blocked"] }),
                     "reason": string("Why, in a sentence; shown on the issue and in the autopilot feed"),
                     "followup": string("For needs_followup: the message the worker gets"),
+                }),
+                &["id", "verdict", "reason"],
+            ),
+        ),
+        Spec::new(
+            "judge_issue",
+            "Supervisor chat only. Record your verdict on a backlog or todo issue that has no goal, judged against its project's vision. Answer every issue of a judge_issues message with one call. serves_goal sets `goal` (an active goal id) and keeps the state: promoting to todo stays a separate decision. off_vision flags it and keeps it in backlog. needs_user labels it needs-user. duplicate closes it as done pointing at `duplicate_of`. not_worth_doing closes it as done. The reason is written to the issue as a comment. An untrusted issue cannot be given serves_goal.",
+            object(
+                json!({
+                    "id": id("The issue number"),
+                    "verdict": json!({ "type": "string", "enum": ["serves_goal", "off_vision", "needs_user", "duplicate", "not_worth_doing"] }),
+                    "goal": string("For serves_goal: the active goal id it serves"),
+                    "duplicate_of": id("For duplicate: the issue it duplicates"),
+                    "reason": string("Why, in a sentence; for needs_user, the decision the user must make"),
                 }),
                 &["id", "verdict", "reason"],
             ),
@@ -786,6 +801,7 @@ fn agentbench_specs() -> Vec<Spec> {
                     "check_in_all": json!({ "type": "boolean", "description": "Also check in on workers already on the top model (default off)" }),
                     "groom": json!({ "type": "boolean", "description": "Send you a groom message when a project at autowork or above has an empty todo queue, no running worker and a backlog (default on)" }),
                     "groom_hours": id("Hours between groom messages for one project (default 24); it is also sent only after the backlog changed"),
+                    "judge_unset_goals": json!({ "type": "boolean", "description": "Send you judge_issues messages listing backlog and todo issues with no goal, to judge against the vision with judge_issue (default on; a project can override it with set_automation)" }),
                     "auto_escalate": json!({ "type": "boolean", "description": "Escalate a stuck worker to the top model without waiting for you (default off)" }),
                     "stuck_failed_runs": id("Same test or build command failing this many times in a row marks a check_in stuck"),
                     "stuck_compactions": id("Compactions in one turn that mark a check_in stuck"),
@@ -805,6 +821,7 @@ fn agentbench_specs() -> Vec<Spec> {
                     "level": string("manual, assist, delegate, autowork, ship or full_auto; `default` makes the project follow the global default"),
                     "risky": json!({ "type": "array", "items": { "type": "string" }, "description": "The full list of risky actions allowed at full auto: deploy, prod_data, external_messages, publish, spend_money" }),
                     "deploy": string("The command that deploys the project, run from its main checkout"),
+                    "judge_unset_goals": json!({ "description": "Per project: true or false to override the autopilot's judge_unset_goals switch, or \"default\" to follow it" }),
                 }),
                 &[],
             ),
