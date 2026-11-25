@@ -2919,20 +2919,25 @@ fn the_settings_projects_page_switches_judging_goalless_issues_at_desktop_and_ph
         h.run_steps(3);
         shot(&mut h, &format!("judge-goalless-{tag}"));
         for label in ["judge goalless issues".to_string()] {
+            until_label(&mut h, &label);
             let r = h.get_by_label(&label).rect();
             assert!(r.min.x >= 0.0 && r.max.x <= size[0], "{label} at {size:?}: {r:?}");
         }
-        assert!(h.state().autopilot().is_some_and(|a| a.judge_unset_goals), "on by default");
+        until(&mut h, "autopilot", |h| h.state().autopilot().is_some_and(|a| a.judge_unset_goals));
+        until_label(&mut h, "judge goalless issues");
         h.get_by_label("judge goalless issues").click();
         until(&mut h, "global off", |_| rig.store.setting("autopilot_judge_unset_goals").unwrap().as_deref() == Some("0"));
+        until_label(&mut h, &format!("{} judge goalless on", project.name));
         h.get_by_label(&format!("{} judge goalless on", project.name)).scroll_to_me();
         h.run_steps(3);
         shot(&mut h, &format!("judge-goalless-{tag}-project"));
+        until_label(&mut h, &format!("{} judge goalless default (off)", project.name));
         let r = h.get_by_label(&format!("{} judge goalless default (off)", project.name)).rect();
         assert!(r.min.x >= 0.0 && r.max.x <= size[0], "project row at {size:?}: {r:?}");
         h.get_by_label(&format!("{} judge goalless on", project.name)).click();
         until(&mut h, "project on", |_| rig.store.project(project.id).unwrap().judge_unset_goals == Some(true));
         h.run_steps(5);
+        until_label(&mut h, &format!("{} judge goalless default (off)", project.name));
         h.get_by_label(&format!("{} judge goalless default (off)", project.name)).click();
         until(&mut h, "project default", |_| rig.store.project(project.id).unwrap().judge_unset_goals.is_none());
     }

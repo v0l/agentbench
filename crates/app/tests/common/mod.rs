@@ -322,6 +322,10 @@ pub fn until(h: &mut Harness<'_, App>, what: &str, ok: impl Fn(&Harness<'_, App>
     h.run_steps(3);
 }
 
+pub fn until_label(h: &mut Harness<'_, App>, label: &str) {
+    until(h, label, |h| h.query_by_label(label).is_some());
+}
+
 pub fn open_home_row(h: &mut Harness<'_, App>) {
     h.state_mut().blank_chat_in_home();
     h.run_steps(3);
