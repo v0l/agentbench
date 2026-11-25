@@ -45,6 +45,10 @@ impl Limits {
     }
 }
 
+pub fn resident(root: Option<u32>) -> u64 {
+    root.map_or(0, |root| tree_memory(root, proc_children, proc_rss))
+}
+
 fn tree_memory(root: u32, children: impl Fn(u32) -> Vec<u32>, rss: impl Fn(u32) -> u64) -> u64 {
     let mut total = 0;
     let mut seen = std::collections::HashSet::new();

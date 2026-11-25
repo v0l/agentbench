@@ -10,6 +10,7 @@ pub mod local;
 pub mod lsp;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+pub mod pool;
 pub mod sandbox;
 pub mod skills;
 pub mod skillset;
