@@ -1614,9 +1614,13 @@ impl Api for StoreApi {
                     intake_per_hour: num("intake_per_hour"),
                     untrusted_turns_per_day: num("untrusted_turns_per_day"),
                     judge_unset_goals: flag("judge_unset_goals"),
+                    pressure: flag("pressure"),
                 };
-                let state = crate::autopilot::apply(s, &patch).map_err(|e| e.0)?;
-                json!(state)
+                let mut state = json!(crate::autopilot::apply(s, &patch).map_err(|e| e.0)?);
+                if let Ok(runner) = self.runner.get() {
+                    state = json!(crate::autopilot::state_for(&runner));
+                }
+                state
             }
             "merge_branch" | "set_automation" | "risky_action" | "restart_server" | "approve_action" | "set_vision" | "main_checkout" if !sup => {
                 return Err(format!("only the supervisor chat can use {tool}"));

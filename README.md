@@ -449,6 +449,44 @@ shows a `stuck` badge while the last check_in was stuck. `check_in_all` also
 checks in on top-model sessions; `auto_escalate` (off) escalates stuck sessions
 by itself and tells the supervisor. All of these are in the `autopilot` tool.
 
+### Host pressure
+
+Every 10 s the server reads `/proc/pressure/{cpu,memory,io}`, `/proc/meminfo`,
+`/proc/loadavg`, `/proc/swaps` and `/proc/diskstats`. When a reading stays bad
+the autopilot backs off: in `pressure` it starts workers only up to half the
+cap (at least 1), in `critical` it starts none and tells each running worker
+once to pause test and build runs and commit. Running workers are never
+stopped, and sessions the user started or took control of, and the supervisor,
+are never messaged. Pressure clears after the cooldown with every reading below
+the pressure limits, then the cap comes back one worker per step. Every change
+goes to the autopilot feed, the supervisor gets one notice per episode, and
+`GET /api/autopilot` has `pressure {state, reason, since, readings,
+effective_cap, configured_cap}`. `agentbench autopilot` and the app status line
+show it as `scaled to 2 of 8: io full 22%, swap 19 GB (swap on nvme1n1p1)`.
+Off Linux the readings are unknown and the state stays `ok`.
+
+Settings (rows of the `settings` table in `agentbench.db`, each threshold named with the `autopilot_pressure_` prefix):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `autopilot_pressure` | on | `off` turns the whole watch off; also the `pressure` switch of the `autopilot` tool and `PATCH /api/autopilot` |
+| `autopilot_pressure_devices` | `$TMPDIR` (or /tmp) and the parent of `CARGO_TARGET_DIR` | comma separated paths or device names whose write latency is read |
+| `_io_full` | 15 | pressure: io full avg10 above, % |
+| `_memory_some` | 10 | pressure: memory some avg10 above, % |
+| `_mem_available_gb` | 12 | pressure: MemAvailable under, GB |
+| `_swap_gb` | 4 | pressure: swap used above, GB, and growing over the hold time |
+| `_cpu_some` | 40 | pressure: cpu some avg60 above, % |
+| `_load_per_core` | 0.7 | pressure: 1 minute load per core above |
+| `_write_ms` | 0 (off) | pressure: write latency on a watched device above, ms |
+| `_hold_secs` | 60 | how long a pressure reading must hold |
+| `_critical_io_full` | 30 | critical: io full avg10 above, % |
+| `_critical_memory_full` | 5 | critical: memory full avg10 above, % |
+| `_critical_mem_available_gb` | 5 | critical: MemAvailable under, GB |
+| `_critical_swap_gb` | 16 | critical: swap used above, GB |
+| `_critical_hold_secs` | 30 | how long a critical reading must hold |
+| `_cooldown_secs` | 300 | calm time before pressure clears |
+| `_recover_secs` | 120 | one more worker each this many seconds after clearing |
+
 When a project at autowork or above has no `todo` issue, no running worker and at
 least one `backlog` issue, the autopilot sends the supervisor one `groom <project>:`
 message with the vision, active goals, the backlog (oldest first, 40 at most) and

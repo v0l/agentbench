@@ -2498,6 +2498,122 @@ pub struct AutopilotState {
     pub judge_unset_goals: bool,
     #[serde(default)]
     pub activity: Vec<Activity>,
+    #[serde(default)]
+    pub pressure: Option<HostPressure>,
+}
+
+impl AutopilotState {
+    pub fn status_line(&self) -> String {
+        let base = if !self.enabled {
+            "paused".to_string()
+        } else if self.idle {
+            "idle, no eligible issues".to_string()
+        } else {
+            format!("running, {} of {} workers", self.workers, self.cap)
+        };
+        match self.pressure.as_ref().and_then(HostPressure::line) {
+            Some(p) if self.enabled => format!("{base}; {p}"),
+            _ => base,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PressureState {
+    #[default]
+    Ok,
+    Pressure,
+    Critical,
+    #[serde(other)]
+    Unknown,
+}
+
+impl PressureState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PressureState::Ok => "ok",
+            PressureState::Pressure => "pressure",
+            PressureState::Critical => "critical",
+            PressureState::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiskReading {
+    pub device: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub write_ms: f32,
+    #[serde(default)]
+    pub queue_ms: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PressureReadings {
+    #[serde(default)]
+    pub known: bool,
+    #[serde(default)]
+    pub cpu_some10: Option<f32>,
+    #[serde(default)]
+    pub cpu_some60: Option<f32>,
+    #[serde(default)]
+    pub memory_some10: Option<f32>,
+    #[serde(default)]
+    pub memory_some60: Option<f32>,
+    #[serde(default)]
+    pub memory_full10: Option<f32>,
+    #[serde(default)]
+    pub memory_full60: Option<f32>,
+    #[serde(default)]
+    pub io_some10: Option<f32>,
+    #[serde(default)]
+    pub io_some60: Option<f32>,
+    #[serde(default)]
+    pub io_full10: Option<f32>,
+    #[serde(default)]
+    pub io_full60: Option<f32>,
+    #[serde(default)]
+    pub mem_available: Option<u64>,
+    #[serde(default)]
+    pub swap_used: Option<u64>,
+    #[serde(default)]
+    pub swap_device: Option<String>,
+    #[serde(default)]
+    pub load_per_core: Option<f32>,
+    #[serde(default)]
+    pub disks: Vec<DiskReading>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HostPressure {
+    #[serde(default)]
+    pub enabled: bool,
+    pub state: PressureState,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub since: i64,
+    #[serde(default)]
+    pub readings: PressureReadings,
+    #[serde(default)]
+    pub effective_cap: u32,
+    #[serde(default)]
+    pub configured_cap: u32,
+}
+
+impl HostPressure {
+    pub fn line(&self) -> Option<String> {
+        let (on, of) = (self.effective_cap, self.configured_cap);
+        match self.state {
+            PressureState::Critical => Some(format!("starts paused, 0 of {of}: {}", self.reason)),
+            PressureState::Pressure => Some(format!("scaled to {on} of {of}: {}", self.reason)),
+            _ if self.enabled && on < of => Some(format!("recovering, {on} of {of}")),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -2538,6 +2654,8 @@ pub struct AutopilotPatch {
     pub untrusted_turns_per_day: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge_unset_goals: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

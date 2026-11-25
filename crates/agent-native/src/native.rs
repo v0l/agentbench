@@ -807,6 +807,7 @@ fn agentbench_specs() -> Vec<Spec> {
                     "stuck_compactions": id("Compactions in one turn that mark a check_in stuck"),
                     "stuck_no_commit_minutes": id("Minutes with no commit while dirty files grow that mark a check_in stuck"),
                     "auto_close": json!({ "type": "boolean", "description": "Close a session and remove its worktree once its branch is merged and its issue done (default on)" }),
+                    "pressure": json!({ "type": "boolean", "description": "Back off under sustained host RAM, swap, disk IO or CPU pressure: half the cap under pressure, no starts when critical (default on). The reading shows as `pressure` in the reply" }),
                 }),
                 &[],
             ),

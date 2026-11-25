@@ -120,6 +120,8 @@ fn level_flag(text: &str) -> Result<Option<agentbench_core::ModelLevel>, String>
 #[derive(Subcommand)]
 pub enum Command {
     Serve,
+    #[command(about = "Show the autopilot loop state, with host pressure and the scaled worker cap.")]
+    Autopilot,
     /// Create issues, set their model level, or show and set a project's level table.
     Issue {
         #[command(subcommand)]
@@ -520,6 +522,51 @@ pub async fn restart_command(
     Err(format!("the server did not come back at {} within a minute", server.base()))
 }
 
+pub fn autopilot_text(a: &agentbench_core::AutopilotState) -> String {
+    let mut out = format!("autopilot: {}", a.status_line());
+    if let Some(p) = &a.pressure
+        && p.enabled
+    {
+        out.push_str(&format!("\nhost pressure: {}", p.state.as_str()));
+        if !p.reason.is_empty() {
+            out.push_str(&format!(" ({})", p.reason));
+        }
+        out.push_str(&format!(", workers {} of {}", p.effective_cap, p.configured_cap));
+        let r = &p.readings;
+        if r.known {
+            let pct = |v: Option<f32>| v.map_or("?".to_string(), |v| format!("{v:.0}%"));
+            let gb = |v: Option<u64>| v.map_or("?".to_string(), |v| format!("{:.1} GB", v as f64 / 1073741824.0));
+            out.push_str(&format!(
+                "\nio full {}, memory some {}, cpu some {}, available {}, swap {}{}, load {} per core",
+                pct(r.io_full10),
+                pct(r.memory_some10),
+                pct(r.cpu_some60),
+                gb(r.mem_available),
+                gb(r.swap_used),
+                r.swap_device.as_ref().map(|d| format!(" on {d}")).unwrap_or_default(),
+                r.load_per_core.map_or("?".to_string(), |v| format!("{v:.2}")),
+            ));
+            for d in &r.disks {
+                out.push_str(&format!("\n{} ({}): writes {:.1} ms, queue {:.1} ms", d.device, d.path, d.write_ms, d.queue_ms));
+            }
+        } else {
+            out.push_str("\nreadings unknown on this host");
+        }
+    }
+    out
+}
+
+pub async fn autopilot_command(home: &std::path::Path, url: Option<String>, token: Option<String>) -> Result<Option<String>, String> {
+    match resolve_target(home, url, token)? {
+        Target::Remote(server) => {
+            let v = remote_call(&server, reqwest::Method::GET, "/api/autopilot", None).await?;
+            let a: agentbench_core::AutopilotState = serde_json::from_value(v).map_err(|e| e.to_string())?;
+            Ok(Some(autopilot_text(&a)))
+        }
+        Target::Local(_) => Ok(None),
+    }
+}
+
 pub fn logging() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -579,6 +626,12 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         let Some(Command::Github { action }) = cli.command else { unreachable!() };
         let out = github_command(&home, std::env::var("AGENTBENCH_URL").ok(), std::env::var("AGENTBENCH_TOKEN").ok(), action).await?;
         println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
+    if let Some(Command::Autopilot) = &cli.command
+        && let Some(out) = autopilot_command(&home, std::env::var("AGENTBENCH_URL").ok(), std::env::var("AGENTBENCH_TOKEN").ok()).await?
+    {
+        println!("{out}");
         return Ok(());
     }
     if let Some(Command::Restart { drain_secs }) = &cli.command {
@@ -681,6 +734,10 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Command::Github { .. } => unreachable!("handled before the store opens"),
         Command::Chat { .. } => unreachable!("handled before the store opens"),
         Command::Restart { .. } => unreachable!("handled before the store opens"),
+        Command::Autopilot => {
+            println!("{}", autopilot_text(&crate::autopilot::state(&store)));
+            Ok(())
+        }
         Command::Issue { action } => {
             let find = |name: &str| -> Result<agentbench_core::Project, String> {
                 store
@@ -757,6 +814,29 @@ mod tests {
     use crate::github::testing::Rig;
     use agentbench_core::{PostMode, Trust};
     use serde_json::json;
+
+    #[test]
+    fn the_autopilot_command_prints_the_scaled_cap_and_the_reason() {
+        assert!(matches!(Cli::try_parse_from(["agentbench", "autopilot"]).unwrap().command, Some(Command::Autopilot)));
+        let a = agentbench_core::AutopilotState {
+            enabled: true,
+            cap: 8,
+            workers: 2,
+            pressure: Some(agentbench_core::HostPressure {
+                enabled: true,
+                state: agentbench_core::PressureState::Pressure,
+                reason: "io full 22%, swap 19 GB (swap on nvme1n1p1)".into(),
+                effective_cap: 2,
+                configured_cap: 8,
+                readings: agentbench_core::PressureReadings { known: true, io_full10: Some(22.0), ..Default::default() },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let text = autopilot_text(&a);
+        assert!(text.starts_with("autopilot: running, 2 of 8 workers; scaled to 2 of 8: io full 22%, swap 19 GB"), "{text}");
+        assert!(text.contains("host pressure: pressure"), "{text}");
+    }
 
     fn parse(args: &[&str]) -> GithubAction {
         let mut all = vec!["agentbench", "github"];

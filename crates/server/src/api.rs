@@ -401,7 +401,7 @@ async fn overview(State(api): State<Api>) -> Reply<Overview> {
         issues: store.issues()?,
         sessions: api.runner.with_queued(store.sessions()?),
         supervisor: api.runner.supervisor_session().map(|s| s.id),
-        autopilot: Some(crate::autopilot::state(store)),
+        autopilot: Some(crate::autopilot::state_for(&api.runner)),
         triage: Some(crate::triage::state(store)),
         visions: store.visions()?,
         usage: Some(usage_report(&api)?),
@@ -1281,14 +1281,15 @@ async fn set_issue_deps(
 }
 
 async fn get_autopilot(State(api): State<Api>) -> Reply<agentbench_core::AutopilotState> {
-    Ok(Json(crate::autopilot::state(api.runner.store())))
+    Ok(Json(crate::autopilot::state_for(&api.runner)))
 }
 
 async fn patch_autopilot(
     State(api): State<Api>,
     Json(patch): Json<agentbench_core::AutopilotPatch>,
 ) -> Reply<agentbench_core::AutopilotState> {
-    let state = crate::autopilot::apply(api.runner.store(), &patch)?;
+    crate::autopilot::apply(api.runner.store(), &patch)?;
+    let state = crate::autopilot::state_for(&api.runner);
     changed(&api);
     Ok(Json(state))
 }
@@ -3331,6 +3332,28 @@ mod tests {
         let (_, o) = call(&f.app, "GET", "/api/overview", None, T).await;
         assert_eq!(o["api_version"], agentbench_core::API_VERSION);
         assert_eq!(o["min_client_api"], agentbench_core::MIN_CLIENT_API);
+    }
+
+    #[tokio::test]
+    async fn the_autopilot_reports_host_pressure_and_the_scaled_cap() {
+        let f = fixture();
+        let (_, a) = call(&f.app, "GET", "/api/autopilot", None, T).await;
+        assert_eq!(a["pressure"]["state"], "ok");
+        let ap = crate::autopilot::Autopilot::new(f.api.runner.clone());
+        f.api.runner.store().set_setting("autopilot_cap", "8").unwrap();
+        let busy = agentbench_core::PressureReadings { known: true, io_full10: Some(22.0), ..Default::default() };
+        for t in 0..=6 {
+            ap.observe_pressure(busy.clone(), t * 10_000);
+        }
+        let (_, a) = call(&f.app, "GET", "/api/autopilot", None, T).await;
+        let p = &a["pressure"];
+        assert_eq!((p["state"].as_str(), p["effective_cap"].as_u64(), p["configured_cap"].as_u64()), (Some("pressure"), Some(4), Some(8)), "{a}");
+        assert_eq!(p["reason"], "io full 22%");
+        assert_eq!(p["since"], 60_000);
+        assert_eq!(p["readings"]["io_full10"], 22.0);
+        assert!(a["activity"].as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("host pressure ok to pressure: io full 22%")), "{a}");
+        let (_, o) = call(&f.app, "GET", "/api/overview", None, T).await;
+        assert_eq!(o["autopilot"]["pressure"]["effective_cap"], 4);
     }
 
     #[tokio::test]

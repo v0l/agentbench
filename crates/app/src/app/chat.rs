@@ -414,12 +414,11 @@ impl App {
 
     fn autopilot_panel(&mut self, ui: &mut Ui) {
         let Some(a) = self.autopilot().cloned() else { return };
-        let status = if !a.enabled {
-            "paused".to_string()
-        } else if a.idle {
-            "idle, no eligible issues".to_string()
-        } else {
-            format!("running, {} of {} workers", a.workers, a.cap)
+        let narrow_now = self.narrow;
+        let pressure_line = a.pressure.as_ref().and_then(|p| p.line()).filter(|_| a.enabled && narrow_now);
+        let status = match &pressure_line {
+            Some(_) => agentbench_core::AutopilotState { pressure: None, ..a.clone() }.status_line(),
+            None => a.status_line(),
         };
         let mut flip = false;
         let mut new_default = None;
@@ -479,6 +478,9 @@ impl App {
             });
             if narrow {
                 ui.horizontal(|ui| keys(ui));
+                if let Some(p) = &pressure_line {
+                    Line::new().legend("host").size(10.0).tint(LEGEND).gap(8.0).value(p).size(11.0).tint(FAULT).wrapped(ui);
+                }
             }
             if open || levels_open {
             ui.horizontal(|ui| {

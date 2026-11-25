@@ -4376,6 +4376,32 @@ fn a_new_issue_in_the_home_view_goes_to_the_workspace_picked() {
 }
 
 #[test]
+fn the_autopilot_status_line_shows_the_host_pressure_at_desktop_and_phone_width() {
+    for (size, tag) in [([1280.0, 800.0], "desktop"), ([390.0, 844.0], "phone"), ([412.0, 900.0], "phone412")] {
+        let mut o = recorded_overview();
+        let sid = o["sessions"][0]["id"].clone();
+        o["supervisor"] = sid.clone();
+        o["autopilot"] = serde_json::json!({
+            "enabled": true, "cap": 8, "project_cap": 5, "stuck_minutes": 15, "max_nudges": 2, "idle": false, "workers": 2,
+            "pressure": {
+                "enabled": true, "state": "pressure", "reason": "io full 22%, swap 19 GB (swap on nvme1n1p1)",
+                "since": 1, "effective_cap": 4, "configured_cap": 8, "readings": {"known": true, "io_full10": 22.0}
+            }
+        });
+        let mut h = harness_at(canned_server(o.to_string()), size);
+        until(&mut h, "the overview", |h| h.state().autopilot().is_some());
+        let sid: agentbench_core::SessionId = serde_json::from_value(sid).unwrap();
+        h.state_mut().open_supervisor_chat(sid);
+        h.run_steps(5);
+        shot(&mut h, &format!("pressure-{tag}"));
+        let line = "running, 2 of 8 workers; scaled to 4 of 8: io full 22%, swap 19 GB (swap on nvme1n1p1)";
+        assert_eq!(h.state().autopilot().unwrap().status_line(), line);
+        let toggle = h.get_by_label("autopilot toggle").rect();
+        assert!(toggle.max.x <= size[0] + 0.5, "pause key on screen at {tag}: {toggle:?}");
+    }
+}
+
+#[test]
 fn an_unknown_session_state_shows_as_unknown() {
     let mut o = recorded_overview();
     o["sessions"][0]["status"] = "hibernating".into();

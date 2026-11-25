@@ -109,6 +109,7 @@ pub struct Runner {
     pub attention: Arc<crate::attention::Attention>,
     pub terminals: crate::terminal::Terminals,
     pub quotas: crate::quota::Quotas,
+    pub pressure: crate::pressure::Shared,
     /// This runner, as the tracker tools see it, for starting and messaging sessions.
     me: crate::tools::Handle,
     claims: Arc<Mutex<()>>,
@@ -190,6 +191,7 @@ impl Runner {
             attention: Default::default(),
             terminals: Default::default(),
             quotas: Default::default(),
+            pressure: Default::default(),
             me,
             claims: Default::default(),
             draining: Default::default(),

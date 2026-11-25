@@ -204,7 +204,20 @@ pub fn state(store: &Store) -> AutopilotState {
         groom_hours: crate::groom::groom_hours(store),
         workers: workers.iter().filter(|w| is_active(&w.state)).count() as u32,
         activity: store.autopilot_log(30).unwrap_or_default(),
+        pressure: None,
     }
+}
+
+pub fn state_for(runner: &Runner) -> AutopilotState {
+    let store = runner.store();
+    let mut st = state(store);
+    let limits = crate::pressure::limits(store);
+    let monitor = runner.pressure.lock().unwrap_or_else(|e| e.into_inner());
+    st.pressure = Some(monitor.current(st.cap, &limits)).map(|mut p| {
+        p.enabled &= crate::pressure::enabled(store);
+        p
+    });
+    st
 }
 
 pub fn apply(store: &Store, patch: &AutopilotPatch) -> Result<AutopilotState, StoreError> {
@@ -260,6 +273,10 @@ pub fn apply(store: &Store, patch: &AutopilotPatch) -> Result<AutopilotState, St
     if let Some(on) = patch.auto_escalate {
         store.set_setting(AUTO_ESCALATE, if on { "1" } else { "0" })?;
         store.log_autopilot(None, None, if on { "auto-escalating stuck sessions is on" } else { "auto-escalating stuck sessions is off" })?;
+    }
+    if let Some(on) = patch.pressure {
+        store.set_setting(crate::pressure::SETTING, if on { "on" } else { "off" })?;
+        store.log_autopilot(None, None, if on { "host pressure watch is on" } else { "host pressure watch is off" })?;
     }
     if let Some(on) = patch.auto_close {
         store.set_setting(AUTO_CLOSE, if on { "1" } else { "0" })?;
@@ -844,6 +861,108 @@ impl Autopilot {
         self.tick_at(crate::store::now());
     }
 
+    fn pressure_targets(&self) -> Vec<Session> {
+        let store = self.store();
+        let supervisor = store.supervisor_project().ok().flatten().map(|p| p.id);
+        store
+            .workers()
+            .unwrap_or_default()
+            .iter()
+            .filter(|w| is_active(&w.state) && self.runner.is_running(w.session))
+            .filter_map(|w| store.session(w.session).ok())
+            .filter(|s| !s.released && s.parent.is_some() && Some(s.project_id) != supervisor)
+            .collect()
+    }
+
+    pub fn observe_pressure(&self, readings: agentbench_core::PressureReadings, now: i64) {
+        use agentbench_core::PressureState;
+        use crate::pressure::Event;
+        let store = self.store();
+        if !crate::pressure::enabled(store) {
+            let mut m = self.runner.pressure.lock().unwrap_or_else(|e| e.into_inner());
+            if m.state() != PressureState::Ok || !m.messaged.is_empty() {
+                m.disable();
+                drop(m);
+                self.log(None, None, "host pressure watch is off");
+            }
+            return;
+        }
+        let configured = number(store, CAP, DEFAULT_CAP);
+        let limits = crate::pressure::limits(store);
+        let (events, first_notice) = {
+            let mut m = self.runner.pressure.lock().unwrap_or_else(|e| e.into_inner());
+            let events = m.observe(readings, &limits, configured, now);
+            let entering = events.iter().any(|e| matches!(e, Event::Changed { from: PressureState::Ok, .. }));
+            let first = entering && !m.notified;
+            if first {
+                m.notified = true;
+            }
+            (events, first)
+        };
+        for e in &events {
+            match e {
+                Event::Changed { from, to, reason, cap } => {
+                    let line = match to {
+                        PressureState::Critical => format!("host pressure {} to critical: {reason}; no new workers start (0 of {configured})", from.as_str()),
+                        PressureState::Pressure => format!("host pressure {} to pressure: {reason}; scaled to {cap} of {configured} workers", from.as_str()),
+                        _ => format!("host pressure cleared ({reason}); recovering one worker every {} min, now {cap} of {configured}", limits.step_ms / 60_000),
+                    };
+                    self.log(None, None, &line);
+                    if *from == PressureState::Critical {
+                        self.resume_after_pressure();
+                    }
+                }
+                Event::Step { cap } => {
+                    self.log(None, None, &format!("host pressure recovery: {cap} of {configured} workers"));
+                }
+            }
+        }
+        if first_notice
+            && let Some(Event::Changed { to, reason, cap, .. }) = events.iter().find(|e| matches!(e, Event::Changed { .. }))
+        {
+            let what = if *to == PressureState::Critical { "no new workers start".to_string() } else { format!("scaled to {cap} of {configured} workers") };
+            self.notify(&format!("the host is under sustained load ({reason}): {what} until it clears"));
+        }
+        if self.runner.pressure.lock().unwrap_or_else(|e| e.into_inner()).state() == PressureState::Critical {
+            self.pause_for_pressure();
+        }
+    }
+
+    fn pause_for_pressure(&self) {
+        for s in self.pressure_targets() {
+            let fresh = self.runner.pressure.lock().unwrap_or_else(|e| e.into_inner()).messaged.insert(s.id);
+            if !fresh {
+                continue;
+            }
+            match self.runner.tell(&s, crate::pressure::PAUSE_TEXT, Origin::new("autopilot", Some(s.id))) {
+                Ok(()) => self.log(Some(s.project_id), s.issue_id, &format!("host pressure: told session {} to pause test and build runs", s.id)),
+                Err(e) => self.log(Some(s.project_id), s.issue_id, &format!("host pressure: could not tell session {}: {}", s.id, clip(&e.0, 160))),
+            }
+        }
+    }
+
+    fn resume_after_pressure(&self) {
+        let told: Vec<SessionId> = std::mem::take(&mut self.runner.pressure.lock().unwrap_or_else(|e| e.into_inner()).messaged).into_iter().collect();
+        for id in told {
+            let Ok(s) = self.store().session(id) else { continue };
+            if s.released {
+                continue;
+            }
+            if self.runner.tell(&s, crate::pressure::RESUME_TEXT, Origin::new("autopilot", Some(s.id))).is_ok() {
+                self.log(Some(s.project_id), s.issue_id, &format!("host pressure: told session {} to resume", s.id));
+            }
+        }
+    }
+
+    fn effective_cap(&self, configured: u32) -> u32 {
+        let store = self.store();
+        if !crate::pressure::enabled(store) {
+            return configured;
+        }
+        let limits = crate::pressure::limits(store);
+        self.runner.pressure.lock().unwrap_or_else(|e| e.into_inner()).cap(configured, &limits)
+    }
+
     pub fn tick_at(&self, now: i64) {
         let store = self.store();
         let watched: Vec<Id> = self.dirty.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().collect();
@@ -1421,6 +1540,11 @@ impl Autopilot {
             }
             None => self.resume_note(false),
         }
+        let configured = number(store, CAP, DEFAULT_CAP);
+        let cap = self.effective_cap(configured);
+        if cap == 0 {
+            return;
+        }
         let workers = store.workers().unwrap_or_default();
         let issues = crate::github::caps::startable(store, store.issues().unwrap_or_default(), crate::store::now());
         let mut live: HashSet<Id> = workers.iter().map(|w| w.issue).collect();
@@ -1453,7 +1577,7 @@ impl Autopilot {
             live: &live,
             running_by_project: &by_project,
             running,
-            cap: number(store, CAP, DEFAULT_CAP),
+            cap,
             project_cap: number(store, PROJECT_CAP, DEFAULT_PROJECT_CAP),
         };
         let picked = pick(&issues, &room);
@@ -1877,6 +2001,26 @@ pub fn run_deploy(dir: &Path, command: &str, limit: Duration) -> Result<String, 
 
 pub fn spawn(runner: Runner) {
     let ap = Autopilot::new(runner.clone());
+    let watcher = ap.clone();
+    tokio::spawn(async move {
+        let mut reader = Some(crate::host::Reader::system());
+        loop {
+            let this = watcher.clone();
+            let Some(mut r) = reader.take() else { break };
+            reader = tokio::task::spawn_blocking(move || {
+                if crate::pressure::enabled(this.store()) {
+                    let readings = r.sample(&crate::pressure::devices(this.store()));
+                    this.observe_pressure(readings, crate::store::now());
+                } else {
+                    this.observe_pressure(Default::default(), crate::store::now());
+                }
+                r
+            })
+            .await
+            .ok();
+            tokio::time::sleep(crate::pressure::SAMPLE_EVERY).await;
+        }
+    });
     tokio::spawn(async move {
         loop {
             let woken = runner.changed.notified();
@@ -2509,6 +2653,187 @@ mod tests {
         apply(&r.store, &AutopilotPatch { default_level: Some(Automation::Autowork), ..Default::default() }).unwrap();
         r.ap.tick();
         assert_eq!(r.store.issue(a).unwrap().state, IssueState::Doing, "the default reaches autowork");
+    }
+
+    const S: i64 = 1000;
+
+    fn load(r: &Rig, readings: &agentbench_core::PressureReadings, from: i64, to: i64) {
+        let mut t = from;
+        while t <= to {
+            r.ap.observe_pressure(readings.clone(), t);
+            t += 10 * S;
+        }
+    }
+
+    fn running_issues(r: &Rig) -> usize {
+        r.store.workers().unwrap().iter().filter(|w| r.ap.runner.is_running(w.session)).count()
+    }
+
+    fn pressure_rig(cap: u32, issues: usize) -> Rig {
+        let r = rig(LONG);
+        for i in 0..issues {
+            todo(&r, &format!("t{i}"), 0, &[]);
+        }
+        on(&r);
+        apply(&r.store, &AutopilotPatch { cap: Some(cap), ..Default::default() }).unwrap();
+        r
+    }
+
+    fn pause_messages(r: &Rig, sid: agentbench_core::SessionId) -> usize {
+        told(r, sid).iter().chain(r.ap.runner.queued(sid).iter()).filter(|t| t.contains(crate::pressure::PAUSE_TEXT)).count()
+    }
+
+    fn load_notices(r: &Rig) -> Vec<String> {
+        r.store
+            .messages(r.boss.unwrap(), 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|m| match m.entry {
+                Entry::Notice { text } if text.contains("sustained load") => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_single_bad_sample_does_not_scale_back_the_loop() {
+        use crate::pressure::tests::{calm, heavy};
+        let r = pressure_rig(4, 6);
+        load(&r, &calm(), 0, 30 * S);
+        load(&r, &heavy(), 40 * S, 40 * S);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 4);
+    }
+
+    #[tokio::test]
+    async fn sixty_seconds_of_pressure_halve_the_workers_the_loop_starts() {
+        use crate::pressure::tests::busy;
+        let r = pressure_rig(4, 6);
+        load(&r, &busy(), 0, 60 * S);
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 2, "half of the cap of 4");
+        let st = state_for(&r.ap.runner);
+        let p = st.pressure.clone().unwrap();
+        assert_eq!((p.state, p.effective_cap, p.configured_cap), (agentbench_core::PressureState::Pressure, 2, 4));
+        assert_eq!(p.reason, "io full 22%");
+        assert!(st.status_line().contains("scaled to 2 of 4: io full 22%"), "{}", st.status_line());
+        let changes: Vec<String> = feed(&r).into_iter().filter(|l| l.contains("host pressure ok to pressure")).collect();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert!(changes[0].contains("io full 22%") && changes[0].contains("scaled to 2 of 4"), "{}", changes[0]);
+    }
+
+    #[tokio::test]
+    async fn pressure_keeps_running_workers_running() {
+        use crate::pressure::tests::busy;
+        let r = pressure_rig(4, 6);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 4);
+        load(&r, &busy(), 0, 120 * S);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 4, "none stopped");
+        assert_eq!(r.store.workers().unwrap().len(), 4, "none started either");
+    }
+
+    #[tokio::test]
+    async fn critical_starts_nothing_and_messages_each_worker_once() {
+        use crate::pressure::tests::heavy;
+        let r = pressure_rig(2, 4);
+        r.ap.tick();
+        let sids: Vec<_> = r.store.workers().unwrap().iter().map(|w| w.session).collect();
+        assert_eq!(sids.len(), 2);
+        apply(&r.store, &AutopilotPatch { cap: Some(4), ..Default::default() }).unwrap();
+        load(&r, &heavy(), 0, 200 * S);
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(r.store.workers().unwrap().len(), 2, "nothing new starts");
+        assert!(sids.iter().all(|s| r.ap.runner.is_running(*s)), "nobody is stopped");
+        for sid in &sids {
+            assert_eq!(pause_messages(&r, *sid), 1, "exactly one message to {sid}");
+        }
+        let told_lines = feed(&r).into_iter().filter(|l| l.contains("to pause test and build runs")).count();
+        assert_eq!(told_lines, 2);
+        let st = state_for(&r.ap.runner);
+        assert_eq!(st.pressure.unwrap().effective_cap, 0);
+        let notices = load_notices(&r);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+    }
+
+    #[tokio::test]
+    async fn clearing_needs_the_cooldown_and_recovers_one_worker_every_two_minutes() {
+        use crate::pressure::tests::{busy, calm};
+        let r = pressure_rig(4, 8);
+        load(&r, &busy(), 0, 60 * S);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 2);
+        load(&r, &calm(), 70 * S, 360 * S);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 2, "still in the cooldown");
+        load(&r, &calm(), 370 * S, 370 * S);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 2, "cleared, but at the halved cap");
+        load(&r, &calm(), 380 * S, 480 * S);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 2);
+        load(&r, &calm(), 490 * S, 490 * S);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 3, "one more after two minutes");
+        load(&r, &calm(), 500 * S, 610 * S);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 4, "and the next two minutes later");
+        let feed = feed(&r);
+        assert!(feed.iter().any(|l| l.contains("host pressure cleared")), "{feed:?}");
+        assert!(feed.iter().any(|l| l.contains("host pressure recovery: 4 of 4")), "{feed:?}");
+        let notices = load_notices(&r);
+        assert_eq!(notices.len(), 1, "one notice per episode: {notices:?}");
+    }
+
+    #[tokio::test]
+    async fn the_supervisor_and_user_sessions_are_never_messaged_or_stopped() {
+        use crate::pressure::tests::heavy;
+        let r = pressure_rig(3, 3);
+        r.ap.tick();
+        let workers = r.store.workers().unwrap();
+        assert_eq!(workers.len(), 3);
+        let (kept, released, user) = (workers[0].session, workers[1].session, workers[2].session);
+        assert!(release(&r.store, released, "user").unwrap());
+        r.store.set_parent(user, None).unwrap();
+        load(&r, &heavy(), 0, 200 * S);
+        assert_eq!(pause_messages(&r, kept), 1);
+        assert_eq!(pause_messages(&r, released), 0, "user controlled");
+        assert_eq!(pause_messages(&r, user), 0, "user started");
+        assert_eq!(pause_messages(&r, r.boss.unwrap()), 0, "the supervisor");
+        assert!(said_to_boss(&r).iter().all(|t| !t.contains(crate::pressure::PAUSE_TEXT)));
+        for s in [kept, released, user] {
+            assert!(r.ap.runner.is_running(s), "{s} still running");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_host_without_proc_stays_ok_and_the_loop_starts_as_usual() {
+        let r = pressure_rig(2, 2);
+        let dir = tempfile::tempdir().unwrap();
+        let mut reader = crate::host::Reader::at(dir.path(), 4);
+        for t in 0..40 {
+            r.ap.observe_pressure(reader.sample(&crate::host::default_devices()), t * 10 * S);
+        }
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 2);
+        let p = state_for(&r.ap.runner).pressure.unwrap();
+        assert_eq!(p.state, agentbench_core::PressureState::Ok);
+        assert!(!p.readings.known);
+    }
+
+    #[tokio::test]
+    async fn the_off_setting_ignores_pressure() {
+        use crate::pressure::tests::heavy;
+        let r = pressure_rig(2, 2);
+        r.store.set_setting(crate::pressure::SETTING, "off").unwrap();
+        load(&r, &heavy(), 0, 200 * S);
+        r.ap.tick();
+        assert_eq!(running_issues(&r), 2);
+        assert!(!state_for(&r.ap.runner).pressure.unwrap().enabled);
+        assert!(feed(&r).iter().all(|l| !l.contains("host pressure")));
     }
 
     #[tokio::test]

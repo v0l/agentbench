@@ -26,6 +26,7 @@ pub mod memory;
 pub mod process;
 pub mod projects;
 pub mod quota;
+pub mod pressure;
 pub mod providers;
 pub mod restart;
 pub mod runner;
