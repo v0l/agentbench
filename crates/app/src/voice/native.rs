@@ -697,19 +697,20 @@ mod tests {
     }
 
     fn take_with(pcm: Vec<f32>) -> Voice {
-        let mut v = Voice::default();
-        v.state = State::Listening(Box::new(Take {
-            _stream: Box::new(()),
-            heard: Arc::new(Mutex::new(pcm)),
-            peak: Arc::new(AtomicU32::new(0)),
-            rate: RATE,
-            device: "test".into(),
-            since: Instant::now(),
-            endpoint: Endpoint::new(RATE),
-            partial_at: 0,
-            partial_busy: Arc::new(AtomicBool::new(false)),
-        }));
-        v
+        Voice {
+            state: State::Listening(Box::new(Take {
+                _stream: Box::new(()),
+                heard: Arc::new(Mutex::new(pcm)),
+                peak: Arc::new(AtomicU32::new(0)),
+                rate: RATE,
+                device: "test".into(),
+                since: Instant::now(),
+                endpoint: Endpoint::new(RATE),
+                partial_at: 0,
+                partial_busy: Arc::new(AtomicBool::new(false)),
+            })),
+            ..Voice::default()
+        }
     }
 
     fn speech_then_quiet(quiet: f32) -> Vec<f32> {
