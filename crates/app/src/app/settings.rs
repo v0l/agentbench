@@ -931,6 +931,35 @@ pub(super) fn speech_section(
                 }
             },
         );
+        row_help(
+            ui,
+            "auto send",
+            "After a take is turned into text, send it by itself once the countdown ends. Tap the draft or type to cancel. Never sends commands starting with /, empty text or silence. Off: you press send.",
+            |ui| {
+                let on = sp.auto_send;
+                let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
+                t.widget_info(|| {
+                    egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "auto send")
+                });
+                if t.clicked() {
+                    sp.auto_send = !on;
+                }
+            },
+        );
+        if sp.auto_send {
+            row_help(
+                ui,
+                "auto send delay",
+                "Seconds to wait before sending, 1 to 30. A few seconds is enough to read the text; raise it to leave more time to cancel.",
+                |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut sp.auto_send_secs)
+                            .range(crate::voice::AUTO_SEND_SECS)
+                            .suffix(" s"),
+                    );
+                },
+            );
+        }
         if let Some(p) = sp.problem() {
             status(ui, false, p);
         }

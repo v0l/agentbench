@@ -30,12 +30,16 @@ pub struct Settings {
     /// agentbench server speaks them.
     pub reply_voice: String,
     pub hold_to_talk: bool,
+    pub auto_send: bool,
+    pub auto_send_secs: u32,
     pub converse: bool,
     pub input_device: String,
     pub talk_key: String,
 }
 
 pub const DEFAULT_TALK_KEY: &str = "F9";
+pub const DEFAULT_AUTO_SEND_SECS: u32 = 3;
+pub const AUTO_SEND_SECS: std::ops::RangeInclusive<u32> = 1..=30;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -52,6 +56,8 @@ impl Default for Settings {
             server_model: String::new(),
             reply_voice: agent_voice::voice::DEFAULT_SPOKEN_VOICE.into(),
             hold_to_talk: cfg!(target_os = "android"),
+            auto_send: cfg!(target_os = "android"),
+            auto_send_secs: DEFAULT_AUTO_SEND_SECS,
             converse: false,
             input_device: String::new(),
             talk_key: DEFAULT_TALK_KEY.into(),
@@ -83,6 +89,12 @@ impl Settings {
         }
         if let Some(h) = st.get_string("voice_hold") {
             s.hold_to_talk = h == "1";
+        }
+        if let Some(a) = st.get_string("voice_auto_send") {
+            s.auto_send = a == "1";
+        }
+        if let Some(n) = st.get_string("voice_auto_send_secs").and_then(|n| n.parse::<u32>().ok()) {
+            s.auto_send_secs = n.clamp(*AUTO_SEND_SECS.start(), *AUTO_SEND_SECS.end());
         }
         s.converse = st.get_string("voice_converse").as_deref() == Some("1");
         s.input_device = st.get_string("voice_input").unwrap_or_default();
@@ -117,6 +129,8 @@ impl Settings {
         st.set_string("voice_server_model", self.server_model.clone());
         st.set_string("voice_reply", self.reply_voice.clone());
         st.set_string("voice_hold", if self.hold_to_talk { "1" } else { "0" }.into());
+        st.set_string("voice_auto_send", if self.auto_send { "1" } else { "0" }.into());
+        st.set_string("voice_auto_send_secs", self.auto_send_secs.to_string());
         st.set_string("voice_converse", if self.converse { "1" } else { "0" }.into());
         st.set_string("voice_input", self.input_device.clone());
         st.set_string("voice_talk_key", self.talk_key.clone());
@@ -222,6 +236,23 @@ mod tests {
             Settings { hold_to_talk: !Settings::default().hold_to_talk, ..Default::default() };
         flipped.save(&mut m);
         assert_eq!(Settings::load(Some(&m)).hold_to_talk, flipped.hold_to_talk);
+    }
+
+    #[test]
+    fn auto_send_is_on_for_android_only_with_a_delay_that_is_kept_and_clamped() {
+        use eframe::Storage;
+        let d = Settings::default();
+        assert_eq!(d.auto_send, cfg!(target_os = "android"));
+        assert_eq!(d.auto_send_secs, 3);
+        let mut m = Mem::default();
+        Settings { auto_send: !d.auto_send, auto_send_secs: 7, ..Default::default() }.save(&mut m);
+        let back = Settings::load(Some(&m));
+        assert_eq!(back.auto_send, !d.auto_send);
+        assert_eq!(back.auto_send_secs, 7);
+        m.set_string("voice_auto_send_secs", "900".into());
+        assert_eq!(Settings::load(Some(&m)).auto_send_secs, 30);
+        m.set_string("voice_auto_send_secs", "0".into());
+        assert_eq!(Settings::load(Some(&m)).auto_send_secs, 1);
     }
 
     #[test]

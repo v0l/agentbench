@@ -797,6 +797,8 @@ pub struct App {
     last_talk: Option<crate::voice::Talk>,
     conversing: Option<SessionId>,
     talk_turn: bool,
+    auto: Option<(Tile, crate::voice::autosend::Countdown)>,
+    clock: Option<f64>,
     /// Models on the server the native agent is saved to use. None until asked.
     agent_models: HashMap<String, Result<Vec<String>, String>>,
     asking_models: HashSet<String>,
@@ -1019,6 +1021,8 @@ impl App {
             last_talk: None,
             conversing: None,
             talk_turn: false,
+            auto: None,
+            clock: None,
             speech: crate::voice::Settings::load(storage),
             agent_models: HashMap::new(),
             asking_models: HashSet::new(),
@@ -1635,9 +1639,68 @@ impl App {
         self.reader.silent();
     }
 
+    fn now(&self, ctx: &egui::Context) -> f64 {
+        self.clock.unwrap_or_else(|| ctx.input(|i| i.time))
+    }
+
+    fn start_auto_send(&mut self, ctx: &egui::Context, tile: Tile, said: &str) {
+        self.auto = None;
+        let Tile::Chat(sid) = tile else { return };
+        let supervisor_voice = self.speech.converse && self.supervisor_chat() == Some(sid);
+        if !self.speech.auto_send
+            || supervisor_voice
+            || !crate::voice::autosend::sendable(said)
+            || self.client.is_none()
+        {
+            return;
+        }
+        let draft = self.draft_of(sid).to_string();
+        if let Some(c) = crate::voice::autosend::Countdown::start(
+            &draft,
+            self.now(ctx),
+            self.speech.auto_send_secs,
+        ) {
+            self.auto = Some((tile, c));
+            ctx.request_repaint();
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_clock(&mut self, now: f64) {
+        self.clock = Some(now);
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_auto_send(&self) -> bool {
+        self.speech.auto_send
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_countdown(&self) -> bool {
+        self.auto.is_some()
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_set_auto_send(&mut self, on: bool, secs: u32) {
+        self.speech.auto_send = on;
+        self.speech.auto_send_secs = secs;
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_final(&mut self, ctx: &egui::Context, said: &str) {
+        let tile = match self.session {
+            Some(s) => Tile::Chat(s),
+            None => Tile::New,
+        };
+        self.speaking_in = Some(tile);
+        self.add_speech(said, true);
+        self.start_auto_send(ctx, tile, said);
+    }
+
     #[doc(hidden)]
     pub fn voice_test_take(&mut self, wav: &[u8], ctx: &egui::Context) -> Result<(), String> {
         let ctx = ctx.clone();
+        self.auto = None;
         if let Some(sid) = self.supervisor_chat().filter(|_| self.speech.converse) {
             if self.conversing.is_none() {
                 let last = self.transcripts.get(&sid).map_or(0, |t| t.last);
@@ -1835,6 +1898,7 @@ impl App {
     }
 
     fn begin_speech(&mut self, tile: Tile, wake: impl Fn() + Send + Sync + 'static) {
+        self.auto = None;
         if self.voice.busy() {
             return;
         }
@@ -2738,7 +2802,11 @@ impl App {
                     self.drop_speech();
                     self.notice = Some((false, "no speech was heard".into()));
                 }
-                crate::voice::Said::Final(text) => self.add_speech(&text, true),
+                crate::voice::Said::Final(text) => {
+                    let tile = self.speaking_in.unwrap_or(Tile::New);
+                    self.add_speech(&text, true);
+                    self.start_auto_send(ctx, tile, &text);
+                }
                 crate::voice::Said::Failed(e) => {
                     self.drop_speech();
                     self.notice = Some((false, e));
@@ -2747,6 +2815,12 @@ impl App {
         }
         if self.voice.busy() {
             ctx.request_repaint_after(Duration::from_millis(60));
+        }
+        if let Some((Tile::Chat(s), _)) = &self.auto
+            && self.session != Some(*s)
+            && !self.shown().contains(s)
+        {
+            self.auto = None;
         }
         self.take_dropped(ctx);
         let wants = self

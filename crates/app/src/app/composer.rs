@@ -244,6 +244,7 @@ impl App {
         }
         self.slash_menu(ui, edit.rect);
         let enter = agent_ui::composer::entered(ui, &edit, &mut self.draft);
+        let fire = self.auto_send_step(ui, &edit, ready && !speaking);
         let mut out = None;
         // A phone has no room beside the keys, so the status line gets a row of its own.
         if narrow && let Some(session) = session {
@@ -256,7 +257,7 @@ impl App {
                 let can = ready && !speaking && (!self.draft.trim().is_empty() || sending);
                 let label = if busy { "steer" } else { "send" };
                 let width = if compact { 64.0 } else { 100.0 };
-                if (agent_ui::composer::send_key(ui, label, can, width) || (enter && can)) && can {
+                if (agent_ui::composer::send_key(ui, label, can, width) || ((enter || fire) && can)) && can {
                     let files = if self.focused { self.tray.take() } else { Vec::new() };
                     out = Some((self.draft.trim().to_string(), files));
                     self.draft.clear();
@@ -292,6 +293,35 @@ impl App {
             ui.ctx().request_repaint();
         }
         out
+    }
+
+    pub(super) fn auto_send_step(&mut self, ui: &mut Ui, edit: &egui::Response, ready: bool) -> bool {
+        use crate::voice::autosend::{Tick, label};
+        let Some((tile, countdown)) = &self.auto else { return false };
+        if Some(*tile) != self.drawing {
+            return false;
+        }
+        let now = self.now(ui.ctx());
+        let step = countdown.tick(&self.draft, now);
+        let touched = edit.clicked() || edit.changed();
+        match step {
+            _ if touched => self.auto = None,
+            Tick::Cancel => self.auto = None,
+            Tick::Fire if !ready => self.auto = None,
+            Tick::Fire if self.offline.is_some() || self.client.is_none() => {
+                self.auto = None;
+                self.notice = Some((false, "not sent: the server is unreachable".into()));
+            }
+            Tick::Fire => {
+                self.auto = None;
+                return true;
+            }
+            Tick::Waiting(left) => {
+                ui.label(egui::RichText::new(label(left)).color(LEGEND).size(12.0));
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            }
+        }
+        false
     }
 
     pub(super) fn hold_gesture(
