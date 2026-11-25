@@ -1,5 +1,7 @@
 pub mod pairing;
 pub mod prompts;
+pub mod supervisor_log;
+pub use supervisor_log::{LogItem, LogQuery, LogSettings, SupervisorLog};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -2802,7 +2804,8 @@ pub struct TriagePatch {
     pub note: Option<String>,
 }
 
-pub const API_VERSION: u32 = 15;
+pub const API_VERSION: u32 = 16;
+pub const API_SUPERVISOR_LOG: u32 = 16;
 pub const API_VOICE_MODE: u32 = 15;
 pub const API_JUDGE_GOALS: u32 = 14;
 pub const API_RESTART: u32 = 13;
