@@ -57,6 +57,10 @@ pub const MIN_PEAK: f32 = 0.005;
 /// ending under you.
 pub const HANG_SECONDS: f32 = 3.0;
 
+pub const HANG_RANGE: std::ops::RangeInclusive<f32> = 1.0..=15.0;
+
+pub const COUNTDOWN_AFTER: f32 = 1.5;
+
 /// How much new speech is heard between one partial reading starting and the next being allowed.
 pub const PARTIAL_SECONDS: usize = 2;
 
@@ -125,6 +129,7 @@ impl Band {
 /// comes and goes cannot pass for it. Three speech blocks in a row count as speaking, which a
 /// click does not manage.
 pub struct Endpoint {
+    hang: f32,
     rate: u32,
     scanned: usize,
     recent: std::collections::VecDeque<f32>,
@@ -132,13 +137,19 @@ pub struct Endpoint {
     run: u32,
     spoke: bool,
     quiet: f32,
+    level: f32,
     listened: f32,
 }
 
 impl Endpoint {
     pub fn new(rate: u32) -> Self {
+        Self::with_hang(rate, HANG_SECONDS)
+    }
+
+    pub fn with_hang(rate: u32, hang: f32) -> Self {
         let rate = rate.max(1);
         Endpoint {
+            hang,
             rate,
             scanned: 0,
             recent: Default::default(),
@@ -146,6 +157,7 @@ impl Endpoint {
             run: 0,
             spoke: false,
             quiet: 0.0,
+            level: 0.0,
             listened: 0.0,
         }
     }
@@ -153,6 +165,14 @@ impl Endpoint {
     /// How long it has been quiet since the last speech.
     pub fn quiet_seconds(&self) -> f32 {
         self.quiet
+    }
+
+    pub fn set_hang(&mut self, hang: f32) {
+        self.hang = hang;
+    }
+
+    pub fn hang(&self) -> f32 {
+        self.hang
     }
 
     /// Whether speech has been heard yet.
@@ -176,11 +196,12 @@ impl Endpoint {
             sorted.sort_by(|a, b| a.total_cmp(b));
             let at = |p: f32| sorted[((sorted.len() - 1) as f32 * p) as usize];
             let floor = (at(0.2) * 3.0).max(MIN_BAND);
-            let voice = if self.spoke { at(0.95) * 0.35 } else { 0.0 };
+            let voice = if self.spoke { (self.level * 0.25).min(floor * 4.0) } else { 0.0 };
             let bar = floor.max(voice) * if self.spoke && self.run > 0 { 0.8 } else { 1.0 };
             let loud = rms > bar;
             self.listened += step;
             if loud {
+                self.level = if self.level == 0.0 { rms } else { self.level + 0.02 * (rms - self.level) };
                 self.run += 1;
                 self.quiet = 0.0;
                 self.spoke |= self.run >= 3;
@@ -188,7 +209,7 @@ impl Endpoint {
                 self.run = 0;
                 self.quiet += step;
             }
-            if self.spoke && self.quiet >= HANG_SECONDS {
+            if self.spoke && self.quiet >= self.hang {
                 return Heard::Done;
             }
             if !self.spoke && self.listened >= GIVE_UP_SECONDS {
@@ -424,6 +445,67 @@ mod tests {
             at += step;
         }
         None
+    }
+
+    fn speech_at(level: f32, seconds: f32) -> Vec<f32> {
+        let clip = scaled(spoken_clip(), level);
+        let gap = vec![0.0f32; RATE as usize / 4];
+        let mut out = Vec::new();
+        while (out.len() as f32) < seconds * RATE as f32 {
+            out.extend_from_slice(&clip);
+            out.extend_from_slice(&gap);
+        }
+        out.truncate((seconds * RATE as f32) as usize);
+        out
+    }
+
+    fn first_done(pcm: &[f32], hang: f32) -> Option<f32> {
+        let mut e = Endpoint::with_hang(RATE, hang);
+        let step = RATE as usize / 10;
+        let mut at = step;
+        while at <= pcm.len() {
+            if e.feed(&pcm[..at]) == Heard::Done {
+                return Some(at as f32 / RATE as f32);
+            }
+            at += step;
+        }
+        None
+    }
+
+    #[test]
+    fn quieter_speech_after_a_loud_stretch_does_not_end_the_take() {
+        let mut take = vec![0.0f32; RATE as usize / 2];
+        take.extend(speech_at(0.06, 6.0));
+        take.extend(speech_at(0.316, 10.0));
+        take.extend(speech_at(0.06, 20.0));
+        let spoken = take.len() as f32 / RATE as f32;
+        take.extend(vec![0.0f32; RATE as usize * 6]);
+        let done = first_done(&take, HANG_SECONDS).expect("never ended");
+        assert!(done > spoken, "ended at {done}s during speech that lasts until {spoken}s");
+    }
+
+    #[test]
+    fn five_minutes_of_speech_with_level_changes_never_ends_early() {
+        let mut take = vec![0.0f32; RATE as usize / 2];
+        let levels = [0.1, 0.05, 0.3, 0.08, 0.2, 0.04, 0.12, 0.35, 0.06, 0.1];
+        for level in levels {
+            take.extend(speech_at(level, 30.0));
+        }
+        let spoken = take.len() as f32 / RATE as f32;
+        take.extend(vec![0.0f32; RATE as usize * 6]);
+        let done = first_done(&take, HANG_SECONDS).expect("never ended");
+        assert!(done > spoken, "ended at {done}s during speech that lasts until {spoken}s");
+    }
+
+    #[test]
+    fn a_longer_hang_waits_longer() {
+        let mut take = speech_at(0.1, 3.0);
+        let spoken = take.len() as f32 / RATE as f32;
+        take.extend(vec![0.0f32; RATE as usize * 12]);
+        let short = first_done(&take, 2.0).unwrap();
+        let long = first_done(&take, 8.0).unwrap();
+        assert!(short < spoken + 2.6, "{short}");
+        assert!(long > spoken + 7.0, "{long}");
     }
 
     #[test]

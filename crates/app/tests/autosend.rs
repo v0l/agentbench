@@ -109,6 +109,18 @@ fn a_new_take_cancels_the_countdown() {
 }
 
 #[test]
+fn the_sending_countdown_and_the_closing_chip_never_show_together() {
+    let (_rig, mut h, _sid) = chat(true);
+    started(&mut h);
+    h.get_by_label_contains("Sending in");
+    let ctx = h.ctx.clone();
+    let _ = h.state_mut().voice_test_take(&[], &ctx);
+    h.run_steps(3);
+    assert!(!h.state().voice_test_countdown());
+    assert!(h.query_by_label_contains("Sending in").is_none());
+}
+
+#[test]
 fn leaving_the_chat_cancels_the_countdown() {
     let (_rig, mut h, sid) = chat(true);
     started(&mut h);

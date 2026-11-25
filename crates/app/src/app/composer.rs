@@ -298,6 +298,10 @@ impl App {
     pub(super) fn auto_send_step(&mut self, ui: &mut Ui, edit: &egui::Response, ready: bool) -> bool {
         use crate::voice::autosend::{Tick, label};
         let Some((tile, countdown)) = &self.auto else { return false };
+        if self.voice.busy() {
+            self.auto = None;
+            return false;
+        }
         if Some(*tile) != self.drawing {
             return false;
         }

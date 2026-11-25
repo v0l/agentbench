@@ -967,6 +967,18 @@ pub(super) fn speech_section(
                 },
             );
         }
+        row_help(
+            ui,
+            "quiet before it stops",
+            "Seconds of quiet that end a take when hold to talk is off. Hold to talk never stops on quiet. 1 to 15.",
+            |ui| {
+                ui.add(
+                    egui::Slider::new(&mut sp.hang_secs, crate::voice::HANG_RANGE)
+                        .suffix(" s")
+                        .step_by(0.5),
+                );
+            },
+        );
         if let Some(p) = sp.problem() {
             status(ui, false, p);
         }
