@@ -86,35 +86,11 @@ fn a_spoken_take_reaches_the_supervisor_and_its_reply_is_spoken_back() {
     h.state_mut().open_supervisor();
     until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
     let sid = h.state().supervisor_chat().unwrap();
-    eprintln!("supervisor sid {sid} expected {expected}");
     assert_eq!(sid, expected, "the two sentence agent is the supervisor's");
     h.run_steps(4);
 
     let ctx = h.ctx.clone();
     h.state_mut().voice_test_take(ASK, &ctx).expect("the take was read");
-    for _ in 0..60 {
-        h.run_steps(2);
-        if let Some(e) = h.state().last_error() {
-            eprintln!("notice: {e}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    eprintln!("transcript now: {:?}", h.state().transcript_talk(sid));
-    eprintln!("converse state: {:?}", h.state().voice_test_state());
-    eprintln!("supervisor: {:?}", h.state().supervisor_chat());
-    eprintln!(
-        "speaking {} rows {}",
-        h.state().speaking(),
-        h.state().transcript_len(sid)
-    );
-    let stored: Vec<String> = rig
-        .store
-        .messages(sid, 0)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|m| format!("{:?}", m.entry))
-        .collect();
-    eprintln!("stored: {stored:?}");
     until(&mut h, "the words", |h| {
         h.state().transcript_talk(sid).iter().any(|l| l.contains("running"))
     });
@@ -137,9 +113,12 @@ fn a_spoken_take_reaches_the_supervisor_and_its_reply_is_spoken_back() {
     }
     eprintln!("spoken, in order: {spoken:?}");
     let transcript = h.state().transcript_talk(sid);
-    eprintln!("transcript at the end:\n{}", transcript.join("\n"));
-    assert!(transcript.iter().any(|l| l.starts_with("assistant: ")), "{transcript:?}");
     assert!(spoken.len() >= 2, "the reply was spoken a sentence at a time: {spoken:?}");
+    assert!(
+        spoken[0].contains("two workers") && !spoken[0].contains("still running"),
+        "the first sentence is spoken before the reply ends: {spoken:?}"
+    );
+    assert!(transcript.iter().any(|l| l.starts_with("assistant: ")), "{transcript:?}");
 }
 
 /// The talk key: hold to talk ends the take when the key comes up, a tap toggles it, and either way
