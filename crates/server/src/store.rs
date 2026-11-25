@@ -3833,6 +3833,60 @@ mod tests {
     }
 
     #[test]
+    fn the_supervisor_log_survives_a_reopen_and_pages_with_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.db");
+        let pid;
+        {
+            let s = Store::open(&path).unwrap();
+            pid = project(&s, "/r").0.id;
+            for n in 0..5 {
+                let kind = if n % 2 == 0 { "judge" } else { "user" };
+                let id = s
+                    .add_log(&NewLogItem {
+                        kind,
+                        asker: "user",
+                        project_id: (n < 3).then_some(pid),
+                        question: &format!("question {n} about bananas{n}"),
+                        needs_answer: true,
+                        ..Default::default()
+                    })
+                    .unwrap();
+                if n < 2 {
+                    s.close_log(id, &Closing::new("replied").outcome(format!("answer {n}"))).unwrap();
+                }
+            }
+        }
+        let s = Store::open(&path).unwrap();
+        let all = s.log_items(&Default::default()).unwrap();
+        assert_eq!(all.items.len(), 5);
+        assert_eq!(all.open, 3);
+        assert_eq!(all.items[0].question, "question 4 about bananas4", "newest first");
+        assert_eq!(all.items[4].outcome, "answer 0");
+        let page = |before| agentbench_core::LogQuery { limit: Some(2), before, ..Default::default() };
+        let first = s.log_items(&page(None)).unwrap();
+        assert_eq!(first.items.len(), 2);
+        let second = s.log_items(&page(first.next_before)).unwrap();
+        assert_eq!(second.items[0].question, "question 2 about bananas2");
+        let last = s.log_items(&page(second.next_before)).unwrap();
+        assert_eq!((last.items.len(), last.next_before), (1, None));
+        let q = |q: agentbench_core::LogQuery| {
+            s.log_items(&q).unwrap().items.iter().map(|i| i.question.chars().nth(9).unwrap()).collect::<String>()
+        };
+        assert_eq!(q(agentbench_core::LogQuery { kind: Some("judge".into()), ..Default::default() }), "420");
+        assert_eq!(q(agentbench_core::LogQuery { state: Some("open".into()), ..Default::default() }), "432");
+        assert_eq!(q(agentbench_core::LogQuery { state: Some("closed".into()), ..Default::default() }), "10");
+        assert_eq!(q(agentbench_core::LogQuery { project: Some("demo".into()), ..Default::default() }), "210");
+        assert_eq!(q(agentbench_core::LogQuery { project: Some(pid.to_string()), ..Default::default() }), "210");
+        assert_eq!(q(agentbench_core::LogQuery { q: Some("BANANAS3".into()), ..Default::default() }), "3");
+        assert_eq!(q(agentbench_core::LogQuery { q: Some("answer 1".into()), ..Default::default() }), "1");
+        let future = agentbench_core::LogQuery { since: Some(now() + 60_000), ..Default::default() };
+        assert!(s.log_items(&future).unwrap().items.is_empty());
+        assert_eq!(s.log_item(all.items[0].id).unwrap().unwrap().project, "");
+        assert_eq!(s.log_item(all.items[2].id).unwrap().unwrap().project, "demo");
+    }
+
+    #[test]
     fn an_old_database_migrates_and_keeps_its_issues() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("old.db");
