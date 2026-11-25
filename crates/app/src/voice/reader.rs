@@ -43,15 +43,12 @@ pub struct Reader {
     pub(crate) playing: Option<(Arc<Shared>, Output)>,
     pub(crate) errors: Option<Receiver<String>>,
     silent: bool,
-    /// The lines a silent reader has been asked to read, in the order they were queued.
     lines: Vec<String>,
 }
 
 pub(crate) enum Output {
     #[allow(dead_code)]
     Device(cpal::Stream),
-    /// No sound card is opened and the samples are thrown away as they would have played. For a
-    /// test that reads the queue without making a noise on the machine running it.
     Silent,
 }
 
@@ -62,15 +59,11 @@ impl Default for Output {
 }
 
 impl Reader {
-    /// Throw the samples away instead of opening a sound card, so a test can watch what would
-    /// have been played without a speaker making a noise.
     #[doc(hidden)]
     pub fn silent(&mut self) {
         self.silent = true;
     }
 
-    /// The lines a silent reader has been asked to read since this was last called, in the order
-    /// they were queued. Empty for a reader with a real sound card, since those were heard.
     #[doc(hidden)]
     pub fn spoken(&mut self) -> Vec<String> {
         std::mem::take(&mut self.lines)
@@ -130,8 +123,6 @@ impl Reader {
         Ok(())
     }
 
-    /// Once a frame: play out what has been made, drop the stream when everything has been
-    /// played, and hand back why a piece could not be made.
     pub fn tick(&mut self) -> Vec<String> {
         let errors: Vec<String> = self.errors.iter().flat_map(|rx| rx.try_iter()).collect();
         if self.silent

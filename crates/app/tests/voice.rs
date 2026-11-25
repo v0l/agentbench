@@ -1,12 +1,3 @@
-//! The spoken conversation with the supervisor, end to end in the window.
-//!
-//! A recorded take goes in through the same reader a finished microphone take uses, Whisper reads
-//! it (on the scratch server, from the models on this machine), the words go to the supervisor as
-//! a spoken turn, and the reply comes back a sentence at a time through the same queue the sound
-//! card would have pulled from. Nothing opens a microphone or a speaker, and the servers are the
-//! test's own: a private home folder, database and token, on a port the kernel picked. Only the
-//! model files are shared with the machine's own install.
-
 mod common;
 
 use common::*;
@@ -30,16 +21,14 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-/// A supervisor that answers with two sentences, so the reply is spoken in two pieces and there is
-/// something left to drop when the user speaks over it.
-fn two_sentence_agent(name: &str) -> Box<dyn agentbench_server::agent::Agent> {
+fn six_sentence_agent(name: &str) -> Box<dyn agentbench_server::agent::Agent> {
     Box::new(agentbench_server::agent::JsonCommand {
         name: name.into(),
         label: Some("Two sentences".into()),
         program: "sh".into(),
         args: vec![
             "-c".into(),
-            r#"read p; echo '{"text":"I started two workers just now. They are still running."}'"#
+            r#"read p; echo '{"text":"I started two workers just now. They are still running. The first is on the login fix. The second is on the readme. Neither has asked for help. I will tell you when they finish."}'"#
                 .into(),
             "sh".into(),
         ],
@@ -55,23 +44,20 @@ fn two_sentence_agent(name: &str) -> Box<dyn agentbench_server::agent::Agent> {
     })
 }
 
-/// The supervisor chat, made before the window starts so the agent that answers in two sentences is
-/// the one the supervisor uses.
-fn two_sentence_supervisor(rig: &Rig) -> SessionId {
+fn six_sentence_supervisor(rig: &Rig) -> SessionId {
     let project = rig.store.supervisor_project().unwrap().expect("the supervisor project");
     let tree = rig.store.main_worktree(project.id).unwrap();
     rig.store.add_session(tree.id, "glib", "Supervisor", None, None).unwrap().id
 }
 
-/// The supervisor's reply, sent a sentence at a time, as the window queues it for the sound card.
 #[test]
 fn a_spoken_take_reaches_the_supervisor_and_its_reply_is_spoken_back() {
     let Some(models) = models_dir() else {
         eprintln!("skipped: no speech models on this machine");
         return;
     };
-    let rig = rig_with_models(vec![two_sentence_agent("glib")], models);
-    let expected = two_sentence_supervisor(&rig);
+    let rig = rig_with_models(vec![six_sentence_agent("glib")], models);
+    let expected = six_sentence_supervisor(&rig);
     let mut h = harness_cfg(
         vec![
             ("url".into(), rig.url.clone()),
@@ -121,15 +107,13 @@ fn a_spoken_take_reaches_the_supervisor_and_its_reply_is_spoken_back() {
     assert!(transcript.iter().any(|l| l.starts_with("assistant: ")), "{transcript:?}");
 }
 
-/// The talk key: hold to talk ends the take when the key comes up, a tap toggles it, and either way
-/// what was heard is sent as a spoken turn.
 #[test]
 fn the_talk_key_holds_to_talk_and_toggles_with_the_microphone() {
     let Some(models) = models_dir() else {
         eprintln!("skipped: no speech models on this machine");
         return;
     };
-    let rig = rig_with_models(vec![two_sentence_agent("glib")], models);
+    let rig = rig_with_models(vec![six_sentence_agent("glib")], models);
     for (hold, tag) in [(true, "hold"), (false, "toggle")] {
         let mut h = harness_cfg(
             vec![
@@ -170,15 +154,14 @@ fn the_talk_key_holds_to_talk_and_toggles_with_the_microphone() {
     }
 }
 
-/// Speaking over the reply stops the audio and drops what of it had not been said yet.
 #[test]
 fn speaking_over_the_reply_drops_the_rest_of_it() {
     let Some(models) = models_dir() else {
         eprintln!("skipped: no speech models on this machine");
         return;
     };
-    let rig = rig_with_models(vec![two_sentence_agent("glib")], models);
-    let expected = two_sentence_supervisor(&rig);
+    let rig = rig_with_models(vec![six_sentence_agent("glib")], models);
+    let expected = six_sentence_supervisor(&rig);
     let mut h = harness_cfg(
         vec![
             ("url".into(), rig.url.clone()),
@@ -201,20 +184,15 @@ fn speaking_over_the_reply_drops_the_rest_of_it() {
     until(&mut h, "the reply", |h| {
         h.state().transcript_talk(sid).iter().any(|l| l.starts_with("assistant: "))
     });
-    for _ in 0..40 {
-        h.run_steps(2);
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let before = h.state().transcript_talk(sid);
-    eprintln!("transcript before the barge in:\n{}", before.join("\n"));
-    assert!(
-        before.iter().filter(|l| l.starts_with("assistant: ")).count() == 1,
-        "one reply before the barge in: {before:?}"
-    );
+    until(&mut h, "the first sentence being read with more queued", |h| {
+        h.state().voice_test_reading() && h.state().voice_test_waiting() >= 2
+    });
+    let queued_before = h.state().voice_test_waiting();
+    assert!(queued_before >= 2, "later sentences were waiting: {queued_before}");
 
     h.state_mut().voice_test_barge(BARGE, &ctx).expect("the take was read");
     assert!(!h.state().voice_test_reading(), "the audio stopped at once");
-    assert_eq!(h.state().voice_test_pending(), 0, "the rest of that reply was dropped");
+    assert_eq!(h.state().voice_test_waiting(), 0, "the rest of that reply was dropped");
     until(&mut h, "the second question", |h| {
         h.state().transcript_talk(sid).iter().filter(|l| l.starts_with("user: ")).count() >= 2
     });

@@ -48,8 +48,6 @@ struct Message {
 
 pub const VOICE_STYLE: &str = "The user is talking to you and hears your reply read aloud. Speak in short plain sentences. No tables, no code blocks, no lists, no issue numbers or ids read out. Say what changed in plain words. When you start workers, say so in one sentence and stay free to talk. Never read results out as a wall of text.";
 
-/// The supervisor chat's voice mode, kept on the server so the turns the server starts itself (a
-/// worker report, a check in) are spoken too, and not only the turns the user typed.
 pub const VOICE_SETTING: &str = "supervisor_voice";
 
 fn styled_for_voice(prompt: &str, voice: bool, supervisor: bool) -> String {
@@ -668,8 +666,6 @@ impl Runner {
         }
     }
 
-    /// Whether this turn is spoken: the message itself says so, or the supervisor's voice mode is
-    /// on and this is a turn the server started (a worker report carries no voice flag of its own).
     fn spoken(&self, session: &Session, msg: &Message) -> bool {
         if !self.is_supervisor(session) {
             return false;
@@ -834,8 +830,6 @@ impl Runner {
         self.send_with(session, text, &[])
     }
 
-    /// Send a typed message, saying whether the user is talking rather than typing. A supervisor
-    /// turn remembers it, so its later worker report turns are spoken too.
     pub fn send_spoken(
         &self,
         session: &Session,

@@ -793,10 +793,7 @@ pub struct App {
     reading: Option<Id>,
     converse: crate::voice::Converse,
     talk_key: crate::voice::TalkKey,
-    /// A recorded take a test feeds where the microphone would be, so both talk key modes can be
-    /// driven without a microphone.
     test_take: Option<Vec<u8>>,
-    /// What the talk key last decided, for a test.
     last_talk: Option<crate::voice::Talk>,
     conversing: Option<SessionId>,
     talk_turn: bool,
@@ -1616,8 +1613,6 @@ impl App {
         }
     }
 
-    /// Where a reply is read from: the agentbench server this window is connected to, unless the
-    /// voice settings point reading at a server of their own.
     fn reading_source(&self) -> Option<crate::voice::Source> {
         if self.speech.mode == crate::voice::Mode::Server && !self.speech.url.trim().is_empty() {
             let url = self.speech.url.trim_end_matches('/').trim_end_matches("/v1");
@@ -1640,8 +1635,6 @@ impl App {
         self.reader.silent();
     }
 
-    /// Feed a recorded take through the same reader a microphone take uses, as the talk key does
-    /// after a finished take.
     #[doc(hidden)]
     pub fn voice_test_take(&mut self, wav: &[u8], ctx: &egui::Context) -> Result<(), String> {
         let ctx = ctx.clone();
@@ -1656,25 +1649,26 @@ impl App {
         self.voice.read_take(wav, &self.speech_now(), move || ctx.request_repaint())
     }
 
-    /// The lines the voice has been asked to read since this was last called.
     #[doc(hidden)]
     pub fn voice_test_spoken(&mut self) -> Vec<String> {
         self.reader.spoken()
     }
 
-    /// How many sentences are waiting to be spoken, and whether the voice is mid reply.
+    #[doc(hidden)]
+    pub fn voice_test_waiting(&self) -> usize {
+        self.converse.waiting()
+    }
+
     #[doc(hidden)]
     pub fn voice_test_pending(&self) -> usize {
         self.converse.waiting() + self.reader.busy() as usize
     }
 
-    /// Whether a reply is being read aloud right now.
     #[doc(hidden)]
     pub fn voice_test_reading(&self) -> bool {
         self.reader.busy()
     }
 
-    /// What the chat has said and been told, in order, for a test that reads the conversation.
     #[doc(hidden)]
     pub fn transcript_talk(&self, session: SessionId) -> Vec<String> {
         self.transcripts
@@ -1692,16 +1686,12 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Speak over the reply being read and start a new take, as the talk key does: the audio stops
-    /// at once and the rest of that reply is dropped.
     #[doc(hidden)]
     pub fn voice_test_barge(&mut self, wav: &[u8], ctx: &egui::Context) -> Result<(), String> {
         self.barge_in();
         self.voice_test_take(wav, ctx)
     }
 
-    /// Drive the talk key with a recorded take where the microphone would be, so both modes can
-    /// be walked in a test without a microphone or a speaker.
     #[doc(hidden)]
     pub fn voice_test_talk_key(
         &mut self,
@@ -1715,15 +1705,11 @@ impl App {
         self.last_talk.take()
     }
 
-    /// Send what was said as a spoken turn to the supervisor, as a finished take does.
     #[doc(hidden)]
     pub fn voice_test_send(&mut self, said: &str) {
         self.say_to_supervisor(said);
     }
 
-    /// The talk key: with the conversation on and the supervisor chat open, it cuts off what is
-    /// being said and opens the microphone, and what is heard is sent as a spoken turn. Hold to
-    /// talk ends the take when the key comes up, and a tap toggles it.
     fn talk(&mut self, ctx: &egui::Context, down: bool) {
         let listening = self.voice.listening() || self.voice.staged();
         let key = if down {
@@ -1776,14 +1762,12 @@ impl App {
         }
     }
 
-    /// Stop speaking at once and drop the rest of the reply being read.
     pub fn barge_in(&mut self) {
         self.reader.stop();
         self.reading = None;
         self.converse.barge_in();
     }
 
-    /// Send what was said as a spoken turn to the conversation's chat.
     pub fn say_to_supervisor(&mut self, text: &str) {
         let Some(sid) = self.conversing else { return };
         let last = self.transcripts.get(&sid).map_or(0, |t| t.last);
@@ -1793,8 +1777,6 @@ impl App {
         }
     }
 
-    /// Once a frame while the conversation is on: find the supervisor chat, and speak its replies a
-    /// sentence at a time as they arrive.
     fn converse_tick(&mut self, ctx: &egui::Context) {
         let supervisor = self.supervisor_chat().filter(|_| self.speech.converse);
         if supervisor != self.conversing {

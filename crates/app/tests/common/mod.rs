@@ -64,9 +64,6 @@ pub fn rig_with(extra: Vec<Box<dyn agentbench_server::agent::Agent>>) -> Rig {
     rig_on("http://127.0.0.1:9/v1", extra)
 }
 
-/// A scratch server that reads speech with models already on this machine, so a test that talks to
-/// it does not fetch several gigabytes. The home folder, database and token are all still the
-/// test's own: only the model files are shared.
 pub fn rig_with_models(
     extra: Vec<Box<dyn agentbench_server::agent::Agent>>,
     models: PathBuf,

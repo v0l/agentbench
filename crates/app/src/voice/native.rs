@@ -90,8 +90,6 @@ impl Voice {
         self.shown = Some((seconds, level));
     }
 
-    /// Put the key in a listening state with no microphone behind it, for a test driving the talk
-    /// key with a recorded take.
     #[doc(hidden)]
     pub fn stage_take(&mut self) {
         self.show_recording(0.0, 0.0);
@@ -252,7 +250,6 @@ impl Voice {
         self.read(pcm, settings, None, wake);
     }
 
-    /// Read a take that was recorded elsewhere, through the same reader a microphone take uses.
     pub fn read_take(
         &mut self,
         bytes: &[u8],

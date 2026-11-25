@@ -68,7 +68,6 @@ impl Converse {
         !self.queue.is_empty()
     }
 
-    /// How many sentences are waiting to be spoken.
     pub fn waiting(&self) -> usize {
         self.queue.len()
     }
@@ -82,26 +81,19 @@ impl Converse {
     }
 }
 
-/// What the talk key asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Talk {
-    /// Open the microphone.
     Start,
-    /// Close it and send what was heard.
     Finish,
     Nothing,
 }
 
-/// The talk key's own state, so a press and a release (hold to talk) and a press on its own
-/// (toggle) both drive the microphone the way the setting says.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TalkKey {
     down: bool,
 }
 
 impl TalkKey {
-    /// A press of the key. In hold to talk mode the key is held until the release; otherwise the
-    /// press is the whole gesture and the key is up again at once.
     pub fn press(&mut self, hold_to_talk: bool, listening: bool) -> Talk {
         if self.down {
             return Talk::Nothing;
@@ -110,7 +102,6 @@ impl TalkKey {
         if listening { Talk::Finish } else { Talk::Start }
     }
 
-    /// A release of the key. Only hold to talk mode acts on it.
     pub fn release(&mut self, hold_to_talk: bool, listening: bool) -> Talk {
         self.down = false;
         if hold_to_talk && listening { Talk::Finish } else { Talk::Nothing }
