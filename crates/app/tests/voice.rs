@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use agentbench_core::SessionId;
+use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -152,6 +153,142 @@ fn the_talk_key_holds_to_talk_and_toggles_with_the_microphone() {
         let ask = said.iter().find(|l| l.starts_with("user: ")).unwrap();
         assert!(ask.to_lowercase().contains("running"), "{tag}: {ask}");
     }
+}
+
+fn hands_free_chat(rig: &Rig, sink: agentbench::voice::Sink, size: [f32; 2]) -> (Harness<'static, agentbench::App>, SessionId) {
+    let mut h = harness_cfg(
+        vec![
+            ("url".into(), rig.url.clone()),
+            ("voice_converse".into(), "1".into()),
+            ("voice_hands_free".into(), "1".into()),
+            ("voice_mode".into(), "agentbench".into()),
+            ("voice_model".into(), "whisper-base.en".into()),
+        ],
+        Cfg { size, ..Cfg::default() },
+    );
+    h.state_mut().voice_test_silent();
+    h.state_mut().voice_test_hands_free(sink);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_supervisor();
+    until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+    let sid = h.state().supervisor_chat().unwrap();
+    h.run_steps(4);
+    (h, sid)
+}
+
+fn clip(wav: &[u8]) -> Vec<f32> {
+    let (pcm, rate) = agentbench::voice::read_wav(wav).unwrap();
+    let mut pcm = agentbench::voice::to_whisper_rate(&pcm, rate);
+    pcm.extend(vec![0.0005f32; agentbench::voice::RATE as usize * 4]);
+    pcm
+}
+
+fn room(seconds: f32) -> Vec<f32> {
+    vec![0.0005f32; (agentbench::voice::RATE as f32 * seconds) as usize]
+}
+
+#[test]
+fn hands_free_starts_a_take_when_you_speak_and_the_words_reach_the_supervisor() {
+    let Some(models) = models_dir() else {
+        eprintln!("skipped: no speech models on this machine");
+        return;
+    };
+    let rig = rig_with_models(vec![six_sentence_agent("glib")], models);
+    six_sentence_supervisor(&rig);
+    for (size, tag) in [([1280.0, 800.0], "1280"), ([390.0, 844.0], "390")] {
+        let (mut h, sid) = hands_free_chat(&rig, agentbench::voice::Sink::Headphones, size);
+        until(&mut h, "the microphone to open", |h| h.state().hands_free_on());
+        until_label(&mut h, "hands free listening");
+        shot(&mut h, &format!("hands-free-listening-{tag}"));
+        h.state_mut().voice_test_hear(&room(2.0));
+        h.run_steps(3);
+        assert!(!h.state().voice_test_in_speech(), "{tag}: room is not speech");
+        if tag == "390" {
+            continue;
+        }
+        h.state_mut().voice_test_hear(&clip(ASK));
+        until(&mut h, "the spoken turn", |h| {
+            h.state().transcript_talk(sid).iter().any(|l| l.starts_with("user: "))
+        });
+        let said = h.state().transcript_talk(sid);
+        let ask = said.iter().find(|l| l.starts_with("user: ")).unwrap();
+        assert!(ask.to_lowercase().contains("running"), "{ask}");
+        assert!(h.state().hands_free_on(), "the microphone stays open after the take");
+    }
+}
+
+#[test]
+fn hands_free_speech_during_a_reply_stops_the_reader_and_clears_the_queue() {
+    let Some(models) = models_dir() else {
+        eprintln!("skipped: no speech models on this machine");
+        return;
+    };
+    let rig = rig_with_models(vec![six_sentence_agent("glib")], models);
+    six_sentence_supervisor(&rig);
+    let (mut h, sid) = hands_free_chat(&rig, agentbench::voice::Sink::Headphones, [1280.0, 800.0]);
+    until(&mut h, "the microphone to open", |h| h.state().hands_free_on());
+    h.state_mut().voice_test_send("tell me about every worker running right now, in detail");
+    until(&mut h, "the first sentence being read with more queued", |h| {
+        h.state().voice_test_reading() && h.state().voice_test_waiting() >= 2
+    });
+    let speech = clip(BARGE);
+    let tail = agentbench::voice::RATE as usize * 4;
+    h.state_mut().voice_test_hear(&speech[..speech.len() - tail]);
+    until(&mut h, "speech to be heard", |h| h.state().voice_test_in_speech());
+    assert!(!h.state().voice_test_reading(), "the audio stopped at once");
+    assert_eq!(h.state().voice_test_waiting(), 0, "the rest of that reply was dropped");
+    h.state_mut().voice_test_hear(&speech[speech.len() - tail..]);
+    until(&mut h, "the second question", |h| {
+        h.state().transcript_talk(sid).iter().filter(|l| l.starts_with("user: ")).count() >= 2
+    });
+    assert!(h.state().hands_free_on());
+}
+
+#[test]
+fn hands_free_closes_the_microphone_when_you_leave_the_chat_or_press_the_key() {
+    let rig = rig_with(vec![six_sentence_agent("glib")]);
+    six_sentence_supervisor(&rig);
+    let (mut h, _) = hands_free_chat(&rig, agentbench::voice::Sink::Headphones, [1280.0, 800.0]);
+    until(&mut h, "the microphone to open", |h| h.state().hands_free_on());
+
+    let ctx = h.ctx.clone();
+    let key = h.state_mut().voice_test_talk_key(ASK, &ctx, true);
+    assert_eq!(key, Some(agentbench::voice::Talk::Finish));
+    h.run_steps(4);
+    assert!(!h.state().hands_free_on(), "the talk key pauses it");
+    let key = h.state_mut().voice_test_talk_key(ASK, &ctx, true);
+    assert_eq!(key, Some(agentbench::voice::Talk::Start));
+    until(&mut h, "the microphone to open again", |h| h.state().hands_free_on());
+
+    h.state_mut().blank_chat_in_home();
+    h.run_steps(4);
+    assert!(!h.state().hands_free_on(), "leaving the chat closes the microphone");
+    h.state_mut().open_supervisor();
+    until(&mut h, "the microphone to open on return", |h| h.state().hands_free_on());
+}
+
+#[test]
+fn hands_free_refuses_speakers_and_asks_once_when_the_output_is_unknown() {
+    let rig = rig_with(vec![six_sentence_agent("glib")]);
+    six_sentence_supervisor(&rig);
+    let speakers = agentbench::voice::Sink::Speakers("Built-in Audio".into());
+    let (mut h, _) = hands_free_chat(&rig, speakers, [1280.0, 800.0]);
+    until(&mut h, "the refusal", |h| h.state().voice_test_notice().is_some());
+    let why = h.state().voice_test_notice().unwrap();
+    assert!(why.contains("Built-in Audio") && why.contains("headphones"), "{why}");
+    h.run_steps(4);
+    assert!(!h.state().hands_free_on());
+    shot(&mut h, "hands-free-refused-1280");
+
+    let (mut h, _) = hands_free_chat(&rig, agentbench::voice::Sink::Unknown, [390.0, 844.0]);
+    until(&mut h, "the question", |h| h.state().asking_headphones());
+    h.run_steps(4);
+    shot(&mut h, "hands-free-ask-390");
+    until_label(&mut h, "speakers");
+    assert!(!h.state().hands_free_on());
+    h.get_by_label("headphones").click();
+    until(&mut h, "the microphone to open", |h| h.state().hands_free_on());
+    assert!(!h.state().asking_headphones());
 }
 
 #[test]

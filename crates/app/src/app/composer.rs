@@ -376,6 +376,15 @@ impl App {
             move || ctx.request_repaint()
         };
         let (listening, reading) = (self.voice.listening(), self.voice.reading());
+        if self.voice.open() {
+            let key = ui.add(Key::new("stop listening").solid(OK));
+            key.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "speak"));
+            if key.on_hover_text("hands free: the microphone is open while this chat is").clicked() {
+                self.barge_in();
+                self.pause_hands_free();
+            }
+            return;
+        }
         let hold_mode = self.speech.hold_to_talk;
         let label = if listening && hold_mode {
             if self.hold.off_button() {

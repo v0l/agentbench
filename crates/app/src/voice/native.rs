@@ -45,6 +45,8 @@ struct Take {
     partial_at: usize,
     /// A partial reading is under way; only one runs at a time.
     partial_busy: Arc<AtomicBool>,
+    open: bool,
+    heard_speech: bool,
 }
 
 #[cfg(local_speech)]
@@ -64,6 +66,7 @@ pub struct Voice {
     take_id: u64,
     shown: Option<(f32, f32)>,
     quiet_stop: Option<f32>,
+    speech_started: bool,
 }
 
 impl Default for Voice {
@@ -78,6 +81,7 @@ impl Default for Voice {
             take_id: 0,
             shown: None,
             quiet_stop: None,
+            speech_started: false,
         }
     }
 }
@@ -124,6 +128,52 @@ impl Voice {
 
     pub fn take_quiet_stop(&mut self) -> Option<f32> {
         self.quiet_stop.take()
+    }
+
+    pub fn take_speech_start(&mut self) -> bool {
+        std::mem::take(&mut self.speech_started)
+    }
+
+    pub fn open(&self) -> bool {
+        matches!(&self.state, State::Listening(t) if t.open)
+    }
+
+    pub fn in_speech(&self) -> bool {
+        matches!(&self.state, State::Listening(t) if t.endpoint.spoke())
+    }
+
+    pub fn start_open(
+        &mut self,
+        wake: impl Fn() + Send + Sync + 'static,
+        device: &str,
+    ) -> Result<(), String> {
+        self.start_on(wake, device)?;
+        if let State::Listening(t) = &mut self.state {
+            t.open = true;
+            t.endpoint = Endpoint::open(t.rate);
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn open_fake(&mut self) -> super::Mic {
+        let heard: super::Mic = Arc::new(Mutex::new(Vec::new()));
+        self.shown = None;
+        self.state = State::Listening(Box::new(Take {
+            _stream: Box::new(()),
+            heard: heard.clone(),
+            peak: Arc::new(AtomicU32::new(0)),
+            rate: RATE,
+            device: "test microphone".into(),
+            since: Instant::now(),
+            endpoint: Endpoint::open(RATE),
+            partial_at: 0,
+            partial_busy: Arc::new(AtomicBool::new(false)),
+            open: true,
+            heard_speech: false,
+        }));
+        self.take_id += 1;
+        heard
     }
 
     pub fn seconds(&self) -> f32 {
@@ -193,20 +243,36 @@ impl Voice {
             return;
         };
         let (heard, samples) = {
-            let heard = take.heard.lock().unwrap_or_else(|e| e.into_inner());
+            let mut heard = take.heard.lock().unwrap_or_else(|e| e.into_inner());
             take.endpoint.set_hang(settings.hang_secs);
-            (take.endpoint.feed(&heard), heard.len())
+            let said = take.endpoint.feed(&heard);
+            if take.open && !take.endpoint.spoke() {
+                let keep = take.rate as usize * super::LEAD_SECONDS;
+                let drop = take.endpoint.scanned().saturating_sub(keep);
+                if drop > keep {
+                    heard.drain(..drop);
+                    take.endpoint.forget(drop);
+                }
+            }
+            (said, heard.len())
         };
+        if take.open && !take.heard_speech && take.endpoint.spoke() {
+            take.heard_speech = true;
+            self.speech_started = true;
+        }
         match heard {
-            Heard::Done | Heard::GaveUp if settings.hold_to_talk => {}
+            Heard::Done | Heard::GaveUp if settings.hold_to_talk && !take.open => {}
             Heard::Done => {
-                self.quiet_stop = Some(take.endpoint.hang());
+                if !take.open {
+                    self.quiet_stop = Some(take.endpoint.hang());
+                }
                 self.finish(settings, wake)
             }
             Heard::GaveUp => {
                 self.state = State::Idle;
                 let _ = self.tx.send(Event::Failed("no speech was heard".into()));
             }
+            Heard::Speaking | Heard::Pause if take.open => {}
             Heard::Speaking | Heard::Pause => {
                 let due = take.rate as usize * super::PARTIAL_SECONDS;
                 if settings.problem().is_none()
@@ -237,39 +303,62 @@ impl Voice {
 
     /// Close the microphone and read what it heard.
     pub fn finish(&mut self, settings: &Settings, wake: impl Fn() + Send + Sync + 'static) {
+        if let State::Listening(take) = &mut self.state
+            && take.open
+        {
+            let rate = take.rate;
+            let quiet = take.endpoint.quiet_seconds();
+            let heard = std::mem::take(&mut *take.heard.lock().unwrap_or_else(|e| e.into_inner()));
+            take.endpoint = Endpoint::open(rate);
+            take.heard_speech = false;
+            if let Some(pcm) = self.trimmed(heard, rate, quiet, settings, true) {
+                self.read(pcm, settings, None, wake);
+            }
+            return;
+        }
         let State::Listening(take) = std::mem::replace(&mut self.state, State::Idle) else {
             return;
         };
         let rate = take.rate;
-        let mut heard = std::mem::take(&mut *take.heard.lock().unwrap_or_else(|e| e.into_inner()));
+        let quiet = take.endpoint.quiet_seconds();
+        let heard = std::mem::take(&mut *take.heard.lock().unwrap_or_else(|e| e.into_inner()));
+        drop(take);
+        if let Some(pcm) = self.trimmed(heard, rate, quiet, settings, false) {
+            self.state = State::Reading;
+            self.status = "reading".into();
+            self.read(pcm, settings, None, wake);
+        }
+    }
+
+    fn trimmed(
+        &self,
+        mut heard: Vec<f32>,
+        rate: u32,
+        quiet: f32,
+        settings: &Settings,
+        open: bool,
+    ) -> Option<Vec<f32>> {
         // Keep a little of the silence the take ended on and drop the rest: Whisper invents words
         // for a long quiet tail.
-        let tail = ((take.endpoint.quiet_seconds() - 0.3).max(0.0) * rate as f32) as usize;
+        let tail = ((quiet - 0.3).max(0.0) * rate as f32) as usize;
         heard.truncate(heard.len().saturating_sub(tail));
-        drop(take);
 
         let seconds = heard.len() as f32 / rate.max(1) as f32;
         let peak = heard.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        if seconds < MIN_SECONDS {
-            let _ =
-                self.tx.send(Event::Failed("too short to read; hold on a little longer".into()));
-            return;
+        let failed = if seconds < MIN_SECONDS {
+            Some("too short to read; hold on a little longer")
+        } else if peak < MIN_PEAK {
+            Some("the microphone heard nothing; check it is not muted")
+        } else {
+            settings.problem()
+        };
+        if let Some(why) = failed {
+            if !open || settings.problem().is_some() {
+                let _ = self.tx.send(Event::Failed(why.into()));
+            }
+            return None;
         }
-        if peak < MIN_PEAK {
-            let _ = self
-                .tx
-                .send(Event::Failed("the microphone heard nothing; check it is not muted".into()));
-            return;
-        }
-        if let Some(p) = settings.problem() {
-            let _ = self.tx.send(Event::Failed(p.into()));
-            return;
-        }
-
-        self.state = State::Reading;
-        self.status = "reading".into();
-        let pcm = super::to_whisper_rate(&heard, rate);
-        self.read(pcm, settings, None, wake);
+        Some(super::to_whisper_rate(&heard, rate))
     }
 
     pub fn read_take(
@@ -347,12 +436,16 @@ impl Voice {
                     }
                 }
                 Event::Text(t) => {
-                    self.state = State::Idle;
+                    if self.reading() {
+                        self.state = State::Idle;
+                    }
                     self.status.clear();
                     out.push(Said::Final(t));
                 }
                 Event::Failed(e) => {
-                    self.state = State::Idle;
+                    if self.reading() {
+                        self.state = State::Idle;
+                    }
                     self.status.clear();
                     out.push(Said::Failed(e));
                 }
@@ -416,6 +509,8 @@ fn open(device: &str) -> Result<Take, String> {
             endpoint: Endpoint::new(rate),
             partial_at: 0,
             partial_busy: Arc::new(AtomicBool::new(false)),
+            open: false,
+            heard_speech: false,
         })
     }
     #[cfg(not(target_os = "android"))]
@@ -484,6 +579,8 @@ fn open_cpal(wanted: &str) -> Result<Take, String> {
         endpoint: Endpoint::new(rate),
         partial_at: 0,
         partial_busy: Arc::new(AtomicBool::new(false)),
+        open: false,
+        heard_speech: false,
     })
 }
 
@@ -708,6 +805,8 @@ mod tests {
                 endpoint: Endpoint::new(RATE),
                 partial_at: 0,
                 partial_busy: Arc::new(AtomicBool::new(false)),
+                open: false,
+                heard_speech: false,
             })),
             ..Voice::default()
         }
@@ -718,6 +817,44 @@ mod tests {
         pcm.extend((0..RATE as usize * 2).map(|i| 0.3 * (i as f32 * 0.1).sin()));
         pcm.extend(vec![0.001f32; (RATE as f32 * quiet) as usize]);
         pcm
+    }
+
+    #[test]
+    fn an_open_microphone_reads_each_take_and_stays_open() {
+        let mut v = Voice::default();
+        let mic = v.open_fake();
+        let settings = Settings {
+            mode: Mode::Server,
+            url: "http://127.0.0.1:9/v1".into(),
+            hang_secs: 3.0,
+            ..Default::default()
+        };
+        mic.lock().unwrap().extend(vec![0.001f32; RATE as usize * 20]);
+        v.tick(&settings, || {});
+        assert!(v.open() && !v.in_speech() && !v.take_speech_start());
+        assert!(mic.lock().unwrap().len() <= RATE as usize * 2, "room before speech is dropped");
+        mic.lock().unwrap().extend(speech_then_quiet(0.5));
+        v.tick(&settings, || {});
+        assert!(v.in_speech());
+        assert!(v.take_speech_start(), "speech starting is reported once");
+        assert!(!v.take_speech_start());
+        mic.lock().unwrap().extend(vec![0.001f32; RATE as usize * 4]);
+        v.tick(&settings, || {});
+        assert!(v.open() && !v.in_speech(), "the take ended and the microphone stays open");
+        assert!(mic.lock().unwrap().is_empty());
+        assert!(v.take_quiet_stop().is_none());
+        let mut said = Vec::new();
+        for _ in 0..100 {
+            said.extend(v.poll());
+            if !said.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(matches!(said.as_slice(), [Said::Failed(_)]), "{said:?}");
+        assert!(v.open(), "a failed reading does not close it");
+        v.cancel();
+        assert!(!v.open() && !v.listening());
     }
 
     #[test]

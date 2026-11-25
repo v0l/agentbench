@@ -1001,6 +1001,53 @@ pub(super) fn speech_section(
             },
         );
         if sp.converse {
+            row_help(
+                ui,
+                "hands free",
+                "Keep the microphone open while the supervisor chat is open. Speak and it listens by itself; speak over a reply to cut it off. Needs headphones, or echo cancelling, so the reply does not feed back. Press the talk key to pause it.",
+                |ui| {
+                    let on = sp.hands_free;
+                    let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
+                    t.widget_info(|| {
+                        egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "hands free")
+                    });
+                    if t.clicked() {
+                        sp.hands_free = !on;
+                    }
+                },
+            );
+        }
+        if sp.converse && sp.hands_free {
+            row_help(
+                ui,
+                "listening through",
+                "What the sound plays through, when this machine cannot tell. Asked the first time hands free starts.",
+                |ui| {
+                    let mut picked = match sp.headphones {
+                        Some(true) => "headphones",
+                        Some(false) => "speakers",
+                        None => "",
+                    }
+                    .to_string();
+                    choice_fit(
+                        ui,
+                        "headphones",
+                        &mut picked,
+                        [
+                            (String::new(), "ask me".to_string()),
+                            ("headphones".into(), "headphones".into()),
+                            ("speakers".into(), "speakers".into()),
+                        ],
+                    );
+                    sp.headphones = match picked.as_str() {
+                        "headphones" => Some(true),
+                        "speakers" => Some(false),
+                        _ => None,
+                    };
+                },
+            );
+        }
+        if sp.converse {
             row_help(ui, "input device", "The microphone to listen on. Empty uses the default.", |ui| {
                 let mut options = vec![(String::new(), "default".to_string())];
                 options.extend(crate::voice::input_devices().into_iter().map(|d| (d.clone(), d)));

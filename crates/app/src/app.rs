@@ -611,6 +611,15 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
+#[derive(Default)]
+struct HandsFree {
+    paused: Option<SessionId>,
+    asking: bool,
+    sink: Option<crate::voice::Sink>,
+    fake: bool,
+    mic: Option<crate::voice::Mic>,
+}
+
 enum Confirm {
     Project(Id, String),
     Worktree(Id, String, bool),
@@ -797,6 +806,7 @@ pub struct App {
     last_talk: Option<crate::voice::Talk>,
     conversing: Option<SessionId>,
     talk_turn: bool,
+    hands_free: HandsFree,
     auto: Option<(Tile, crate::voice::autosend::Countdown)>,
     clock: Option<f64>,
     /// Models on the server the native agent is saved to use. None until asked.
@@ -1021,6 +1031,7 @@ impl App {
             last_talk: None,
             conversing: None,
             talk_turn: false,
+            hands_free: Default::default(),
             auto: None,
             clock: None,
             speech: crate::voice::Settings::load(storage),
@@ -1774,6 +1785,23 @@ impl App {
     }
 
     fn talk(&mut self, ctx: &egui::Context, down: bool) {
+        if self.hands_free_wanted() {
+            if !down {
+                self.talk_key.release(false, false);
+                self.last_talk = Some(crate::voice::Talk::Nothing);
+                return;
+            }
+            self.talk_key.press(false, false);
+            self.barge_in();
+            if self.voice.open() {
+                self.pause_hands_free();
+                self.last_talk = Some(crate::voice::Talk::Finish);
+            } else {
+                self.hands_free.paused = None;
+                self.last_talk = Some(crate::voice::Talk::Start);
+            }
+            return;
+        }
         let listening = self.voice.listening() || self.voice.staged();
         let key = if down {
             self.talk_key.press(self.speech.hold_to_talk, listening)
@@ -1831,6 +1859,113 @@ impl App {
         self.converse.barge_in();
     }
 
+    fn hands_free_wanted(&self) -> bool {
+        self.speech.converse
+            && self.speech.hands_free
+            && self.conversing.is_some()
+            && self.conversing == self.session
+    }
+
+    pub fn hands_free_on(&self) -> bool {
+        self.voice.open()
+    }
+
+    fn hands_free_tick(&mut self, ctx: &egui::Context) {
+        if self.hands_free.paused.is_some() && self.hands_free.paused != self.session {
+            self.hands_free.paused = None;
+        }
+        let want = self.hands_free_wanted() && self.hands_free.paused.is_none();
+        if !want {
+            self.hands_free.asking = false;
+            if self.voice.open() {
+                self.voice.cancel();
+                self.talk_turn = false;
+            }
+            return;
+        }
+        if self.voice.open() {
+            return;
+        }
+        if self.voice.busy() || self.hands_free.asking {
+            return;
+        }
+        let sink = self.hands_free.sink.clone().unwrap_or_else(crate::voice::output::default_sink);
+        use crate::voice::Verdict;
+        match crate::voice::output::verdict(&sink, self.speech.headphones, self.speech.echo_cancel) {
+            Verdict::Ask => {
+                self.hands_free.asking = true;
+                return;
+            }
+            Verdict::Refuse(why) => {
+                self.hands_free.paused = self.session;
+                self.notice = Some((false, why));
+                return;
+            }
+            Verdict::Go => {}
+        }
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        };
+        let opened = if let Some(problem) = self.speech.problem() {
+            Err(problem.to_string())
+        } else if self.hands_free.fake {
+            self.hands_free.mic = Some(self.voice.open_fake());
+            Ok(())
+        } else {
+            self.voice.start_open(wake, &self.speech.input_device.clone())
+        };
+        if let Err(e) = opened {
+            self.hands_free.paused = self.session;
+            self.notice = Some((false, e));
+        }
+    }
+
+    fn pause_hands_free(&mut self) {
+        self.voice.cancel();
+        self.talk_turn = false;
+        self.hands_free.paused = self.session;
+    }
+
+    pub fn answer_headphones(&mut self, headphones: bool) {
+        self.speech.headphones = Some(headphones);
+        self.hands_free.asking = false;
+    }
+
+    pub fn asking_headphones(&self) -> bool {
+        self.hands_free.asking
+    }
+
+    pub fn dismiss_headphones(&mut self) {
+        self.hands_free.asking = false;
+        self.hands_free.paused = self.session;
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_hands_free(&mut self, sink: crate::voice::Sink) {
+        self.speech.converse = true;
+        self.speech.hands_free = true;
+        self.hands_free.sink = Some(sink);
+        self.hands_free.fake = true;
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_hear(&mut self, pcm: &[f32]) {
+        if let Some(mic) = &self.hands_free.mic {
+            mic.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(pcm);
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_notice(&self) -> Option<String> {
+        self.notice.as_ref().map(|(_, t)| t.clone())
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_in_speech(&self) -> bool {
+        self.voice.in_speech()
+    }
+
     pub fn say_to_supervisor(&mut self, text: &str) {
         let Some(sid) = self.conversing else { return };
         let last = self.transcripts.get(&sid).map_or(0, |t| t.last);
@@ -1865,7 +2000,8 @@ impl App {
             }
         }
         if !self.reader.busy()
-            && !self.voice.listening()
+            && !(self.voice.listening() && !self.voice.open())
+            && !self.voice.in_speech()
             && let Some(sentence) = self.converse.next()
             && let Some(from) = self.reading_source()
         {
@@ -1885,6 +2021,11 @@ impl App {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
         };
+        if self.voice.open() {
+            self.barge_in();
+            self.pause_hands_free();
+            return;
+        }
         if self.voice.listening() {
             self.voice.finish(&self.speech_now(), wake);
             return;
@@ -2782,8 +2923,13 @@ impl App {
             self.reading = None;
         }
         self.converse_tick(ctx);
+        self.hands_free_tick(ctx);
         let speech = self.speech_now();
         self.voice.tick(&speech, wake);
+        if self.voice.take_speech_start() {
+            self.barge_in();
+            self.talk_turn = true;
+        }
         if let Some(hang) = self.voice.take_quiet_stop() {
             self.notice = Some((false, format!("stopped after {hang:.0} s of quiet")));
         }
