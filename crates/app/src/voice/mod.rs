@@ -19,6 +19,9 @@ pub use settings::{AUTO_SEND_SECS, LOCAL_MODELS, Mode, Settings};
 mod converse;
 pub use converse::{Converse, Talk, TalkKey};
 
+pub mod output;
+pub use output::{Sink, Verdict};
+
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]

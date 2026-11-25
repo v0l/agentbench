@@ -33,6 +33,9 @@ pub struct Settings {
     pub auto_send: bool,
     pub auto_send_secs: u32,
     pub converse: bool,
+    pub hands_free: bool,
+    pub headphones: Option<bool>,
+    pub echo_cancel: bool,
     pub input_device: String,
     pub talk_key: String,
     pub hang_secs: f32,
@@ -60,6 +63,9 @@ impl Default for Settings {
             auto_send: cfg!(target_os = "android"),
             auto_send_secs: DEFAULT_AUTO_SEND_SECS,
             converse: false,
+            hands_free: false,
+            headphones: None,
+            echo_cancel: false,
             input_device: String::new(),
             talk_key: DEFAULT_TALK_KEY.into(),
             hang_secs: super::HANG_SECONDS,
@@ -99,6 +105,13 @@ impl Settings {
             s.auto_send_secs = n.clamp(*AUTO_SEND_SECS.start(), *AUTO_SEND_SECS.end());
         }
         s.converse = st.get_string("voice_converse").as_deref() == Some("1");
+        s.hands_free = st.get_string("voice_hands_free").as_deref() == Some("1");
+        s.headphones = match st.get_string("voice_headphones").as_deref() {
+            Some("1") => Some(true),
+            Some("0") => Some(false),
+            _ => None,
+        };
+        s.echo_cancel = st.get_string("voice_echo_cancel").as_deref() == Some("1");
         s.input_device = st.get_string("voice_input").unwrap_or_default();
         if let Some(k) = st.get_string("voice_talk_key").filter(|k| !k.trim().is_empty()) {
             s.talk_key = k;
@@ -137,6 +150,12 @@ impl Settings {
         st.set_string("voice_auto_send", if self.auto_send { "1" } else { "0" }.into());
         st.set_string("voice_auto_send_secs", self.auto_send_secs.to_string());
         st.set_string("voice_converse", if self.converse { "1" } else { "0" }.into());
+        st.set_string("voice_hands_free", if self.hands_free { "1" } else { "0" }.into());
+        match self.headphones {
+            Some(on) => st.set_string("voice_headphones", if on { "1" } else { "0" }.into()),
+            None => st.remove_string("voice_headphones"),
+        }
+        st.set_string("voice_echo_cancel", if self.echo_cancel { "1" } else { "0" }.into());
         st.set_string("voice_input", self.input_device.clone());
         st.set_string("voice_talk_key", self.talk_key.clone());
         st.set_string("voice_hang_secs", self.hang_secs.to_string());
@@ -290,6 +309,23 @@ mod tests {
         assert!(back.converse);
         assert_eq!(back.input_device, "USB mic");
         assert_eq!(back.talk_key(), Some(eframe::egui::Key::F8));
+    }
+
+    #[test]
+    fn hands_free_is_off_by_default_and_the_headphones_answer_is_kept() {
+        let s = Settings::default();
+        assert!(!s.hands_free);
+        assert_eq!(s.headphones, None);
+        assert!(!s.echo_cancel);
+        let mut m = Mem::default();
+        Settings { hands_free: true, headphones: Some(false), echo_cancel: true, ..Default::default() }
+            .save(&mut m);
+        let back = Settings::load(Some(&m));
+        assert!(back.hands_free);
+        assert_eq!(back.headphones, Some(false));
+        assert!(back.echo_cancel);
+        Settings { headphones: None, ..back }.save(&mut m);
+        assert_eq!(Settings::load(Some(&m)).headphones, None);
     }
 
     #[test]
