@@ -482,7 +482,9 @@ Settings (rows of the `settings` table in `agentbench.db`, each threshold named 
 | `_critical_io_full` | 30 | critical: io full avg10 above, % |
 | `_critical_memory_full` | 5 | critical: memory full avg10 above, % |
 | `_critical_mem_available_gb` | 5 | critical: MemAvailable under, GB |
-| `_critical_swap_gb` | 16 | critical: swap used above, GB |
+| `_swap_pages` | 100 | pressure: swapping now, pages per second in or out (from `/proc/vmstat`, last 60 s), 0 is off |
+| `_critical_swap_pages` | 1000 | critical: swapping now, pages per second in or out, 0 is off |
+| `_critical_swap_gb` | 0 (off) | critical: swap used above, GB, and only with proof of trouble (swap grew over 1 GB in 60 s, MemAvailable under `_mem_available_gb`, or memory some avg10 above 5%) |
 | `_critical_hold_secs` | 30 | how long a critical reading must hold |
 | `_cooldown_secs` | 300 | calm time before pressure clears |
 | `_recover_secs` | 120 | one more worker each this many seconds after clearing |

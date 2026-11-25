@@ -1,5 +1,5 @@
 use agentbench_core::{DiskReading, Host, PressureReadings};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use sysinfo::{Disks, System};
 
@@ -40,6 +40,18 @@ pub struct Reader {
     cores: u32,
     live: bool,
     last: HashMap<String, DiskCounters>,
+    vm: VecDeque<(i64, u64, u64)>,
+}
+
+const SWAP_WINDOW_MS: i64 = 60_000;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
+}
+
+fn vmstat_swap(text: &str) -> Option<(u64, u64)> {
+    let get = |k: &str| text.lines().find_map(|l| l.strip_prefix(k)?.trim().parse::<u64>().ok());
+    Some((get("pswpin ")?, get("pswpout ")?))
 }
 
 impl Reader {
@@ -49,11 +61,12 @@ impl Reader {
             cores: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1),
             live: cfg!(target_os = "linux"),
             last: HashMap::new(),
+            vm: VecDeque::new(),
         }
     }
 
     pub fn at(root: &Path, cores: u32) -> Reader {
-        Reader { root: root.to_path_buf(), cores: cores.max(1), live: true, last: HashMap::new() }
+        Reader { root: root.to_path_buf(), cores: cores.max(1), live: true, last: HashMap::new(), vm: VecDeque::new() }
     }
 
     fn read(&self, path: &str) -> Option<String> {
@@ -61,6 +74,23 @@ impl Reader {
     }
 
     pub fn sample(&mut self, devices: &[String]) -> PressureReadings {
+        self.sample_at(devices, now_ms())
+    }
+
+    fn swap_rates(&mut self, text: &str, now: i64) -> (Option<f32>, Option<f32>) {
+        let Some((pin, pout)) = vmstat_swap(text) else { return (None, None) };
+        while self.vm.front().is_some_and(|(at, _, _)| now - at > SWAP_WINDOW_MS) {
+            self.vm.pop_front();
+        }
+        let rates = self.vm.front().filter(|(at, _, _)| now > *at).map(|(at, i, o)| {
+            let secs = (now - at) as f32 / 1000.0;
+            (pin.saturating_sub(*i) as f32 / secs, pout.saturating_sub(*o) as f32 / secs)
+        });
+        self.vm.push_back((now, pin, pout));
+        (rates.map(|r| r.0), rates.map(|r| r.1))
+    }
+
+    pub fn sample_at(&mut self, devices: &[String], now: i64) -> PressureReadings {
         let mut r = PressureReadings::default();
         if !self.live {
             return r;
@@ -92,6 +122,9 @@ impl Reader {
         if let Some(load) = self.read("/proc/loadavg").and_then(|t| t.split_whitespace().next()?.parse::<f32>().ok()) {
             r.load_per_core = Some(load / self.cores as f32);
             r.known = true;
+        }
+        if let Some(text) = self.read("/proc/vmstat") {
+            (r.swap_in_rate, r.swap_out_rate) = self.swap_rates(&text, now);
         }
         let mounts = self.read("/proc/self/mountinfo").map(|t| mountinfo(&t)).unwrap_or_default();
         r.swap_device = self.read("/proc/swaps").and_then(|t| swap_device(&t, &mounts));
@@ -349,6 +382,19 @@ pub(crate) mod tests {
     fn a_swap_partition_is_named_by_itself() {
         let text = "Filename Type Size Used Priority\n/dev/sda2 partition 100 50 -2\n/mnt/data/swapfile file 100 10 -3\n";
         assert_eq!(swap_device(text, &mountinfo(MOUNTS)).as_deref(), Some("sda2"));
+    }
+
+    #[test]
+    fn swap_rates_come_from_vmstat_deltas_over_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reader = Reader::at(dir.path(), 4);
+        let vm = |i: u64, o: u64| format!("pgfault 5\npswpin {i}\npswpout {o}\npswpoutx 9\n");
+        fake_proc(dir.path(), &[("proc/vmstat", &vm(1000, 2000))]);
+        let first = reader.sample_at(&[], 0);
+        assert_eq!((first.swap_in_rate, first.swap_out_rate), (None, None));
+        fake_proc(dir.path(), &[("proc/vmstat", &vm(1000, 152_000))]);
+        let r = reader.sample_at(&[], 30_000);
+        assert_eq!((r.swap_in_rate, r.swap_out_rate), (Some(0.0), Some(5000.0)));
     }
 
     #[test]

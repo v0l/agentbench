@@ -24,6 +24,8 @@ pub struct Limits {
     pub critical_memory_full: f32,
     pub critical_mem_available_gb: f32,
     pub critical_swap_gb: f32,
+    pub swap_pages: f32,
+    pub critical_swap_pages: f32,
     pub hold_ms: i64,
     pub critical_hold_ms: i64,
     pub cooldown_ms: i64,
@@ -43,7 +45,9 @@ impl Default for Limits {
             critical_io_full: 30.0,
             critical_memory_full: 5.0,
             critical_mem_available_gb: 5.0,
-            critical_swap_gb: 16.0,
+            critical_swap_gb: 0.0,
+            swap_pages: 100.0,
+            critical_swap_pages: 1000.0,
             hold_ms: 60_000,
             critical_hold_ms: 30_000,
             cooldown_ms: 300_000,
@@ -75,6 +79,8 @@ pub fn limits(store: &Store) -> Limits {
         critical_memory_full: f("critical_memory_full", d.critical_memory_full),
         critical_mem_available_gb: f("critical_mem_available_gb", d.critical_mem_available_gb),
         critical_swap_gb: f("critical_swap_gb", d.critical_swap_gb),
+        swap_pages: f("swap_pages", d.swap_pages),
+        critical_swap_pages: f("critical_swap_pages", d.critical_swap_pages),
         hold_ms: secs("hold_secs", d.hold_ms),
         critical_hold_ms: secs("critical_hold_secs", d.critical_hold_ms),
         cooldown_ms: secs("cooldown_secs", d.cooldown_ms),
@@ -136,11 +142,25 @@ fn swap_text(used: u64, device: &Option<String>) -> String {
     }
 }
 
+fn swap_rate(r: &PressureReadings) -> f32 {
+    r.swap_in_rate.unwrap_or(0.0).max(r.swap_out_rate.unwrap_or(0.0))
+}
+
+fn swapping_text(r: &PressureReadings) -> String {
+    let used = r.swap_used.map(|s| format!(", {}", swap_text(s, &r.swap_device))).unwrap_or_default();
+    format!("swapping {:.0} pages/s{used}", swap_rate(r))
+}
+
+pub struct SwapTrend {
+    pub growing: bool,
+    pub grew_over_gb: bool,
+}
+
 fn above(v: Option<f32>, limit: f32) -> Option<f32> {
     v.filter(|v| limit > 0.0 && *v > limit)
 }
 
-fn hits(r: &PressureReadings, l: &Limits, swap_growing: bool) -> (Vec<Hit>, Vec<Hit>) {
+fn hits(r: &PressureReadings, l: &Limits, trend: &SwapTrend) -> (Vec<Hit>, Vec<Hit>) {
     let mut p = Vec::new();
     let mut c = Vec::new();
     let pct = |key, name: &str, v: f32| Hit { key, text: format!("{name} {v:.0}%") };
@@ -153,7 +173,10 @@ fn hits(r: &PressureReadings, l: &Limits, swap_growing: bool) -> (Vec<Hit>, Vec<
     if let Some(m) = r.mem_available.filter(|m| gb(*m) < l.mem_available_gb as f64) {
         p.push(Hit { key: "mem_available", text: format!("{} available", gb_text(m)) });
     }
-    if let Some(s) = r.swap_used.filter(|s| swap_growing && gb(*s) > l.swap_gb as f64) {
+    let rate = swap_rate(r);
+    if l.swap_pages > 0.0 && rate > l.swap_pages {
+        p.push(Hit { key: "swap", text: swapping_text(r) });
+    } else if let Some(s) = r.swap_used.filter(|s| trend.growing && gb(*s) > l.swap_gb as f64) {
         p.push(Hit { key: "swap", text: swap_text(s, &r.swap_device) });
     }
     if let Some(v) = above(r.cpu_some60, l.cpu_some) {
@@ -176,8 +199,15 @@ fn hits(r: &PressureReadings, l: &Limits, swap_growing: bool) -> (Vec<Hit>, Vec<
     if let Some(m) = r.mem_available.filter(|m| gb(*m) < l.critical_mem_available_gb as f64) {
         c.push(Hit { key: "c_mem_available", text: format!("{} available", gb_text(m)) });
     }
-    if let Some(s) = r.swap_used.filter(|s| l.critical_swap_gb > 0.0 && gb(*s) > l.critical_swap_gb as f64) {
-        c.push(Hit { key: "c_swap", text: swap_text(s, &r.swap_device) });
+    if l.critical_swap_pages > 0.0 && rate > l.critical_swap_pages {
+        c.push(Hit { key: "c_swap", text: swapping_text(r) });
+    } else if let Some(s) = r.swap_used.filter(|s| l.critical_swap_gb > 0.0 && gb(*s) > l.critical_swap_gb as f64) {
+        let trouble = trend.grew_over_gb
+            || r.mem_available.is_some_and(|m| gb(m) < l.mem_available_gb as f64)
+            || above(r.memory_some10, 5.0).is_some();
+        if trouble {
+            c.push(Hit { key: "c_swap", text: swap_text(s, &r.swap_device) });
+        }
     }
     (p, c)
 }
@@ -263,7 +293,10 @@ impl Monitor {
         let growing = r.swap_used.is_some_and(|s| {
             self.swaps.iter().rev().skip(1).map(|(_, v)| *v).min().is_some_and(|low| s > low)
         });
-        let (p, c) = hits(&r, l, growing);
+        let grew_over_gb = r.swap_used.is_some_and(|s| {
+            self.swaps.iter().rev().skip(1).map(|(_, v)| *v).min().is_some_and(|low| s.saturating_sub(low) as f64 > GB)
+        });
+        let (p, c) = hits(&r, l, &SwapTrend { growing, grew_over_gb });
         self.readings = r;
         let keys: HashSet<&'static str> = p.iter().chain(&c).map(|h| h.key).collect();
         self.held.retain(|k, _| keys.contains(k));
@@ -360,6 +393,8 @@ pub(crate) mod tests {
             mem_available: Some(40 * 1024 * 1024 * 1024),
             swap_used: Some(0),
             swap_device: Some("nvme1n1p1".into()),
+            swap_in_rate: None,
+            swap_out_rate: None,
             load_per_core: Some(0.2),
             disks: vec![],
         }
@@ -472,6 +507,53 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn stale_swap_on_an_idle_host_stays_ok() {
+        let mut m = Monitor::default();
+        let gib = 1024 * 1024 * 1024u64;
+        let r = PressureReadings { swap_used: Some(18 * gib), mem_available: Some(34 * gib), swap_in_rate: Some(0.0), swap_out_rate: Some(0.0), ..calm() };
+        run(&mut m, &r, 0, 600 * S);
+        assert_eq!(m.state(), PressureState::Ok);
+        let l = Limits { critical_swap_gb: 16.0, ..Limits::default() };
+        for t in 0..60 {
+            m.observe(r.clone(), &l, 8, 700 * S + t * 10 * S);
+        }
+        assert_eq!(m.state(), PressureState::Ok, "a person's limit still needs evidence");
+    }
+
+    #[test]
+    fn heavy_paging_out_is_critical_with_the_used_size_in_the_reason() {
+        let mut m = Monitor::default();
+        let gib = 1024 * 1024 * 1024u64;
+        let r = PressureReadings { swap_used: Some(18 * gib), mem_available: Some(34 * gib), swap_in_rate: Some(0.0), swap_out_rate: Some(5000.0), ..calm() };
+        run(&mut m, &r, 0, 30 * S);
+        assert_eq!(m.state(), PressureState::Critical);
+        assert!(m.reason.contains("swap 18 GB"), "{}", m.reason);
+    }
+
+    #[test]
+    fn growing_swap_with_low_memory_is_pressure() {
+        let mut m = Monitor::default();
+        let gib = 1024 * 1024 * 1024u64;
+        let l = Limits::default();
+        for i in 0..24u64 {
+            let r = PressureReadings { swap_used: Some(6 * gib + i * gib / 3), mem_available: Some(8 * gib), ..calm() };
+            m.observe(r, &l, 8, (i * 10) as i64 * S);
+        }
+        assert_eq!(m.state(), PressureState::Pressure);
+    }
+
+    #[test]
+    fn a_first_reading_cannot_be_critical_from_swap_alone() {
+        let mut m = Monitor::default();
+        let gib = 1024 * 1024 * 1024u64;
+        let l = Limits { critical_swap_gb: 16.0, ..Limits::default() };
+        let r = PressureReadings { swap_used: Some(18 * gib), mem_available: Some(34 * gib), ..calm() };
+        let ev = m.observe(r, &l, 8, 0);
+        assert!(ev.is_empty());
+        assert_eq!(m.state(), PressureState::Ok);
+    }
+
+    #[test]
     fn unknown_readings_stay_ok() {
         let mut m = Monitor::default();
         run(&mut m, &PressureReadings::default(), 0, 600 * S);
@@ -487,14 +569,14 @@ pub(crate) mod tests {
         let mut t = 0;
         while m.state() == PressureState::Ok && t < 200 * S {
             used += gib / 8;
-            let r = PressureReadings { io_full10: Some(22.0), swap_used: Some(used), ..calm() };
+            let r = PressureReadings { io_full10: Some(22.0), swap_used: Some(used), swap_out_rate: Some(5000.0), ..calm() };
             m.observe(r, &l, 8, t);
             t += 10 * S;
         }
         let snap = m.snapshot(8, t, &l);
         assert_eq!(snap.state, PressureState::Critical);
         let line = snap.line().unwrap();
-        assert!(line.starts_with("starts paused, 0 of 8: swap 19 GB (swap on nvme1n1p1)"), "{line}");
+        assert!(line.starts_with("starts paused, 0 of 8: swapping 5000 pages/s, swap 19 GB (swap on nvme1n1p1)"), "{line}");
         let p = HostPressure { state: PressureState::Pressure, effective_cap: 2, reason: "io full 22%, swap 19 GB".into(), ..snap };
         assert_eq!(p.line().unwrap(), "scaled to 2 of 8: io full 22%, swap 19 GB");
     }

@@ -2582,6 +2582,10 @@ pub struct PressureReadings {
     #[serde(default)]
     pub swap_device: Option<String>,
     #[serde(default)]
+    pub swap_in_rate: Option<f32>,
+    #[serde(default)]
+    pub swap_out_rate: Option<f32>,
+    #[serde(default)]
     pub load_per_core: Option<f32>,
     #[serde(default)]
     pub disks: Vec<DiskReading>,
