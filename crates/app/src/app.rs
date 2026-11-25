@@ -1050,7 +1050,7 @@ impl App {
                 == Some("true"),
             triage_open: storage.and_then(|s| s.get_string("triage_open")).as_deref()
                 == Some("true"),
-            questions: Default::default(),
+            questions: questions::QuestionsLog::opened(storage.and_then(|s| s.get_string("questions_open")).as_deref() == Some("true")),
             github: HashMap::new(),
             gh_tab: github::GhTab::Issues,
             outbox_shown: github::Sent::Waiting,
@@ -1087,6 +1087,7 @@ impl App {
         storage.set_string("alerts_managed", self.alerts_managed.to_string());
         storage.set_string("issues_first", self.issues_first.to_string());
         storage.set_string("triage_open", self.triage_open.to_string());
+        storage.set_string("questions_open", self.questions.open.to_string());
         self.speech.save(storage);
         storage.set_string("grid", self.grid.key());
         let tiles: Vec<String> =

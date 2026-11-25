@@ -94,7 +94,13 @@ impl LogItem {
         if let (Some(i), Some(state)) = (self.issue_id, self.issue_state) {
             parts.push(format!("#{i} is {}", state.as_str()));
         }
-        parts.join(". ")
+        let last = parts.len().saturating_sub(1);
+        parts
+            .iter()
+            .enumerate()
+            .map(|(n, p)| if n < last { p.trim_end_matches(['.', ' ']).to_string() } else { p.clone() })
+            .collect::<Vec<_>>()
+            .join(". ")
     }
 
     pub fn clip(mut self) -> LogItem {
@@ -307,6 +313,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(item.answer(), "judged concluded_pass. tests ran. merged issue-3 into the main branch. #3 is done");
+        let stopped = LogItem { outcome: "tests ran.".into(), ..item };
+        assert_eq!(stopped.answer(), "judged concluded_pass. tests ran. merged issue-3 into the main branch. #3 is done");
     }
 
     #[test]

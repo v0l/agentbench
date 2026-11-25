@@ -22,6 +22,10 @@ pub(super) struct QuestionsLog {
 }
 
 impl QuestionsLog {
+    pub(super) fn opened(open: bool) -> QuestionsLog {
+        QuestionsLog { open, ..Default::default() }
+    }
+
     fn query(&self) -> LogQuery {
         let state = self.state.as_str();
         LogQuery {
