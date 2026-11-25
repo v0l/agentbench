@@ -47,6 +47,8 @@ struct Take {
     partial_busy: Arc<AtomicBool>,
     open: bool,
     heard_speech: bool,
+    echo: Option<Box<super::echo::Canceller>>,
+    cancelled: usize,
 }
 
 #[cfg(local_speech)]
@@ -148,6 +150,7 @@ impl Voice {
         device: &str,
     ) -> Result<(), String> {
         self.start_on(wake, device)?;
+        super::echo::PLAYED.clear();
         if let State::Listening(t) = &mut self.state {
             t.open = true;
             t.endpoint = Endpoint::open(t.rate);
@@ -171,6 +174,8 @@ impl Voice {
             partial_busy: Arc::new(AtomicBool::new(false)),
             open: true,
             heard_speech: false,
+            echo: None,
+            cancelled: 0,
         }));
         self.take_id += 1;
         heard
@@ -244,6 +249,20 @@ impl Voice {
         };
         let (heard, samples) = {
             let mut heard = take.heard.lock().unwrap_or_else(|e| e.into_inner());
+            if take.open && settings.echo_cancel {
+                let rate = take.rate;
+                let echo = take.echo.get_or_insert_with(|| Box::new(super::echo::Canceller::new(rate)));
+                let from = take.cancelled.min(heard.len());
+                let fresh = &mut heard[from..];
+                let far = super::echo::PLAYED.take(fresh.len(), rate);
+                let mut out = Vec::with_capacity(fresh.len());
+                echo.process(fresh, &far, &mut out);
+                fresh.copy_from_slice(&out);
+                take.cancelled = heard.len();
+            } else {
+                take.echo = None;
+                take.cancelled = heard.len();
+            }
             take.endpoint.set_hang(settings.hang_secs);
             let said = take.endpoint.feed(&heard);
             if take.open && !take.endpoint.spoke() {
@@ -252,6 +271,7 @@ impl Voice {
                 if drop > keep {
                     heard.drain(..drop);
                     take.endpoint.forget(drop);
+                    take.cancelled = take.cancelled.saturating_sub(drop);
                 }
             }
             (said, heard.len())
@@ -311,6 +331,7 @@ impl Voice {
             let heard = std::mem::take(&mut *take.heard.lock().unwrap_or_else(|e| e.into_inner()));
             take.endpoint = Endpoint::open(rate);
             take.heard_speech = false;
+            take.cancelled = 0;
             if let Some(pcm) = self.trimmed(heard, rate, quiet, settings, true) {
                 self.read(pcm, settings, None, wake);
             }
@@ -511,6 +532,8 @@ fn open(device: &str) -> Result<Take, String> {
             partial_busy: Arc::new(AtomicBool::new(false)),
             open: false,
             heard_speech: false,
+            echo: None,
+            cancelled: 0,
         })
     }
     #[cfg(not(target_os = "android"))]
@@ -581,6 +604,8 @@ fn open_cpal(wanted: &str) -> Result<Take, String> {
         partial_busy: Arc::new(AtomicBool::new(false)),
         open: false,
         heard_speech: false,
+            echo: None,
+            cancelled: 0,
     })
 }
 
@@ -807,6 +832,8 @@ mod tests {
                 partial_busy: Arc::new(AtomicBool::new(false)),
                 open: false,
                 heard_speech: false,
+            echo: None,
+            cancelled: 0,
             })),
             ..Voice::default()
         }
@@ -855,6 +882,36 @@ mod tests {
         assert!(v.open(), "a failed reading does not close it");
         v.cancel();
         assert!(!v.open() && !v.listening());
+    }
+
+    #[test]
+    fn with_echo_cancelling_on_the_reply_heard_through_speakers_is_not_speech() {
+        let (pcm, rate) = super::super::read_wav(include_bytes!("../../tests/fixtures/voice/speech.wav")).unwrap();
+        let reply: Vec<f32> = super::super::to_whisper_rate(&pcm, rate).iter().map(|v| v * 0.5).collect();
+        let delay = RATE as usize / 40;
+        let run = |cancel: bool| {
+            super::super::echo::PLAYED.clear();
+            let mut v = Voice::default();
+            let mic = v.open_fake();
+            let settings = Settings { mode: Mode::Server, url: "http://127.0.0.1:9/v1".into(), echo_cancel: cancel, ..Default::default() };
+            let mut spoke = false;
+            let block = 320;
+            let mut warm = vec![0.0f32; RATE as usize * 6];
+            warm.extend(reply.iter().chain(&reply).chain(&reply));
+            for (i, chunk) in warm.chunks(block).enumerate() {
+                super::super::echo::PLAYED.push(chunk, RATE);
+                let at = i * block;
+                let heard: Vec<f32> = (at..at + chunk.len())
+                    .map(|n| 0.0005 + if n >= delay { 0.4 * warm[n - delay] } else { 0.0 })
+                    .collect();
+                mic.lock().unwrap().extend(heard);
+                v.tick(&settings, || {});
+                spoke |= v.in_speech() && at > RATE as usize * 6;
+            }
+            spoke
+        };
+        assert!(run(false), "without cancelling the echo passes for speech");
+        assert!(!run(true), "with it the echo is taken out");
     }
 
     #[test]

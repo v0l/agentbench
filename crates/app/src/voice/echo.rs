@@ -1,8 +1,58 @@
 pub const TAIL_SECONDS: f32 = 0.128;
 
+const PLAYED_SECONDS: usize = 2;
+
+pub struct Played {
+    buf: std::sync::Mutex<(std::collections::VecDeque<f32>, u32)>,
+}
+
+pub static PLAYED: Played = Played { buf: std::sync::Mutex::new((std::collections::VecDeque::new(), 0)) };
+
+impl Played {
+    pub fn push(&self, samples: &[f32], rate: u32) {
+        let mut b = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        if b.1 != rate {
+            b.0.clear();
+            b.1 = rate;
+        }
+        b.0.extend(samples.iter().copied());
+        let cap = rate as usize * PLAYED_SECONDS;
+        let over = b.0.len().saturating_sub(cap);
+        b.0.drain(..over);
+    }
+
+    pub fn take(&self, n: usize, rate: u32) -> Vec<f32> {
+        let mut b = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        let from = b.1.max(1);
+        let want = ((n as u64 * from as u64).div_ceil(rate.max(1) as u64)) as usize;
+        let got = want.min(b.0.len());
+        let raw: Vec<f32> = b.0.drain(..got).collect();
+        drop(b);
+        let mut out = if from == rate {
+            raw
+        } else {
+            agent_voice::voice::audio::resample(&raw, from, rate)
+        };
+        out.resize(n, 0.0);
+        out
+    }
+
+    pub fn clear(&self) {
+        self.buf.lock().unwrap_or_else(|e| e.into_inner()).0.clear();
+    }
+}
+
 const BLOCK: usize = 128;
 const MU: f32 = 1.0;
 const SMOOTH: f32 = 0.3;
+const CONVERGED: f32 = 15.85;
+const SETTLED_BLOCKS: usize = 40;
+const SUPPRESS_BELOW: f32 = 0.25;
+const SUPPRESS_GAIN: f32 = 0.1;
+
+fn mic_block_energy(err: &[f32], estimate: &[f32]) -> f32 {
+    err.iter().zip(estimate).map(|(e, y)| (e + y) * (e + y)).sum()
+}
 
 #[derive(Clone, Copy, Default, Debug)]
 struct C {
@@ -111,6 +161,10 @@ pub struct Canceller {
     far_in: Vec<f32>,
     ready: std::collections::VecDeque<f32>,
     copies: usize,
+    mic_energy: f32,
+    out_energy: f32,
+    converged: bool,
+    settled: usize,
 }
 
 impl Canceller {
@@ -127,7 +181,15 @@ impl Canceller {
             far_in: Vec::with_capacity(BLOCK),
             ready: Default::default(),
             copies: 0,
+            mic_energy: 0.0,
+            out_energy: 0.0,
+            converged: false,
+            settled: 0,
         }
+    }
+
+    pub fn converged(&self) -> bool {
+        self.converged
     }
 
     pub fn copies(&self) -> usize {
@@ -170,11 +232,23 @@ impl Canceller {
         let mic = std::mem::take(&mut self.mic_in);
         let fe: Vec<f32> = mic.iter().zip(&fy).map(|(m, y)| m - y).collect();
         let be: Vec<f32> = mic.iter().zip(&by).map(|(m, y)| m - y).collect();
-        self.ready.extend(fe.iter().copied());
+        let far_power: f32 = self.psd.iter().sum::<f32>() / self.psd.len() as f32;
+        let far_active = far_power > 1e-6;
+        let residual: f32 = fe.iter().map(|v| v * v).sum();
+        let echo: f32 = fy.iter().map(|v| v * v).sum();
+        let gain = if !far_active {
+            1.0
+        } else if !self.converged {
+            0.0
+        } else if residual < SUPPRESS_BELOW * echo {
+            SUPPRESS_GAIN
+        } else {
+            1.0
+        };
+        self.ready.extend(fe.iter().map(|v| v * gain));
         self.mic_in = mic;
         self.mic_in.clear();
 
-        let far_power: f32 = self.psd.iter().sum::<f32>() / self.psd.len() as f32;
         if far_power > 1e-6 {
             let mut e: Vec<C> = std::iter::repeat_n(C::default(), BLOCK)
                 .chain(be.iter().map(|&re| C { re, im: 0.0 }))
@@ -202,6 +276,17 @@ impl Canceller {
 
         self.front.err = fe.iter().map(|v| v * v).sum();
         self.back.err = be.iter().map(|v| v * v).sum();
+        if far_active {
+            let mic_e = mic_block_energy(&fe, &fy);
+            self.mic_energy += SMOOTH * (mic_e - self.mic_energy);
+            self.out_energy += SMOOTH * (self.front.err - self.out_energy);
+            if self.mic_energy > 1e-7 && self.out_energy * CONVERGED < self.mic_energy {
+                self.settled += 1;
+            } else {
+                self.settled = 0;
+            }
+            self.converged |= self.settled >= SETTLED_BLOCKS;
+        }
         self.front.avg += SMOOTH * (self.front.err - self.front.avg);
         self.back.avg += SMOOTH * (self.back.err - self.back.avg);
         if self.back.avg < 0.8 * self.front.avg {
@@ -257,6 +342,18 @@ mod tests {
         (0..len)
             .map(|n| h.iter().enumerate().take(n + 1).map(|(k, hk)| hk * x[n - k]).sum())
             .collect()
+    }
+
+    #[test]
+    fn the_played_reference_is_handed_out_at_the_microphone_rate_and_padded() {
+        let p = Played { buf: std::sync::Mutex::new((Default::default(), 0)) };
+        p.push(&[0.5; 480], 48_000);
+        let got = p.take(320, 16_000);
+        assert_eq!(got.len(), 320);
+        assert!(got[..150].iter().all(|v| (v - 0.5).abs() < 1e-3), "{:?}", &got[..4]);
+        assert!(got[200..].iter().all(|v| *v == 0.0));
+        p.push(&vec![0.1; 48_000 * 5], 48_000);
+        assert_eq!(p.buf.lock().unwrap().0.len(), 48_000 * PLAYED_SECONDS);
     }
 
     #[test]

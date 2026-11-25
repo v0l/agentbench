@@ -299,7 +299,7 @@ fn open(shared: Arc<Shared>) -> Result<(cpal::Stream, u32), String> {
             let shared = shared.clone();
             device.build_output_stream(
                 cfg,
-                move |data: &mut [$t], _| fill(data, channels, &shared),
+                move |data: &mut [$t], _| fill(data, channels, &shared, rate),
                 err,
                 None,
             )
@@ -323,6 +323,18 @@ fn fill<T: cpal::SizedSample + cpal::FromSample<f32>>(
     data: &mut [T],
     channels: usize,
     shared: &Shared,
+    rate: u32,
+) {
+    let mut played = Vec::with_capacity(data.len() / channels.max(1));
+    fill_from(data, channels, shared, &mut played);
+    super::echo::PLAYED.push(&played, rate);
+}
+
+fn fill_from<T: cpal::SizedSample + cpal::FromSample<f32>>(
+    data: &mut [T],
+    channels: usize,
+    shared: &Shared,
+    played: &mut Vec<f32>,
 ) {
     let mut queue = shared.queue.lock().unwrap_or_else(|e| e.into_inner());
     if !shared.started.load(Ordering::Relaxed) {
@@ -330,12 +342,14 @@ fn fill<T: cpal::SizedSample + cpal::FromSample<f32>>(
             && !shared.done.load(Ordering::Relaxed)
         {
             data.fill(T::from_sample(0.0));
+            played.resize(data.len() / channels.max(1), 0.0);
             return;
         }
         shared.started.store(true, Ordering::Relaxed);
     }
     for frame in data.chunks_mut(channels) {
         let v = queue.pop_front().unwrap_or(0.0);
+        played.push(v);
         for out in frame {
             *out = T::from_sample(v);
         }
@@ -522,11 +536,26 @@ mod tests {
     }
 
     #[test]
+    fn what_is_played_is_kept_once_per_frame_as_the_echo_reference() {
+        let s = shared();
+        s.queue.lock().unwrap().extend([0.5, -0.25]);
+        let mut out = [9.0f32; 6];
+        let mut played = Vec::new();
+        fill_from(&mut out, 2, &s, &mut played);
+        assert_eq!(played, vec![0.5, -0.25, 0.0]);
+        let s = shared();
+        s.prebuffer.store(100, Ordering::Relaxed);
+        let mut played = Vec::new();
+        fill_from(&mut out, 2, &s, &mut played);
+        assert_eq!(played, vec![0.0; 3], "the wait before playing is silence too");
+    }
+
+    #[test]
     fn the_queue_feeds_every_channel_and_then_goes_quiet() {
         let s = shared();
         s.queue.lock().unwrap().extend([0.5, -0.5]);
         let mut out = [9.0f32; 8];
-        fill(&mut out, 2, &s);
+        fill_from(&mut out, 2, &s, &mut Vec::new());
         assert_eq!(out, [0.5, 0.5, -0.5, -0.5, 0.0, 0.0, 0.0, 0.0]);
     }
 
@@ -536,11 +565,11 @@ mod tests {
         s.prebuffer.store(4, Ordering::Relaxed);
         s.queue.lock().unwrap().extend([0.5, 0.5]);
         let mut out = [9.0f32; 2];
-        fill(&mut out, 1, &s);
+        fill_from(&mut out, 1, &s, &mut Vec::new());
         assert_eq!(out, [0.0, 0.0], "two samples is not enough yet");
         assert_eq!(s.queue.lock().unwrap().len(), 2, "and nothing is used up");
         s.queue.lock().unwrap().extend([0.5, 0.5]);
-        fill(&mut out, 1, &s);
+        fill_from(&mut out, 1, &s, &mut Vec::new());
         assert_eq!(out, [0.5, 0.5], "four is enough");
         // And a reply shorter than the buffer is not held back for ever.
         let s = shared();
@@ -548,7 +577,7 @@ mod tests {
         s.queue.lock().unwrap().extend([0.25]);
         s.done.store(true, Ordering::Relaxed);
         let mut out = [9.0f32; 1];
-        fill(&mut out, 1, &s);
+        fill_from(&mut out, 1, &s, &mut Vec::new());
         assert_eq!(out, [0.25]);
     }
 }

@@ -1020,6 +1020,21 @@ pub(super) fn speech_section(
         if sp.converse && sp.hands_free {
             row_help(
                 ui,
+                "echo cancelling",
+                "Takes what is being read aloud back out of the microphone, so hands free works on speakers. Off by default until it has been measured on real rooms.",
+                |ui| {
+                    let on = sp.echo_cancel;
+                    let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
+                    t.widget_info(|| {
+                        egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "echo cancelling")
+                    });
+                    if t.clicked() {
+                        sp.echo_cancel = !on;
+                    }
+                },
+            );
+            row_help(
+                ui,
                 "listening through",
                 "What the sound plays through, when this machine cannot tell. Asked the first time hands free starts.",
                 |ui| {
