@@ -81,7 +81,7 @@ pub struct Snapshot {
 #[derive(Clone, Default)]
 pub struct Jobs(Arc<Mutex<HashMap<(Owner, String), Job>>>);
 
-mod scope {
+pub(crate) mod scope {
     use std::process::ExitStatus;
     use tokio::process::Command;
 

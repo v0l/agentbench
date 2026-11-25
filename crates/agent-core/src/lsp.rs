@@ -169,7 +169,8 @@ pub struct Client {
     caps: Value,
     started: Instant,
     docs: Mutex<Docs>,
-    _child: Mutex<Child>,
+    pid: Option<u32>,
+    child: Mutex<Child>,
     _scratch: Option<Scratch>,
 }
 
@@ -361,7 +362,8 @@ impl Client {
             caps: Value::Null,
             started: Instant::now(),
             docs: Mutex::new(Docs::default()),
-            _child: Mutex::new(child),
+            pid: child.id(),
+            child: Mutex::new(child),
             _scratch: scratch,
         };
         let uri = uri_of(root)?.to_string();
@@ -400,7 +402,32 @@ impl Client {
     }
 
     pub fn alive(&self) -> bool {
-        !lock(&self.state).dead
+        !lock(&self.state).dead && self.exit().is_none()
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    pub fn exit(&self) -> Option<std::process::ExitStatus> {
+        lock(&self.child).try_wait().ok().flatten()
+    }
+
+    pub fn kill(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pid.and_then(|p| i32::try_from(p).ok()) {
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+        #[cfg(windows)]
+        if let Some(pid) = self.pid {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        let _ = lock(&self.child).start_kill();
+        lock(&self.state).dead = true;
     }
 
     pub fn root(&self) -> &Path {
@@ -719,6 +746,14 @@ impl Client {
                 _ = stop.cancelled() => return Err("stopped".into()),
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
             }
+        }
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        if self.exit().is_none() {
+            self.kill();
         }
     }
 }

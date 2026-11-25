@@ -1,22 +1,21 @@
 use super::grants::Access;
+use super::jobs::scope;
 use super::lsp::{Client, Diag, Found, Pos, Sym, inside};
+use super::pool::{Pool, Slot};
 use super::spawn::{self, Confine};
 use super::tools::{self as files, flag};
 use super::workspace::Workspace;
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// How long a server may sit unused before it is stopped.
-const IDLE: Duration = Duration::from_secs(20 * 60);
-/// Servers kept running at once; the one unused longest goes first.
-const MAX_LIVE: usize = 6;
 /// How long a tool waits for a server that is still indexing the project.
 const INDEXING: Duration = Duration::from_secs(90);
 /// How long the check after an edit waits for the same.
@@ -318,20 +317,72 @@ pub fn merged(extra: &[ServerSpec]) -> Vec<ServerSpec> {
     all
 }
 
+type Key = (String, PathBuf);
+
 struct Live {
     client: tokio::sync::OnceCell<Result<Arc<Client>, String>>,
     used: Mutex<Instant>,
+    calls: AtomicUsize,
+    slot: Mutex<Option<Slot>>,
+    why: Mutex<Option<String>>,
+    retired: AtomicBool,
+    fresh: AtomicBool,
+    queued: AtomicBool,
+}
+
+impl Live {
+    fn new(now: Instant) -> Live {
+        Live {
+            client: Default::default(),
+            used: Mutex::new(now),
+            calls: AtomicUsize::new(0),
+            slot: Mutex::default(),
+            why: Mutex::default(),
+            retired: AtomicBool::new(false),
+            fresh: AtomicBool::new(true),
+            queued: AtomicBool::new(false),
+        }
+    }
+}
+
+fn killed_by_signal(status: &std::process::ExitStatus) -> bool {
+    scope::killed_by_signal(&Some(*status)).is_some()
+}
+
+struct Busy {
+    live: Arc<Live>,
+    pool: Arc<Pool>,
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        *lock(&self.live.used) = self.pool.now();
+        self.live.calls.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Default)]
+struct Call {
+    holder: String,
+    stop: CancellationToken,
+    notes: Vec<String>,
+    busy: Vec<Busy>,
+}
+
+tokio::task_local! {
+    static CALL: RefCell<Call>;
 }
 
 pub struct Code {
     pub settings: Settings,
     started: AtomicUsize,
     servers: Vec<ServerSpec>,
-    live: Mutex<HashMap<(String, PathBuf), Arc<Live>>>,
-    reaper: AtomicBool,
+    live: Mutex<HashMap<Key, Arc<Live>>>,
+    pool: Arc<Pool>,
+    restarts: Mutex<HashMap<Key, String>>,
     scans: Mutex<HashMap<PathBuf, Scan>>,
     /// Why a server last would not start, by server and folder, until it does.
-    failures: Mutex<HashMap<(String, PathBuf), String>>,
+    failures: Mutex<HashMap<Key, String>>,
 }
 
 /// When a project was last scanned, and what was found.
@@ -371,10 +422,20 @@ impl Code {
             started: AtomicUsize::new(0),
             servers,
             live: Mutex::default(),
-            reaper: AtomicBool::new(false),
+            pool: Pool::global(),
+            restarts: Mutex::default(),
             scans: Mutex::default(),
             failures: Mutex::default(),
         }
+    }
+
+    pub fn with_pool(mut self, pool: Arc<Pool>) -> Code {
+        self.pool = pool;
+        self
+    }
+
+    pub fn pool(&self) -> &Arc<Pool> {
+        &self.pool
     }
 
     /// The role of the message that carries diagnostics.
@@ -557,20 +618,38 @@ impl Code {
             .collect()
     }
 
-    fn evict(&self) {
-        let mut live = lock(&self.live);
-        live.retain(|_, l| lock(&l.used).elapsed() < IDLE);
-        while live.len() > MAX_LIVE {
-            let oldest = live.iter().min_by_key(|(_, l)| *lock(&l.used)).map(|(k, _)| k.clone());
-            match oldest {
-                Some(k) => live.remove(&k),
-                None => break,
-            };
+    fn retire(&self, key: &Key, live: &Arc<Live>, why: Option<String>) {
+        {
+            let mut map = lock(&self.live);
+            if map.get(key).is_some_and(|l| Arc::ptr_eq(l, live)) {
+                map.remove(key);
+            }
         }
+        if live.retired.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let why = lock(&live.why).take().or(why);
+        if let Some(why) = why {
+            lock(&self.restarts).insert(key.clone(), why);
+        }
+        drop(lock(&live.slot).take());
     }
 
-    fn forget(&self, key: &(String, PathBuf)) {
-        lock(&self.live).remove(key);
+    fn running(&self, key: &Key) -> Option<(Arc<Client>, Busy)> {
+        let live = lock(&self.live).get(key).cloned()?;
+        let client = match live.client.get() {
+            Some(Ok(c)) if c.alive() => c.clone(),
+            _ => return None,
+        };
+        let busy = self.busy(&live);
+        client.alive().then_some((client, busy))
+    }
+
+    fn busy(&self, live: &Arc<Live>) -> Busy {
+        let mut used = lock(&live.used);
+        live.calls.fetch_add(1, Ordering::SeqCst);
+        *used = self.pool.now();
+        Busy { live: live.clone(), pool: self.pool.clone() }
     }
 
     async fn client(
@@ -591,47 +670,58 @@ impl Code {
                 self.where_configured()
             )
         })?;
-        if !self.reaper.swap(true, Ordering::SeqCst) {
-            let weak: Weak<Code> = Arc::downgrade(self);
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(60)).await;
-                    match weak.upgrade() {
-                        Some(code) => code.evict(),
-                        None => break,
-                    }
-                }
-            });
-        }
+        let (holder, stop) = CALL
+            .try_with(|c| {
+                let c = c.borrow();
+                (c.holder.clone(), c.stop.clone())
+            })
+            .map_err(|_| format!("{} is only started by a code tool", spec.name))?;
         let key = (spec.name.clone(), root.to_path_buf());
-        for _ in 0..2 {
-            self.evict();
+        for _ in 0..3 {
             let live = lock(&self.live)
                 .entry(key.clone())
-                .or_insert_with(|| {
-                    Arc::new(Live { client: Default::default(), used: Mutex::new(Instant::now()) })
-                })
+                .or_insert_with(|| Arc::new(Live::new(self.pool.now())))
                 .clone();
-            *lock(&live.used) = Instant::now();
+            let busy = self.busy(&live);
             let started = live
                 .client
                 .get_or_init(|| async {
-                    let prepared = self.launch(spec, &program, root)?;
-                    Client::start(&spec.name, prepared, root, spec.options.clone(), START)
-                        .await
-                        .map(Arc::new)
+                    let slot = match self.pool.acquire(&holder, &spec.name, root, &stop).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            live.queued.store(true, Ordering::SeqCst);
+                            return Err(e);
+                        }
+                    };
+                    let client = self.start(spec, &program, root).await.map(Arc::new)?;
+                    self.watch(&key, &live, &client, slot, &holder);
+                    Ok(client)
                 })
-                .await;
+                .await
+                .clone();
             match started {
                 Ok(c) if c.alive() => {
                     lock(&self.failures).remove(&key);
-                    return Ok(c.clone());
+                    let _ = CALL.try_with(|call| call.borrow_mut().busy.push(busy));
+                    if let Some(why) = lock(&self.restarts).remove(&key).filter(|_| live.fresh.swap(false, Ordering::SeqCst)) {
+                        let note = format!("language server restarted: {} was {why}", spec.name);
+                        let _ = CALL.try_with(|call| call.borrow_mut().notes.push(note));
+                    }
+                    return Ok(c);
                 }
-                // it died since: start it again
-                Ok(_) => self.forget(&key),
+                Ok(_) => {
+                    drop(busy);
+                    self.retire(&key, &live, Some("stopped".into()));
+                }
+                Err(e) if live.queued.load(Ordering::SeqCst) => {
+                    drop(busy);
+                    self.retire(&key, &live, None);
+                    return Err(e);
+                }
                 Err(e) => {
+                    drop(busy);
                     let e = format!("could not start {}: {e}", spec.name);
-                    self.forget(&key);
+                    self.retire(&key, &live, None);
                     lock(&self.failures).insert(key, e.clone());
                     return Err(e);
                 }
@@ -640,7 +730,132 @@ impl Code {
         Err(format!("{} keeps stopping", spec.name))
     }
 
+    async fn start(&self, spec: &ServerSpec, program: &Path, root: &Path) -> Result<Client, String> {
+        let prepared = self.launch(spec, program, root)?;
+        let config = self.pool.config();
+        let prepared = match config.memory_mb {
+            Some(mb) if config.scope && scope::available() => spawn::Prepared {
+                command: scope::wrap(prepared.command, mb),
+                scratch: prepared.scratch,
+            },
+            _ => prepared,
+        };
+        Client::start(&spec.name, prepared, root, spec.options.clone(), START).await
+    }
+
+    fn watch(self: &Arc<Self>, key: &Key, live: &Arc<Live>, client: &Arc<Client>, slot: Slot, holder: &str) {
+        let config = self.pool.config();
+        let scoped = config.scope && config.memory_mb.is_some() && scope::available();
+        let id = slot.id();
+        let pid = client.pid();
+        *lock(&live.slot) = Some(slot);
+        let stopper = {
+            let (live, client, pool) = (Arc::downgrade(live), Arc::downgrade(client), Arc::downgrade(&self.pool));
+            Arc::new(move |unused_for: Duration, why: &str| {
+                let (Some(live), Some(client), Some(pool)) = (live.upgrade(), client.upgrade(), pool.upgrade()) else {
+                    return false;
+                };
+                let used = lock(&live.used);
+                if live.calls.load(Ordering::SeqCst) > 0 || pool.now().saturating_duration_since(*used) < unused_for {
+                    return false;
+                }
+                lock(&live.why).get_or_insert_with(|| why.to_string());
+                client.kill();
+                true
+            }) as super::pool::Stopper
+        };
+        self.pool.attach(id, pid, stopper);
+        tracing::info!(server = %key.0, root = %key.1.display(), holder, pid = ?pid, scoped, "language server started");
+        let (code, key, live, client) = (Arc::downgrade(self), key.clone(), live.clone(), Arc::downgrade(client));
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            let mut peak = 0u64;
+            loop {
+                let Some(c) = client.upgrade() else { break };
+                if code.strong_count() == 0 {
+                    c.kill();
+                }
+                if let Some(status) = c.exit() {
+                    if lock(&live.why).is_none() {
+                        let why = if scoped && killed_by_signal(&status) {
+                            format!("killed by its memory cap (lsp_memory_mb {})", config.memory_mb.unwrap_or_default())
+                        } else {
+                            format!("stopped by itself ({status})")
+                        };
+                        *lock(&live.why) = Some(why);
+                    }
+                    break;
+                }
+                if !c.alive() {
+                    c.kill();
+                    break;
+                }
+                drop(c);
+                let used = tokio::task::spawn_blocking(move || super::limits::resident(pid)).await.unwrap_or(0);
+                peak = peak.max(used);
+                pool.set_resident(id, used);
+                if let Some(mb) = config.memory_mb.filter(|_| !scoped)
+                    && used > mb << 20
+                    && let Some(c) = client.upgrade()
+                {
+                    *lock(&live.why) = Some(format!(
+                        "killed after it used {} MB, over its memory cap (lsp_memory_mb {mb})",
+                        used >> 20
+                    ));
+                    tracing::warn!(server = %key.0, root = %key.1.display(), pid = ?pid, resident_mb = used >> 20, cap_mb = mb, "language server over its memory cap");
+                    c.kill();
+                    continue;
+                }
+                tokio::time::sleep(config.poll).await;
+            }
+            tracing::info!(server = %key.0, root = %key.1.display(), pid = ?pid, peak_mb = peak >> 20, why = ?lock(&live.why).clone(), "language server exited");
+            match code.upgrade() {
+                Some(code) => code.retire(&key, &live, None),
+                None => drop(lock(&live.slot).take()),
+            }
+        });
+    }
+
     pub async fn run(
+        self: &Arc<Self>,
+        tool: &str,
+        args: &Value,
+        ws: &Workspace,
+        stop: &CancellationToken,
+    ) -> Result<String, String> {
+        let holder = ws.root().display().to_string();
+        self.run_as(&holder, tool, args, ws, stop).await
+    }
+
+    pub async fn run_as(
+        self: &Arc<Self>,
+        holder: &str,
+        tool: &str,
+        args: &Value,
+        ws: &Workspace,
+        stop: &CancellationToken,
+    ) -> Result<String, String> {
+        let call = Call { holder: holder.to_string(), stop: stop.clone(), ..Call::default() };
+        CALL.scope(RefCell::new(call), async {
+            let out = self.dispatch(tool, args, ws, stop).await;
+            let notes = CALL.with(|c| {
+                let mut c = c.borrow_mut();
+                c.busy.clear();
+                std::mem::take(&mut c.notes)
+            });
+            if notes.is_empty() {
+                return out;
+            }
+            let notes = notes.join("\n");
+            match out {
+                Ok(o) => Ok(format!("{o}\n[{notes}]")),
+                Err(e) => Err(format!("{e}\n[{notes}]")),
+            }
+        })
+        .await
+    }
+
+    async fn dispatch(
         self: &Arc<Self>,
         tool: &str,
         args: &Value,
@@ -1001,7 +1216,8 @@ impl Code {
             if !found || !spec.installed(&dir) {
                 continue;
             }
-            let Ok(client) = self.client(&spec, &dir).await else { continue };
+            let key = (spec.name.clone(), dir.clone());
+            let Some((client, _busy)) = self.running(&key) else { continue };
             if !client.ready(INDEXING_AFTER_EDIT, stop).await {
                 continue;
             }
@@ -1908,10 +2124,10 @@ mod tests {
             "fn main() {\n    let s = demo::shape::Shape { kind: demo::shape::Kind::Round, size: 2.0 };\n    println!(\"{}\", demo::total(&[s]));\n}\n",
         );
         let ws = Workspace::open(dir.path()).unwrap();
-        let code = Arc::new(Code::new(Settings {
-            confine: Confine::Open { env: Vec::new() },
-            ..Settings::default()
-        }));
+        let code = Arc::new(
+            Code::new(Settings { confine: Confine::Open { env: Vec::new() }, ..Settings::default() })
+                .with_pool(Pool::new(super::super::pool::Config::default())),
+        );
         let stop = CancellationToken::new();
         let run = |tool: &'static str, args: Value| {
             let (code, ws, stop) = (code.clone(), ws.clone(), stop.clone());
@@ -1963,5 +2179,241 @@ mod tests {
         let reports = code.after_edit(&[path], dir.path(), &stop).await;
         let note = render(&reports, dir.path(), &mut bad).unwrap();
         assert!(note.contains("no errors now"), "{note}");
+    }
+
+    const FAKE: &str = r#"
+while IFS= read -r line; do
+  line=${line%$'\r'}
+  case "$line" in
+    Content-Length:*) len=${line#Content-Length: } ;;
+    "")
+      [ -z "$len" ] && continue
+      IFS= read -r -n "$len" body
+      len=
+      id=; method=
+      [[ $body =~ \"id\":([0-9]+) ]] && id=${BASH_REMATCH[1]}
+      [[ $body =~ \"method\":\"([^\"]+)\" ]] && method=${BASH_REMATCH[1]}
+      [ -z "$id" ] && continue
+      case "$method" in
+        initialize) result='{"capabilities":{"documentSymbolProvider":true}}' ;;
+        textDocument/documentSymbol) result='[{"name":"thing","kind":12,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":5}},"selectionRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":5}}}]' ;;
+        *) result=null ;;
+      esac
+      reply="{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":$result}"
+      printf 'Content-Length: %d\r\n\r\n%s' "${#reply}" "$reply"
+      if [[ $body == *grow.fk* && $method == textDocument/documentSymbol ]]; then
+        held=$(head -c 300000000 /dev/zero | tr '\0' a)
+      fi
+      ;;
+  esac
+done
+"#;
+
+    struct Fake {
+        code: Arc<Code>,
+        pool: Arc<Pool>,
+        _script: tempfile::TempDir,
+    }
+
+    fn fake(config: super::super::pool::Config) -> Fake {
+        let script = tempfile::tempdir().unwrap();
+        let path = script.path().join("fake-lsp.sh");
+        fs::write(&path, FAKE).unwrap();
+        let pool = Pool::new(config);
+        let spec = ServerSpec {
+            name: "fake".into(),
+            command: "bash".into(),
+            args: vec![path.display().to_string()],
+            extensions: vec!["fk".into()],
+            markers: vec!["fake.toml".into()],
+            ..ServerSpec::default()
+        };
+        let code = Arc::new(
+            Code::new(Settings {
+                lsp: vec![spec],
+                confine: Confine::Open { env: Vec::new() },
+                ..Settings::default()
+            })
+            .with_pool(pool.clone()),
+        );
+        Fake { code, pool, _script: script }
+    }
+
+    fn quick() -> super::super::pool::Config {
+        super::super::pool::Config {
+            max: 4,
+            queue_wait: Duration::from_millis(400),
+            poll: Duration::from_millis(100),
+            scope: false,
+            ..Default::default()
+        }
+    }
+
+    fn fake_project() -> (tempfile::TempDir, Workspace) {
+        let dir = project(&["fake.toml", "a.fk", "grow.fk"]);
+        let ws = Workspace::open(dir.path()).unwrap();
+        (dir, ws)
+    }
+
+    async fn outline(f: &Fake, who: &str, ws: &Workspace, file: &str) -> Result<String, String> {
+        let stop = CancellationToken::new();
+        f.code.run_as(who, "code_outline", &json!({ "path": file }), ws, &stop).await
+    }
+
+    async fn until(what: &str, mut ok: impl FnMut() -> bool) {
+        let end = Instant::now() + Duration::from_secs(20);
+        while !ok() {
+            assert!(Instant::now() < end, "timed out waiting until {what}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_with_no_code_call_starts_no_language_server() {
+        let f = fake(quick());
+        let (dir, _ws) = fake_project();
+        let stop = CancellationToken::new();
+        let file = dir.path().join("a.fk");
+        fs::write(&file, "thing").unwrap();
+        let reports = f.code.after_edit(&[file], dir.path(), &stop).await;
+        assert!(reports.is_empty());
+        assert_eq!(f.code.launches(), 0, "an edit alone must not start a server");
+        assert_eq!(f.pool.total().servers, 0);
+        assert_eq!(f.code.status(dir.path())[0].health, Health::Idle);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_first_code_call_starts_the_server_and_edits_then_use_it() {
+        let f = fake(quick());
+        let (dir, ws) = fake_project();
+        let out = outline(&f, "session a", &ws, "a.fk").await.unwrap();
+        assert!(out.contains("thing") && !out.contains("restarted"), "{out}");
+        assert_eq!(f.code.launches(), 1);
+        assert_eq!(f.pool.held()[0].holder, "session a");
+        assert!(f.pool.held()[0].pid.is_some());
+        let stop = CancellationToken::new();
+        let reports = f.code.after_edit(&[dir.path().join("a.fk")], dir.path(), &stop).await;
+        assert_eq!(reports.len(), 1);
+        assert_eq!(f.code.launches(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idle_server_stops_after_the_timeout_and_restarts_saying_so_once() {
+        let f = fake(quick());
+        let (_dir, ws) = fake_project();
+        outline(&f, "s", &ws, "a.fk").await.unwrap();
+        let pid = f.pool.held()[0].pid;
+        f.pool.advance(Duration::from_secs(9 * 60));
+        assert_eq!(f.pool.reap().servers, 0, "nine minutes is not idle enough");
+        f.pool.advance(Duration::from_secs(2 * 60));
+        assert_eq!(f.pool.reap().servers, 1);
+        until("the server is gone", || f.pool.total().servers == 0).await;
+        until("the process itself is stopped", || !alive(pid)).await;
+        let out = outline(&f, "s", &ws, "a.fk").await.unwrap();
+        assert!(out.contains("thing"), "{out}");
+        assert!(out.contains("language server restarted") && out.contains("without a call"), "{out}");
+        assert_eq!(f.code.launches(), 2);
+        let again = outline(&f, "s", &ws, "a.fk").await.unwrap();
+        assert!(!again.contains("restarted"), "said once: {again}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_third_session_queues_then_hears_who_holds_the_servers() {
+        let f = fake(super::super::pool::Config { max: 2, ..quick() });
+        let (_a, one) = fake_project();
+        let (_b, two) = fake_project();
+        let (_c, three) = fake_project();
+        outline(&f, "session one", &one, "a.fk").await.unwrap();
+        outline(&f, "session two", &two, "a.fk").await.unwrap();
+        let started = Instant::now();
+        let err = outline(&f, "session three", &three, "a.fk").await.unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(350), "it waited in the queue");
+        assert!(err.contains("the host is busy"), "{err}");
+        assert!(err.contains("session one (fake in") && err.contains("session two (fake in"), "{err}");
+        assert!(err.contains("search_files"), "{err}");
+        assert_eq!(f.code.launches(), 2);
+        f.pool.advance(Duration::from_secs(11 * 60));
+        f.pool.reap();
+        until("the servers stop", || f.pool.total().servers == 0).await;
+        let out = outline(&f, "session three", &three, "a.fk").await.unwrap();
+        assert!(out.contains("thing") && !out.contains("restarted"), "{out}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_server_answering_a_call_is_never_stopped() {
+        let f = fake(quick());
+        let (_dir, ws) = fake_project();
+        outline(&f, "s", &ws, "a.fk").await.unwrap();
+        let key = lock(&f.code.live).keys().next().cloned().unwrap();
+        let (_client, busy) = f.code.running(&key).unwrap();
+        f.pool.advance(Duration::from_secs(3600));
+        assert_eq!(f.pool.reap().servers, 0);
+        assert_eq!(f.pool.stop_idle_language_servers().servers, 0);
+        drop(busy);
+        assert_eq!(f.pool.stop_idle_language_servers().servers, 0, "just used");
+        f.pool.advance(Duration::from_secs(61));
+        assert_eq!(f.pool.stop_idle_language_servers().servers, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pressure_stops_idle_servers_and_keeps_one_used_in_the_last_minute() {
+        let f = fake(quick());
+        let (_a, old) = fake_project();
+        let (_b, recent) = fake_project();
+        outline(&f, "old", &old, "a.fk").await.unwrap();
+        f.pool.advance(Duration::from_secs(5 * 60));
+        outline(&f, "recent", &recent, "a.fk").await.unwrap();
+        f.pool.advance(Duration::from_secs(30));
+        until("sizes are read", || f.pool.held().iter().all(|h| h.resident > 0)).await;
+        let before = f.pool.held();
+        let freed = f.pool.stop_idle_language_servers();
+        assert_eq!(freed.servers, 1);
+        assert_eq!(freed.bytes, before.iter().find(|h| h.holder == "old").unwrap().resident);
+        until("the idle one stops", || f.pool.total().servers == 1).await;
+        assert_eq!(f.pool.held()[0].holder, "recent");
+        let out = outline(&f, "old", &old, "a.fk").await.unwrap();
+        assert!(out.contains("language server restarted") && out.contains("pressure"), "{out}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_watchdog_kills_a_server_that_grows_past_its_cap() {
+        let f = fake(super::super::pool::Config { memory_mb: Some(64), ..quick() });
+        let (_dir, ws) = fake_project();
+        outline(&f, "s", &ws, "grow.fk").await.unwrap();
+        let pid = f.pool.held()[0].pid;
+        until("the cap kills it", || f.pool.total().servers == 0).await;
+        until("the process is gone", || !alive(pid)).await;
+        let out = outline(&f, "s", &ws, "a.fk").await.unwrap();
+        assert!(out.contains("language server restarted"), "{out}");
+        assert!(out.contains("over its memory cap (lsp_memory_mb 64)"), "{out}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_systemd_scope_kills_a_server_that_grows_past_its_cap() {
+        if !scope::available() {
+            eprintln!("no systemd user scope here; skipping");
+            return;
+        }
+        let f = fake(super::super::pool::Config { memory_mb: Some(64), scope: true, ..quick() });
+        let (_dir, ws) = fake_project();
+        outline(&f, "s", &ws, "grow.fk").await.unwrap();
+        until("the cap kills it", || f.pool.total().servers == 0).await;
+        let out = outline(&f, "s", &ws, "a.fk").await.unwrap();
+        assert!(out.contains("language server restarted"), "{out}");
+        assert!(out.contains("killed by its memory cap (lsp_memory_mb 64)"), "{out}");
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: Option<u32>) -> bool {
+        let pid = pid.unwrap() as i32;
+        let running = unsafe { libc::kill(pid, 0) == 0 };
+        running && !fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.contains(") Z "))
+    }
+
+    #[cfg(not(unix))]
+    fn alive(_pid: Option<u32>) -> bool {
+        false
     }
 }

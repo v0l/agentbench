@@ -95,6 +95,22 @@ pub fn devices(store: &Store) -> Vec<String> {
     if set.is_empty() { crate::host::default_devices() } else { set }
 }
 
+pub const LSP_MAX: &str = "lsp_max_servers";
+pub const LSP_IDLE: &str = "lsp_idle_stop_secs";
+pub const LSP_MEMORY: &str = "lsp_memory_mb";
+
+pub fn lsp_config(store: &Store) -> agent_core::pool::Config {
+    use agent_core::pool::{Config, DEFAULT_IDLE, DEFAULT_MAX, DEFAULT_MEMORY_MB};
+    let n = |k: &str, d: u64| crate::autopilot::number(store, k, d);
+    let memory = n(LSP_MEMORY, DEFAULT_MEMORY_MB);
+    Config {
+        max: n(LSP_MAX, DEFAULT_MAX as u64).max(1) as usize,
+        idle: std::time::Duration::from_secs(n(LSP_IDLE, DEFAULT_IDLE.as_secs()).max(1)),
+        memory_mb: (memory > 0).then_some(memory),
+        ..Config::default()
+    }
+}
+
 pub fn pressure_cap(configured: u32) -> u32 {
     (configured / 2).max(1).min(configured)
 }
@@ -319,6 +335,7 @@ impl Monitor {
             readings: self.readings.clone(),
             effective_cap: self.effective_cap(configured, now, l),
             configured_cap: configured,
+            ..HostPressure::default()
         }
     }
 }

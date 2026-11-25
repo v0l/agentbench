@@ -2602,6 +2602,10 @@ pub struct HostPressure {
     pub effective_cap: u32,
     #[serde(default)]
     pub configured_cap: u32,
+    #[serde(default)]
+    pub lsp_servers: u32,
+    #[serde(default)]
+    pub lsp_resident: u64,
 }
 
 impl HostPressure {

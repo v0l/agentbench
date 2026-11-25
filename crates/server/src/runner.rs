@@ -110,6 +110,7 @@ pub struct Runner {
     pub terminals: crate::terminal::Terminals,
     pub quotas: crate::quota::Quotas,
     pub pressure: crate::pressure::Shared,
+    pub lsp: Arc<agent_core::pool::Pool>,
     /// This runner, as the tracker tools see it, for starting and messaging sessions.
     me: crate::tools::Handle,
     claims: Arc<Mutex<()>>,
@@ -192,6 +193,7 @@ impl Runner {
             terminals: Default::default(),
             quotas: Default::default(),
             pressure: Default::default(),
+            lsp: agent_core::pool::Pool::global(),
             me,
             claims: Default::default(),
             draining: Default::default(),

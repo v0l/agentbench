@@ -532,6 +532,7 @@ pub fn autopilot_text(a: &agentbench_core::AutopilotState) -> String {
             out.push_str(&format!(" ({})", p.reason));
         }
         out.push_str(&format!(", workers {} of {}", p.effective_cap, p.configured_cap));
+        out.push_str(&lsp_text(p));
         let r = &p.readings;
         if r.known {
             let pct = |v: Option<f32>| v.map_or("?".to_string(), |v| format!("{v:.0}%"));
@@ -552,8 +553,18 @@ pub fn autopilot_text(a: &agentbench_core::AutopilotState) -> String {
         } else {
             out.push_str("\nreadings unknown on this host");
         }
+    } else if let Some(p) = &a.pressure {
+        out.push_str(&format!("\nhost pressure: off{}", lsp_text(p)));
     }
     out
+}
+
+fn lsp_text(p: &agentbench_core::HostPressure) -> String {
+    format!(
+        "; language servers {} running, {:.1} GB resident",
+        p.lsp_servers,
+        p.lsp_resident as f64 / 1073741824.0
+    )
 }
 
 pub async fn autopilot_command(home: &std::path::Path, url: Option<String>, token: Option<String>) -> Result<Option<String>, String> {
@@ -829,6 +840,8 @@ mod tests {
                 effective_cap: 2,
                 configured_cap: 8,
                 readings: agentbench_core::PressureReadings { known: true, io_full10: Some(22.0), ..Default::default() },
+                lsp_servers: 2,
+                lsp_resident: 9 << 30,
                 ..Default::default()
             }),
             ..Default::default()
@@ -836,6 +849,7 @@ mod tests {
         let text = autopilot_text(&a);
         assert!(text.starts_with("autopilot: running, 2 of 8 workers; scaled to 2 of 8: io full 22%, swap 19 GB"), "{text}");
         assert!(text.contains("host pressure: pressure"), "{text}");
+        assert!(text.contains("workers 2 of 8; language servers 2 running, 9.0 GB resident"), "{text}");
     }
 
     fn parse(args: &[&str]) -> GithubAction {
