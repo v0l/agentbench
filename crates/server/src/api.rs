@@ -179,6 +179,10 @@ pub fn router(api: Api) -> Router {
         .route("/api/issues/{id}/start", post(start_issue))
         .route("/api/sessions", get(sessions).post(add_session))
         .route("/api/supervisor", post(open_supervisor))
+        .route("/api/supervisor/log", get(supervisor_log))
+        .route("/api/supervisor/log/export", get(supervisor_log_export))
+        .route("/api/supervisor/log/{id}", get(supervisor_log_item))
+        .route("/api/settings/supervisor-log", get(get_supervisor_log_settings).put(put_supervisor_log_settings))
         .route("/api/sessions/{id}", get(session).patch(rename_session).delete(delete_session))
         .route("/api/sessions/{id}/messages", get(messages).post(send))
         .route("/api/sessions/{id}/interrupt", post(interrupt))
@@ -855,6 +859,41 @@ async fn outbox_list(State(api): State<Api>, Query(q): Query<OutboxQuery>) -> Re
 struct OutboxQuery {
     #[serde(default)]
     project: Option<Id>,
+}
+
+async fn supervisor_log(
+    State(api): State<Api>,
+    Query(p): Query<crate::supervisor_log::LogParams>,
+) -> Reply<agentbench_core::SupervisorLog> {
+    let q = p.query(crate::store::now()).map_err(bad)?;
+    Ok(Json(crate::supervisor_log::list(api.runner.store(), &q)?))
+}
+
+async fn supervisor_log_item(State(api): State<Api>, Path(id): Path<Id>) -> Reply<agentbench_core::LogItem> {
+    match api.runner.store().log_item(id)? {
+        Some(i) => Ok(Json(i)),
+        None => Err(Failure(StatusCode::NOT_FOUND, format!("log item {id} not found"))),
+    }
+}
+
+async fn supervisor_log_export(
+    State(api): State<Api>,
+    Query(p): Query<crate::supervisor_log::LogParams>,
+) -> Result<Response, Failure> {
+    let q = p.query(crate::store::now()).map_err(bad)?;
+    let md = crate::supervisor_log::markdown(api.runner.store(), &q, crate::store::now())?;
+    Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], md).into_response())
+}
+
+async fn get_supervisor_log_settings(State(api): State<Api>) -> Reply<agentbench_core::LogSettings> {
+    Ok(Json(crate::supervisor_log::settings(api.runner.store())))
+}
+
+async fn put_supervisor_log_settings(
+    State(api): State<Api>,
+    Json(body): Json<agentbench_core::LogSettings>,
+) -> Reply<agentbench_core::LogSettings> {
+    crate::supervisor_log::save(api.runner.store(), &body).map(Json).map_err(bad)
 }
 
 async fn webhook_secret(State(api): State<Api>, Path(id): Path<Id>) -> Reply<agentbench_core::WebhookSecret> {
@@ -3357,6 +3396,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_supervisor_log_lists_filters_pages_reads_one_and_exports_markdown() {
+        let f = fixture();
+        let store = f.api.runner.store();
+        let sup = crate::projects::ensure_supervisor(store, &f._dir.path().join("sup")).unwrap();
+        let tree = store.main_worktree(sup.id).unwrap();
+        let boss = store.add_session(tree.id, "echo", "boss", None, None).unwrap();
+        crate::ledger::delivered(store, boss.id, "user", None, &format!("where is the release {}", "x".repeat(700)));
+        crate::ledger::delivered(store, boss.id, "judge", None, "judge the worker");
+        crate::ledger::closed_by(store, "file_issue", &json!({"title": "Ship it"}), boss.id, &json!({"filed": 9}));
+        let (s, log) = call(&f.app, "GET", "/api/supervisor/log", None, T).await;
+        assert_eq!(s, StatusCode::OK, "{log}");
+        let items = log["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(log["open"], 1);
+        assert_eq!(items[0]["kind"], "judge");
+        assert_eq!(items[1]["detail"], "#9");
+        assert_eq!(items[1]["clipped"], true);
+        let _: agentbench_core::SupervisorLog = serde_json::from_value(log.clone()).unwrap();
+        let (_, open) = call(&f.app, "GET", "/api/supervisor/log?state=open&kind=judge", None, T).await;
+        assert_eq!(open["items"].as_array().unwrap().len(), 1);
+        let (_, found) = call(&f.app, "GET", "/api/supervisor/log?q=release&since=1d", None, T).await;
+        assert_eq!(found["items"].as_array().unwrap().len(), 1);
+        let (_, page) = call(&f.app, "GET", "/api/supervisor/log?limit=1", None, T).await;
+        let before = page["next_before"].as_i64().unwrap();
+        let (_, rest) = call(&f.app, "GET", &format!("/api/supervisor/log?limit=1&before={before}"), None, T).await;
+        assert_eq!(rest["items"][0]["action"], "file_issue");
+        assert!(rest["next_before"].is_null());
+        let (s, bad) = call(&f.app, "GET", "/api/supervisor/log?state=maybe", None, T).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}");
+        let id = items[1]["id"].as_i64().unwrap();
+        let (_, one) = call(&f.app, "GET", &format!("/api/supervisor/log/{id}"), None, T).await;
+        assert!(one["question"].as_str().unwrap().len() > 700, "the full question");
+        let (s, _) = call(&f.app, "GET", "/api/supervisor/log/99999", None, T).await;
+        assert_eq!(s, StatusCode::NOT_FOUND);
+        let req = axum::http::Request::builder()
+            .uri("/api/supervisor/log/export?since=1d")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        let res = f.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.headers()["content-type"], "text/markdown; charset=utf-8");
+        let md = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+        assert!(md.starts_with("# Supervisor questions log") && md.contains("filed #9. Ship it"), "{md}");
+        let (_, days) = call(&f.app, "GET", "/api/settings/supervisor-log", None, T).await;
+        assert_eq!(days["days"], 90);
+        let (_, days) = call(&f.app, "PUT", "/api/settings/supervisor-log", Some(json!({"days": 30})), T).await;
+        assert_eq!(days["days"], 30);
+    }
+
+    #[tokio::test]
     async fn the_recorded_api_fixtures_match_this_server() {
         let f = fixture();
         let pid = project(&f).await;
@@ -3364,7 +3453,7 @@ mod tests {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../core/tests/fixtures/api")
             .join(format!("v{}", agentbench_core::API_VERSION));
-        let mut keep = |name: &str, v: &serde_json::Value| {
+        let keep = |name: &str, v: &serde_json::Value| {
             if record {
                 std::fs::create_dir_all(&dir).unwrap();
                 std::fs::write(dir.join(format!("{name}.json")), serde_json::to_string_pretty(v).unwrap() + "\n")
@@ -3452,5 +3541,25 @@ mod tests {
         let _: agentbench_core::ChangesFeed = serde_json::from_value(changes).unwrap();
         let _: Vec<agentbench_core::Message> = serde_json::from_value(messages).unwrap();
         let _: agentbench_core::SendMessage = serde_json::from_value(send).unwrap();
+        let store = f.api.runner.store();
+        let sup = crate::projects::ensure_supervisor(store, &f._dir.path().join("sup")).unwrap();
+        let tree = store.main_worktree(sup.id).unwrap();
+        let boss = store.add_session(tree.id, "echo", "boss", None, None).unwrap();
+        crate::ledger::delivered(store, boss.id, "question", Some(id), "which database");
+        crate::ledger::closed_by(store, "answer_session", &json!({"id": id.to_string(), "answer": "sqlite"}), boss.id, &serde_json::Value::Null);
+        crate::ledger::delivered(store, boss.id, "judge", Some(id), "judge it");
+        crate::ledger::closed_by(store, "judge_session", &json!({"id": id.to_string(), "verdict": "concluded_pass", "reason": "tests pass"}), boss.id, &serde_json::Value::Null);
+        let (s, log) = call(&f.app, "GET", "/api/supervisor/log", None, T).await;
+        assert_eq!(s, StatusCode::OK, "{log}");
+        let mut log = log;
+        for i in log["items"].as_array_mut().unwrap() {
+            i["arrived_at"] = json!(1_764_158_400_000i64);
+            if !i["closed_at"].is_null() {
+                i["closed_at"] = json!(1_764_158_460_000i64);
+            }
+        }
+        keep("supervisor_log", &log);
+        let _: agentbench_core::SupervisorLog = serde_json::from_value(log).unwrap();
+        keep("supervisor_log_settings", &json!(agentbench_core::LogSettings { days: 90 }));
     }
 }

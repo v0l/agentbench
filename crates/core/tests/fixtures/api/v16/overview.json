@@ -1,0 +1,203 @@
+{
+  "agents": [
+    {
+      "about": "sh",
+      "available": true,
+      "label": "Echo",
+      "name": "echo",
+      "resumable": false
+    }
+  ],
+  "api_version": 16,
+  "autopilot": {
+    "activity": [],
+    "auto_close": true,
+    "auto_escalate": false,
+    "cap": 4,
+    "check_in_all": false,
+    "check_in_minutes": 30,
+    "default_level": "delegate",
+    "enabled": false,
+    "groom": true,
+    "groom_hours": 24,
+    "idle": false,
+    "intake_per_hour": 20,
+    "judge_unset_goals": true,
+    "max_nudges": 2,
+    "pressure": {
+      "configured_cap": 4,
+      "effective_cap": 4,
+      "enabled": false,
+      "lsp_resident": 0,
+      "lsp_servers": 0,
+      "readings": {
+        "cpu_some10": null,
+        "cpu_some60": null,
+        "disks": [],
+        "io_full10": null,
+        "io_full60": null,
+        "io_some10": null,
+        "io_some60": null,
+        "known": false,
+        "load_per_core": null,
+        "mem_available": null,
+        "memory_full10": null,
+        "memory_full60": null,
+        "memory_some10": null,
+        "memory_some60": null,
+        "swap_device": null,
+        "swap_in_rate": null,
+        "swap_out_rate": null,
+        "swap_used": null
+      },
+      "reason": "",
+      "since": 0,
+      "state": "ok"
+    },
+    "project_cap": 2,
+    "stuck_compactions": 2,
+    "stuck_failed_runs": 3,
+    "stuck_minutes": 15,
+    "stuck_no_commit_minutes": 45,
+    "untrusted_turns_per_day": 50,
+    "untrusted_turns_today": 0,
+    "workers": 0
+  },
+  "cursor": 9,
+  "host": {
+    "cores": 48,
+    "disk_free": 650959855616,
+    "disk_total": 3935812239360,
+    "load": 5.79,
+    "mem_total": 66741600256,
+    "mem_used": 53494312960
+  },
+  "issues": [
+    {
+      "blocks": [],
+      "body": "details",
+      "created_at": 1795629542785,
+      "depends_on": [],
+      "external_author": null,
+      "external_number": null,
+      "external_updated_at": null,
+      "external_url": null,
+      "goal": null,
+      "held": null,
+      "id": 1,
+      "labels": [
+        "bug"
+      ],
+      "model_level": "med",
+      "off_vision": false,
+      "priority": 3,
+      "project_id": 1,
+      "ready_by": null,
+      "source": "internal",
+      "state": "doing",
+      "title": "Fix it",
+      "trust": "trusted",
+      "updated_at": 1795629542785,
+      "waiting_on": []
+    }
+  ],
+  "min_client_api": 1,
+  "projects": [
+    {
+      "automation": null,
+      "automerge": "off",
+      "branch": "main",
+      "created_at": 1795629542783,
+      "deploy": null,
+      "home": false,
+      "id": 1,
+      "judge_unset_goals": null,
+      "merge_method": "merge",
+      "merge_mode": "pr",
+      "model_levels": {
+        "high": "",
+        "low": "",
+        "med": ""
+      },
+      "name": "demo",
+      "path": "/tmp/.tmpvRyfEO/demo",
+      "pinned": false,
+      "post_mode": "draft",
+      "remote": null,
+      "risky": [],
+      "supervisor": false,
+      "tags": [],
+      "tracker": {
+        "kind": "internal"
+      }
+    }
+  ],
+  "sessions": [
+    {
+      "agent": "echo",
+      "agent_session": null,
+      "created_at": 1795629542785,
+      "cwd": "/tmp/.tmpvRyfEO/demo",
+      "effort": null,
+      "id": "10f09e5b-adba-45d0-9d57-bdc22f8ab932",
+      "issue_id": null,
+      "model": null,
+      "parent": null,
+      "project_id": 1,
+      "status": "idle",
+      "title": "hello",
+      "updated_at": 1795629542787,
+      "usage": {
+        "bash_edits": 0,
+        "bash_sleeps": 0,
+        "cache_read_tokens": 0,
+        "context": 0,
+        "cost_usd": 0.0,
+        "effort": "",
+        "file_edits": 0,
+        "host": "",
+        "input_tokens": 0,
+        "lsp": [],
+        "max_tokens": 0,
+        "model": "",
+        "output_tokens": 0,
+        "turns": 0,
+        "window": 0
+      },
+      "worktree_id": 1
+    }
+  ],
+  "supervisor": null,
+  "triage": {
+    "budget_tokens": 24000,
+    "every_hours": 0,
+    "last_run": null,
+    "last_status": "",
+    "notes": [],
+    "proposals": [],
+    "running": false
+  },
+  "usage": {
+    "quotas": [],
+    "spend": {
+      "projects": [],
+      "today_usd": -0.0,
+      "total_usd": -0.0
+    }
+  },
+  "version": "0.10.0",
+  "visions": [],
+  "worktrees": [
+    {
+      "branch": "main",
+      "created_at": 1795629542785,
+      "head": "bec80175c1f2ae76dc60315617b0a6da31acd25b",
+      "id": 1,
+      "main": true,
+      "missing": false,
+      "owned": false,
+      "path": "/tmp/.tmpvRyfEO/demo",
+      "project_id": 1
+    }
+  ]
+}

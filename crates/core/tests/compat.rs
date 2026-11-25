@@ -124,11 +124,13 @@ fn reserialised(name: &str, json: &Value) -> Result<Value, String> {
         "github_settings" => via::<GithubSettings>(name, json),
         "restart_settings" => via::<RestartSettings>(name, json),
         "restarted" => via::<Restarted>(name, json),
+        "supervisor_log" => via::<SupervisorLog>(name, json),
+        "supervisor_log_settings" => via::<LogSettings>(name, json),
         other => Err(format!("{other} is not a response type")),
     }
 }
 
-const RESPONSES: [&str; 10] = ["overview", "sessions", "issues", "messages", "changes", "pulls", "outbox", "github_settings", "restart_settings", "restarted"];
+const RESPONSES: [&str; 12] = ["overview", "sessions", "issues", "messages", "changes", "pulls", "outbox", "github_settings", "restart_settings", "restarted", "supervisor_log", "supervisor_log_settings"];
 
 fn fixture_dir(version: u32) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/api/v{version}"))
@@ -240,6 +242,8 @@ fn check(name: &str, json: &Value) -> Result<(), String> {
         "github_settings" => response_still_holds::<GithubSettings>(name, json),
         "restart_settings" => response_still_holds::<RestartSettings>(name, json),
         "restarted" => response_still_holds::<Restarted>(name, json),
+        "supervisor_log" => response_still_holds::<SupervisorLog>(name, json),
+        "supervisor_log_settings" => response_still_holds::<LogSettings>(name, json),
         "request_restart" => decodes::<RestartRequest>(name, json).map(|_| ()),
         "request_new_project" => decodes::<NewProject>(name, json).map(|_| ()),
         "request_new_issue" => decodes::<NewIssue>(name, json).map(|_| ()),

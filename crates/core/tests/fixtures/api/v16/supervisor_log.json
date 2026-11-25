@@ -1,0 +1,50 @@
+{
+  "items": [
+    {
+      "action": "judge_session",
+      "arrived_at": 1764158400000,
+      "asker": "10f09e5b-adba-45d0-9d57-bdc22f8ab932",
+      "asker_title": "hello",
+      "clipped": false,
+      "closed_at": 1764158460000,
+      "detail": "concluded_pass",
+      "id": 2,
+      "issue_id": null,
+      "issue_state": null,
+      "kind": "judge",
+      "merge": "",
+      "needs_answer": true,
+      "outcome": "tests pass",
+      "project": "demo",
+      "project_id": 1,
+      "question": "judge it",
+      "reply": "",
+      "session": "10f09e5b-adba-45d0-9d57-bdc22f8ab932",
+      "supervisor": "d4d15206-dcdb-46a4-b045-a4e76361a8e9"
+    },
+    {
+      "action": "answer_session",
+      "arrived_at": 1764158400000,
+      "asker": "10f09e5b-adba-45d0-9d57-bdc22f8ab932",
+      "asker_title": "hello",
+      "clipped": false,
+      "closed_at": 1764158460000,
+      "detail": "",
+      "id": 1,
+      "issue_id": null,
+      "issue_state": null,
+      "kind": "question",
+      "merge": "",
+      "needs_answer": true,
+      "outcome": "sqlite",
+      "project": "demo",
+      "project_id": 1,
+      "question": "which database",
+      "reply": "",
+      "session": "10f09e5b-adba-45d0-9d57-bdc22f8ab932",
+      "supervisor": "d4d15206-dcdb-46a4-b045-a4e76361a8e9"
+    }
+  ],
+  "next_before": null,
+  "open": 0
+}

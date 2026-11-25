@@ -32,6 +32,7 @@ pub mod restart;
 pub mod runner;
 pub mod speech;
 pub mod store;
+pub mod supervisor_log;
 pub mod terminal;
 pub mod titles;
 pub mod tools;
