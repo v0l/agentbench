@@ -110,6 +110,108 @@ pub enum IssueAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum SupervisorAction {
+    #[command(about = "List what reached the supervisor and what came of it, newest first; with an id, the full pair.")]
+    Log {
+        id: Option<i64>,
+        #[arg(long, help = "Only items still waiting for an answer.")]
+        open: bool,
+        #[arg(long, help = "Only these kinds: user, question, judge, check_in, watch, process, groom, judge_issues.")]
+        kind: Option<String>,
+        #[arg(long, help = "Only this project, by name or id.")]
+        project: Option<String>,
+        #[arg(long, help = "Only items since a span (30m, 2h, 1d, 1w) or a time in ms.")]
+        since: Option<String>,
+        #[arg(short = 'q', long = "query", help = "Only items whose text has these words.")]
+        q: Option<String>,
+        #[arg(long, default_value_t = 50, help = "How many items.")]
+        limit: usize,
+        #[arg(long, help = "Print the range as markdown.")]
+        markdown: bool,
+    },
+}
+
+fn log_params(open: bool, kind: Option<String>, project: Option<String>, since: Option<String>, q: Option<String>, limit: usize) -> crate::supervisor_log::LogParams {
+    crate::supervisor_log::LogParams {
+        kind: kind.map(|k| if k == "worker" { "question".into() } else { k }),
+        project,
+        state: open.then(|| "open".to_string()),
+        since,
+        q,
+        limit: Some(limit),
+        ..Default::default()
+    }
+}
+
+pub fn supervisor_local(store: &Store, action: SupervisorAction, now: i64) -> Result<String, String> {
+    let SupervisorAction::Log { id, open, kind, project, since, q, limit, markdown } = action;
+    if let Some(id) = id {
+        let item = store.log_item(id).map_err(|e| e.0)?.ok_or_else(|| format!("no log item {id}"))?;
+        return Ok(crate::supervisor_log::full(&item, now));
+    }
+    let query = log_params(open, kind, project, since, q, limit).query(now)?;
+    if markdown {
+        return crate::supervisor_log::markdown(store, &query, now).map_err(|e| e.0);
+    }
+    let log = crate::supervisor_log::list(store, &query).map_err(|e| e.0)?;
+    Ok(log_text(&log, now))
+}
+
+fn log_text(log: &agentbench_core::SupervisorLog, now: i64) -> String {
+    if log.items.is_empty() {
+        return format!("nothing in the log matches ({} open in all)", log.open);
+    }
+    let mut lines: Vec<String> = log.items.iter().map(|i| crate::supervisor_log::line(i, now)).collect();
+    lines.push(format!("{} shown, {} open in all", log.items.len(), log.open));
+    if let Some(b) = log.next_before {
+        lines.push(format!("more before id {b}"));
+    }
+    lines.join("\n")
+}
+
+pub async fn supervisor_remote(server: &crate::tui::Server, action: SupervisorAction, now: i64) -> Result<String, String> {
+    let SupervisorAction::Log { id, open, kind, project, since, q, limit, markdown } = action;
+    if let Some(id) = id {
+        let v = remote_call(server, reqwest::Method::GET, &format!("/api/supervisor/log/{id}"), None).await?;
+        let item: agentbench_core::LogItem = serde_json::from_value(v).map_err(|e| e.to_string())?;
+        return Ok(crate::supervisor_log::full(&item, now));
+    }
+    let p = log_params(open, kind, project, since, q, limit).query(now)?;
+    let query = p.to_query();
+    if markdown {
+        let r = crate::http::client()
+            .get(format!("{}/api/supervisor/log/export?{query}", server.base()))
+            .bearer_auth(&server.token)
+            .send()
+            .await
+            .map_err(|e| format!("{}: {e}", server.base()))?;
+        if !r.status().is_success() {
+            return Err(format!("{}: {}", server.base(), r.status()));
+        }
+        return r.text().await.map_err(|e| e.to_string());
+    }
+    let v = remote_call(server, reqwest::Method::GET, &format!("/api/supervisor/log?{query}"), None).await?;
+    let log: agentbench_core::SupervisorLog = serde_json::from_value(v).map_err(|e| e.to_string())?;
+    Ok(log_text(&log, now))
+}
+
+pub async fn supervisor_command(
+    home: &std::path::Path,
+    url: Option<String>,
+    token: Option<String>,
+    action: SupervisorAction,
+) -> Result<String, String> {
+    let now = crate::store::now();
+    match resolve_target(home, url, token)? {
+        Target::Remote(server) => supervisor_remote(&server, action, now).await,
+        Target::Local(home) => {
+            let store = Store::open_with_memory(&home.join("agentbench.db"), crate::memory::default_root()).map_err(|e| e.0)?;
+            supervisor_local(&store, action, now)
+        }
+    }
+}
+
 fn level_flag(text: &str) -> Result<Option<agentbench_core::ModelLevel>, String> {
     if text.trim().eq_ignore_ascii_case("default") || text.trim().is_empty() {
         return Ok(None);
@@ -132,6 +234,11 @@ pub enum Command {
         rotate: bool,
     },
     Agents,
+    #[command(about = "The supervisor's questions log.")]
+    Supervisor {
+        #[command(subcommand)]
+        action: SupervisorAction,
+    },
     /// Restart the server once no turn is running, or once the drain limit passes.
     Restart {
         /// Seconds to wait for running turns; default the `restart_drain_secs` setting (120).
@@ -639,6 +746,12 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
         return Ok(());
     }
+    if let Some(Command::Supervisor { .. }) = &cli.command {
+        let Some(Command::Supervisor { action }) = cli.command else { unreachable!() };
+        let out = supervisor_command(&home, std::env::var("AGENTBENCH_URL").ok(), std::env::var("AGENTBENCH_TOKEN").ok(), action).await?;
+        println!("{out}");
+        return Ok(());
+    }
     if let Some(Command::Autopilot) = &cli.command
         && let Some(out) = autopilot_command(&home, std::env::var("AGENTBENCH_URL").ok(), std::env::var("AGENTBENCH_TOKEN").ok()).await?
     {
@@ -743,6 +856,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             }
         }
         Command::Github { .. } => unreachable!("handled before the store opens"),
+        Command::Supervisor { .. } => unreachable!("handled before the store opens"),
         Command::Chat { .. } => unreachable!("handled before the store opens"),
         Command::Restart { .. } => unreachable!("handled before the store opens"),
         Command::Autopilot => {
@@ -892,6 +1006,78 @@ mod tests {
         let out = github_command(home.path(), Some(url), Some("t".into()), GithubAction::Reject { id: 2 }).await.unwrap();
         assert_eq!(out, json!({"rejected": 2}));
         assert_eq!(*hits.lock().unwrap(), vec![2]);
+    }
+
+    fn sup(args: &[&str]) -> SupervisorAction {
+        let mut all = vec!["agentbench", "supervisor", "log"];
+        all.extend_from_slice(args);
+        match Cli::try_parse_from(all).unwrap().command {
+            Some(Command::Supervisor { action }) => action,
+            _ => panic!("not a supervisor command"),
+        }
+    }
+
+    fn logged() -> (Store, i64) {
+        let store = Store::memory().unwrap();
+        let a = store
+            .add_log(&crate::store::NewLogItem { kind: "user", asker: "user", question: "is the release out", needs_answer: true, ..Default::default() })
+            .unwrap();
+        store.close_log(a, &crate::store::Closing::new("replied").outcome("Yes, at noon.")).unwrap();
+        store
+            .add_log(&crate::store::NewLogItem { kind: "judge", asker: "autopilot", question: "judge the login worker", needs_answer: true, ..Default::default() })
+            .unwrap();
+        (store, a)
+    }
+
+    #[test]
+    fn supervisor_log_prints_one_line_per_item_and_filters() {
+        let (store, first) = logged();
+        let now = crate::store::now();
+        let all = supervisor_local(&store, sup(&[]), now).unwrap();
+        let lines: Vec<&str> = all.lines().collect();
+        assert_eq!(lines.len(), 3, "{all}");
+        assert!(lines[0].contains("judge request") && lines[0].contains("judge the login worker") && lines[0].contains("OPEN for"), "{all}");
+        assert!(lines[1].contains("user message") && lines[1].contains("you: is the release out") && lines[1].contains("replied. Yes, at noon."), "{all}");
+        assert_eq!(lines[2], "2 shown, 1 open in all");
+        let open = supervisor_local(&store, sup(&["--open"]), now).unwrap();
+        assert!(open.contains("judge the login") && !open.contains("release"), "{open}");
+        let kind = supervisor_local(&store, sup(&["--kind", "user", "--since", "1d"]), now).unwrap();
+        assert!(kind.contains("release") && !kind.contains("judge the login"), "{kind}");
+        let found = supervisor_local(&store, sup(&["-q", "login"]), now).unwrap();
+        assert!(found.starts_with(&format!("{:>5}", first + 1)), "{found}");
+        let none = supervisor_local(&store, sup(&["--project", "nowhere"]), now).unwrap();
+        assert_eq!(none, "nothing in the log matches (1 open in all)");
+        let one = supervisor_local(&store, sup(&[&first.to_string()]), now).unwrap();
+        assert!(one.contains("question:\nis the release out") && one.contains("outcome:\nYes, at noon."), "{one}");
+        assert!(supervisor_local(&store, sup(&["999"]), now).is_err());
+        let md = supervisor_local(&store, sup(&["--markdown"]), now).unwrap();
+        assert!(md.starts_with("# Supervisor questions log"), "{md}");
+        assert!(supervisor_local(&store, sup(&["--since", "soon"]), now).is_err());
+    }
+
+    #[tokio::test]
+    async fn supervisor_log_asks_the_server_named_by_the_url() {
+        use axum::{Router, extract::RawQuery, routing::get};
+        let (store, _) = logged();
+        let log = store.log_items(&Default::default()).unwrap();
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        let app = Router::new().route(
+            "/api/supervisor/log",
+            get(move |RawQuery(q): RawQuery| async move {
+                seen.lock().unwrap().push(q.unwrap_or_default());
+                axum::Json(log)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let home = tempfile::tempdir().unwrap();
+        let out = supervisor_command(home.path(), Some(url), Some("t".into()), sup(&["--open", "--kind", "worker", "-q", "login bug"]))
+            .await
+            .unwrap();
+        assert!(out.contains("judge the login worker"), "{out}");
+        assert_eq!(*asked.lock().unwrap(), vec!["kind=question&state=open&q=login%20bug&limit=50".to_string()]);
     }
 
     #[tokio::test]
