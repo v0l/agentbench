@@ -90,6 +90,13 @@ impl Voice {
         self.shown = Some((seconds, level));
     }
 
+    /// Put the key in a listening state with no microphone behind it, for a test driving the talk
+    /// key with a recorded take.
+    #[doc(hidden)]
+    pub fn stage_take(&mut self) {
+        self.show_recording(0.0, 0.0);
+    }
+
     pub fn staged(&self) -> bool {
         self.shown.is_some()
     }
@@ -262,6 +269,7 @@ impl Voice {
         }
         self.state = State::Reading;
         self.status = "reading".into();
+        self.shown = None;
         self.read(pcm, settings, None, wake);
         Ok(())
     }

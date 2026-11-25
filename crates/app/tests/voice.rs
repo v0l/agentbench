@@ -142,6 +142,55 @@ fn a_spoken_take_reaches_the_supervisor_and_its_reply_is_spoken_back() {
     assert!(spoken.len() >= 2, "the reply was spoken a sentence at a time: {spoken:?}");
 }
 
+/// The talk key: hold to talk ends the take when the key comes up, a tap toggles it, and either way
+/// what was heard is sent as a spoken turn.
+#[test]
+fn the_talk_key_holds_to_talk_and_toggles_with_the_microphone() {
+    let Some(models) = models_dir() else {
+        eprintln!("skipped: no speech models on this machine");
+        return;
+    };
+    let rig = rig_with_models(vec![two_sentence_agent("glib")], models);
+    for (hold, tag) in [(true, "hold"), (false, "toggle")] {
+        let mut h = harness_cfg(
+            vec![
+                ("url".into(), rig.url.clone()),
+                ("voice_converse".into(), "1".into()),
+                ("voice_mode".into(), "agentbench".into()),
+                ("voice_model".into(), "whisper-base.en".into()),
+                ("voice_hold".into(), if hold { "1" } else { "0" }.into()),
+            ],
+            Cfg { size: [1280.0, 800.0], ..Cfg::default() },
+        );
+        h.state_mut().voice_test_silent();
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_supervisor();
+        until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
+        let sid = h.state().supervisor_chat().unwrap();
+        h.run_steps(4);
+
+        use agentbench::voice::Talk;
+        let ctx = h.ctx.clone();
+        let press = h.state_mut().voice_test_talk_key(ASK, &ctx, true);
+        assert_eq!(press, Some(Talk::Start), "{tag}: a press opens the take");
+        let release = h.state_mut().voice_test_talk_key(ASK, &ctx, false);
+        if hold {
+            assert_eq!(release, Some(Talk::Finish), "{tag}: the release ends the take");
+        } else {
+            assert_eq!(release, Some(Talk::Nothing), "{tag}: a tap does not end the take");
+            let press = h.state_mut().voice_test_talk_key(ASK, &ctx, true);
+            assert_eq!(press, Some(Talk::Finish), "{tag}: the next press ends it");
+        }
+        until(&mut h, "the words", |h| {
+            h.state().transcript_talk(sid).iter().any(|l| l.starts_with("user: "))
+        });
+        let said = h.state().transcript_talk(sid);
+        eprintln!("{tag} transcript:\n{}", said.join("\n"));
+        let ask = said.iter().find(|l| l.starts_with("user: ")).unwrap();
+        assert!(ask.to_lowercase().contains("running"), "{tag}: {ask}");
+    }
+}
+
 /// Speaking over the reply stops the audio and drops what of it had not been said yet.
 #[test]
 fn speaking_over_the_reply_drops_the_rest_of_it() {

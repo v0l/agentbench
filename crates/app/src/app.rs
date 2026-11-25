@@ -793,6 +793,11 @@ pub struct App {
     reading: Option<Id>,
     converse: crate::voice::Converse,
     talk_key: crate::voice::TalkKey,
+    /// A recorded take a test feeds where the microphone would be, so both talk key modes can be
+    /// driven without a microphone.
+    test_take: Option<Vec<u8>>,
+    /// What the talk key last decided, for a test.
+    last_talk: Option<crate::voice::Talk>,
     conversing: Option<SessionId>,
     talk_turn: bool,
     /// Models on the server the native agent is saved to use. None until asked.
@@ -1013,6 +1018,8 @@ impl App {
             reading: None,
             converse: Default::default(),
             talk_key: Default::default(),
+            test_take: None,
+            last_talk: None,
             conversing: None,
             talk_turn: false,
             speech: crate::voice::Settings::load(storage),
@@ -1699,6 +1706,21 @@ impl App {
         self.voice_test_take(wav, ctx)
     }
 
+    /// Drive the talk key with a recorded take where the microphone would be, so both modes can
+    /// be walked in a test without a microphone or a speaker.
+    #[doc(hidden)]
+    pub fn voice_test_talk_key(
+        &mut self,
+        wav: &[u8],
+        ctx: &egui::Context,
+        down: bool,
+    ) -> Option<crate::voice::Talk> {
+        self.test_take = Some(wav.to_vec());
+        self.talk(ctx, down);
+        self.test_take = None;
+        self.last_talk.take()
+    }
+
     /// Send what was said as a spoken turn to the supervisor, as a finished take does.
     #[doc(hidden)]
     pub fn voice_test_send(&mut self, said: &str) {
@@ -1716,6 +1738,7 @@ impl App {
             self.talk_key.release(self.speech.hold_to_talk, listening)
         };
         use crate::voice::Talk;
+        self.last_talk = Some(key);
         match key {
             Talk::Nothing => return,
             Talk::Finish => {
@@ -1724,7 +1747,14 @@ impl App {
                     let ctx = ctx.clone();
                     move || ctx.request_repaint()
                 };
-                self.voice.finish(&self.speech_now(), wake);
+                if let Some(wav) = self.test_take.clone() {
+                    self.voice.cancel();
+                    if let Err(e) = self.voice.read_take(&wav, &self.speech_now(), wake) {
+                        self.notice = Some((false, e));
+                    }
+                } else {
+                    self.voice.finish(&self.speech_now(), wake);
+                }
                 return;
             }
             Talk::Start => {}
@@ -1742,6 +1772,9 @@ impl App {
         }
         if let Some(p) = self.speech.problem() {
             self.notice = Some((false, p.into()));
+        } else if self.test_take.is_some() {
+            self.talk_turn = true;
+            self.voice.stage_take();
         } else if let Err(e) = self.voice.start_on(wake, &self.speech.input_device.clone()) {
             self.notice = Some((false, e));
         } else {

@@ -25,6 +25,8 @@ impl Voice {
     }
     #[doc(hidden)]
     pub fn show_recording(&mut self, _: f32, _: f32) {}
+    #[doc(hidden)]
+    pub fn stage_take(&mut self) {}
     pub fn staged(&self) -> bool {
         false
     }
