@@ -46,8 +46,9 @@ fn open_log(rig: &Rig, size: [f32; 2]) -> Harness<'static, App> {
         h.run_steps(5);
     }
     until(&mut h, "the open count", |h| h.query_by_label("questions log, 1 open").is_some());
-    h.get_by_label("questions log").click();
+    h.get_by_label("questions log, 1 open").click();
     until(&mut h, "the items", |h| h.state().questions_log().is_some_and(|l| l.items.len() == 3));
+    assert!(h.query_by_label("questions log panel, 1 open").is_some());
     h.run_steps(5);
     h
 }
@@ -114,6 +115,16 @@ fn tapping_an_item_jumps_to_its_place_in_the_transcript() {
     assert_eq!(target / agentbench_core::SHOWN_PER_ROW, s.early, "the user message the item came from");
     assert!(h.query_by_label_contains("I judged it this morning").is_some(), "the reply under the question is on screen");
     assert!(h.query_by_label_contains("filler reply 39").is_none(), "scrolled away from the bottom");
+}
+
+#[test]
+fn the_log_is_a_key_until_opened_and_hides_again() {
+    let s = seeded();
+    let mut h = open_log(&s.rig, [1280.0, 800.0]);
+    h.get_by_label("hide questions log").click();
+    h.run_steps(5);
+    assert!(h.query_by_label("log search").is_none());
+    assert!(h.query_by_label("questions log, 1 open").is_some(), "the count stays on the key");
 }
 
 #[test]

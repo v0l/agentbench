@@ -440,6 +440,12 @@ impl App {
         let open_id = egui::Id::new("autopilot_open");
         let open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
         let mut toggle_open = false;
+        let log_count = self
+            .client
+            .as_ref()
+            .is_some_and(|c| c.supervisor_log_supported())
+            .then(|| self.questions_open());
+        let mut toggle_log = false;
         ui.add_space(4.0);
         section_panel(ui, |ui| {
             let narrow = self.narrow;
@@ -466,6 +472,17 @@ impl App {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "automation levels")
                 });
                 toggle_levels = more.clicked();
+                if let Some(open_count) = log_count {
+                    let text = match open_count {
+                        0 => "log".to_string(),
+                        n => format!("log {n} open"),
+                    };
+                    let log = ui.add(Key::new(&text).outline(if open_count > 0 { READOUT } else { VALUE }));
+                    log.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Button, true, format!("questions log, {}", if open_count == 0 { "nothing open".to_string() } else { format!("{open_count} open") }))
+                    });
+                    toggle_log = log.clicked();
+                }
             };
             ui.horizontal(|ui| {
                 let arrow = ui.add(Key::new(if open { "v" } else { ">" }).outline(VALUE));
@@ -530,6 +547,9 @@ impl App {
         }
         if toggle_levels {
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("levels_open"), !levels_open));
+        }
+        if toggle_log {
+            self.toggle_questions();
         }
         if let Some(on) = new_close {
             self.set_auto_close(on);

@@ -107,6 +107,9 @@ impl App {
             return;
         }
         self.questions_fetch();
+        if !self.questions.open {
+            return;
+        }
         let open_count = self.questions_open();
         let mut toggle = false;
         let mut refetch = false;
@@ -122,8 +125,8 @@ impl App {
         ui.add_space(4.0);
         section_panel(ui, |ui| {
             ui.horizontal(|ui| {
-                let arrow = ui.add(Key::new(if self.questions.open { "v" } else { ">" }).outline(VALUE));
-                arrow.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "questions log"));
+                let arrow = ui.add(Key::new("hide").outline(VALUE));
+                arrow.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "hide questions log"));
                 toggle = arrow.clicked();
                 let count = match open_count {
                     0 => "nothing open".to_string(),
@@ -138,11 +141,8 @@ impl App {
                     .size(11.0)
                     .tint(if open_count > 0 { READOUT } else { VALUE })
                     .elided(ui);
-                badge.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("questions log, {count}")));
+                badge.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, format!("questions log panel, {count}")));
             });
-            if !self.questions.open {
-                return;
-            }
             let q = &mut self.questions;
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
@@ -251,8 +251,7 @@ impl App {
         });
         ui.add_space(4.0);
         if toggle {
-            self.questions.open = !self.questions.open;
-            refetch = true;
+            self.toggle_questions();
         }
         if refetch {
             self.questions.stale();
@@ -262,6 +261,13 @@ impl App {
         if let Some(at) = jump_to {
             self.seek_transcript(session, at);
         }
+    }
+
+    pub(super) fn toggle_questions(&mut self) {
+        self.questions.open = !self.questions.open;
+        self.questions.stale();
+        self.questions.seen_cursor = None;
+        self.questions_fetch();
     }
 
     pub(super) fn seek_transcript(&mut self, session: SessionId, at: i64) {
