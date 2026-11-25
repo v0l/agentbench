@@ -355,6 +355,20 @@ impl App {
                         tokens(s.usage.output_tokens)
                     );
                     chip(ui, &project, if supervisor { TRACE } else { READOUT }, true).on_hover_text(&about);
+                    if supervisor && self.voice.open() {
+                        let (word, tint) = if self.voice.in_speech() {
+                            ("hearing you", OK)
+                        } else {
+                            ("listening", OK)
+                        };
+                        let c = chip(ui, word, tint, true).on_hover_text(
+                            "hands free: the microphone is open while this chat is. Speak to talk over the reply; press the talk key to stop.",
+                        );
+                        c.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "hands free listening")
+                        });
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    }
                     if let Some(left) = self.voice.closing_in(&self.speech_now()) {
                         chip(ui, &format!("closing in {:.0}...", left.ceil()), FAULT, true)
                             .on_hover_text("quiet for a while: keep talking to keep the take open");

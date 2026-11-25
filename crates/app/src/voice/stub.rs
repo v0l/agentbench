@@ -26,6 +26,22 @@ impl Voice {
     pub fn take_quiet_stop(&mut self) -> Option<f32> {
         None
     }
+    pub fn take_speech_start(&mut self) -> bool {
+        false
+    }
+    pub fn open(&self) -> bool {
+        false
+    }
+    pub fn in_speech(&self) -> bool {
+        false
+    }
+    pub fn start_open(&mut self, _: impl Fn() + Send + Sync + 'static, _: &str) -> Result<(), String> {
+        Err("voice input is not available on this platform".into())
+    }
+    #[doc(hidden)]
+    pub fn open_fake(&mut self) -> super::Mic {
+        Default::default()
+    }
     pub fn level(&self) -> f32 {
         0.0
     }

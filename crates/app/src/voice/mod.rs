@@ -19,6 +19,11 @@ pub use settings::{AUTO_SEND_SECS, LOCAL_MODELS, Mode, Settings};
 mod converse;
 pub use converse::{Converse, Talk, TalkKey};
 
+pub mod output;
+pub use output::{Sink, Verdict};
+
+pub mod echo;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
@@ -67,6 +72,10 @@ pub const PARTIAL_SECONDS: usize = 2;
 /// A take that never hears speech stops after this long, so a hotkey pressed by mistake does not
 /// leave the microphone open.
 pub const GIVE_UP_SECONDS: f32 = 10.0;
+
+pub const LEAD_SECONDS: usize = 1;
+
+pub type Mic = std::sync::Arc<std::sync::Mutex<Vec<f32>>>;
 
 /// What the take sounds like right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +139,7 @@ impl Band {
 /// click does not manage.
 pub struct Endpoint {
     hang: f32,
+    give_up: f32,
     rate: u32,
     scanned: usize,
     recent: std::collections::VecDeque<f32>,
@@ -150,6 +160,7 @@ impl Endpoint {
         let rate = rate.max(1);
         Endpoint {
             hang,
+            give_up: GIVE_UP_SECONDS,
             rate,
             scanned: 0,
             recent: Default::default(),
@@ -160,6 +171,10 @@ impl Endpoint {
             level: 0.0,
             listened: 0.0,
         }
+    }
+
+    pub fn open(rate: u32) -> Self {
+        Endpoint { give_up: f32::INFINITY, ..Self::new(rate) }
     }
 
     /// How long it has been quiet since the last speech.
@@ -178,6 +193,14 @@ impl Endpoint {
     /// Whether speech has been heard yet.
     pub fn spoke(&self) -> bool {
         self.spoke
+    }
+
+    pub fn scanned(&self) -> usize {
+        self.scanned
+    }
+
+    pub fn forget(&mut self, samples: usize) {
+        self.scanned = self.scanned.saturating_sub(samples);
     }
 
     /// `pcm` is the whole take so far; only what is new since the last call is looked at.
@@ -212,7 +235,7 @@ impl Endpoint {
             if self.spoke && self.quiet >= self.hang {
                 return Heard::Done;
             }
-            if !self.spoke && self.listened >= GIVE_UP_SECONDS {
+            if !self.spoke && self.listened >= self.give_up {
                 return Heard::GaveUp;
             }
         }
@@ -506,6 +529,21 @@ mod tests {
         let long = first_done(&take, 8.0).unwrap();
         assert!(short < spoken + 2.6, "{short}");
         assert!(long > spoken + 7.0, "{long}");
+    }
+
+    #[test]
+    fn an_open_microphone_waits_for_speech_as_long_as_it_takes() {
+        let mut take = tone(30.0, 0.001);
+        let mut e = Endpoint::open(RATE);
+        assert_eq!(e.feed(&take), Heard::Waiting);
+        let drop = take.len() - RATE as usize;
+        take.drain(..drop);
+        e.forget(drop);
+        assert_eq!(e.scanned(), RATE as usize);
+        take.extend(tone(1.0, 0.3));
+        assert_eq!(e.feed(&take), Heard::Speaking);
+        take.extend(tone(3.2, 0.001));
+        assert_eq!(e.feed(&take), Heard::Done);
     }
 
     #[test]

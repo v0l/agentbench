@@ -883,6 +883,7 @@ impl App {
     }
 
     pub(super) fn confirm_modal(&mut self, ctx: &egui::Context) {
+        self.headphones_modal(ctx);
         let Some(c) = &self.confirm else {
             return;
         };
@@ -955,11 +956,42 @@ impl App {
         }
     }
 
+    fn headphones_modal(&mut self, ctx: &egui::Context) {
+        if !self.asking_headphones() {
+            return;
+        }
+        let mut answer = None;
+        let m = egui::Modal::new(egui::Id::unique("headphones"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(modal_width(ctx, 400.0));
+                modal_title(ui, "Are you on headphones?");
+                note(
+                    ui,
+                    "Hands free keeps the microphone open while replies are read aloud. Through speakers the reply would feed back into the microphone. This machine cannot tell what the sound plays through, so it asks once and remembers.",
+                    LEGEND,
+                );
+                footer(ui, |ui| {
+                    if ui.add(Key::new("headphones").solid(OK).min_width(100.0)).clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.add(Key::new("speakers").outline(VALUE).min_width(100.0)).clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        if let Some(a) = answer {
+            self.answer_headphones(a);
+        } else if m.should_close() {
+            self.dismiss_headphones();
+        }
+    }
+
     /// Escape stops the agent working in the open chat. Dialogs, pickers and menus take the
     /// key first to close themselves, so this only sees an Escape nothing else wanted.
     pub(super) fn escape_stops_agent(&mut self, ctx: &egui::Context) {
         // Escape while the microphone is open throws the take away, and only that.
-        if egui::Popup::is_any_open(ctx) || self.voice.listening() {
+        if egui::Popup::is_any_open(ctx) || (self.voice.listening() && !self.voice.open()) {
             return;
         }
         let Some(s) = self.current_session().filter(|s| s.status.busy()).map(|s| s.id) else {
