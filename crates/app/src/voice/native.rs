@@ -63,6 +63,7 @@ pub struct Voice {
     /// Which take is current, so a late partial from an earlier one is dropped.
     take_id: u64,
     shown: Option<(f32, f32)>,
+    quiet_stop: Option<f32>,
 }
 
 impl Default for Voice {
@@ -76,6 +77,7 @@ impl Default for Voice {
             status: String::new(),
             take_id: 0,
             shown: None,
+            quiet_stop: None,
         }
     }
 }
@@ -108,6 +110,22 @@ impl Voice {
     }
 
     /// Seconds since the microphone opened.
+    pub fn closing_in(&self, settings: &Settings) -> Option<f32> {
+        if settings.hold_to_talk {
+            return None;
+        }
+        let State::Listening(t) = &self.state else {
+            return None;
+        };
+        let quiet = t.endpoint.quiet_seconds();
+        (t.endpoint.spoke() && quiet > super::COUNTDOWN_AFTER)
+            .then(|| (settings.hang_secs - quiet).max(0.0))
+    }
+
+    pub fn take_quiet_stop(&mut self) -> Option<f32> {
+        self.quiet_stop.take()
+    }
+
     pub fn seconds(&self) -> f32 {
         if let Some((s, _)) = self.shown {
             return s;
@@ -176,11 +194,15 @@ impl Voice {
         };
         let (heard, samples) = {
             let heard = take.heard.lock().unwrap_or_else(|e| e.into_inner());
+            take.endpoint.set_hang(settings.hang_secs);
             (take.endpoint.feed(&heard), heard.len())
         };
         match heard {
             Heard::Done | Heard::GaveUp if settings.hold_to_talk => {}
-            Heard::Done => self.finish(settings, wake),
+            Heard::Done => {
+                self.quiet_stop = Some(take.endpoint.hang());
+                self.finish(settings, wake)
+            }
             Heard::GaveUp => {
                 self.state = State::Idle;
                 let _ = self.tx.send(Event::Failed("no speech was heard".into()));
@@ -672,6 +694,61 @@ mod tests {
         let settings = Settings { mode: Mode::Server, url, ..Default::default() };
         let e = read_on_server(&settings, &vec![0.1f32; 16_000]).unwrap_err();
         assert!(e.contains("404") && e.contains("no such model"), "{e}");
+    }
+
+    fn take_with(pcm: Vec<f32>) -> Voice {
+        Voice {
+            state: State::Listening(Box::new(Take {
+                _stream: Box::new(()),
+                heard: Arc::new(Mutex::new(pcm)),
+                peak: Arc::new(AtomicU32::new(0)),
+                rate: RATE,
+                device: "test".into(),
+                since: Instant::now(),
+                endpoint: Endpoint::new(RATE),
+                partial_at: 0,
+                partial_busy: Arc::new(AtomicBool::new(false)),
+            })),
+            ..Voice::default()
+        }
+    }
+
+    fn speech_then_quiet(quiet: f32) -> Vec<f32> {
+        let mut pcm = vec![0.001f32; RATE as usize];
+        pcm.extend((0..RATE as usize * 2).map(|i| 0.3 * (i as f32 * 0.1).sin()));
+        pcm.extend(vec![0.001f32; (RATE as f32 * quiet) as usize]);
+        pcm
+    }
+
+    #[test]
+    fn a_held_take_stays_open_through_twenty_seconds_of_silence() {
+        let mut v = take_with(speech_then_quiet(20.0));
+        let held = Settings { mode: Mode::Server, hold_to_talk: true, ..Default::default() };
+        v.tick(&held, || {});
+        assert!(v.listening());
+        assert!(v.take_quiet_stop().is_none());
+        assert!(v.closing_in(&held).is_none());
+    }
+
+    #[test]
+    fn a_toggle_take_ends_on_quiet_and_says_so() {
+        let mut v = take_with(speech_then_quiet(4.0));
+        let toggle = Settings { mode: Mode::Server, hold_to_talk: false, hang_secs: 3.0, ..Default::default() };
+        v.tick(&toggle, || {});
+        assert!(!v.listening());
+        assert_eq!(v.take_quiet_stop(), Some(3.0));
+    }
+
+    #[test]
+    fn the_countdown_shows_once_quiet_passes_a_second_and_a_half() {
+        let toggle = Settings { mode: Mode::Server, hold_to_talk: false, hang_secs: 3.0, ..Default::default() };
+        let mut v = take_with(speech_then_quiet(1.0));
+        v.tick(&toggle, || {});
+        assert!(v.closing_in(&toggle).is_none());
+        let mut v = take_with(speech_then_quiet(2.0));
+        v.tick(&toggle, || {});
+        let left = v.closing_in(&toggle).unwrap();
+        assert!((left - 1.0).abs() < 0.2, "{left}");
     }
 
     #[test]

@@ -568,6 +568,8 @@ ABI=x86_64 packaging/android/build.sh      # emulator
 
 That script is the only Android build (needs `cargo-ndk`, the SDK and NDK). `cargo apk` does not ship the Kotlin activity, so paste and notifications break.
 
+On Android, push to talk sends the text by itself: after a take is turned into text, the draft shows "Sending in 3, tap to cancel or edit" and sends when it ends. Typing, tapping the draft, a new take or leaving the chat cancels it, and `/` commands and silence are never sent. Settings, speech, `auto send` (on by default on Android, off on desktop) and `auto send delay` (1 to 30 seconds, default 3).
+
 ## API
 
 | route | |
