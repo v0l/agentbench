@@ -25,6 +25,7 @@ mod modals;
 mod onboarding;
 mod pairing;
 mod projects;
+mod questions;
 mod settings;
 mod side;
 mod transcript;
@@ -632,6 +633,8 @@ struct Transcript {
     content_h: f32,
     view_h: f32,
     shift: Option<f32>,
+    seek: Option<i64>,
+    sought: Option<Id>,
     /// How tall each message was when last laid out, so the ones scrolled out of sight are not
     /// laid out again, only given their room. Thrown away when the width or the look changes.
     heights: Heights,
@@ -815,6 +818,7 @@ pub struct App {
     alerts_managed: bool,
     issues_first: bool,
     triage_open: bool,
+    questions: questions::QuestionsLog,
     github: HashMap<Id, github::GithubView>,
     gh_tab: github::GhTab,
     outbox_shown: github::Sent,
@@ -1046,6 +1050,7 @@ impl App {
                 == Some("true"),
             triage_open: storage.and_then(|s| s.get_string("triage_open")).as_deref()
                 == Some("true"),
+            questions: Default::default(),
             github: HashMap::new(),
             gh_tab: github::GhTab::Issues,
             outbox_shown: github::Sent::Waiting,
@@ -2470,6 +2475,7 @@ impl App {
                     c.overview();
                 }
             }
+            Reply::SupervisorLog(q, log) => self.questions.arrived(q, log),
             r @ (Reply::GithubStatus(..) | Reply::Outbox(..) | Reply::Pulls(..) | Reply::GithubSettings(..) | Reply::WebhookSecret(..)) => {
                 self.github_replied(r);
             }

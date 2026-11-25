@@ -768,6 +768,7 @@ impl App {
         self.chat_header(ui, &s, tree.as_ref());
         if self.supervisor_chat() == Some(s.id) {
             self.autopilot_panel(ui);
+            self.questions_panel(ui, s.id);
             self.triage_panel(ui);
         }
         self.add_project_cards(ui, s.id);
@@ -809,6 +810,22 @@ impl App {
         if jump {
             self.follow = true;
         }
+        let seek = self.transcripts.get(&s.id).and_then(|t| t.seek);
+        let target = seek.and_then(|at| messages.iter().find(|m| m.created_at >= at).map(|m| m.id));
+        let before_loaded = seek.is_some_and(|at| messages.first().is_some_and(|m| m.created_at > at));
+        let complete = self.transcripts.get(&s.id).is_none_or(|t| t.complete);
+        let seek_to = match seek {
+            None => None,
+            Some(_) if before_loaded && !complete => None,
+            Some(_) => target.or(messages.last().map(|m| m.id)),
+        };
+        if seek.is_some() && seek_to.is_none() {
+            self.fetch_older(s.id);
+            ui.ctx().request_repaint();
+        }
+        if seek_to.is_some() {
+            self.follow = false;
+        }
         let mut area = egui::ScrollArea::vertical()
             .id_salt(("transcript", s.id))
             .max_height(rect.height())
@@ -842,6 +859,7 @@ impl App {
                 // An entry that was measured and is out of sight is not laid out, only
                 // given the room it took.
                 if let Some(h) = heights.known(m.id)
+                    && seek_to != Some(m.id)
                     && !(egui::Rect::from_min_size(column.min, Vec2::new(column.width(), h)))
                         .intersects(visible)
                 {
@@ -863,6 +881,12 @@ impl App {
                 let used = one.min_rect();
                 let h = (used.bottom().max(column.top()) - column.top()).max(0.0);
                 heights.measured(m.id, h);
+                if seek_to == Some(m.id) {
+                    ui.scroll_to_rect(
+                        egui::Rect::from_min_size(column.min, Vec2::new(column.width(), h.min(40.0))),
+                        Some(Align::TOP),
+                    );
+                }
                 ui.allocate_rect(
                     egui::Rect::from_min_max(
                         column.min,
@@ -888,6 +912,10 @@ impl App {
             let arrived = std::mem::replace(&mut t.messages, messages);
             t.messages.extend(arrived);
             t.heights = heights;
+            if let Some(id) = seek_to {
+                t.seek = None;
+                t.sought = Some(id);
+            }
         }
         ui.allocate_rect(rect, Sense::hover());
         if let Some(before) = self.transcripts.get_mut(&s.id).and_then(|t| t.anchor.take()) {

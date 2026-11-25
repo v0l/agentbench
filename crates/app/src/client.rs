@@ -64,6 +64,7 @@ pub enum Reply {
     Pulls(Id, Vec<agentbench_core::PullRequest>),
     GithubSettings(Id, agentbench_core::GithubSettings),
     WebhookSecret(Id, agentbench_core::WebhookSecret),
+    SupervisorLog(agentbench_core::LogQuery, agentbench_core::SupervisorLog),
     Done(String),
     Failed(String),
     Offline(String),
@@ -394,6 +395,12 @@ impl Client {
     pub fn github_sync(&mut self, project: Id) {
         let req = self.request(Method::POST, &format!("/api/projects/{project}/github/sync"), None).timeout(Duration::from_secs(120));
         self.send(req, move |s| Reply::GithubStatus(project, s));
+    }
+
+    pub fn supervisor_log(&mut self, query: &agentbench_core::LogQuery) {
+        let q = query.clone();
+        let req = self.request(Method::GET, &format!("/api/supervisor/log?{}", q.to_query()), None);
+        self.send(req, move |log: agentbench_core::SupervisorLog| Reply::SupervisorLog(q, log));
     }
 
     pub fn outbox(&mut self, project: Id) {

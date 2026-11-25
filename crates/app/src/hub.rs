@@ -434,6 +434,12 @@ impl Hub {
                         }
                         out.push(Reply::Outbox(tag(slot, id), list));
                     }
+                    Reply::SupervisorLog(q, mut log) => {
+                        for i in &mut log.items {
+                            i.project_id = i.project_id.map(|p| tag(slot, p));
+                        }
+                        out.push(Reply::SupervisorLog(q, log));
+                    }
                     Reply::Pulls(id, mut list) => {
                         for p in &mut list {
                             p.project_id = tag(slot, p.project_id);
@@ -489,6 +495,19 @@ impl Hub {
     pub fn autopilot(&mut self, patch: &agentbench_core::AutopilotPatch) {
         let slot = self.supervisor_slot();
         self.link(slot).client.autopilot(patch);
+    }
+
+    pub fn supervisor_log(&mut self, query: &agentbench_core::LogQuery) {
+        let slot = self.supervisor_slot();
+        let mut q = query.clone();
+        if let Some(p) = q.project.as_deref().and_then(|p| p.parse::<Id>().ok()) {
+            q.project = Some(untag(p).to_string());
+        }
+        self.link(slot).client.supervisor_log(&q);
+    }
+
+    pub fn supervisor_log_supported(&self) -> bool {
+        self.server_has(self.supervisor_slot(), agentbench_core::API_SUPERVISOR_LOG)
     }
 
     pub fn triage_run(&mut self) {
