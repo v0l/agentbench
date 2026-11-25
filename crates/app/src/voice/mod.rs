@@ -8,6 +8,11 @@
 //! Face) or by any server that speaks OpenAI's `/v1/audio/transcriptions`. The words land in the
 //! draft for you to read and send; nothing is sent on its own.
 //!
+//! The conversation is the same microphone and reader with no draft in between: the talk key on
+//! the supervisor chat sends what was heard as a turn, and the reply is read aloud a sentence at a
+//! time. Speaking while it talks stops it. `Converse` holds the queue of sentences and `TalkKey`
+//! holds the key's own state, so a hold and a tap both work.
+//!
 //! This module holds what is the same on every platform: the settings, the audio helpers and the
 //! shape of a result. The microphone and the two readers live in `native`, and platforms with no
 //! microphone to open (the browser) get `stub`, which says so.

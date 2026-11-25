@@ -76,17 +76,6 @@ impl Reader {
         std::mem::take(&mut self.lines)
     }
 
-    /// Everything still waiting to be played, for a test that wants the whole reply at once.
-    #[doc(hidden)]
-    pub fn queued(&self) -> Vec<f32> {
-        match &self.playing {
-            Some((shared, Output::Silent)) => {
-                shared.queue.lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect()
-            }
-            _ => Vec::new(),
-        }
-    }
-
     /// Whether anything is being made or played.
     pub fn busy(&self) -> bool {
         self.playing.is_some()

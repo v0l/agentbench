@@ -80,10 +80,6 @@ impl Reader {
     pub fn spoken(&mut self) -> Vec<String> {
         Vec::new()
     }
-    #[doc(hidden)]
-    pub fn queued(&self) -> Vec<f32> {
-        Vec::new()
-    }
     pub fn stop(&mut self) {}
     pub fn start(
         &mut self,
