@@ -6,10 +6,32 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-25
+
 ### Added
+- GitHub as the place work lives. Issues and pull requests are mirrored through `gh` (`agentbench github`, a Pull requests and an Outbox tab in the app, an optional webhook). Text from people who are not trusted can never carry instructions to a worker, and every write to GitHub goes through one outbox that is draft by default, can post only trusted rows in auto mode, never merges by itself, and has a kill switch and an hourly cap. Ready issues start a worker and the finished branch opens a pull request that closes the issue. Pull requests are reviewed on the high model; only the owner can merge, and only the exact head the owner approved.
+- The merge tool finds the repository's default branch, merges in a temporary worktree, and opens a pull request when the branch is protected. A failed merge tells the worker, retries with backoff and checks the push really landed. A dirty main checkout sends a message to the supervisor, which has a `main_checkout` tool to commit, stash or reset paths.
+- The autopilot backs off under sustained load. It reads CPU, memory and disk pressure, free memory and swap every 10 seconds; after a minute of strain it halves the number of new workers, after 30 seconds of heavy strain it starts none and tells each running worker once to pause test and build runs, and it recovers one worker every two minutes after five quiet minutes. It names the device that holds the swapfile. `autopilot_pressure = off` turns it off.
+- The autopilot judges issues with no goal against the vision before it starts them.
+- Spoken conversation with the supervisor on the desktop: speech in and out, barge in, and a voice mode for worker reports.
+- A restart command (`agentbench-server restart`, a button in settings and an optional `restart_server` tool) that waits for running turns to finish before it restarts and says how many finished and how many were interrupted.
+- A max tokens setting per model, and an automatic continuation when a reply is cut off by the output limit.
+- Background shell jobs run in a memory capped scope, so a runaway build is killed and says so instead of taking the host down.
+- The supervisor's open items are tracked so a reply is not forgotten, and notes written from the supervisor chat that apply to every project wait for your confirmation.
+- Android: chats that the supervisor or the autopilot handle no longer raise a notification for every state change. A setting turns them back on.
+- Windows: agent-core and agent-native build and pass their tests.
+- API version 15.
+
+### Changed
+- The notes tables are gone. The first start writes `legacy-notes-<timestamp>.json` in the data folder with every note and version it held; keep that file.
+- `file_issue` with no state now files into the backlog, as its schema says, and no longer starts a worker.
+- Workers report in the last line of their reply and no longer send a message to their parent.
+
+### Added (model levels)
 - Issues carry a model level (`low`, `med`, `high`, or the label `model:high`). The autopilot starts the worker on that level's model from a per-project table, never on a cheaper one. `file_issue`, `update_issue`, the CLI (`agentbench issue`) and the app edit it. API version 9.
 
 ### Fixed
+- Flaky UI and sweep tests that failed under load now wait for their state, and the `owner approves and merges` guard no longer matches a word in a grep.
 - The context window is read from a server that lists the model under another name (a provider prefix, other case, or the only model served), and a web page at `/props` no longer counts as an answer. A server that says nothing now gets a 1M window instead of 128k, so compaction stops firing early.
 
 ## [0.9.2] - 2026-11-20
