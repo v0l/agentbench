@@ -292,6 +292,56 @@ fn hands_free_refuses_speakers_and_asks_once_when_the_output_is_unknown() {
 }
 
 #[test]
+fn hands_free_on_speakers_opens_with_echo_cancelling_on() {
+    let rig = rig_with(vec![six_sentence_agent("glib")]);
+    six_sentence_supervisor(&rig);
+    let speakers = agentbench::voice::Sink::Speakers("Built-in Audio".into());
+    let mut h = harness_cfg(
+        vec![
+            ("url".into(), rig.url.clone()),
+            ("voice_converse".into(), "1".into()),
+            ("voice_hands_free".into(), "1".into()),
+            ("voice_echo_cancel".into(), "1".into()),
+            ("voice_mode".into(), "agentbench".into()),
+        ],
+        Cfg::default(),
+    );
+    h.state_mut().voice_test_silent();
+    h.state_mut().voice_test_hands_free(speakers);
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_supervisor();
+    until(&mut h, "the microphone to open", |h| h.state().hands_free_on());
+    assert!(h.state().voice_test_notice().is_none());
+}
+
+#[test]
+fn the_hands_free_settings_fit_at_both_sizes() {
+    let rig = rig();
+    for (tag, size) in [("1280", [1280.0, 800.0]), ("390", [390.0, 844.0])] {
+        let mut h = harness_cfg(
+            vec![
+                ("url".into(), rig.url.clone()),
+                ("voice_converse".into(), "1".into()),
+                ("voice_hands_free".into(), "1".into()),
+            ],
+            Cfg { size, ..Cfg::default() },
+        );
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_settings_page("speech");
+        h.run_steps(2);
+        until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
+        h.run_steps(4);
+        for label in ["hands free", "echo cancelling"] {
+            let n = h.get_by_label(label);
+            assert!(n.rect().right() <= size[0], "{label} runs off a {tag} screen");
+        }
+        h.get_by_label("hands free").scroll_to_me();
+        h.run_steps(4);
+        shot(&mut h, &format!("hands-free-settings-{tag}"));
+    }
+}
+
+#[test]
 fn speaking_over_the_reply_drops_the_rest_of_it() {
     let Some(models) = models_dir() else {
         eprintln!("skipped: no speech models on this machine");
