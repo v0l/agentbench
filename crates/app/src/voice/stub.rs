@@ -20,6 +20,12 @@ impl Voice {
     pub fn seconds(&self) -> f32 {
         0.0
     }
+    pub fn closing_in(&self, _: &Settings) -> Option<f32> {
+        None
+    }
+    pub fn take_quiet_stop(&mut self) -> Option<f32> {
+        None
+    }
     pub fn level(&self) -> f32 {
         0.0
     }

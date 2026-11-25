@@ -355,6 +355,11 @@ impl App {
                         tokens(s.usage.output_tokens)
                     );
                     chip(ui, &project, if supervisor { TRACE } else { READOUT }, true).on_hover_text(&about);
+                    if let Some(left) = self.voice.closing_in(&self.speech_now()) {
+                        chip(ui, &format!("closing in {:.0}...", left.ceil()), FAULT, true)
+                            .on_hover_text("quiet for a while: keep talking to keep the take open");
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                    }
                     if let Some(w) = tree.filter(|_| !home) {
                         chip(ui, &w.label(), VALUE, false).on_hover_text(&about);
                     }

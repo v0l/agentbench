@@ -2720,6 +2720,9 @@ impl App {
         self.converse_tick(ctx);
         let speech = self.speech_now();
         self.voice.tick(&speech, wake);
+        if let Some(hang) = self.voice.take_quiet_stop() {
+            self.notice = Some((false, format!("stopped after {hang:.0} s of quiet")));
+        }
         for said in self.voice.poll() {
             if self.talk_turn && !matches!(said, crate::voice::Said::Partial(_)) {
                 self.talk_turn = false;

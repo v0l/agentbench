@@ -56,6 +56,10 @@ pub const MIN_PEAK: f32 = 0.005;
 /// ending under you.
 pub const HANG_SECONDS: f32 = 3.0;
 
+pub const HANG_RANGE: std::ops::RangeInclusive<f32> = 1.0..=15.0;
+
+pub const COUNTDOWN_AFTER: f32 = 1.5;
+
 /// How much new speech is heard between one partial reading starting and the next being allowed.
 pub const PARTIAL_SECONDS: usize = 2;
 
@@ -160,6 +164,14 @@ impl Endpoint {
     /// How long it has been quiet since the last speech.
     pub fn quiet_seconds(&self) -> f32 {
         self.quiet
+    }
+
+    pub fn set_hang(&mut self, hang: f32) {
+        self.hang = hang;
+    }
+
+    pub fn hang(&self) -> f32 {
+        self.hang
     }
 
     /// Whether speech has been heard yet.

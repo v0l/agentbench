@@ -33,6 +33,7 @@ pub struct Settings {
     pub converse: bool,
     pub input_device: String,
     pub talk_key: String,
+    pub hang_secs: f32,
 }
 
 pub const DEFAULT_TALK_KEY: &str = "F9";
@@ -55,6 +56,7 @@ impl Default for Settings {
             converse: false,
             input_device: String::new(),
             talk_key: DEFAULT_TALK_KEY.into(),
+            hang_secs: super::HANG_SECONDS,
         }
     }
 }
@@ -89,6 +91,9 @@ impl Settings {
         if let Some(k) = st.get_string("voice_talk_key").filter(|k| !k.trim().is_empty()) {
             s.talk_key = k;
         }
+        if let Some(h) = st.get_string("voice_hang_secs").and_then(|h| h.parse::<f32>().ok()) {
+            s.hang_secs = h.clamp(*super::HANG_RANGE.start(), *super::HANG_RANGE.end());
+        }
         s.url = st.get_string("voice_url").unwrap_or_default();
         s.key = st.get_string("voice_key").unwrap_or_default();
         s.server_model = st.get_string("voice_server_model").unwrap_or_default();
@@ -120,6 +125,7 @@ impl Settings {
         st.set_string("voice_converse", if self.converse { "1" } else { "0" }.into());
         st.set_string("voice_input", self.input_device.clone());
         st.set_string("voice_talk_key", self.talk_key.clone());
+        st.set_string("voice_hang_secs", self.hang_secs.to_string());
     }
 
     pub fn talk_key(&self) -> Option<eframe::egui::Key> {
@@ -222,6 +228,18 @@ mod tests {
             Settings { hold_to_talk: !Settings::default().hold_to_talk, ..Default::default() };
         flipped.save(&mut m);
         assert_eq!(Settings::load(Some(&m)).hold_to_talk, flipped.hold_to_talk);
+    }
+
+    #[test]
+    fn the_hang_defaults_to_three_seconds_is_kept_and_clamped() {
+        assert_eq!(Settings::default().hang_secs, 3.0);
+        let mut m = Mem::default();
+        Settings { hang_secs: 8.0, ..Default::default() }.save(&mut m);
+        assert_eq!(Settings::load(Some(&m)).hang_secs, 8.0);
+        eframe::Storage::set_string(&mut m, "voice_hang_secs", "99".into());
+        assert_eq!(Settings::load(Some(&m)).hang_secs, 15.0);
+        eframe::Storage::set_string(&mut m, "voice_hang_secs", "0".into());
+        assert_eq!(Settings::load(Some(&m)).hang_secs, 1.0);
     }
 
     #[test]
