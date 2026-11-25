@@ -213,8 +213,11 @@ pub fn state_for(runner: &Runner) -> AutopilotState {
     let mut st = state(store);
     let limits = crate::pressure::limits(store);
     let monitor = runner.pressure.lock().unwrap_or_else(|e| e.into_inner());
+    let lsp = runner.lsp.total();
     st.pressure = Some(monitor.current(st.cap, &limits)).map(|mut p| {
         p.enabled &= crate::pressure::enabled(store);
+        p.lsp_servers = lsp.servers as u32;
+        p.lsp_resident = lsp.bytes;
         p
     });
     st
@@ -874,10 +877,20 @@ impl Autopilot {
             .collect()
     }
 
+    pub fn stop_idle_language_servers(&self) -> agent_core::pool::Freed {
+        let freed = self.runner.lsp.stop_idle_language_servers();
+        if freed.servers > 0 {
+            let noun = if freed.servers == 1 { "language server" } else { "language servers" };
+            self.log(None, None, &format!("stopped {} {noun}, freed {:.1} GB", freed.servers, freed.gb()));
+        }
+        freed
+    }
+
     pub fn observe_pressure(&self, readings: agentbench_core::PressureReadings, now: i64) {
         use agentbench_core::PressureState;
         use crate::pressure::Event;
         let store = self.store();
+        self.runner.lsp.configure(crate::pressure::lsp_config(store));
         if !crate::pressure::enabled(store) {
             let mut m = self.runner.pressure.lock().unwrap_or_else(|e| e.into_inner());
             if m.state() != PressureState::Ok || !m.messaged.is_empty() {
@@ -899,6 +912,13 @@ impl Autopilot {
             }
             (events, first)
         };
+        let strained = matches!(
+            self.runner.pressure.lock().unwrap_or_else(|e| e.into_inner()).state(),
+            PressureState::Pressure | PressureState::Critical
+        );
+        if strained {
+            self.stop_idle_language_servers();
+        }
         for e in &events {
             match e {
                 Event::Changed { from, to, reason, cap } => {
@@ -2693,6 +2713,55 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn entering_pressure_stops_idle_language_servers_first_and_says_what_it_freed() {
+        use crate::pressure::tests::{busy, calm};
+        use agent_core::pool::{Config, Pool};
+        let mut r = pressure_rig(4, 0);
+        let pool = Pool::new(Config::default());
+        r.ap.runner.lsp = pool.clone();
+        let stop = tokio_util::sync::CancellationToken::new();
+        let idle = pool.acquire("session 1", "rust-analyzer", std::path::Path::new("/w/1"), &stop).await.unwrap();
+        let recent = pool.acquire("session 2", "rust-analyzer", std::path::Path::new("/w/2"), &stop).await.unwrap();
+        pool.set_resident(idle.id(), 3 << 30);
+        pool.set_resident(recent.id(), 4 << 30);
+        let id = idle.id();
+        let held = Arc::new(Mutex::new(Some(idle)));
+        let h = held.clone();
+        pool.attach(id, Some(1), Arc::new(move |_, _| h.lock().unwrap().take().is_some()));
+        pool.attach(recent.id(), Some(2), Arc::new(|_, _| false));
+        let st = state_for(&r.ap.runner).pressure.unwrap();
+        assert_eq!((st.lsp_servers, st.lsp_resident), (2, 7 << 30));
+        load(&r, &calm(), 0, 60 * S);
+        assert_eq!(pool.total().servers, 2, "nothing is stopped while the host is fine");
+        load(&r, &busy(), 70 * S, 140 * S);
+        assert_eq!(pool.total().servers, 1);
+        assert_eq!(pool.held()[0].holder, "session 2");
+        let lines = feed(&r);
+        let stopped: Vec<&String> = lines.iter().filter(|l| l.contains("language server")).collect();
+        assert_eq!(stopped.len(), 1, "{lines:?}");
+        assert!(stopped[0].contains("stopped 1 language server, freed 3.0 GB"), "{}", stopped[0]);
+        let st = state_for(&r.ap.runner).pressure.unwrap();
+        assert_eq!((st.lsp_servers, st.lsp_resident), (1, 4 << 30));
+    }
+
+    #[tokio::test]
+    async fn the_language_server_settings_reach_the_pool() {
+        use agent_core::pool::{Config, Pool};
+        let mut r = pressure_rig(4, 0);
+        let pool = Pool::new(Config::default());
+        r.ap.runner.lsp = pool.clone();
+        r.store.set_setting("lsp_max_servers", "3").unwrap();
+        r.store.set_setting("lsp_idle_stop_secs", "120").unwrap();
+        r.store.set_setting("lsp_memory_mb", "0").unwrap();
+        r.ap.observe_pressure(Default::default(), 0);
+        let c = pool.config();
+        assert_eq!((c.max, c.idle.as_secs(), c.memory_mb), (3, 120, None));
+        r.store.set_setting("lsp_memory_mb", "4096").unwrap();
+        r.ap.observe_pressure(Default::default(), 10 * S);
+        assert_eq!(pool.config().memory_mb, Some(4096));
     }
 
     #[tokio::test]

@@ -3210,7 +3210,8 @@ impl Native {
                 }
             }
             n if super::code::TOOLS.contains(&n) => {
-                self.watched(self.code.run(n, args, ws, io.stop()), ws.root(), io).await
+                let holder = format!("session {}", cx.session);
+                self.watched(self.code.run_as(&holder, n, args, ws, io.stop()), ws.root(), io).await
             }
             "web_search" => agent_core::web::search(args, io.stop()).await,
             "web_fetch" => {
@@ -4093,6 +4094,11 @@ mod tests {
         assert!(!outputs[1].contains("code_find"), "{}", outputs[1]);
     }
 
+    fn own_pool(settings: crate::code::Settings) -> Arc<crate::code::Code> {
+        let pool = agent_core::pool::Pool::new(agent_core::pool::Config::default());
+        Arc::new(crate::code::Code::new(crate::code::unconfined(settings)).with_pool(pool))
+    }
+
     /// Needs rust-analyzer; skipped where it is not installed.
     #[tokio::test(flavor = "multi_thread")]
     async fn errors_from_the_language_server_follow_an_edit_in_the_configured_role() {
@@ -4111,6 +4117,7 @@ mod tests {
             std::fs::write(dir.path().join("src/lib.rs"), "pub fn one() -> u32 {\n    1\n}\n")
                 .unwrap();
             let (url, asked) = stub(vec![
+                vec![call("c0", "code_outline", json!({"path": "src/lib.rs"}))],
                 vec![call(
                     "c1",
                     "edit_file",
@@ -4119,12 +4126,11 @@ mod tests {
                 vec![say("fixing")],
             ]);
             let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
-            native.code = Arc::new(crate::code::Code::new(crate::code::unconfined(
-                crate::code::Settings { role: role.into(), ..Default::default() },
-            )));
+            native.code = own_pool(crate::code::Settings { role: role.into(), ..Default::default() });
             let io = TestIo::new(Arc::new(FakeApi));
             run(&native, dir.path(), "break it", &io).await.unwrap();
             let _first = asked.recv().unwrap();
+            let _outlined = asked.recv().unwrap();
             let second = asked.recv().unwrap();
             let last = second["messages"].as_array().unwrap().last().unwrap().clone();
             assert_eq!(last["role"], role, "{last}");
@@ -4161,6 +4167,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.path().join("src/lib.rs"), "pub fn one() -> u32 {\n    1\n}\n").unwrap();
         let (url, asked) = stub(vec![
+            vec![call("c0", "code_outline", json!({"path": "src/lib.rs"}))],
             vec![call(
                 "c1",
                 "edit_file",
@@ -4175,12 +4182,10 @@ mod tests {
             vec![say("fixed")],
         ]);
         let mut native = Native::new(Model { url, model: "m".into(), ..Model::default() });
-        native.code = Arc::new(crate::code::Code::new(crate::code::unconfined(
-            crate::code::Settings { role: "developer".into(), ..Default::default() },
-        )));
+        native.code = own_pool(crate::code::Settings { role: "developer".into(), ..Default::default() });
         let first = TestIo::new(Arc::new(FakeApi));
         run(&native, dir.path(), "break it", &first).await.unwrap();
-        let (_, _) = (asked.recv().unwrap(), asked.recv().unwrap());
+        let (_, _, _) = (asked.recv().unwrap(), asked.recv().unwrap(), asked.recv().unwrap());
         let entries = rows_from(&first);
         let c = context();
         let turn = Turn {

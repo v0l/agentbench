@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -2188,7 +2188,7 @@ while IFS= read -r line; do
     Content-Length:*) len=${line#Content-Length: } ;;
     "")
       [ -z "$len" ] && continue
-      IFS= read -r -N "$len" body
+      IFS= read -r -n "$len" body
       len=
       id=; method=
       [[ $body =~ \"id\":([0-9]+) ]] && id=${BASH_REMATCH[1]}
@@ -2375,7 +2375,7 @@ done
         assert!(out.contains("language server restarted") && out.contains("pressure"), "{out}");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_watchdog_kills_a_server_that_grows_past_its_cap() {
         let f = fake(super::super::pool::Config { memory_mb: Some(64), ..quick() });

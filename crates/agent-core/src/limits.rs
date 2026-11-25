@@ -46,7 +46,32 @@ impl Limits {
 }
 
 pub fn resident(root: Option<u32>) -> u64 {
-    root.map_or(0, |root| tree_memory(root, proc_children, proc_rss))
+    let Some(root) = root else { return 0 };
+    #[cfg(target_os = "macos")]
+    {
+        ps_tree(root)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        tree_memory(root, proc_children, proc_rss)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ps_tree(root: u32) -> u64 {
+    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,rss="]).output() else {
+        return 0;
+    };
+    let mut kids: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let mut rss: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let f: Vec<u64> = line.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+        if let [pid, ppid, kb] = f[..] {
+            kids.entry(ppid as u32).or_default().push(pid as u32);
+            rss.insert(pid as u32, kb * 1024);
+        }
+    }
+    tree_memory(root, |p| kids.get(&p).cloned().unwrap_or_default(), |p| rss.get(&p).copied().unwrap_or(0))
 }
 
 fn tree_memory(root: u32, children: impl Fn(u32) -> Vec<u32>, rss: impl Fn(u32) -> u64) -> u64 {
