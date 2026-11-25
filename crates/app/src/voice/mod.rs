@@ -16,7 +16,7 @@ mod settings;
 pub use settings::{LOCAL_MODELS, Mode, Settings};
 
 mod converse;
-pub use converse::Converse;
+pub use converse::{Converse, Talk, TalkKey};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

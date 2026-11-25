@@ -792,6 +792,7 @@ pub struct App {
     reader: crate::voice::Reader,
     reading: Option<Id>,
     converse: crate::voice::Converse,
+    talk_key: crate::voice::TalkKey,
     conversing: Option<SessionId>,
     talk_turn: bool,
     /// Models on the server the native agent is saved to use. None until asked.
@@ -1011,6 +1012,7 @@ impl App {
             reader: Default::default(),
             reading: None,
             converse: Default::default(),
+            talk_key: Default::default(),
             conversing: None,
             talk_turn: false,
             speech: crate::voice::Settings::load(storage),
@@ -1631,11 +1633,19 @@ impl App {
         self.reader.silent();
     }
 
-    /// Feed a recorded take through the same reader a microphone take uses, as the speak key
-    /// would after a finished take.
+    /// Feed a recorded take through the same reader a microphone take uses, as the talk key does
+    /// after a finished take.
     #[doc(hidden)]
     pub fn voice_test_take(&mut self, wav: &[u8], ctx: &egui::Context) -> Result<(), String> {
         let ctx = ctx.clone();
+        if let Some(sid) = self.supervisor_chat().filter(|_| self.speech.converse) {
+            if self.conversing.is_none() {
+                let last = self.transcripts.get(&sid).map_or(0, |t| t.last);
+                self.converse.begin(last);
+                self.conversing = Some(sid);
+            }
+            self.talk_turn = true;
+        }
         self.voice.read_take(wav, &self.speech_now(), move || ctx.request_repaint())
     }
 
@@ -1643,6 +1653,42 @@ impl App {
     #[doc(hidden)]
     pub fn voice_test_spoken(&mut self) -> Vec<String> {
         self.reader.spoken()
+    }
+
+    /// What the conversation is doing, for a test that wonders why nothing is heard.
+    #[doc(hidden)]
+    pub fn voice_test_state(&self) -> (Option<SessionId>, bool) {
+        (self.conversing, self.transcripts.contains_key(&self.conversing.unwrap_or_default()))
+    }
+
+    /// How many sentences are waiting to be spoken, and whether the voice is mid reply.
+    #[doc(hidden)]
+    pub fn voice_test_pending(&self) -> usize {
+        self.converse.waiting() + self.reader.busy() as usize
+    }
+
+    /// Whether a reply is being read aloud right now.
+    #[doc(hidden)]
+    pub fn voice_test_reading(&self) -> bool {
+        self.reader.busy()
+    }
+
+    /// What the chat has said and been told, in order, for a test that reads the conversation.
+    #[doc(hidden)]
+    pub fn transcript_talk(&self, session: SessionId) -> Vec<String> {
+        self.transcripts
+            .get(&session)
+            .map(|t| {
+                t.rows
+                    .iter()
+                    .filter_map(|m| match &m.entry {
+                        Entry::User { text, .. } => Some(format!("user: {text}")),
+                        Entry::Assistant { text } => Some(format!("assistant: {text}")),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Speak over the reply being read and start a new take, as the talk key does: the audio stops
@@ -1660,18 +1706,37 @@ impl App {
     }
 
     /// The talk key: with the conversation on and the supervisor chat open, it cuts off what is
-    /// being said and opens the microphone, and what is heard is sent as a spoken turn.
-    fn talk(&mut self, ctx: &egui::Context) {
-        let Some(sid) = self.conversing.filter(|s| self.session == Some(*s)) else { return };
+    /// being said and opens the microphone, and what is heard is sent as a spoken turn. Hold to
+    /// talk ends the take when the key comes up, and a tap toggles it.
+    fn talk(&mut self, ctx: &egui::Context, down: bool) {
+        let listening = self.voice.listening() || self.voice.staged();
+        let key = if down {
+            self.talk_key.press(self.speech.hold_to_talk, listening)
+        } else {
+            self.talk_key.release(self.speech.hold_to_talk, listening)
+        };
+        use crate::voice::Talk;
+        match key {
+            Talk::Nothing => return,
+            Talk::Finish => {
+                self.barge_in();
+                let wake = {
+                    let ctx = ctx.clone();
+                    move || ctx.request_repaint()
+                };
+                self.voice.finish(&self.speech_now(), wake);
+                return;
+            }
+            Talk::Start => {}
+        }
+        if self.conversing != self.session || self.conversing.is_none() {
+            return;
+        }
         let wake = {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
         };
         self.barge_in();
-        if self.voice.listening() {
-            self.voice.finish(&self.speech_now(), wake);
-            return;
-        }
         if self.voice.busy() {
             return;
         }
@@ -1712,7 +1777,7 @@ impl App {
         }
         let Some(sid) = supervisor else { return };
         if self.conversing.is_none() {
-            let Some(t) = self.transcripts.get(&sid).filter(|t| !t.loading && t.last > 0) else {
+            let Some(t) = self.transcripts.get(&sid).filter(|t| !t.loading) else {
                 return;
             };
             self.converse.begin(t.last);
@@ -2615,9 +2680,23 @@ impl App {
         }
         if let Some(key) = self.speech.talk_key()
             && self.speech.converse
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key))
+            && self.session.is_some()
+            && self.conversing == self.session
         {
-            self.talk(ctx);
+            let (down, pressed, released) = ctx.input(|i| {
+                (
+                    i.key_down(key),
+                    i.key_pressed(key),
+                    i.key_released(key),
+                )
+            });
+            if pressed {
+                self.talk(ctx, true);
+            } else if released {
+                self.talk(ctx, false);
+            } else if down && self.speech.hold_to_talk && self.talk_key.down() {
+                self.talk(ctx, true);
+            }
         }
         let wake = {
             let ctx = ctx.clone();

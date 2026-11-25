@@ -64,6 +64,24 @@ pub fn rig_with(extra: Vec<Box<dyn agentbench_server::agent::Agent>>) -> Rig {
     rig_on("http://127.0.0.1:9/v1", extra)
 }
 
+/// A scratch server that reads speech with models already on this machine, so a test that talks to
+/// it does not fetch several gigabytes. The home folder, database and token are all still the
+/// test's own: only the model files are shared.
+pub fn rig_with_models(
+    extra: Vec<Box<dyn agentbench_server::agent::Agent>>,
+    models: PathBuf,
+) -> Rig {
+    rig_model_full(
+        agentbench_server::agent::native::Model {
+            url: "http://127.0.0.1:9/v1".into(),
+            model: "test-model".into(),
+            ..Default::default()
+        },
+        extra,
+        Some(models),
+    )
+}
+
 /// A model server that lists `n` models, for as many requests as come.
 pub fn model_server(n: usize) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -108,6 +126,14 @@ pub fn rig_named(
 pub fn rig_model(
     model: agentbench_server::agent::native::Model,
     extra: Vec<Box<dyn agentbench_server::agent::Agent>>,
+) -> Rig {
+    rig_model_full(model, extra, None)
+}
+
+fn rig_model_full(
+    model: agentbench_server::agent::native::Model,
+    extra: Vec<Box<dyn agentbench_server::agent::Agent>>,
+    models: Option<PathBuf>,
 ) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("demo");
@@ -169,7 +195,7 @@ pub fn rig_model(
         plain: false,
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let models = dir.path().join("models");
+    let models = models.unwrap_or_else(|| dir.path().join("models"));
     let mut extra = Some(extra);
     let mut echo = Some(echo);
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();

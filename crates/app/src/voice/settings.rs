@@ -145,6 +145,12 @@ impl Settings {
         let mut s = self.clone();
         if let (Mode::Agentbench, Some((url, token))) = (self.mode, agentbench) {
             s.mode = Mode::Server;
+            let url = url.trim().trim_end_matches('/');
+            let url = if url.starts_with("http://") || url.starts_with("https://") {
+                url.to_string()
+            } else {
+                format!("http://{url}")
+            };
             s.url = format!("{}/v1", url.trim_end_matches('/'));
             s.key = token.to_string();
             s.server_model = self.model.clone();
@@ -235,6 +241,15 @@ mod tests {
         assert!(back.converse);
         assert_eq!(back.input_device, "USB mic");
         assert_eq!(back.talk_key(), Some(eframe::egui::Key::F8));
+    }
+
+    #[test]
+    fn a_server_address_without_a_scheme_still_reaches_the_agentbench_endpoint() {
+        let s = Settings { mode: Mode::Agentbench, ..Default::default() };
+        let r = s.resolved(Some(("127.0.0.1:7420", "t")));
+        assert_eq!(r.endpoint(), "http://127.0.0.1:7420/v1/audio/transcriptions");
+        let r = s.resolved(Some(("http://box:1/", "t")));
+        assert_eq!(r.endpoint(), "http://box:1/v1/audio/transcriptions");
     }
 
     #[test]
