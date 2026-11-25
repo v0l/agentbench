@@ -3263,7 +3263,7 @@ mod tests {
         let path = dir.path().join("agentbench.db");
         {
             let conn = Connection::open(&path).unwrap();
-            let last = SCHEMA.len() - 2;
+            let last = SCHEMA.iter().position(|s| s.starts_with("DROP TABLE IF EXISTS notes")).unwrap();
             for (i, step) in SCHEMA[..last].iter().enumerate() {
                 conn.execute_batch(&format!("BEGIN; {step}; PRAGMA user_version = {}; COMMIT;", i + 1)).unwrap();
             }
