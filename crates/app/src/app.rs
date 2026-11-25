@@ -1662,12 +1662,6 @@ impl App {
         self.reader.spoken()
     }
 
-    /// What the conversation is doing, for a test that wonders why nothing is heard.
-    #[doc(hidden)]
-    pub fn voice_test_state(&self) -> (Option<SessionId>, bool) {
-        (self.conversing, self.transcripts.contains_key(&self.conversing.unwrap_or_default()))
-    }
-
     /// How many sentences are waiting to be spoken, and whether the voice is mid reply.
     #[doc(hidden)]
     pub fn voice_test_pending(&self) -> usize {
