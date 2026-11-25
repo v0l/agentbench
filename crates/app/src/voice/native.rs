@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn a_held_take_stays_open_through_twenty_seconds_of_silence() {
         let mut v = take_with(speech_then_quiet(20.0));
-        let held = Settings { hold_to_talk: true, ..Default::default() };
+        let held = Settings { mode: Mode::Server, hold_to_talk: true, ..Default::default() };
         v.tick(&held, || {});
         assert!(v.listening());
         assert!(v.take_quiet_stop().is_none());
@@ -732,7 +732,7 @@ mod tests {
     #[test]
     fn a_toggle_take_ends_on_quiet_and_says_so() {
         let mut v = take_with(speech_then_quiet(4.0));
-        let toggle = Settings { hold_to_talk: false, hang_secs: 3.0, ..Default::default() };
+        let toggle = Settings { mode: Mode::Server, hold_to_talk: false, hang_secs: 3.0, ..Default::default() };
         v.tick(&toggle, || {});
         assert!(!v.listening());
         assert_eq!(v.take_quiet_stop(), Some(3.0));
@@ -740,7 +740,7 @@ mod tests {
 
     #[test]
     fn the_countdown_shows_once_quiet_passes_a_second_and_a_half() {
-        let toggle = Settings { hold_to_talk: false, hang_secs: 3.0, ..Default::default() };
+        let toggle = Settings { mode: Mode::Server, hold_to_talk: false, hang_secs: 3.0, ..Default::default() };
         let mut v = take_with(speech_then_quiet(1.0));
         v.tick(&toggle, || {});
         assert!(v.closing_in(&toggle).is_none());
