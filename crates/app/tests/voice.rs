@@ -11,6 +11,8 @@ const ASK: &[u8] = include_bytes!("fixtures/voice/ask.wav");
 const BARGE: &[u8] = include_bytes!("fixtures/voice/barge.wav");
 
 fn models_dir() -> Option<PathBuf> {
+    static CPU_SPEECH: std::sync::Once = std::sync::Once::new();
+    CPU_SPEECH.call_once(|| unsafe { std::env::set_var("AGENTBENCH_SPEECH_DEVICE", "cpu") });
     let dir = std::env::var("AGENTBENCH_MODELS").ok().map(PathBuf::from).or_else(|| {
         Some(dirs_home()?.join(".local/share/agentbench/models"))
     })?;
@@ -131,7 +133,7 @@ fn the_talk_key_holds_to_talk_and_toggles_with_the_microphone() {
         h.state_mut().open_supervisor();
         until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
         let sid = h.state().supervisor_chat().unwrap();
-        h.run_steps(4);
+        until(&mut h, "the conversation", |h| h.state().voice_test_conversing());
 
         use agentbench::voice::Talk;
         let ctx = h.ctx.clone();
@@ -364,7 +366,7 @@ fn speaking_over_the_reply_drops_the_rest_of_it() {
     until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
     let sid = h.state().supervisor_chat().unwrap();
     assert_eq!(sid, expected);
-    h.run_steps(4);
+    until(&mut h, "the conversation", |h| h.state().voice_test_conversing());
 
     let ctx = h.ctx.clone();
     h.state_mut().voice_test_send("tell me about every worker running right now, in detail");

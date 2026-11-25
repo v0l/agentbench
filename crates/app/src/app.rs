@@ -1786,6 +1786,11 @@ impl App {
     }
 
     #[doc(hidden)]
+    pub fn voice_test_conversing(&self) -> bool {
+        self.conversing.is_some() && self.conversing == self.session
+    }
+
+    #[doc(hidden)]
     pub fn voice_test_send(&mut self, said: &str) {
         self.say_to_supervisor(said);
     }

@@ -54,6 +54,9 @@ pub struct Whisper {
 /// a kernel (a driver older than the toolkit) is not worth stopping for: the CPU is slower and
 /// not nothing.
 pub fn best_device() -> (Device, &'static str) {
+    if std::env::var("AGENTBENCH_SPEECH_DEVICE").is_ok_and(|v| v.eq_ignore_ascii_case("cpu")) {
+        return (Device::Cpu, "CPU");
+    }
     #[cfg(feature = "speech-cuda")]
     if let Ok(d) = Device::new_cuda(0) {
         let ok = || -> candle_core::Result<f32> {
