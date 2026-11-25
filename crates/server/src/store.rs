@@ -295,6 +295,29 @@ CREATE TABLE open_items (
 );
 CREATE INDEX open_items_session ON open_items(session, id);
 "#,
+    r#"
+CREATE TABLE supervisor_log (
+    id INTEGER PRIMARY KEY,
+    supervisor TEXT,
+    kind TEXT NOT NULL,
+    asker TEXT NOT NULL DEFAULT '',
+    asker_title TEXT NOT NULL DEFAULT '',
+    session TEXT,
+    project_id INTEGER,
+    issue_id INTEGER,
+    question TEXT NOT NULL DEFAULT '',
+    arrived_at INTEGER NOT NULL,
+    needs_answer INTEGER NOT NULL DEFAULT 1,
+    closed_at INTEGER,
+    action TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT '',
+    reply TEXT NOT NULL DEFAULT '',
+    merge TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX supervisor_log_arrived ON supervisor_log(arrived_at);
+CREATE INDEX supervisor_log_session ON supervisor_log(session, id);
+"#,
 ];
 
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
@@ -362,6 +385,7 @@ const LATE_COLUMNS: &[(&str, &str, &str)] = &[
     ("pull_requests", "by_agentbench", "INTEGER NOT NULL DEFAULT 0"),
     ("pull_requests", "ci_reworks", "INTEGER NOT NULL DEFAULT 0"),
     ("pull_requests", "ci_sent_sha", "TEXT"),
+    ("open_items", "log_id", "INTEGER"),
 ];
 
 const AFTER_COLUMNS: &str = r#"
@@ -584,7 +608,75 @@ pub struct OpenItem {
     pub head: Option<String>,
     pub text: String,
     pub delivered_at: i64,
+    pub log_id: Option<Id>,
 }
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NewLogItem<'a> {
+    pub supervisor: Option<SessionId>,
+    pub kind: &'a str,
+    pub asker: &'a str,
+    pub asker_title: &'a str,
+    pub session: Option<SessionId>,
+    pub project_id: Option<Id>,
+    pub issue_id: Option<Id>,
+    pub question: &'a str,
+    pub needs_answer: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Closing {
+    pub action: String,
+    pub detail: String,
+    pub outcome: String,
+    pub reply: String,
+    pub issue_id: Option<Id>,
+}
+
+impl Closing {
+    pub fn new(action: &str) -> Closing {
+        Closing { action: action.into(), ..Default::default() }
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Closing {
+        self.detail = detail.into();
+        self
+    }
+
+    pub fn outcome(mut self, outcome: impl Into<String>) -> Closing {
+        self.outcome = outcome.into();
+        self
+    }
+}
+
+fn log_row(r: &Row) -> rusqlite::Result<agentbench_core::LogItem> {
+    let state: Option<String> = r.get("issue_state")?;
+    Ok(agentbench_core::LogItem {
+        id: r.get("id")?,
+        kind: r.get("kind")?,
+        asker: r.get("asker")?,
+        asker_title: r.get("asker_title")?,
+        session: r.get::<_, Option<String>>("session")?.and_then(|s| s.parse().ok()),
+        supervisor: r.get::<_, Option<String>>("supervisor")?.and_then(|s| s.parse().ok()),
+        project_id: r.get("project_id")?,
+        project: r.get::<_, Option<String>>("project")?.unwrap_or_default(),
+        issue_id: r.get("issue_id")?,
+        issue_state: state.as_deref().and_then(IssueState::parse),
+        question: r.get("question")?,
+        arrived_at: r.get("arrived_at")?,
+        needs_answer: r.get::<_, i64>("needs_answer")? != 0,
+        closed_at: r.get("closed_at")?,
+        action: r.get("action")?,
+        detail: r.get("detail")?,
+        outcome: r.get("outcome")?,
+        reply: r.get("reply")?,
+        merge: r.get("merge")?,
+        clipped: false,
+    })
+}
+
+const LOG_SELECT: &str = "SELECT l.*, p.name AS project, i.state AS issue_state FROM supervisor_log l
+     LEFT JOIN projects p ON p.id = l.project_id LEFT JOIN issues i ON i.id = l.issue_id";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SeenTree {
@@ -2560,12 +2652,13 @@ impl Store {
         target: Option<&str>,
         head: Option<&str>,
         text: &str,
+        log_id: Option<Id>,
     ) -> Result<Id> {
         let db = self.db();
         db.execute(
-            "INSERT INTO open_items (session, kind, target, head, text, delivered_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![session, kind, target, head, text, now()],
+            "INSERT INTO open_items (session, kind, target, head, text, delivered_at, log_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![session, kind, target, head, text, now(), log_id],
         )?;
         Ok(db.last_insert_rowid())
     }
@@ -2573,7 +2666,7 @@ impl Store {
     pub fn open_items(&self, session: SessionId) -> Result<Vec<OpenItem>> {
         let db = self.db();
         let mut stmt = db.prepare(
-            "SELECT id, kind, target, head, text, delivered_at FROM open_items
+            "SELECT id, kind, target, head, text, delivered_at, log_id FROM open_items
              WHERE session = ?1 ORDER BY id",
         )?;
         let rows = stmt.query_map([session], |r| {
@@ -2584,9 +2677,154 @@ impl Store {
                 head: r.get(3)?,
                 text: r.get(4)?,
                 delivered_at: r.get(5)?,
+                log_id: r.get(6)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn add_log(&self, item: &NewLogItem) -> Result<Id> {
+        let db = self.db();
+        let at = now();
+        let closed = (!item.needs_answer).then_some(at);
+        let action = if item.needs_answer { "" } else { "no_action_needed" };
+        db.execute(
+            "INSERT INTO supervisor_log (supervisor, kind, asker, asker_title, session, project_id, issue_id,
+             question, arrived_at, needs_answer, closed_at, action)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                item.supervisor.map(|s| s.to_string()),
+                item.kind,
+                item.asker,
+                item.asker_title,
+                item.session.map(|s| s.to_string()),
+                item.project_id,
+                item.issue_id,
+                item.question,
+                at,
+                item.needs_answer as i64,
+                closed,
+                action
+            ],
+        )?;
+        let id = db.last_insert_rowid();
+        Store::changed(&db, "supervisor_log", id)?;
+        Ok(id)
+    }
+
+    pub fn close_log(&self, id: Id, closing: &Closing) -> Result<bool> {
+        let db = self.db();
+        let n = db.execute(
+            "UPDATE supervisor_log SET closed_at = ?2, action = ?3, detail = ?4, outcome = ?5, reply = ?6,
+             issue_id = COALESCE(issue_id, ?7) WHERE id = ?1 AND closed_at IS NULL",
+            params![id, now(), closing.action, closing.detail, closing.outcome, closing.reply, closing.issue_id],
+        )?;
+        if n > 0 {
+            Store::changed(&db, "supervisor_log", id)?;
+        }
+        Ok(n > 0)
+    }
+
+    pub fn set_log_outcome(&self, id: Id, outcome: &str, reply: &str) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "UPDATE supervisor_log SET outcome = CASE WHEN outcome = '' THEN ?2 ELSE outcome END,
+             reply = CASE WHEN reply = '' THEN ?3 ELSE reply END WHERE id = ?1",
+            params![id, outcome, reply],
+        )?;
+        Store::changed(&db, "supervisor_log", id)
+    }
+
+    pub fn set_log_merge(&self, session: SessionId, merge: &str) -> Result<()> {
+        let db = self.db();
+        db.execute(
+            "UPDATE supervisor_log SET merge = ?2 WHERE id = (
+                SELECT id FROM supervisor_log WHERE session = ?1 AND kind = 'judge' ORDER BY id DESC LIMIT 1)",
+            params![session.to_string(), merge],
+        )?;
+        Store::changed(&db, "supervisor_log", 0)
+    }
+
+    pub fn log_item(&self, id: Id) -> Result<Option<agentbench_core::LogItem>> {
+        let db = self.db();
+        Ok(db.query_row(&format!("{LOG_SELECT} WHERE l.id = ?1"), [id], log_row).optional()?)
+    }
+
+    pub fn log_items(&self, q: &agentbench_core::LogQuery) -> Result<agentbench_core::SupervisorLog> {
+        let mut wheres: Vec<String> = Vec::new();
+        let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        let mut arg = |v: rusqlite::types::Value| {
+            args.push(v);
+            format!("?{}", args.len())
+        };
+        if let Some(kind) = q.kind.as_deref().map(str::trim).filter(|k| !k.is_empty() && *k != "all") {
+            let kinds: Vec<String> =
+                kind.split(',').map(|k| arg(k.trim().to_string().into())).collect();
+            wheres.push(format!("l.kind IN ({})", kinds.join(",")));
+        }
+        if let Some(p) = q.project.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            match p.parse::<Id>() {
+                Ok(id) => wheres.push(format!("l.project_id = {}", arg(id.into()))),
+                Err(_) => wheres.push(format!("p.name = {}", arg(p.to_string().into()))),
+            }
+        }
+        match q.state.as_deref().unwrap_or("all") {
+            "open" => wheres.push("l.closed_at IS NULL".into()),
+            "closed" => wheres.push("l.closed_at IS NOT NULL".into()),
+            _ => {}
+        }
+        if let Some(n) = q.needs_answer {
+            wheres.push(format!("l.needs_answer = {}", arg((n as i64).into())));
+        }
+        if let Some(t) = q.since {
+            wheres.push(format!("l.arrived_at >= {}", arg(t.into())));
+        }
+        if let Some(t) = q.until {
+            wheres.push(format!("l.arrived_at < {}", arg(t.into())));
+        }
+        if let Some(b) = q.before {
+            wheres.push(format!("l.id < {}", arg(b.into())));
+        }
+        for word in q.q.as_deref().unwrap_or_default().split_whitespace() {
+            let like = arg(format!("%{}%", word.to_lowercase()).into());
+            wheres.push(format!(
+                "lower(l.question || ' ' || l.outcome || ' ' || l.reply || ' ' || l.asker_title || ' ' || l.detail || ' ' || COALESCE(p.name, '') || ' #' || COALESCE(l.issue_id, '')) LIKE {like}"
+            ));
+        }
+        let limit = q
+            .limit
+            .unwrap_or(agentbench_core::supervisor_log::LOG_PAGE)
+            .clamp(1, agentbench_core::supervisor_log::LOG_PAGE_MAX);
+        let filter = if wheres.is_empty() { String::new() } else { format!(" WHERE {}", wheres.join(" AND ")) };
+        let sql = format!("{LOG_SELECT}{filter} ORDER BY l.id DESC LIMIT {}", limit + 1);
+        let db = self.db();
+        let mut stmt = db.prepare(&sql)?;
+        let mut items: Vec<agentbench_core::LogItem> =
+            stmt.query_map(rusqlite::params_from_iter(args.iter()), log_row)?.collect::<rusqlite::Result<_>>()?;
+        let more = items.len() > limit;
+        items.truncate(limit);
+        let open: i64 =
+            db.query_row("SELECT COUNT(*) FROM supervisor_log WHERE closed_at IS NULL", [], |r| r.get(0))?;
+        Ok(agentbench_core::SupervisorLog {
+            next_before: if more { items.last().map(|i| i.id) } else { None },
+            items,
+            open: open as usize,
+        })
+    }
+
+    pub fn log_waiting_for_reply(&self, supervisor: SessionId) -> Result<Vec<(Id, i64)>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT id, arrived_at FROM supervisor_log WHERE supervisor = ?1 AND kind = 'user'
+             AND closed_at IS NOT NULL AND reply = '' AND arrived_at >= ?2 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![supervisor.to_string(), now() - MS_PER_DAY], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn prune_log(&self, before: i64) -> Result<usize> {
+        let db = self.db();
+        Ok(db.execute("DELETE FROM supervisor_log WHERE arrived_at < ?1", [before])?)
     }
 
     pub fn close_open_items(&self, ids: &[Id]) -> Result<()> {

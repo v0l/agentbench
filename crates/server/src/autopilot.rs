@@ -1865,6 +1865,16 @@ impl Shipped {
 }
 
 pub fn ship(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
+    let done = ship_now(store, session);
+    let line = match &done {
+        Ok(s) => s.describe(),
+        Err(un) => format!("not merged: {}", clip(&un.why(), 300)),
+    };
+    let _ = store.set_log_merge(session.id, &line);
+    done
+}
+
+fn ship_now(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
     let fail = |s: String| Unshipped::Failed(s);
     let (Ok(project), Ok(tree)) =
         (store.project(session.project_id), store.worktree(session.worktree_id))

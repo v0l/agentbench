@@ -1,4 +1,5 @@
-use crate::store::{OpenItem, Store};
+use crate::store::{Closing, NewLogItem, OpenItem, Store};
+use agentbench_core::supervisor_log::{LOG_CLIP, LOG_DAYS_DEFAULT, LOG_DAYS_SETTING, clip_chars, first_sentence};
 use agentbench_core::{Entry, IssueState, SessionId};
 use serde_json::Value;
 use std::path::Path;
@@ -34,51 +35,163 @@ fn clip(text: &str) -> String {
     }
 }
 
+fn short(text: &str) -> String {
+    clip_chars(text.trim(), LOG_CLIP).0
+}
+
 pub fn delivered(store: &Store, supervisor: SessionId, source: &str, worker: Option<SessionId>, text: &str) {
     let kind = kind_of(source);
-    if !is_tracked(kind) {
-        return;
-    }
+    let tracked = is_tracked(kind);
     let target = worker.map(|w| w.to_string());
-    let already = store.open_items(supervisor).unwrap_or_default().iter().any(|i| {
-        i.kind == kind && i.target == target && (kind != "user" && i.text == clip(text) || kind == "judge")
-    });
+    let already = tracked
+        && store.open_items(supervisor).unwrap_or_default().iter().any(|i| {
+            i.kind == kind && i.target == target && (kind != "user" && i.text == clip(text) || kind == "judge")
+        });
     if already {
         if kind == "judge" {
-            let stale: Vec<_> = store
+            let stale: Vec<OpenItem> = store
                 .open_items(supervisor)
                 .unwrap_or_default()
-                .iter()
+                .into_iter()
                 .filter(|i| i.kind == kind && i.target == target)
-                .map(|i| i.id)
                 .collect();
-            let _ = store.close_open_items(&stale);
+            close_items(store, &stale, &Closing::new("superseded").outcome("a newer judge request replaced this one"));
         } else {
             return;
         }
     }
+    let log_id = log_arrival(store, supervisor, source, kind, worker, text, tracked);
+    if !tracked {
+        return;
+    }
     let head = (kind == "judge")
         .then(|| worker.and_then(|w| store.session(w).ok()).and_then(|s| crate::autopilot::head_of(store, &s)))
         .flatten();
-    let _ = store.add_open_item(supervisor, kind, target.as_deref(), head.as_deref(), &clip(text));
+    let _ = store.add_open_item(supervisor, kind, target.as_deref(), head.as_deref(), &clip(text), log_id);
+}
+
+fn log_arrival(
+    store: &Store,
+    supervisor: SessionId,
+    source: &str,
+    kind: &str,
+    worker: Option<SessionId>,
+    text: &str,
+    needs_answer: bool,
+) -> Option<agentbench_core::Id> {
+    prune(store);
+    let asking = worker.and_then(|w| store.session(w).ok());
+    let named = source.split_once(' ').map(|(_, name)| name.trim()).filter(|n| !n.is_empty());
+    let project_id = asking.as_ref().map(|s| s.project_id).or_else(|| {
+        named.and_then(|n| store.projects().ok()?.into_iter().find(|p| p.name == n).map(|p| p.id))
+    });
+    let asker = match (kind, &asking) {
+        ("user", _) => "user".to_string(),
+        (_, Some(s)) => s.id.to_string(),
+        _ => "autopilot".to_string(),
+    };
+    let item = NewLogItem {
+        supervisor: Some(supervisor),
+        kind,
+        asker: &asker,
+        asker_title: asking.as_ref().map(|s| s.title.as_str()).unwrap_or_default(),
+        session: worker,
+        project_id,
+        issue_id: asking.as_ref().and_then(|s| s.issue_id),
+        question: text.trim(),
+        needs_answer,
+    };
+    store.add_log(&item).ok()
+}
+
+pub fn log_days(store: &Store) -> i64 {
+    store
+        .setting(LOG_DAYS_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(LOG_DAYS_DEFAULT)
+}
+
+fn prune(store: &Store) {
+    let days = log_days(store);
+    if days > 0 {
+        let _ = store.prune_log(crate::store::now() - days * 86_400_000);
+    }
+}
+
+fn close_items(store: &Store, items: &[OpenItem], closing: &Closing) {
+    if items.is_empty() {
+        return;
+    }
+    for item in items {
+        if let Some(log) = item.log_id {
+            let _ = store.close_log(log, closing);
+        }
+    }
+    let ids: Vec<_> = items.iter().map(|i| i.id).collect();
+    let _ = store.close_open_items(&ids);
 }
 
 pub fn duplicate_judge(store: &Store, worker: SessionId) -> bool {
     store.session(worker).is_ok_and(|s| crate::autopilot::already_judged(store, &s))
 }
 
-fn close_where(store: &Store, supervisor: SessionId, pick: impl Fn(&OpenItem) -> bool) {
-    let ids: Vec<_> =
-        store.open_items(supervisor).unwrap_or_default().iter().filter(|i| pick(i)).map(|i| i.id).collect();
-    if !ids.is_empty() {
-        let _ = store.close_open_items(&ids);
-    }
+fn close_where(store: &Store, supervisor: SessionId, closing: &Closing, pick: impl Fn(&OpenItem) -> bool) {
+    let items: Vec<OpenItem> =
+        store.open_items(supervisor).unwrap_or_default().into_iter().filter(|i| pick(i)).collect();
+    close_items(store, &items, closing);
 }
 
-pub fn closed_by(store: &Store, tool: &str, args: &Value, supervisor: SessionId) {
+fn arg<'a>(args: &'a Value, key: &str) -> &'a str {
+    args.get(key).and_then(Value::as_str).map(str::trim).unwrap_or_default()
+}
+
+pub fn closing_for(tool: &str, args: &Value, out: &Value) -> Closing {
+    let summary = arg(args, "answer_summary");
+    let mut c = match tool {
+        "judge_session" => {
+            let mut outcome = arg(args, "reason").to_string();
+            let followup = arg(args, "followup");
+            if !followup.is_empty() {
+                outcome = format!("{outcome}. Followup: {followup}");
+            }
+            Closing::new(tool).detail(arg(args, "verdict")).outcome(short(&outcome))
+        }
+        "check_in" => Closing::new(tool).detail(arg(args, "action").to_lowercase()).outcome(short(arg(args, "text"))),
+        "answer_session" => Closing::new(tool).outcome(short(arg(args, "answer"))),
+        "escalate_question" => Closing::new(tool).outcome(short(arg(args, "recommendation"))),
+        "file_issue" => {
+            let n = out.get("filed").and_then(Value::as_i64);
+            let mut c = Closing::new(tool)
+                .detail(n.map(|n| format!("#{n}")).unwrap_or_default())
+                .outcome(short(arg(args, "title")));
+            c.issue_id = n;
+            c
+        }
+        "start_session" => {
+            let id = out.get("session").and_then(Value::as_str).unwrap_or_default();
+            let title = out.get("title").and_then(Value::as_str).unwrap_or_default();
+            let mut c = Closing::new(tool).detail(id.chars().take(8).collect::<String>()).outcome(short(title));
+            c.issue_id = args.get("issue").and_then(Value::as_i64);
+            c
+        }
+        "groom_done" => Closing::new(tool).outcome(short(arg(args, "summary"))),
+        "judge_issue" => Closing::new(tool).outcome(short(arg(args, "reason"))),
+        "main_checkout" => Closing::new(tool).detail(arg(args, "action")).outcome(short(arg(args, "message"))),
+        other => Closing::new(other),
+    };
+    if !summary.is_empty() {
+        c.outcome = short(summary);
+    }
+    c
+}
+
+pub fn closed_by(store: &Store, tool: &str, args: &Value, supervisor: SessionId, out: &Value) {
     let target = args.get("id").and_then(Value::as_str).map(|s| s.trim().to_string());
+    let closing = closing_for(tool, args, out);
     let on = |kinds: &'static [&'static str]| {
-        close_where(store, supervisor, |i| {
+        close_where(store, supervisor, &closing, |i| {
             kinds.contains(&i.kind.as_str()) && target.as_ref().is_some_and(|t| i.target.as_ref() == Some(t))
         })
     };
@@ -90,12 +203,14 @@ pub fn closed_by(store: &Store, tool: &str, args: &Value, supervisor: SessionId)
         "file_issue" | "start_session" => {
             let oldest = store.open_items(supervisor).unwrap_or_default().into_iter().find(|i| i.kind == "user");
             if let Some(item) = oldest {
-                let _ = store.close_open_items(&[item.id]);
+                close_items(store, &[item], &closing);
             }
         }
-        "groom_done" => close_where(store, supervisor, |i| i.kind == "groom"),
-        "judge_issue" if crate::judging::all_answered(store) => close_where(store, supervisor, |i| i.kind == "judge_issues"),
-        "main_checkout" => close_where(store, supervisor, |i| i.kind == "main_dirty"),
+        "groom_done" => close_where(store, supervisor, &closing, |i| i.kind == "groom"),
+        "judge_issue" if crate::judging::all_answered(store) => {
+            close_where(store, supervisor, &closing, |i| i.kind == "judge_issues")
+        }
+        "main_checkout" => close_where(store, supervisor, &closing, |i| i.kind == "main_dirty"),
         _ => {}
     }
 }
@@ -116,36 +231,65 @@ fn target_settled(store: &Store, target: SessionId, kind: &str) -> bool {
     crate::git::is_merged(main, branch)
 }
 
+fn settled_why(store: &Store, target: SessionId) -> &'static str {
+    match store.session(target) {
+        Err(_) => "the session is gone",
+        Ok(s) if s.issue_id.is_some_and(|i| store.issue(i).is_ok_and(|i| i.state == IssueState::Done)) => {
+            "the issue is done"
+        }
+        Ok(_) => "the branch is merged",
+    }
+}
+
 pub fn sweep(store: &Store, supervisor: SessionId) {
-    let settled: Vec<_> = store
+    let settled: Vec<(OpenItem, SessionId)> = store
         .open_items(supervisor)
         .unwrap_or_default()
         .into_iter()
         .filter(|i| i.kind != "user")
-        .filter(|i| i.target.as_deref().and_then(|t| t.parse().ok()).is_some_and(|t| target_settled(store, t, &i.kind)))
-        .map(|i| i.id)
+        .filter_map(|i| {
+            let t: SessionId = i.target.as_deref()?.parse().ok()?;
+            target_settled(store, t, &i.kind).then_some((i, t))
+        })
         .collect();
-    if !settled.is_empty() {
-        let _ = store.close_open_items(&settled);
+    for (item, target) in settled {
+        close_items(store, &[item], &Closing::new("settled").outcome(settled_why(store, target)));
     }
+}
+
+fn replies(store: &Store, supervisor: SessionId) -> Vec<(i64, String)> {
+    let rows = store.messages(supervisor, 0).unwrap_or_default();
+    agentbench_core::shown(&rows)
+        .into_iter()
+        .filter_map(|m| match m.entry {
+            Entry::Assistant { text } => Some((m.created_at, text)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn reply_after(replies: &[(i64, String)], at: i64) -> Option<&str> {
+    replies.iter().find(|(t, _)| *t >= at).map(|(_, text)| text.as_str())
 }
 
 pub fn close_replied(store: &Store, supervisor: SessionId) {
     let users: Vec<OpenItem> =
         store.open_items(supervisor).unwrap_or_default().into_iter().filter(|i| i.kind == "user").collect();
-    if users.is_empty() {
+    let waiting = store.log_waiting_for_reply(supervisor).unwrap_or_default();
+    if users.is_empty() && waiting.is_empty() {
         return;
     }
-    let rows = store.messages(supervisor, 0).unwrap_or_default();
-    let replies: Vec<i64> = agentbench_core::shown(&rows)
-        .into_iter()
-        .filter(|m| matches!(m.entry, Entry::Assistant { .. }))
-        .map(|m| m.created_at)
-        .collect();
-    let ids: Vec<_> =
-        users.iter().filter(|u| replies.iter().any(|r| *r >= u.delivered_at)).map(|u| u.id).collect();
-    if !ids.is_empty() {
-        let _ = store.close_open_items(&ids);
+    let said = replies(store, supervisor);
+    for u in users {
+        if let Some(text) = reply_after(&said, u.delivered_at) {
+            let closing = Closing { reply: short(text), ..Closing::new("replied").outcome(first_sentence(text)) };
+            close_items(store, &[u], &closing);
+        }
+    }
+    for (id, arrived) in waiting {
+        if let Some(text) = reply_after(&said, arrived) {
+            let _ = store.set_log_outcome(id, &first_sentence(text), &short(text));
+        }
     }
 }
 
@@ -215,8 +359,7 @@ pub fn at_turn_end(store: &Store, supervisor: SessionId, now: i64) -> Hold {
     let lines: Vec<String> = open.iter().enumerate().map(|(n, i)| line(n + 1, i, now)).collect();
     if sent >= MAX_NUDGES {
         let _ = store.set_setting(&key, "0");
-        let ids: Vec<_> = open.iter().map(|i| i.id).collect();
-        let _ = store.close_open_items(&ids);
+        close_items(store, &open, &Closing::new("stale").outcome(format!("still open after {MAX_NUDGES} reminders")));
         return Hold::GiveUp(lines);
     }
     let _ = store.set_setting(&key, &(sent + 1).to_string());
