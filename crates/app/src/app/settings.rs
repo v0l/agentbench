@@ -952,11 +952,18 @@ pub(super) fn speech_section(
                 "auto send delay",
                 "Seconds to wait before sending, 1 to 30. A few seconds is enough to read the text; raise it to leave more time to cancel.",
                 |ui| {
-                    ui.add(
+                    let drag = ui.add(
                         egui::DragValue::new(&mut sp.auto_send_secs)
                             .range(crate::voice::AUTO_SEND_SECS)
                             .suffix(" s"),
                     );
+                    drag.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::SpinButton,
+                            true,
+                            "auto send delay",
+                        )
+                    });
                 },
             );
         }
