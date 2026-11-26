@@ -26,6 +26,8 @@ pub struct Limits {
     pub critical_swap_gb: f32,
     pub swap_pages: f32,
     pub critical_swap_pages: f32,
+    pub swap_grow_gb: f32,
+    pub swap_full_pct: f32,
     pub hold_ms: i64,
     pub critical_hold_ms: i64,
     pub cooldown_ms: i64,
@@ -48,6 +50,8 @@ impl Default for Limits {
             critical_swap_gb: 0.0,
             swap_pages: 100.0,
             critical_swap_pages: 1000.0,
+            swap_grow_gb: 1.0,
+            swap_full_pct: 85.0,
             hold_ms: 60_000,
             critical_hold_ms: 30_000,
             cooldown_ms: 300_000,
@@ -81,6 +85,8 @@ pub fn limits(store: &Store) -> Limits {
         critical_swap_gb: f("critical_swap_gb", d.critical_swap_gb),
         swap_pages: f("swap_pages", d.swap_pages),
         critical_swap_pages: f("critical_swap_pages", d.critical_swap_pages),
+        swap_grow_gb: f("swap_grow_gb", d.swap_grow_gb),
+        swap_full_pct: f("swap_full_pct", d.swap_full_pct),
         hold_ms: secs("hold_secs", d.hold_ms),
         critical_hold_ms: secs("critical_hold_secs", d.critical_hold_ms),
         cooldown_ms: secs("cooldown_secs", d.cooldown_ms),
@@ -152,8 +158,28 @@ fn swapping_text(r: &PressureReadings) -> String {
 }
 
 pub struct SwapTrend {
-    pub growing: bool,
-    pub grew_over_gb: bool,
+    pub grew: u64,
+    pub window_secs: i64,
+}
+
+const PAGING_OUT_FLOOR: f32 = 10.0;
+
+fn paging_out(r: &PressureReadings) -> bool {
+    r.swap_out_rate.is_some_and(|v| v > PAGING_OUT_FLOOR)
+}
+
+fn growing(r: &PressureReadings, l: &Limits, trend: &SwapTrend) -> bool {
+    l.swap_grow_gb > 0.0 && gb(trend.grew) >= l.swap_grow_gb as f64 && paging_out(r)
+}
+
+fn grew_text(used: u64, r: &PressureReadings, trend: &SwapTrend) -> String {
+    format!("swap grew {} in {} s to {}", gb_text(trend.grew), trend.window_secs, swap_text(used, &r.swap_device).trim_start_matches("swap "))
+}
+
+fn swap_full(r: &PressureReadings, l: &Limits) -> Option<f64> {
+    let (used, total) = (r.swap_used?, r.swap_total?);
+    let pct = used as f64 * 100.0 / total as f64;
+    (l.swap_full_pct > 0.0 && total > 0 && pct > l.swap_full_pct as f64).then_some(pct)
 }
 
 fn above(v: Option<f32>, limit: f32) -> Option<f32> {
@@ -176,8 +202,8 @@ fn hits(r: &PressureReadings, l: &Limits, trend: &SwapTrend) -> (Vec<Hit>, Vec<H
     let rate = swap_rate(r);
     if l.swap_pages > 0.0 && rate > l.swap_pages {
         p.push(Hit { key: "swap", text: swapping_text(r) });
-    } else if let Some(s) = r.swap_used.filter(|s| trend.growing && gb(*s) > l.swap_gb as f64) {
-        p.push(Hit { key: "swap", text: swap_text(s, &r.swap_device) });
+    } else if let Some(s) = r.swap_used.filter(|s| growing(r, l, trend) && gb(*s) > l.swap_gb as f64) {
+        p.push(Hit { key: "swap", text: grew_text(s, r, trend) });
     }
     if let Some(v) = above(r.cpu_some60, l.cpu_some) {
         p.push(pct("cpu_some", "cpu some", v));
@@ -199,10 +225,13 @@ fn hits(r: &PressureReadings, l: &Limits, trend: &SwapTrend) -> (Vec<Hit>, Vec<H
     if let Some(m) = r.mem_available.filter(|m| gb(*m) < l.critical_mem_available_gb as f64) {
         c.push(Hit { key: "c_mem_available", text: format!("{} available", gb_text(m)) });
     }
+    if let Some(pct) = swap_full(r, l) {
+        c.push(Hit { key: "c_swap_full", text: format!("swap {pct:.0} percent full") });
+    }
     if l.critical_swap_pages > 0.0 && rate > l.critical_swap_pages {
         c.push(Hit { key: "c_swap", text: swapping_text(r) });
     } else if let Some(s) = r.swap_used.filter(|s| l.critical_swap_gb > 0.0 && gb(*s) > l.critical_swap_gb as f64) {
-        let trouble = trend.grew_over_gb
+        let trouble = growing(r, l, trend)
             || r.mem_available.is_some_and(|m| gb(m) < l.mem_available_gb as f64)
             || above(r.memory_some10, 5.0).is_some();
         if trouble {
@@ -290,13 +319,11 @@ impl Monitor {
             }
             self.swaps.push_back((now, s));
         }
-        let growing = r.swap_used.is_some_and(|s| {
-            self.swaps.iter().rev().skip(1).map(|(_, v)| *v).min().is_some_and(|low| s > low)
+        let grew = r.swap_used.map_or(0, |s| {
+            self.swaps.iter().rev().skip(1).map(|(_, v)| *v).min().map_or(0, |low| s.saturating_sub(low))
         });
-        let grew_over_gb = r.swap_used.is_some_and(|s| {
-            self.swaps.iter().rev().skip(1).map(|(_, v)| *v).min().is_some_and(|low| s.saturating_sub(low) as f64 > GB)
-        });
-        let (p, c) = hits(&r, l, &SwapTrend { growing, grew_over_gb });
+        let trend = SwapTrend { grew, window_secs: l.hold_ms / 1000 };
+        let (p, c) = hits(&r, l, &trend);
         self.readings = r;
         let keys: HashSet<&'static str> = p.iter().chain(&c).map(|h| h.key).collect();
         self.held.retain(|k, _| keys.contains(k));
@@ -392,6 +419,7 @@ pub(crate) mod tests {
             io_full60: Some(1.0),
             mem_available: Some(40 * 1024 * 1024 * 1024),
             swap_used: Some(0),
+            swap_total: None,
             swap_device: Some("nvme1n1p1".into()),
             swap_in_rate: None,
             swap_out_rate: None,
@@ -499,11 +527,23 @@ pub(crate) mod tests {
         let mut used = 6 * gib;
         while m.state() == PressureState::Ok && t < 400 * S {
             used += gib / 4;
-            m.observe(PressureReadings { swap_used: Some(used), ..calm() }, &Limits::default(), 8, t);
+            m.observe(PressureReadings { swap_used: Some(used), swap_out_rate: Some(50.0), ..calm() }, &Limits::default(), 8, t);
             t += 10 * S;
         }
         assert_eq!(m.state(), PressureState::Pressure);
+        assert!(m.reason.contains("swap grew 1.5 GB in 60 s to "), "{}", m.reason);
         assert!(m.reason.contains("swap on nvme1n1p1"), "{}", m.reason);
+    }
+
+    #[test]
+    fn swap_growth_without_paging_out_is_not_pressure() {
+        let mut m = Monitor::default();
+        let gib = 1024 * 1024 * 1024u64;
+        for i in 0..40u64 {
+            let r = PressureReadings { swap_used: Some(6 * gib + i * gib / 4), swap_out_rate: Some(0.0), ..calm() };
+            m.observe(r, &Limits::default(), 8, i as i64 * 10 * S);
+        }
+        assert_eq!(m.state(), PressureState::Ok);
     }
 
     #[test]
@@ -518,6 +558,40 @@ pub(crate) mod tests {
             m.observe(r.clone(), &l, 8, 700 * S + t * 10 * S);
         }
         assert_eq!(m.state(), PressureState::Ok, "a person's limit still needs evidence");
+    }
+
+    pub(crate) fn live_idle_host() -> PressureReadings {
+        PressureReadings {
+            swap_used: Some(24_800_000_000),
+            swap_total: Some(49_000_000_000),
+            swap_in_rate: Some(0.0),
+            swap_out_rate: Some(0.0),
+            io_full10: Some(0.3),
+            io_some10: Some(0.4),
+            memory_some10: Some(0.0),
+            memory_full10: Some(0.0),
+            cpu_some60: Some(1.0),
+            mem_available: Some(25_000_000_000),
+            load_per_core: Some(0.12),
+            ..calm()
+        }
+    }
+
+    #[test]
+    fn the_live_idle_host_with_creeping_stale_swap_stays_ok() {
+        let mut m = Monitor::default();
+        let l = Limits::default();
+        let creep = [24_800_000_000u64, 24_800_000_000, 24_810_000_000];
+        let mut used = 0;
+        for i in 0..90u64 {
+            used = creep[(i % 3) as usize] + (i / 3) * 10_000_000;
+            let r = PressureReadings { swap_used: Some(used), ..live_idle_host() };
+            let ev = m.observe(r, &l, 5, i as i64 * 10 * S);
+            assert!(ev.is_empty(), "sample {i}: {ev:?}");
+        }
+        assert!(used > 25_000_000_000);
+        assert_eq!(m.state(), PressureState::Ok);
+        assert_eq!(m.effective_cap(5, 900 * S, &l), 5);
     }
 
     #[test]

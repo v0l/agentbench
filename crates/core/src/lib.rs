@@ -2582,6 +2582,8 @@ pub struct PressureReadings {
     #[serde(default)]
     pub swap_used: Option<u64>,
     #[serde(default)]
+    pub swap_total: Option<u64>,
+    #[serde(default)]
     pub swap_device: Option<String>,
     #[serde(default)]
     pub swap_in_rate: Option<f32>,
