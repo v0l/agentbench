@@ -2118,6 +2118,11 @@ impl App {
     }
 
     #[doc(hidden)]
+    pub fn voice_test_duplex_model(&mut self, model: &str) {
+        self.speech.duplex_model = model.to_string();
+    }
+
+    #[doc(hidden)]
     pub fn voice_test_duplex_on(&self) -> bool {
         self.bridge.conn() == crate::voice::Conn::Ready
     }

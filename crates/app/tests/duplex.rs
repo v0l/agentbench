@@ -386,6 +386,51 @@ fn the_duplex_settings_fit_at_both_sizes() {
 }
 
 #[test]
+#[ignore = "needs a running inference-bench duplex server in AGENTBENCH_DUPLEX_URL"]
+fn a_real_duplex_server_takes_the_start_frames_say_and_interrupt() {
+    let url = std::env::var("AGENTBENCH_DUPLEX_URL").expect("AGENTBENCH_DUPLEX_URL");
+    let rig = rig_with(vec![agent("glib", THREE_SENTENCES)]);
+    supervisor(&rig, "glib");
+    let mut h = harness_cfg(
+        vec![
+            ("url".into(), rig.url.clone()),
+            ("voice_converse".into(), "1".into()),
+            ("voice_hands_free".into(), "1".into()),
+            ("voice_mode".into(), "agentbench".into()),
+        ],
+        Cfg::default(),
+    );
+    h.state_mut().voice_test_silent();
+    h.state_mut().voice_test_hands_free(agentbench::voice::Sink::Headphones);
+    h.state_mut().voice_test_duplex(&url);
+    h.state_mut().voice_test_duplex_model(&std::env::var("AGENTBENCH_DUPLEX_MODEL").unwrap_or_default());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_supervisor();
+    let t = Instant::now();
+    while !h.state().voice_test_duplex_on() {
+        assert!(t.elapsed() < Duration::from_secs(120), "no ready: {:?}", h.state().voice_test_notice());
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    hear_live(&mut h, &room(2.0));
+    let mut heard = 0;
+    for _ in 0..30 {
+        let f = h.state().voice_test_duplex_pull().unwrap();
+        assert_eq!(f.len(), FRAME);
+        heard += f.iter().any(|v| *v != 0.0) as usize;
+        h.step();
+        std::thread::sleep(Duration::from_millis(133));
+    }
+    eprintln!("{} frames sent, {heard} of 30 pulled frames had sound", h.state().voice_test_duplex_sent());
+    assert!(heard > 0, "the server sent audio back");
+    let sid = h.state().supervisor_chat().unwrap();
+    h.state_mut().voice_test_send("what are the workers doing");
+    until(&mut h, "the reply", |h| h.state().transcript_talk(sid).iter().any(|l| l.starts_with("assistant: ")));
+    until(&mut h, "the says", |h| h.state().voice_test_duplex_says().len() >= 3);
+    assert!(h.state().voice_test_notice().is_none_or(|n| !n.contains("duplex")), "{:?}", h.state().voice_test_notice());
+}
+
+#[test]
 fn with_no_duplex_model_hands_free_keeps_text_to_speech() {
     let rig = rig_with(vec![agent("glib", THREE_SENTENCES)]);
     supervisor(&rig, "glib");
