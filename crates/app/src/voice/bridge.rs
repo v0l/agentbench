@@ -35,6 +35,7 @@ pub struct Bridge {
     link: Option<Link>,
     model: Option<DuplexModel>,
     framer: Framer,
+    framer_rate: u32,
     conn: Conn,
     said_at: Option<Instant>,
     voiced_at: Option<Instant>,
@@ -52,6 +53,7 @@ impl Default for Bridge {
             link: None,
             model: None,
             framer: Framer::new(super::RATE),
+            framer_rate: super::RATE,
             conn: Conn::Off,
             said_at: None,
             voiced_at: None,
@@ -154,14 +156,23 @@ impl Bridge {
     }
 
     pub fn feed(&mut self, pcm: &[f32], rate: u32) {
-        let Some(link) = &self.link else { return };
-        if rate != super::RATE && self.sent_frames == 0 {
-            self.framer = Framer::new(rate);
+        if self.link.is_none() {
+            return;
         }
-        for frame in self.framer.push(pcm) {
+        for frame in self.frames(pcm, rate) {
             self.sent_frames += 1;
-            link.send_frame(frame);
+            if let Some(link) = &self.link {
+                link.send_frame(frame);
+            }
         }
+    }
+
+    fn frames(&mut self, pcm: &[f32], rate: u32) -> Vec<Vec<u8>> {
+        if rate != self.framer_rate {
+            self.framer = Framer::new(rate);
+            self.framer_rate = rate;
+        }
+        self.framer.push(pcm)
     }
 
     pub fn say(&mut self, sentence: &str, now: Instant) {
@@ -273,6 +284,17 @@ mod tests {
         assert_eq!(bytes.len(), DUPLEX_RATE as usize * VOICE_SECONDS * 2);
         assert!(voice_clip("/no/such/clip.wav").unwrap_err().contains("clip"));
         assert_eq!(voice_clip("  ").unwrap(), None);
+    }
+
+    #[test]
+    fn a_48_khz_microphone_fed_a_little_each_frame_still_fills_frames() {
+        let mut b = Bridge::default();
+        let mut frames = Vec::new();
+        for _ in 0..60 {
+            frames.extend(b.frames(&vec![0.1f32; 800], 48_000));
+        }
+        assert_eq!(frames.len(), 7, "one second at 24 kHz is seven and a half frames");
+        assert!(frames.iter().all(|f| f.len() == super::super::duplex::FRAME_BYTES));
     }
 
     #[test]
