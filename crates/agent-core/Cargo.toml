@@ -33,6 +33,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io
 tokio-util = "0.7"
 tracing = "0.1"
 url = "2"
+sha2 = "0.10"
 libc = "0.2"
 webpki-roots = "1"
 

@@ -10,7 +10,8 @@ const DEFAULT_TIMEOUT: u64 = 120;
 const MAX_TIMEOUT: u64 = 900;
 const OUTPUT_WAIT_MAX: u64 = 60;
 
-pub const NAMES: [&str; 18] = [
+pub const NAMES: [&str; 19] = [
+    "save_file",
     "bash",
     "bash_output",
     "bash_kill",
@@ -130,6 +131,11 @@ impl Toolbox<'_> {
                 .and_then(|p| ws.read(&p, number(&args, "offset"), number(&args, "limit"))),
             "write_file" => need(&args, "path")
                 .and_then(|p| ws.write(&p, &text(&args, "content").unwrap_or_default())),
+            "save_file" => need(&args, "from").and_then(|f| {
+                let to = need(&args, "to")?;
+                let over = args.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+                ws.save(&f, &to, over)
+            }),
             "edit_file" => (|| {
                 let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
                 ws.edit(

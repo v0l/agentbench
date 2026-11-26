@@ -98,6 +98,22 @@ action = "refuse"
 message = "Workers never push to main or master, force push or delete remote branches: they commit on their branch and the supervisor or autopilot merges."
 
 [[rule]]
+id = "no-bash-file-edits"
+tools = ["bash"]
+fields = ["command"]
+pattern = '(?i)(\bsed\s+-i\b|\bperl\s+-[a-z]*i\b|\bcat\s*>+\s*\S|\btee\s+\S+\.(rs|ts|tsx|js|jsx|py|toml|json|md|css|html|yml|yaml|sql|sh)\b|\s>\s*\S+\.(rs|ts|tsx|js|jsx|py|toml|json|md|css|html|yml|yaml|sql|sh)\b)'
+action = "refuse"
+message = "Do not edit or create files from bash. Use edit_file to change one, write_file to create one, replace_in_files to change many. To place a file you already produced use save_file from= to=."
+
+[[rule]]
+id = "no-script-file-edits"
+tools = ["bash"]
+fields = ["command"]
+pattern = '(?is)\b(python3?|perl|ruby|node)\b.*(open\([^)]*,\s*[\x27"][wa]b?[\x27"]|write_text\(|write_bytes\(|writeFileSync|writeFile\(|File\.write)'
+action = "refuse"
+message = "Do not edit or create files from a script run in bash. Use edit_file or replace_in_files for changes and write_file for a new file. To place a file you already produced use save_file from= to=."
+
+[[rule]]
 id = "owner-approves-and-merges"
 tools = ["bash"]
 fields = ["command"]
@@ -245,6 +261,15 @@ mod tests {
 
     fn id(tool: &str, args: Value) -> Option<String> {
         matches(&rules(), tool, &args).map(|h| h.id)
+    }
+
+    #[test]
+    fn a_refused_redirect_or_script_write_names_save_file() {
+        let all = rules();
+        for cmd in ["cat /tmp/x.json > fixtures/a.json", "python3 -c \"open('a.json','w').write('x')\""] {
+            let hit = matches(&all, "bash", &json!({"command": cmd})).expect(cmd);
+            assert!(hit.refusal().contains("save_file from= to="), "{}", hit.refusal());
+        }
     }
 
     #[test]

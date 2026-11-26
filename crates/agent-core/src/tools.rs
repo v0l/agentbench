@@ -119,6 +119,18 @@ pub fn builtin() -> Vec<Spec> {
             ),
         ),
         Spec::new(
+            "save_file",
+            "Copy a file you already produced (a capture, a recorded fixture, a build output) into the workspace unchanged, without passing its content through the model. `from` is a path you may read, `to` a path in the workspace. A tracked file is not replaced unless overwrite is true. The answer gives the size and sha256.",
+            object(
+                json!({
+                    "from": string("The file to copy, for example under /tmp"),
+                    "to": string("Where to put it in the workspace"),
+                    "overwrite": { "type": "boolean", "description": "Replace a tracked file" },
+                }),
+                &["from", "to"],
+            ),
+        ),
+        Spec::new(
             "edit_file",
             "Replace text in a file in the workspace. `old` must match the file exactly and \
              appear once, unless all is true. Read the file first.",
@@ -272,6 +284,7 @@ file before you edit it. Paths are relative to the workspace. To use a folder ou
 project or a library, call request_access with the folder and a reason: the user chooses read only, \
 read and write, or no. Ask for the narrowest folder, and for read only unless you must change \
 something.\n\
+- To place a file you already produced (a capture or recorded fixture) use save_file from= to=: it copies the bytes unchanged and reports the sha256, so do not paste it into write_file.\n\
 - bash runs a shell command in a sandbox: it reads the system and the installed tools, writes \
 only inside the workspace and the folders the user shared for writing, and cannot see the rest of \
 the user's files. Use it for pipes, globs, scripts and anything the other tools do not cover. Pass \

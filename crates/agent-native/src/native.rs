@@ -3117,13 +3117,13 @@ impl Native {
     ) -> Result<String, String> {
         let number = |keys: &[&str]| files::number(args, keys);
         match name {
-            "list_files" | "read_file" | "write_file" | "edit_file" | "search_files"
-            | "replace_in_files" | "load_skill" => {
+            "list_files" | "read_file" | "write_file" | "save_file" | "edit_file"
+            | "search_files" | "replace_in_files" | "load_skill" => {
                 let (tool, call, space) = (name.to_string(), args.clone(), ws.clone());
                 let done = tokio::task::spawn_blocking(move || file_tool(&tool, &call, &space))
                     .await
                     .map_err(|e| e.to_string())?;
-                if matches!(name, "write_file" | "edit_file" | "replace_in_files") {
+                if matches!(name, "write_file" | "save_file" | "edit_file" | "replace_in_files") {
                     io.emit(Event::Usage(Usage { file_edits: 1, ..Usage::default() }));
                 }
                 let diff = done?;
@@ -3476,6 +3476,12 @@ fn file_tool(name: &str, args: &Value, ws: &Workspace) -> Result<String, String>
             &need_path()?,
             files::text(args, &["content", "text", "contents"]).unwrap_or_default(),
         ),
+        "save_file" => {
+            let from = files::text(args, &["from", "source", "src"]).ok_or("missing `from`")?;
+            let to = files::text(args, &["to", "dest", "destination"]).ok_or("missing `to`")?;
+            let overwrite = args.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
+            ws.save(from, to, overwrite)
+        }
         "edit_file" => files::edit(ws, args),
         "search_files" => super::search::search(ws, args),
         "replace_in_files" => super::replace::replace(ws, args),
