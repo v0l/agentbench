@@ -580,6 +580,7 @@ impl Engine {
         cmd.arg("--config")
             .arg(&config)
             .env("CUDA_VISIBLE_DEVICES", gpu.index.to_string())
+            .env("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
             .env(KEY_ENV, &key)
             .env("NO_COLOR", "1")
             .env_remove("INFERENCE_BENCH_SERVER_CONFIG")

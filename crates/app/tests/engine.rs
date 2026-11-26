@@ -450,15 +450,122 @@ fn a_missing_model_says_what_is_missing_and_falls_back_to_text_to_speech() {
     assert!(!h.state().voice_test_duplex_on());
 }
 
+fn real_engine() -> Option<(String, String)> {
+    Some((std::env::var("AGENTBENCH_REAL_ENGINE").ok()?, std::env::var("AGENTBENCH_REAL_MODEL").ok()?))
+}
+
+fn real_gpu() -> u32 {
+    std::env::var("AGENTBENCH_REAL_GPU").ok().and_then(|g| g.parse().ok()).unwrap_or(1)
+}
+
+fn smi_used(gpu: u32) -> u64 {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=index,memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| {
+            let (i, m) = l.split_once(',')?;
+            (i.trim().parse::<u32>().ok()? == gpu).then(|| m.trim().parse().ok())?
+        })
+        .unwrap_or(0)
+}
+
+fn twenty_seconds() -> Vec<f32> {
+    let rate = agentbench::voice::RATE;
+    let mut pcm = Vec::new();
+    while pcm.len() < rate as usize * 20 {
+        for wav in [&include_bytes!("fixtures/voice/speech.wav")[..], include_bytes!("fixtures/voice/ask.wav"), include_bytes!("fixtures/voice/barge.wav")] {
+            let (p, r) = agentbench::voice::read_wav(wav).unwrap();
+            pcm.extend(agentbench::voice::to_whisper_rate(&p, r));
+            pcm.extend(vec![0.0005f32; rate as usize]);
+        }
+    }
+    pcm.truncate(rate as usize * 20);
+    pcm
+}
+
+#[test]
+#[ignore = "needs the real engine and model in AGENTBENCH_REAL_ENGINE and AGENTBENCH_REAL_MODEL, on a free GPU"]
+fn the_real_model_loads_answers_with_sound_and_frees_its_gpu() {
+    let (program, model) = real_engine().expect("AGENTBENCH_REAL_ENGINE and AGENTBENCH_REAL_MODEL");
+    let gpu = real_gpu();
+    let before = smi_used(gpu);
+    let rig = rig_with(vec![agent("glib", REPLY)]);
+    supervisor(&rig);
+    let mut h = app(&rig, [1280.0, 800.0]);
+    h.state_mut().voice_test_real_engine(&program, &model, gpu);
+    let t = Instant::now();
+    h.state_mut().open_supervisor();
+    let mut lines = std::collections::BTreeSet::new();
+    while !h.state().voice_test_duplex_on() {
+        assert!(t.elapsed() < Duration::from_secs(300), "no ready: {:?}", h.state().voice_test_notice());
+        if let Some(p) = h.state().voice_progress() {
+            lines.insert(p);
+        }
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let ready = t.elapsed();
+    let load = h.state().voice_test_engine().load_time.unwrap();
+    let pid = h.state().voice_test_engine().pid().unwrap();
+    let held = smi_used(gpu);
+    eprintln!("progress lines: {:?}", lines.iter().take(3).collect::<Vec<_>>());
+    eprintln!("model loaded in {:.1} s, session ready {:.1} s after switch on, GPU {gpu} {before} MiB before, {held} MiB loaded", load.as_secs_f32(), ready.as_secs_f32());
+    assert!(!lines.is_empty(), "a loading line was shown");
+    let clip = twenty_seconds();
+    let block = agentbench::voice::RATE as usize / 50;
+    let start = Instant::now();
+    let (mut pulled, mut sound) = (0, 0);
+    let mut next_pull = Instant::now();
+    for (i, chunk) in clip.chunks(block).enumerate() {
+        let due = start + Duration::from_millis(20 * i as u64);
+        while Instant::now() < due {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        h.state_mut().voice_test_hear(chunk);
+        h.step();
+        if Instant::now() >= next_pull {
+            next_pull += Duration::from_millis(133);
+            let f = h.state().voice_test_duplex_pull().unwrap();
+            pulled += 1;
+            sound += f.iter().any(|v| v.abs() > 1e-4) as usize;
+        }
+    }
+    let sent = h.state().voice_test_duplex_sent();
+    eprintln!("20 s streamed: {sent} frames sent, {pulled} pulled, {sound} with sound");
+    assert!(sent >= 140, "{sent}");
+    assert!(sound > pulled / 4, "frames came back with sound: {sound} of {pulled}");
+    assert!(h.state().voice_test_notice().is_none_or(|n| !n.contains("voice model")), "{:?}", h.state().voice_test_notice());
+    h.state_mut().voice_test_speech().hands_free = false;
+    until(&mut h, "the engine to stop", |h| h.state().voice_test_engine().pid().is_none());
+    assert!(wait_gone(pid, Duration::from_secs(20)), "the engine exits");
+    let t = Instant::now();
+    while smi_used(gpu) > before + 200 && t.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let after = smi_used(gpu);
+    eprintln!("after switch off: GPU {gpu} {after} MiB");
+    assert!(after <= before + 200, "the memory is freed: {after} MiB against {before} before");
+}
+
 fn hold_an_engine() {
     let dir = PathBuf::from(std::env::var(HOLDER_ENV).unwrap());
     let rig = rig_with(vec![agent("glib", REPLY)]);
     supervisor(&rig);
     let kit = Kit::new("ok");
     let mut h = app(&rig, [1280.0, 800.0]);
-    kit.attach(&mut h, vec![card(1, 90)]);
+    match real_engine() {
+        Some((program, model)) => h.state_mut().voice_test_real_engine(&program, &model, real_gpu()),
+        None => kit.attach(&mut h, vec![card(1, 90)]),
+    }
     h.state_mut().open_supervisor();
-    until(&mut h, "the duplex session", |h| h.state().voice_test_duplex_on());
+    if real_engine().is_some() {
+        until(&mut h, "the engine to start", |h| h.state().voice_test_engine().pid().is_some());
+    } else {
+        until(&mut h, "the duplex session", |h| h.state().voice_test_duplex_on());
+    }
     let pid = h.state().voice_test_engine().pid().unwrap();
     std::fs::write(dir.join("engine.pid"), pid.to_string()).unwrap();
     loop {
