@@ -4,6 +4,46 @@
 /// What Whisper was trained on, and what a speech server is sent.
 pub const SPEECH_RATE: u32 = 16_000;
 
+pub const DUPLEX_RATE: u32 = 24_000;
+pub const DUPLEX_FRAME_SAMPLES: usize = 3_200;
+
+pub fn to_pcm16(pcm: &[f32]) -> Vec<u8> {
+    pcm.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect()
+}
+
+pub fn from_pcm16(bytes: &[u8]) -> Vec<f32> {
+    bytes.chunks_exact(2).map(|p| i16::from_le_bytes([p[0], p[1]]) as f32 / 32768.0).collect()
+}
+
+pub struct Resampler {
+    step: f64,
+    pos: f64,
+    carry: Vec<f32>,
+}
+
+impl Resampler {
+    pub fn new(from: u32, to: u32) -> Resampler {
+        Resampler { step: from as f64 / to.max(1) as f64, pos: 0.0, carry: Vec::new() }
+    }
+
+    pub fn push(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if input.is_empty() {
+            return;
+        }
+        let mut c = std::mem::take(&mut self.carry);
+        c.extend_from_slice(input);
+        while self.pos + 1.0 < c.len() as f64 {
+            let lo = self.pos as usize;
+            let t = (self.pos - lo as f64) as f32;
+            out.push(c[lo] * (1.0 - t) + c[lo + 1] * t);
+            self.pos += self.step;
+        }
+        let used = (self.pos as usize).min(c.len() - 1);
+        self.carry = c.split_off(used);
+        self.pos -= used as f64;
+    }
+}
+
 /// Mono samples at `from` Hz to `SPEECH_RATE`.
 ///
 /// Averages the source samples that fall under each output sample and then interpolates between
@@ -137,6 +177,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn pcm16_round_trips_and_clamps() {
+        let bytes = to_pcm16(&[0.0, 0.5, -0.5, 2.0]);
+        assert_eq!(bytes.len(), 8);
+        let back = from_pcm16(&bytes);
+        assert!((back[1] - 0.5).abs() < 1e-3 && (back[2] + 0.5).abs() < 1e-3);
+        assert!((back[3] - 1.0).abs() < 1e-3);
+        assert_eq!(from_pcm16(&[1, 2, 3]).len(), 1, "an odd byte is left out");
+    }
+
+    #[test]
+    fn streaming_resampling_matches_resampling_whole() {
+        let tone: Vec<f32> = (0..1600).map(|i| (i as f32 * 0.05).sin()).collect();
+        let whole = resample(&tone, 16_000, 24_000);
+        let (mut r, mut out) = (Resampler::new(16_000, 24_000), Vec::new());
+        for c in tone.chunks(97) {
+            r.push(c, &mut out);
+        }
+        assert!(out.len() + 3 >= whole.len() && out.len() <= whole.len());
+        for (a, b) in out.iter().zip(&whole) {
+            assert!((a - b).abs() < 1e-4, "{a} {b}");
+        }
+    }
 
     #[test]
     fn resampling_changes_length_by_the_ratio() {

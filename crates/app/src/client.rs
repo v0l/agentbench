@@ -126,14 +126,19 @@ fn ordered_writes() -> tokio::sync::mpsc::UnboundedSender<std::pin::Pin<Box<dyn 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn http() -> reqwest::Client {
+pub(crate) fn tls_config() -> rustls::ClientConfig {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
-    let tls = rustls::ClientConfig::builder_with_provider(provider)
+    rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("the ring provider supports the default TLS versions")
         .with_root_certificates(roots)
-        .with_no_client_auth();
+        .with_no_client_auth()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn http() -> reqwest::Client {
+    let tls = tls_config();
     reqwest::Client::builder()
         .tls_backend_preconfigured(tls)
         .connect_timeout(Duration::from_secs(5))

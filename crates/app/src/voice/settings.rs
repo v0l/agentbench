@@ -39,6 +39,19 @@ pub struct Settings {
     pub input_device: String,
     pub talk_key: String,
     pub hang_secs: f32,
+    pub duplex_url: String,
+    pub duplex_model: String,
+    pub duplex_key: String,
+    pub duplex_voice: String,
+    pub duplex_replies: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DuplexModel {
+    pub url: String,
+    pub model: String,
+    pub key: String,
+    pub voice: String,
 }
 
 pub const DEFAULT_TALK_KEY: &str = "F9";
@@ -69,6 +82,11 @@ impl Default for Settings {
             input_device: String::new(),
             talk_key: DEFAULT_TALK_KEY.into(),
             hang_secs: super::HANG_SECONDS,
+            duplex_url: String::new(),
+            duplex_model: String::new(),
+            duplex_key: String::new(),
+            duplex_voice: String::new(),
+            duplex_replies: true,
         }
     }
 }
@@ -122,6 +140,11 @@ impl Settings {
         s.url = st.get_string("voice_url").unwrap_or_default();
         s.key = st.get_string("voice_key").unwrap_or_default();
         s.server_model = st.get_string("voice_server_model").unwrap_or_default();
+        s.duplex_url = st.get_string("voice_duplex_url").unwrap_or_default();
+        s.duplex_model = st.get_string("voice_duplex_model").unwrap_or_default();
+        s.duplex_key = st.get_string("voice_duplex_key").unwrap_or_default();
+        s.duplex_voice = st.get_string("voice_duplex_voice").unwrap_or_default();
+        s.duplex_replies = st.get_string("voice_duplex_replies").as_deref() != Some("0");
         // A Kokoro id (`af_heart`) from before Phonon is not a name the server knows; it would be
         // read in the default voice anyway, so it is dropped here.
         if let Some(v) = st.get_string("voice_reply").filter(|v| !v.is_empty() && !v.contains('_'))
@@ -159,6 +182,21 @@ impl Settings {
         st.set_string("voice_input", self.input_device.clone());
         st.set_string("voice_talk_key", self.talk_key.clone());
         st.set_string("voice_hang_secs", self.hang_secs.to_string());
+        st.set_string("voice_duplex_url", self.duplex_url.clone());
+        st.set_string("voice_duplex_model", self.duplex_model.clone());
+        st.set_string("voice_duplex_key", self.duplex_key.clone());
+        st.set_string("voice_duplex_voice", self.duplex_voice.clone());
+        st.set_string("voice_duplex_replies", if self.duplex_replies { "1" } else { "0" }.into());
+    }
+
+    pub fn duplex(&self) -> Option<DuplexModel> {
+        let url = self.duplex_url.trim();
+        (!url.is_empty()).then(|| DuplexModel {
+            url: url.to_string(),
+            model: self.duplex_model.trim().to_string(),
+            key: self.duplex_key.trim().to_string(),
+            voice: self.duplex_voice.trim().to_string(),
+        })
     }
 
     pub fn talk_key(&self) -> Option<eframe::egui::Key> {
@@ -326,6 +364,34 @@ mod tests {
         assert!(back.echo_cancel);
         Settings { headphones: None, ..back }.save(&mut m);
         assert_eq!(Settings::load(Some(&m)).headphones, None);
+    }
+
+    #[test]
+    fn the_duplex_model_is_off_until_a_server_is_named_and_is_kept() {
+        let s = Settings::default();
+        assert_eq!(s.duplex(), None);
+        assert!(s.duplex_replies);
+        let mut m = Mem::default();
+        Settings {
+            duplex_url: " http://gpu:8080 ".into(),
+            duplex_model: "Haru-4B".into(),
+            duplex_key: "k".into(),
+            duplex_voice: "/tmp/me.wav".into(),
+            duplex_replies: false,
+            ..Default::default()
+        }
+        .save(&mut m);
+        let back = Settings::load(Some(&m));
+        assert!(!back.duplex_replies);
+        assert_eq!(
+            back.duplex(),
+            Some(DuplexModel {
+                url: "http://gpu:8080".into(),
+                model: "Haru-4B".into(),
+                key: "k".into(),
+                voice: "/tmp/me.wav".into(),
+            })
+        );
     }
 
     #[test]

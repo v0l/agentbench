@@ -24,6 +24,10 @@ pub use output::{Sink, Verdict};
 
 pub mod echo;
 
+pub mod duplex;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod link;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
