@@ -59,11 +59,37 @@ pub fn resident(root: Option<u32>) -> u64 {
 
 #[cfg(target_os = "macos")]
 fn ps_tree(root: u32) -> u64 {
-    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,rss="]).output() else {
-        return 0;
-    };
+    let (kids, rss) = ps_table();
+    tree_memory(root, |p| kids.get(&p).cloned().unwrap_or_default(), |p| rss.get(&p).copied().unwrap_or(0))
+}
+
+pub fn largest_child(root: u32) -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        let (kids, rss) = ps_table();
+        let children = |p: u32| kids.get(&p).cloned().unwrap_or_default();
+        largest_tree(root, children, |p| rss.get(&p).copied().unwrap_or(0))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        largest_tree(root, proc_children, proc_rss)
+    }
+}
+
+fn largest_tree(root: u32, children: impl Fn(u32) -> Vec<u32>, rss: impl Fn(u32) -> u64) -> u64 {
+    children(root).into_iter().map(|c| tree_memory(c, &children, &rss)).max().unwrap_or(0)
+}
+
+#[cfg(target_os = "macos")]
+type PsTable = (std::collections::HashMap<u32, Vec<u32>>, std::collections::HashMap<u32, u64>);
+
+#[cfg(target_os = "macos")]
+fn ps_table() -> PsTable {
     let mut kids: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     let mut rss: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,rss="]).output() else {
+        return (kids, rss);
+    };
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let f: Vec<u64> = line.split_whitespace().filter_map(|w| w.parse().ok()).collect();
         if let [pid, ppid, kb] = f[..] {
@@ -71,7 +97,7 @@ fn ps_tree(root: u32) -> u64 {
             rss.insert(pid as u32, kb * 1024);
         }
     }
-    tree_memory(root, |p| kids.get(&p).cloned().unwrap_or_default(), |p| rss.get(&p).copied().unwrap_or(0))
+    (kids, rss)
 }
 
 fn tree_memory(root: u32, children: impl Fn(u32) -> Vec<u32>, rss: impl Fn(u32) -> u64) -> u64 {
@@ -229,6 +255,15 @@ mod tests {
         seen.sort();
         seen.dedup();
         assert_eq!(seen, vec![10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn the_largest_child_is_the_heaviest_tree_under_the_root() {
+        let tree: HashMap<u32, Vec<u32>> = HashMap::from([(1, vec![10, 20]), (10, vec![11]), (20, vec![21, 22])]);
+        let rss = HashMap::from([(1, 1000u64), (10, 5), (11, 50), (20, 20), (21, 20), (22, 20)]);
+        let largest = largest_tree(1, |p| tree.get(&p).cloned().unwrap_or_default(), |p| rss[&p]);
+        assert_eq!(largest, 60);
+        assert_eq!(largest_tree(11, |p| tree.get(&p).cloned().unwrap_or_default(), |p| rss[&p]), 0);
     }
 
     #[tokio::test]
