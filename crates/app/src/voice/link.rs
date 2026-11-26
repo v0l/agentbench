@@ -26,7 +26,7 @@ pub struct Options {
 pub enum Event {
     Ready,
     Text(String),
-    Said(String),
+    Said { text: String, unsaid: u64 },
     Refused(String),
     Lost { why: String, retry_in: Duration },
 }
@@ -280,7 +280,10 @@ fn session(o: &Options, rx: &Receiver<Cmd>, tx: &Sender<Event>, shared: &Shared,
                 let v: Value = serde_json::from_str(&t).unwrap_or_default();
                 let ev = match v["type"].as_str() {
                     Some("text") => Some(Event::Text(v["text"].as_str().unwrap_or_default().to_string())),
-                    Some("said") => Some(Event::Said(v["text"].as_str().unwrap_or_default().to_string())),
+                    Some("said") => Some(Event::Said {
+                        text: v["text"].as_str().unwrap_or_default().trim().to_string(),
+                        unsaid: v["unsaid_tokens"].as_u64().unwrap_or(0),
+                    }),
                     Some("error") => Some(Event::Refused(message_of(&v))),
                     Some("end") => return Ended::Lost(v["reason"].as_str().unwrap_or("the session ended").to_string(), true),
                     _ => None,

@@ -354,14 +354,23 @@ impl App {
                         tokens(s.usage.input_tokens + s.usage.cache_read_tokens),
                         tokens(s.usage.output_tokens)
                     );
-                    chip(ui, &project, if supervisor { TRACE } else { READOUT }, true).on_hover_text(&about);
-                    if supervisor && self.voice.open() {
-                        let (word, tint) = if self.voice.in_speech() {
-                            ("hearing you", OK)
-                        } else {
-                            ("listening", OK)
+                    let talk = if supervisor { self.talk_state() } else { None };
+                    let narrow = ui.ctx().content_rect().width() < 600.0;
+                    if !(narrow && talk.is_some()) {
+                        chip(ui, &project, if supervisor { TRACE } else { READOUT }, true).on_hover_text(&about);
+                    }
+                    if let Some(word) = talk {
+                        let tint = match word {
+                            "supervisor thinking" | "connecting" | "reconnecting" => TRACE,
+                            "model speaking" => VALUE,
+                            _ => OK,
                         };
-                        let c = chip(ui, word, tint, true).on_hover_text(
+                        let shown = match word {
+                            "supervisor thinking" if narrow => "thinking",
+                            "model speaking" if narrow => "speaking",
+                            w => w,
+                        };
+                        let c = chip(ui, shown, tint, true).on_hover_text(
                             "hands free: the microphone is open while this chat is. Speak to talk over the reply; press the talk key to stop.",
                         );
                         c.widget_info(|| {

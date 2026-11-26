@@ -71,6 +71,7 @@ pub struct Voice {
     quiet_stop: Option<f32>,
     speech_started: bool,
     tap: Option<(Vec<f32>, u32)>,
+    recording: bool,
 }
 
 impl Default for Voice {
@@ -87,6 +88,7 @@ impl Default for Voice {
             quiet_stop: None,
             speech_started: false,
             tap: None,
+            recording: false,
         }
     }
 }
@@ -257,6 +259,33 @@ impl Voice {
         Ok(())
     }
 
+    pub fn start_recording(
+        &mut self,
+        wake: impl Fn() + Send + Sync + 'static,
+        device: &str,
+    ) -> Result<(), String> {
+        if self.busy() {
+            return Err("the microphone is in use; stop hands free first".into());
+        }
+        self.start_on(wake, device)?;
+        self.recording = true;
+        Ok(())
+    }
+
+    pub fn recording(&self) -> bool {
+        self.recording && self.listening()
+    }
+
+    #[doc(hidden)]
+    pub fn record_fake(&mut self) -> super::Mic {
+        let mic = self.open_fake();
+        if let State::Listening(t) = &mut self.state {
+            t.open = false;
+        }
+        self.recording = true;
+        mic
+    }
+
     /// Called once a frame while the microphone is open. Listens for the end of the speech and
     /// closes the take by itself, and every couple of seconds starts a reading of what has been
     /// said so far so the words can appear while you are still talking.
@@ -264,6 +293,9 @@ impl Voice {
         let State::Listening(take) = &mut self.state else {
             return;
         };
+        if self.recording {
+            return;
+        }
         let (heard, samples) = {
             let mut heard = take.heard.lock().unwrap_or_else(|e| e.into_inner());
             if take.open && settings.echo_cancel {
@@ -344,9 +376,19 @@ impl Voice {
 
     /// Close the microphone without reading anything.
     pub fn cancel(&mut self) {
+        self.recording = false;
         if self.listening() {
             self.state = State::Idle;
         }
+    }
+
+    pub fn take_raw(&mut self) -> Option<(Vec<f32>, u32)> {
+        self.recording = false;
+        let State::Listening(take) = std::mem::replace(&mut self.state, State::Idle) else {
+            return None;
+        };
+        let heard = std::mem::take(&mut *take.heard.lock().unwrap_or_else(|e| e.into_inner()));
+        Some((heard, take.rate))
     }
 
     /// Close the microphone and read what it heard.

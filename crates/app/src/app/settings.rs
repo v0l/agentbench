@@ -112,6 +112,8 @@ impl App {
         };
         let (mut save, mut close, mut probe, mut probe_title) = (false, false, false, false);
         let mut restart_now = false;
+        let mut clip_action = None;
+        let recording = self.voice.recording();
         let mut providers = false;
         let can_close = self.client.is_some() || self.starting.is_some();
         let has_local = self.local.is_some();
@@ -233,6 +235,10 @@ impl App {
                     }
                 } else if st.page == Page::Speech {
                     speech_section(ui, &mut st.speech, st.voices.as_ref(), st.speech_models.as_ref());
+                    if st.speech.converse && st.speech.hands_free {
+                        ui.add_space(8.0);
+                        clip_action = duplex_section(ui, &mut st.speech, recording);
+                    }
                     ui.add_space(8.0);
                     speech_devices(ui, &st.speech, st.audio.as_ref(), can_close);
                 } else if st.page == Page::Projects {
@@ -531,6 +537,16 @@ impl App {
             c.restart_server(r.drain_secs);
             self.notice = Some((true, format!("the server restarts once running turns finish, up to {} s", r.drain_secs)));
         }
+        if let Some(start) = clip_action {
+            match self.voice_clip(ctx, start) {
+                Ok(Some(path)) => {
+                    st.speech.duplex_voice = path;
+                    self.notice = Some((true, "voice clip kept; it is used from the next hands free session".into()));
+                }
+                Ok(None) => {}
+                Err(e) => self.notice = Some((false, e)),
+            }
+        }
         if probe {
             st.asking = true;
             if let Some(c) = &mut self.client {
@@ -816,6 +832,63 @@ pub(super) fn is_loopback(url: &str) -> bool {
     let host = agentbench_core::host_of(url);
     let host = host.rsplit_once(':').map_or(host.as_str(), |(h, _)| h);
     host.is_empty() || matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1" | "0.0.0.0")
+}
+
+pub(super) fn duplex_section(
+    ui: &mut Ui,
+    sp: &mut crate::voice::Settings,
+    recording: bool,
+) -> Option<bool> {
+    let mut clip = None;
+    section(ui, "duplex model", "a full duplex voice, such as Haru", |ui| {
+        row_help(
+            ui,
+            "duplex server",
+            "An inference-bench server with a duplex model loaded. Hands free then streams the microphone to it and it speaks the supervisor's replies. Empty uses speech to text and read aloud instead.",
+            |ui| {
+                field(ui, &mut sp.duplex_url, "http://gpu-box:8080");
+            },
+        );
+        if sp.duplex_url.trim().is_empty() {
+            return;
+        }
+        row_help(ui, "duplex model name", "Sent as model. Empty uses the one the server has loaded.", |ui| {
+            field(ui, &mut sp.duplex_model, "Haru-4B");
+        });
+        row_help(ui, "duplex key", "Sent as a bearer token. Leave empty if the server needs none.", |ui| {
+            secret(ui, &mut sp.duplex_key);
+        });
+        row_help(
+            ui,
+            "replies in its voice",
+            "On: the supervisor's replies are spoken by the duplex model. Off: they are read aloud as before, and the model only listens and backchannels.",
+            |ui| {
+                let on = sp.duplex_replies;
+                let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
+                t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "replies in its voice"));
+                if t.clicked() {
+                    sp.duplex_replies = !on;
+                }
+            },
+        );
+        row_help(
+            ui,
+            "voice clip",
+            "A few seconds of your chosen voice, recorded once. The model speaks in it. Up to 30 seconds is kept.",
+            |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let label = if recording { "stop recording" } else if sp.duplex_voice.is_empty() { "record" } else { "record again" };
+                    if ui.add(Key::new(label).outline(if recording { FAULT } else { VALUE })).clicked() {
+                        clip = Some(!recording);
+                    }
+                    if !sp.duplex_voice.is_empty() && !recording {
+                        Line::new().value("recorded").size(12.0).show(ui);
+                    }
+                });
+            },
+        );
+    });
+    clip
 }
 
 pub(super) fn speech_section(

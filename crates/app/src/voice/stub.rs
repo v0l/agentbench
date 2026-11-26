@@ -74,6 +74,19 @@ impl Voice {
         Err("voice input is not available on this platform".into())
     }
     pub fn cancel(&mut self) {}
+    pub fn take_raw(&mut self) -> Option<(Vec<f32>, u32)> {
+        None
+    }
+    pub fn start_recording(&mut self, _: impl Fn() + Send + Sync + 'static, _: &str) -> Result<(), String> {
+        Err("voice input is not available on this platform".into())
+    }
+    pub fn recording(&self) -> bool {
+        false
+    }
+    #[doc(hidden)]
+    pub fn record_fake(&mut self) -> super::Mic {
+        Default::default()
+    }
     pub fn finish(&mut self, _: &Settings, _: impl Fn() + Send + Sync + 'static) {}
     pub fn tick(&mut self, _: &Settings, _: impl Fn() + Send + Sync + Clone + 'static) {}
     pub fn poll(&mut self) -> Vec<Said> {
@@ -122,6 +135,61 @@ impl Reader {
 
 pub fn input_devices() -> Vec<String> {
     Vec::new()
+}
+
+pub const VOICE_SECONDS: usize = 30;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Conn {
+    Off,
+    Connecting,
+    Ready,
+    Reconnecting,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Out {
+    Interrupted,
+    Heard(String),
+    Notice(String),
+}
+
+#[derive(Default)]
+pub struct Bridge {
+    pub sent_frames: usize,
+    pub says: Vec<String>,
+}
+
+impl Bridge {
+    pub fn sync(&mut self, _: Option<&super::DuplexModel>, _: impl Fn() + Send + Sync + 'static) -> Option<String> {
+        None
+    }
+    pub fn close(&mut self) {}
+    pub fn active(&self) -> bool {
+        false
+    }
+    pub fn conn(&self) -> Conn {
+        Conn::Off
+    }
+    pub fn speaking(&self) -> bool {
+        false
+    }
+    pub fn feed(&mut self, _: &[f32], _: u32) {}
+    pub fn say(&mut self, _: &str, _: web_time::Instant) {}
+    pub fn queued(&self, _: web_time::Instant) -> bool {
+        false
+    }
+    pub fn tick(&mut self, _: bool, _: bool, _: web_time::Instant) -> Vec<Out> {
+        Vec::new()
+    }
+    pub fn note_heard(&mut self, _: String) {}
+    pub fn take_heard(&mut self) -> Option<String> {
+        None
+    }
+}
+
+pub fn heard_note(heard: &str, said: &str) -> String {
+    format!("(I heard only: \"{heard}\") {said}")
 }
 
 pub fn local_device() -> String {

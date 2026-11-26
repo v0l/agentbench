@@ -14,7 +14,7 @@
 
 mod settings;
 pub(crate) mod autosend;
-pub use settings::{AUTO_SEND_SECS, LOCAL_MODELS, Mode, Settings};
+pub use settings::{AUTO_SEND_SECS, DuplexModel, LOCAL_MODELS, Mode, Settings};
 
 mod converse;
 pub use converse::{Converse, Talk, TalkKey};
@@ -27,6 +27,10 @@ pub mod echo;
 pub mod duplex;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod link;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod bridge;
+#[cfg(not(target_arch = "wasm32"))]
+pub use bridge::{Bridge, Conn, Out, VOICE_SECONDS, heard_note};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -44,7 +48,7 @@ pub(crate) mod android;
 #[cfg(target_arch = "wasm32")]
 mod stub;
 #[cfg(target_arch = "wasm32")]
-pub use stub::{Reader, Source, Voice, input_devices, local_device};
+pub use stub::{Bridge, Conn, Out, Reader, Source, VOICE_SECONDS, Voice, heard_note, input_devices, local_device};
 
 /// What Whisper was trained on, and what a server is sent.
 pub const RATE: u32 = agent_voice::voice::audio::SPEECH_RATE;

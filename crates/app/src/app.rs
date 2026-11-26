@@ -619,6 +619,7 @@ struct HandsFree {
     sink: Option<crate::voice::Sink>,
     fake: bool,
     mic: Option<crate::voice::Mic>,
+    clip_dir: Option<std::path::PathBuf>,
 }
 
 enum Confirm {
@@ -810,6 +811,7 @@ pub struct App {
     conversing: Option<SessionId>,
     talk_turn: bool,
     hands_free: HandsFree,
+    bridge: crate::voice::Bridge,
     auto: Option<(Tile, crate::voice::autosend::Countdown)>,
     clock: Option<f64>,
     /// Models on the server the native agent is saved to use. None until asked.
@@ -1036,6 +1038,7 @@ impl App {
             conversing: None,
             talk_turn: false,
             hands_free: Default::default(),
+            bridge: Default::default(),
             auto: None,
             clock: None,
             speech: crate::voice::Settings::load(storage),
@@ -1981,9 +1984,157 @@ impl App {
         let Some(sid) = self.conversing else { return };
         let last = self.transcripts.get(&sid).map_or(0, |t| t.last);
         self.converse.begin(last);
+        let text = match self.bridge.take_heard() {
+            Some(heard) => crate::voice::heard_note(&heard, text.trim()),
+            None => text.trim().to_string(),
+        };
         if let Some(c) = &mut self.client {
-            c.send_spoken(sid, text.trim());
+            c.send_spoken(sid, &text);
         }
+    }
+
+    fn duplex_wanted(&self) -> Option<crate::voice::DuplexModel> {
+        (self.voice.open() && self.hands_free_wanted()).then(|| self.speech.duplex()).flatten()
+    }
+
+    fn bridge_says(&self) -> bool {
+        self.bridge.active() && self.speech.duplex_replies
+    }
+
+    fn bridge_tick(&mut self, ctx: &egui::Context) -> bool {
+        let want = self.duplex_wanted();
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        };
+        if let Some(e) = self.bridge.sync(want.as_ref(), wake) {
+            self.notice = Some((false, e));
+            self.pause_hands_free();
+            return false;
+        }
+        self.voice.set_tap(self.bridge.active());
+        if !self.bridge.active() {
+            return false;
+        }
+        let (pcm, rate) = self.voice.take_tapped();
+        self.bridge.feed(&pcm, rate);
+        let now = std::time::Instant::now();
+        let more = self.converse.pending() || self.reader.busy();
+        for out in self.bridge.tick(self.voice.in_speech(), more, now) {
+            match out {
+                crate::voice::Out::Interrupted => self.barge_in(),
+                crate::voice::Out::Heard(text) => self.bridge.note_heard(text),
+                crate::voice::Out::Notice(n) => self.notice = Some((false, n)),
+            }
+        }
+        if self.bridge_says() && !self.voice.in_speech() {
+            while let Some(sentence) = self.converse.next() {
+                self.bridge.say(&sentence, now);
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(50));
+        true
+    }
+
+    pub fn talk_state(&self) -> Option<&'static str> {
+        let sid = self.conversing.filter(|_| self.conversing == self.session)?;
+        if !self.voice.open() {
+            return None;
+        }
+        if self.voice.in_speech() {
+            return Some("hearing you");
+        }
+        if self.bridge.active() {
+            match self.bridge.conn() {
+                crate::voice::Conn::Connecting => return Some("connecting"),
+                crate::voice::Conn::Reconnecting => return Some("reconnecting"),
+                _ => {}
+            }
+        }
+        if self.bridge.speaking() || self.reader.busy() || self.bridge.queued(std::time::Instant::now()) {
+            return Some("model speaking");
+        }
+        if self.session_by_id(sid).is_some_and(|s| s.status.busy()) {
+            return Some("supervisor thinking");
+        }
+        Some("listening")
+    }
+
+    pub(super) fn voice_clip(&mut self, ctx: &egui::Context, start: bool) -> Result<Option<String>, String> {
+        if start {
+            self.pause_hands_free();
+            self.bridge.close();
+            if self.hands_free.fake {
+                self.hands_free.mic = Some(self.voice.record_fake());
+                return Ok(None);
+            }
+            let ctx = ctx.clone();
+            self.voice.start_recording(move || ctx.request_repaint(), &self.speech.input_device.clone())?;
+            return Ok(None);
+        }
+        let (pcm, rate) = self.voice.take_raw().ok_or("nothing was recorded")?;
+        if pcm.len() < rate as usize {
+            return Err("record at least a second of your voice".into());
+        }
+        let pcm = &pcm[..pcm.len().min(rate as usize * crate::voice::VOICE_SECONDS)];
+        let path = self.clip_path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        std::fs::write(&path, crate::voice::wav_bytes(pcm, rate)).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Some(path.display().to_string()))
+    }
+
+    fn clip_path(&self) -> std::path::PathBuf {
+        if let Some(p) = &self.hands_free.clip_dir {
+            return p.join("duplex-voice.wav");
+        }
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        return agentbench_server::home().join("duplex-voice.wav");
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        return std::env::temp_dir().join("duplex-voice.wav");
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_clip_dir(&mut self, dir: std::path::PathBuf) {
+        self.hands_free.clip_dir = Some(dir);
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_record_clip(&mut self, ctx: &egui::Context, pcm: &[f32]) -> Result<String, String> {
+        self.voice_clip(ctx, true)?;
+        self.voice_test_hear(pcm);
+        let path = self.voice_clip(ctx, false)?.ok_or("no clip")?;
+        self.speech.duplex_voice = path.clone();
+        self.hands_free.paused = None;
+        Ok(path)
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_duplex(&mut self, url: &str) {
+        self.speech.duplex_url = url.to_string();
+        self.speech.duplex_model = "Haru-4B".into();
+        self.bridge.set_manual();
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_duplex_on(&self) -> bool {
+        self.bridge.conn() == crate::voice::Conn::Ready
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_duplex_sent(&self) -> usize {
+        self.bridge.sent_frames
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_duplex_says(&self) -> Vec<String> {
+        self.bridge.says.clone()
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_duplex_pull(&self) -> Option<Vec<f32>> {
+        self.bridge.pull_frame()
     }
 
     fn converse_tick(&mut self, ctx: &egui::Context) {
@@ -2011,6 +2162,7 @@ impl App {
             }
         }
         if !self.reader.busy()
+            && !self.bridge_says()
             && !(self.voice.listening() && !self.voice.open())
             && !self.voice.in_speech()
             && let Some(sentence) = self.converse.next()
@@ -2938,8 +3090,11 @@ impl App {
         self.hands_free_tick(ctx);
         let speech = self.speech_now();
         self.voice.tick(&speech, wake);
-        if self.voice.take_speech_start() {
+        let bridge_on = self.bridge_tick(ctx);
+        if self.voice.take_speech_start() && !bridge_on {
             self.barge_in();
+            self.talk_turn = true;
+        } else if bridge_on && self.voice.in_speech() {
             self.talk_turn = true;
         }
         if let Some(hang) = self.voice.take_quiet_stop() {
