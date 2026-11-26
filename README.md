@@ -452,70 +452,74 @@ by itself and tells the supervisor. All of these are in the `autopilot` tool.
 ### Host pressure
 
 Every 10 s the server reads `/proc/pressure/{cpu,memory,io}`, `/proc/meminfo`,
-`/proc/loadavg`, `/proc/swaps` and `/proc/diskstats`. When a reading stays bad
+`/proc/loadavg`, `/proc/swaps`, `/proc/vmstat`, `/proc/diskstats` and the
+resident memory of each process tree it started. When tasks stay stalled
 the autopilot backs off: in `pressure` it starts workers only up to half the
 cap (at least 1), in `critical` it starts none and tells each running worker
 once to pause test and build runs and commit. Running workers are never
 stopped, and sessions the user started or took control of, and the supervisor,
-are never messaged. Pressure clears after the cooldown with every reading below
-the pressure limits, then the cap comes back one worker per step. Every change
-goes to the autopilot feed, the supervisor gets one notice per episode, and
+are never messaged. Pressure clears after the cooldown with no rule firing,
+then the cap comes back one worker per step. Every change goes to the
+autopilot feed, the supervisor gets one notice per episode, and
 `GET /api/autopilot` has `pressure {state, reason, since, readings,
 effective_cap, configured_cap}`. `agentbench autopilot` and the app status line
-show it as `scaled to 2 of 8: memory stall 14 percent while swapping, swap disk queue 6.1 ms against 1.2 ms normal`.
-The reason names the rule that fired with its numbers (`swap 91 percent full`,
-`swapping takes 83 percent of nvme1n1p1 (82.5 MB/s of 100.0 MB/s peak), queue 3.5 ms against 2.0 ms normal`). When the state is `ok` with more than
-`_swap_gb` of swap used, the reason reads `swap 23 GB used, idle`, so it is
-clear that the swap is old pages and not a reason to throttle.
+show it as `scaled to 2 of 8: memory stall 30 percent; swapping 40 pages/s, swap 16 GB (swap on nvme1n1p1), swap disk queue 1.7 ms, writes 0.6 ms`.
 Off Linux the readings are unknown and the state stays `ok`.
 
-Swapping is judged by measured harm on this host, never by a fixed page rate.
-The device that holds swap (from `/proc/swaps`) is always read from
-`/proc/diskstats`, and each sample keeps its queue time (weighted io ms per io),
-write latency (write ms per write) and bytes per second. Its normal is the
-median of its samples over the last `_baseline_secs` that were not slow
-(at least 6). While pages move in or out, swapping counts as pressure when:
+Harm is what the kernel measures as stalled work, never a device speed.
 
-- memory some avg10 is above `_memory_some` (`memory stall 14 percent while swapping`), or
-- the swap disk is slow: queue or write latency above `_disk_ratio` times normal and also more than `_disk_floor_ms` above it, or
-- swapping takes most of the disk: `(pswpin + pswpout per second) * 4096 / peak` is above `_swap_share_pct`, where peak is the disk's highest measured bytes per second in the baseline window, and the queue is more than `_disk_floor_ms` above normal.
+- `pressure`: PSI `memory some` or `io some` is above the stall line in both
+  its 10 s and its 60 s average, for `_hold_secs`. The stall line is
+  `_stall_pct` when a person sets it. Otherwise it is this host's own 95th
+  percentile of `some avg10` over the last `_history_secs` (a day), and never
+  under 5 percent. Until the server has a whole day of its own samples the
+  line is 5 percent.
+- `critical`: memory is about to run out. Either MemAvailable is under the
+  largest worker's resident set over the last `_resident_secs` (the next
+  build of that size cannot fit), or swap is over `_swap_full_pct` of
+  SwapTotal while memory stall is rising (`some avg10` above `some avg60`).
+  Critical needs two consecutive samples and `_critical_hold_secs`.
+- Swapping (pages per second, swap used, the swap disk's queue and write
+  latency) is only context in the reason text. It never triggers anything.
+  An `ok` host that is swapping says so: `swapping 40 pages/s, swap 16 GB
+  (swap on nvme1n1p1), swap disk queue 1.7 ms, writes 0.6 ms, no tasks
+  stalled`, and one with old swap pages reads `swap 23 GB used, idle`.
+- Memory stall in the first `_start_grace_secs` after the server starts is
+  ignored while it pages, since a new server pages its own memory back in.
 
-Page movement alone, in either direction, never counts. Critical needs the
-condition on two consecutive samples and for `_critical_hold_secs`, and swap
-readings in the first `_start_grace_secs` after the server starts are ignored,
-since a new server pages its own memory back in.
-Settings `autopilot_pressure_swap_pages` and `autopilot_pressure_critical_swap_pages` set as a stopgap before this are no longer needed and can be deleted.
+Every number that decides a state, and where it comes from:
 
-Settings (rows of the `settings` table in `agentbench.db`, each threshold named with the `autopilot_pressure_` prefix):
+| Number | Where it comes from |
+|---|---|
+| PSI `some avg10`, `some avg60` | the kernel: the share of wall time in which at least one task waited for memory or IO, over its own 10 s and 60 s windows |
+| 95th percentile over a day | the host's own history: the stall level it passes in one sample out of 20 on its own normal day, so a box that always runs at 8 percent is not throttled at 8 percent |
+| 5 percent floor | a share of time, not a device speed: a task waited 1 second out of every 20. It is the same on a fast NVMe and a slow SATA disk, because a slow disk that keeps up stalls nobody. It stops a host whose whole day sat at 0.4 percent from calling 1 percent pressure. The kernel's PSI document gives no level of its own, so this one is a setting (`_stall_pct`) |
+| largest worker's resident set | measured here every 10 s from `/proc/<pid>/statm` over each process tree the server started, the largest kept for `_resident_secs` |
+| 85 percent of SwapTotal | on this desktop SwapTotal is 48 GB, so 15 percent is 7.2 GB, about half of one full workspace `cargo test` (12 to 16 GB): past it the next build cannot be paged out whole. It only counts with memory stall rising, so old pages in a full swap never fire |
+| hold, cooldown, recover times | how long a reading must last and how fast workers come back, not levels |
+
+Settings (rows of the `settings` table in `agentbench.db`, each named with the `autopilot_pressure_` prefix):
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `autopilot_pressure` | on | `off` turns the whole watch off; also the `pressure` switch of the `autopilot` tool and `PATCH /api/autopilot` |
-| `autopilot_pressure_devices` | `$TMPDIR` (or /tmp) and the parent of `CARGO_TARGET_DIR` | comma separated paths or device names whose write latency is read |
-| `_io_full` | 15 | pressure: io full avg10 above, % |
-| `_memory_some` | 10 | pressure: memory some avg10 above, % |
-| `_mem_available_gb` | 12 | pressure: MemAvailable under, GB |
-| `_swap_gb` | 0 (off) | pressure: swap used above, GB, and growing by at least `_swap_grow_gb` over the hold time while swapping does measured harm (rules above) |
-| `_swap_grow_gb` | 0 (off) | how much swap used must grow over the hold time to count as growing, GB |
-| `_swap_full_pct` | 85 | critical: swap used above this percent of SwapTotal, since the next memory spike would be killed, 0 is off |
-| `_cpu_some` | 40 | pressure: cpu some avg60 above, % |
-| `_load_per_core` | 0.7 | pressure: 1 minute load per core above |
-| `_write_ms` | 0 (off) | pressure: write latency on a watched device above, ms |
-| `_hold_secs` | 60 | how long a pressure reading must hold |
-| `_critical_io_full` | 30 | critical: io full avg10 above, % |
-| `_critical_memory_full` | 5 | critical: memory full avg10 above, % |
-| `_critical_mem_available_gb` | 5 | critical: MemAvailable under, GB |
-| `_disk_ratio` | 3 | swap disk slow: queue or write latency above this many times its own normal, 0 is off |
-| `_disk_floor_ms` | 1 | swap disk slow or queue rising: also at least this many ms above normal, so jitter on a quiet disk never counts |
-| `_swap_share_pct` | 50 | swapping takes this percent of the swap disk's measured peak bytes per second, with a rising queue, 0 is off |
-| `_baseline_secs` | 600 | window for the swap disk's normal latency (median of its not slow samples) and its peak bytes per second |
-| `_start_grace_secs` | 60 | swap readings are ignored this long after the server starts |
-| `_swap_pages` | 0 (off) | a person's own limit: pressure while swapping more pages per second in or out than this |
-| `_critical_swap_pages` | 0 (off) | a person's own limit: critical while swapping more pages per second than this |
-| `_critical_swap_gb` | 0 (off) | critical: swap used above, GB, and only with measured harm from swapping or MemAvailable under `_mem_available_gb` |
+| `autopilot_pressure_devices` | `$TMPDIR` (or /tmp) and the parent of `CARGO_TARGET_DIR` | comma separated paths or device names whose latency is shown in the readings |
+| `_stall_pct` | 0 (derived) | pressure: memory or io `some` above this percent in both averages; 0 uses the host's own 95th percentile, at least 5 |
+| `_history_secs` | 86400 | window of the host's own stall samples for the 95th percentile |
+| `_swap_full_pct` | 85 | critical: swap used above this percent of SwapTotal while memory stall rises, 0 is off |
+| `_resident_secs` | 600 | how long the largest worker's resident set is remembered |
+| `_hold_secs` | 60 | how long a stall must hold |
 | `_critical_hold_secs` | 30 | how long a critical reading must hold, and always two consecutive samples |
+| `_start_grace_secs` | 60 | memory stall while paging is ignored this long after the server starts |
 | `_cooldown_secs` | 300 | calm time before pressure clears |
 | `_recover_secs` | 120 | one more worker each this many seconds after clearing |
+
+The older settings `_io_full`, `_memory_some`, `_mem_available_gb`, `_swap_gb`,
+`_swap_grow_gb`, `_cpu_some`, `_load_per_core`, `_write_ms`, `_critical_io_full`,
+`_critical_memory_full`, `_critical_mem_available_gb`, `_disk_ratio`,
+`_disk_floor_ms`, `_swap_share_pct`, `_baseline_secs`, `_swap_pages`,
+`_critical_swap_pages` and `_critical_swap_gb` are no longer read and can be
+deleted.
 
 When a project at autowork or above has no `todo` issue, no running worker and at
 least one `backlog` issue, the autopilot sends the supervisor one `groom <project>:`
