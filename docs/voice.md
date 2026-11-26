@@ -85,4 +85,6 @@ Under voice input, with voice mode and hands free on, the `duplex model` section
 
 `crates/app/tests/duplex.rs` runs the app against a fake duplex server: frames of 6400 bytes about every 133 ms, replies in order, silence for a late frame, a reply as `say` messages, an utterance as a turn (Whisper base on CPU), a barge in as one `interrupt`, the voice clip in `start`, the fallback, and the indicator and settings at 1280 and 390 wide (`AGENTBENCH_SHOTS=dir` keeps the pictures).
 
-Not covered here: the real model. Talking to Haru-4B served on GPU1 (about 16 GB with four slots) is the owner's check.
+`a_real_duplex_server_takes_the_start_frames_say_and_interrupt` (ignored, needs `AGENTBENCH_DUPLEX_URL` and `AGENTBENCH_DUPLEX_MODEL`) runs the same app against a real server. On 26 Nov against inference-bench serving Haru-4B on GPU1: ready, 14 frames sent for 2 s of room, all 30 frames pulled after that carried sound, and the three `say` messages of a reply were taken with no error.
+
+Not covered here: a spoken conversation with the real model, judged by ear. That is the owner's check.
