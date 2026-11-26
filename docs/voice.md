@@ -65,10 +65,33 @@ A full duplex model listens and speaks at once: one 133 ms frame in (3200 sample
 
 Under voice input, with voice mode and hands free on, the `duplex model` section has:
 
-- `duplex server`: the inference-bench address, such as `http://gpu-box:8080`. Empty keeps today's path: speech to text, the supervisor, read aloud.
-- `duplex model name` and `duplex key`: sent as `model` and as a bearer token.
+- `voice model`: `Haru-4B (local)` loads the model on this machine's GPU while hands free is on; `none, read aloud` keeps today's path: speech to text, the supervisor, read aloud.
+- `model folder`: where Haru-4B was downloaded. Empty uses the newest snapshot in the Hugging Face cache (`$HF_HOME/hub` or `~/.cache/huggingface/hub`), then `~/models/Haru-4B`. The line under it says which of `config.json` and `model.safetensors` is missing.
+- `GPU`: auto, or a card from `nvidia-smi`. Auto picks the card with the most free memory; the line under it says which card and why, or why none can take the model (about 16 GB free is needed).
+- `unload after`: minutes the model stays loaded while hands free is set up but not listening (another chat open, or paused), 10 by default. 0 keeps it loaded.
 - `replies in its voice`: on, the supervisor's replies are spoken by the model; off, they are read aloud as before and the model only listens and backchannels (the fallback of section 10 if constrained text proves hard to follow).
 - `voice clip`: press record, speak, press stop. Up to 30 s is kept as `duplex-voice.wav` in the agentbench home and sent as the voice reference at the start of each session.
+- Advanced, `duplex server`: an inference-bench server that already runs a duplex model, here or elsewhere, such as `http://gpu-box:8080`. When set it wins and nothing is loaded here; `duplex model name` and `duplex key` are then sent as `model` and as a bearer token.
+- Advanced, `engine program`: the `inference-bench-server` to run. Empty looks on PATH, then in `~/.cargo/bin`.
+
+### The local model
+
+Agentbench runs the model in a child process it owns, `inference-bench-server` from inference-bench, not inside the app: the engine is large and CUDA specific, and keeping it out of the app keeps it out of the phone and browser builds and keeps a CUDA context out of the window. You never see a server, an address or a key. Agentbench does not download or build it; when it is missing, too old to answer `--version`, or does not list `/v1/duplex` in `/v1/capabilities`, the notice says to run:
+
+```
+cargo install --locked --git https://github.com/v0l/inference-bench inference-bench-server
+```
+
+When hands free opens the microphone with the local model chosen (`voice::engine::Engine`):
+
+- The model folder is checked, then the card: one with less free memory than needed is refused with its numbers, and nothing else is asked of a card another process holds.
+- The child is started bound to `127.0.0.1` on a free port, with a random key passed in its environment (`INFERENCE_BENCH_API_KEYS`, never written to disk), `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER=PCI_BUS_ID` set for the child only, and a generated config, `voice-engine/engine.toml` in the agentbench home: the list of models to load (one duplex model today), `sessions_per_gpu = 1`, `max_ctx = 4096`.
+- The chat chip reads `loading the voice model, 4 s` until `/health` answers, `/v1/capabilities` lists `/v1/duplex` and `/v1/models` lists every model loaded with its type. Then the link connects to the child like to any duplex server.
+- It stops at once when hands free or the local model is switched off in settings, after the idle time when hands free is set up but not listening (another chat is open, or it is paused with the talk key), and when the app exits. The child is its own process group and, on Linux, gets SIGKILL from the kernel when the app dies (`PR_SET_PDEATHSIG`), so a crash or `kill -9` of the app takes it down too.
+- If it dies, the notice says so and it is started once more after 2 s. A second death leaves it off with the last lines of its log in the notice; hands free carries on with speech to text and read aloud. Turning hands free off and on again tries afresh.
+- Its output goes to `voice-engine/engine.log` in the agentbench home.
+
+The child loads a list of models on one port with one key, so speech to text and text to speech will move onto the same child later (inference-bench issue 1474); today they still run in the agentbench server through candle.
 
 ### What happens
 
@@ -88,3 +111,15 @@ Under voice input, with voice mode and hands free on, the `duplex model` section
 `a_real_duplex_server_takes_the_start_frames_say_and_interrupt` (ignored, needs `AGENTBENCH_DUPLEX_URL` and `AGENTBENCH_DUPLEX_MODEL`) runs the same app against a real server. On 26 Nov against inference-bench serving Haru-4B on GPU1: ready, 14 frames sent for 2 s of room, all 30 frames pulled after that carried sound, and the three `say` messages of a reply were taken with no error.
 
 Not covered here: a spoken conversation with the real model, judged by ear. That is the owner's check.
+
+`crates/app/tests/engine.rs` runs the app against a fake child (the test binary itself behind a small script) that serves `/health`, `/v1/capabilities`, `/v1/models` and a duplex socket: start on switch on with the progress line and the card in `CUDA_VISIBLE_DEVICES`, port and key never on screen, stop on switch off, stop when idle and 0 keeping it, a child that dies restarted once then left off with its log tail, no duplex support, a busy card refused with the numbers, a missing engine, a set server address launching nothing, a missing model file falling back to read aloud, the settings at 1280 and 390 wide, and the app killed with SIGKILL in a subprocess taking its child with it.
+
+`the_real_model_loads_answers_with_sound_and_frees_its_gpu` (ignored) runs the same flow on the real engine:
+
+```
+~/.agents/bin/gpu-run 1 --min-free 20000 -- env VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  AGENTBENCH_REAL_ENGINE=<inference-bench-server> AGENTBENCH_REAL_MODEL=~/models/Haru-4B AGENTBENCH_REAL_GPU=1 \
+  cargo test -p agentbench --test engine -- --ignored the_real_model
+```
+
+On 26 Nov with inference-bench-server 0.2.1 (master `77fff0b6`) and Haru-4B on GPU1: loaded in 4.3 s, session ready 4.5 s after hands free opened, 13.7 GB held on GPU1; 20 s of speech streamed through the app's link sent 149 frames and 150 of the 151 frames pulled back had sound; after switch off GPU1 was back to 5 MiB and no `inference-bench-server` process was left. The app killed with SIGKILL during a real load (10.5 GB on GPU1 by then) took the child with it within 3 s and freed the card.

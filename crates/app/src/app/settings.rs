@@ -895,7 +895,7 @@ fn local_voice_rows(ui: &mut Ui, sp: &mut crate::voice::Settings, local: &LocalV
     row_help(
         ui,
         "unload after",
-        "Minutes hands free can be off before the voice model leaves the GPU. 0 keeps it loaded while hands free is set up.",
+        "Minutes the voice model stays loaded while hands free is not listening, such as in another chat. 0 keeps it loaded.",
         |ui| {
             let mut minutes = sp.engine_idle_secs / 60;
             let drag = ui.add(egui::DragValue::new(&mut minutes).range(0..=240).suffix(" min"));
