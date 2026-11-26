@@ -69,8 +69,9 @@ Under voice input, with voice mode and hands free on, the `duplex model` section
 - `model folder`: where Haru-4B was downloaded. Empty uses the newest snapshot in the Hugging Face cache (`$HF_HOME/hub` or `~/.cache/huggingface/hub`), then `~/models/Haru-4B`. The line under it says which of `config.json` and `model.safetensors` is missing.
 - `GPU`: auto, or a card from `nvidia-smi`. Auto picks the card with the most free memory; the line under it says which card and why, or why none can take the model (about 16 GB free is needed).
 - `unload after`: minutes the model stays loaded while hands free is set up but not listening (another chat open, or paused), 10 by default. 0 keeps it loaded.
-- `replies in its voice`: on, the supervisor's replies are spoken by the model; off, they are read aloud as before and the model only listens and backchannels (the fallback of section 10 if constrained text proves hard to follow).
-- `voice clip`: press record, speak, press stop. Up to 30 s is kept as `duplex-voice.wav` in the agentbench home and sent as the voice reference at the start of each session.
+- `replies in its voice`: off by default. On, the supervisor's replies are spoken by the model; off, they are read aloud by text to speech and the model only listens and backchannels. It is off because Haru speaking queued text measured a word error of 3.07 (inference-bench `docs/specrt-haru.md`, section 13). It is kept under `voice_duplex_says`, so an `on` saved by an older build under `voice_duplex_replies` reads as off.
+- `model speaks first`: off by default. Off, the session starts without `speak_first` and nothing the model sends is played until you speak or a reply is sent to it; on, it may greet you first.
+- `voice clip`: press record, speak, press stop. Up to 30 s is kept as `duplex-voice.wav` in the agentbench home and sent as the voice reference at the start of each session. It is needed: with none the model speaks in an unconditioned voice that sounds like noise, so no session is opened (the local engine is not started either), hands free uses speech to text and read aloud, and the chat chip reads `record your voice clip first` (`record voice clip` on a phone).
 - Advanced, `duplex server`: an inference-bench server that already runs a duplex model, here or elsewhere, such as `http://gpu-box:8080`. When set it wins and nothing is loaded here; `duplex model name` and `duplex key` are then sent as `model` and as a bearer token.
 - Advanced, `engine program`: the `inference-bench-server` to run. Empty looks on PATH, then in `~/.cargo/bin`.
 
@@ -98,15 +99,21 @@ The child loads a list of models on one port with one key, so speech to text and
 - The microphone stays open as in hands free, through the same headphones check and echo canceller. Its samples, after cancelling, are resampled to 24 kHz and sent as 6400 byte frames as each one fills (`voice::duplex::Framer`, `voice::link`).
 - The session starts with a fixed card (`voice::bridge::card`: name Bench, a calm persona that relays answers from an assistant) in `relay` mode, so the model only listens and backchannels until it is given words.
 - Reply frames play through a jitter buffer of two frames (`voice::duplex::Jitter`). A frame that is late plays as silence and is dropped when it comes, so the delay never grows; a burst is cut to the buffer.
+- Until you first speak (or a `say` is sent, or `model speaks first` is on), frames from the model are counted and dropped, not played (`voice::link`, `unmute`). On 26 Nov the first install sent no microphone frames (`frames_in=0` in `engine.log`) while Haru, started with no voice clip, sent 68 frames that the app played as noise.
+- The microphone may run at another rate than 16 kHz (48 kHz is common); the framer follows the rate of each block it is handed. Before 26 Nov a microphone not at 16 kHz made a new framer on every frame until the first frame left, which threw away each partial frame, so at 48 kHz no frame ever left: that is the `frames_in=0` of the first install.
 - A dropped socket reconnects with a backoff of 0.25 s doubling to 8 s, and starts the session again.
 - Whisper still reads the same microphone: each utterance ended by the band and hang logic is a supervisor turn.
-- Each finished sentence of the supervisor's reply (from `Converse`) is sent as `say`.
+- Each finished sentence of the supervisor's reply (from `Converse`) is sent as `say` when `replies in its voice` is on; otherwise it is read aloud.
 - Speaking for 400 ms while said words are still pending sends `interrupt`. The `said` answer is the part you heard, and the next turn starts with `(I cut your spoken reply off; I heard only: "...")` so the supervisor knows where you stopped it.
-- The chat header shows `connecting`, `listening`, `hearing you`, `supervisor thinking`, `model speaking` or `reconnecting`. On a phone the long ones read `thinking` and `speaking`, in place of the supervisor chip.
+- The chat header shows `connecting`, `listening`, `hearing you`, `supervisor thinking`, `model speaking`, `reconnecting` or `record your voice clip first`. On a phone the long ones read `thinking`, `speaking` and `record voice clip`, in place of the supervisor chip.
+
+### Settings changed on disk
+
+The desktop app reads the voice settings (`voice_*` in `app.ron` in the eframe data folder) again every 2 s and before each save. A setting changed on disk while the app runs is taken, unless the same setting was also changed in the app since the last save, in which case the app's value wins. The settings window, when open, takes the disk change too for settings not touched in it, so saving it does not undo an edit made on disk.
 
 ### Tests
 
-`crates/app/tests/duplex.rs` runs the app against a fake duplex server: frames of 6400 bytes about every 133 ms, replies in order, silence for a late frame, a reply as `say` messages, an utterance as a turn (Whisper base on CPU), a barge in as one `interrupt`, the voice clip in `start`, the fallback, and the indicator and settings at 1280 and 390 wide (`AGENTBENCH_SHOTS=dir` keeps the pictures).
+`crates/app/tests/duplex.rs` runs the app against a fake duplex server: frames of 6400 bytes about every 133 ms, replies in order, silence for a late frame, nothing played before the user speaks and `speak_first` playing at once, no session without a voice clip and the chip saying so, replies read by text to speech by default and as `say` messages when on, an utterance as a turn (Whisper base on CPU), a barge in as one `interrupt`, the voice clip in `start`, the fallback, a voice setting edited on disk kept through the settings window, and the indicator and settings at 1280 and 390 wide (`AGENTBENCH_SHOTS=dir` keeps the pictures).
 
 `a_real_duplex_server_takes_the_start_frames_say_and_interrupt` (ignored, needs `AGENTBENCH_DUPLEX_URL` and `AGENTBENCH_DUPLEX_MODEL`) runs the same app against a real server. On 26 Nov against inference-bench serving Haru-4B on GPU1: ready, 14 frames sent for 2 s of room, all 30 frames pulled after that carried sound, and the three `say` messages of a reply were taken with no error.
 
@@ -118,8 +125,13 @@ Not covered here: a spoken conversation with the real model, judged by ear. That
 
 ```
 ~/.agents/bin/gpu-run 1 --min-free 20000 -- env VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  AGENTBENCH_HOME=/tmp/scratch-home AGENTBENCH_REAL_PLAYED=/tmp/played.wav \
   AGENTBENCH_REAL_ENGINE=<inference-bench-server> AGENTBENCH_REAL_MODEL=~/models/Haru-4B AGENTBENCH_REAL_GPU=1 \
   cargo test -p agentbench --test engine -- --ignored the_real_model
 ```
+
+It checks what was played against speech (`common::speech_like`: RMS 0.01 to 0.5, zero crossing rate 0.01 to 0.25 per sample, and a 20 ms level that swings by more than 0.3 of its mean, which white noise and a steady tone do not; `the_speech_check_passes_recorded_speech_and_fails_white_noise` holds it to the recorded fixtures). Then it turns `replies in its voice` on, sends a supervisor turn and checks that the 8 s after the `say` messages are silence or speech, never noise. `AGENTBENCH_REAL_PLAYED` keeps both as WAV files.
+
+On 26 Nov, after the noise fix, on GPU1: loaded in 4.4 s, ready 4.7 s after switch on; 149 frames sent, 3 frames dropped before the first speech, the 20 s played RMS 0.052, zero crossings 0.157, swing 2.85, and Whisper read words in it; the said reply RMS 0.065, zero crossings 0.211, swing 2.47, words but not the queued ones (as section 13 measured); 10 MiB on GPU1 after switch off apart from the test's own Whisper context.
 
 On 26 Nov with inference-bench-server 0.2.1 (master `77fff0b6`) and Haru-4B on GPU1: loaded in 4.3 s, session ready 4.5 s after hands free opened, 13.7 GB held on GPU1; 20 s of speech streamed through the app's link sent 149 frames and 150 of the 151 frames pulled back had sound; after switch off GPU1 was back to 5 MiB and no `inference-bench-server` process was left. The app killed with SIGKILL during a real load (10.5 GB on GPU1 by then) took the child with it within 3 s and freed the card.

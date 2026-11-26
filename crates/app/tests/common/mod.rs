@@ -380,6 +380,28 @@ pub fn shot(h: &mut Harness<'_, App>, name: &str) {
     }
 }
 
+#[derive(Debug)]
+pub struct Sound {
+    pub rms: f32,
+    pub zcr: f32,
+    pub swing: f32,
+}
+
+pub fn sound_of(pcm: &[f32], rate: u32) -> Sound {
+    let rms = (pcm.iter().map(|v| v * v).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
+    let crossings = pcm.windows(2).filter(|w| (w[0] >= 0.0) != (w[1] >= 0.0)).count();
+    let zcr = crossings as f32 / pcm.len().max(2) as f32;
+    let block = (rate / 50) as usize;
+    let levels: Vec<f32> = pcm.chunks(block).map(|c| (c.iter().map(|v| v * v).sum::<f32>() / c.len() as f32).sqrt()).collect();
+    let mean = levels.iter().sum::<f32>() / levels.len().max(1) as f32;
+    let var = levels.iter().map(|l| (l - mean).powi(2)).sum::<f32>() / levels.len().max(1) as f32;
+    Sound { rms, zcr, swing: var.sqrt() / mean.max(1e-9) }
+}
+
+pub fn speech_like(s: &Sound) -> bool {
+    (0.01..0.5).contains(&s.rms) && (0.01..0.25).contains(&s.zcr) && s.swing > 0.3
+}
+
 pub fn voice_clip_file() -> String {
     let path = std::env::temp_dir().join(format!("agentbench-test-voice-{}.wav", std::process::id()));
     if !path.is_file() {

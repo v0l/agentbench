@@ -463,16 +463,28 @@ fn real_gpu() -> u32 {
 
 fn smi_used(gpu: u32) -> u64 {
     let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=index,memory.used", "--format=csv,noheader,nounits"])
+        .args(["--query-gpu=index,memory.used,uuid", "--format=csv,noheader,nounits"])
         .output()
         .unwrap();
-    String::from_utf8_lossy(&out.stdout)
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let Some((used, uuid)) = text.lines().find_map(|l| {
+        let mut p = l.split(',').map(str::trim);
+        (p.next()?.parse::<u32>().ok()? == gpu).then(|| Some((p.next()?.parse::<u64>().ok()?, p.next()?.to_string())))?
+    }) else {
+        return 0;
+    };
+    let apps = std::process::Command::new("nvidia-smi")
+        .args(["--query-compute-apps=pid,used_memory,gpu_uuid", "--format=csv,noheader,nounits"])
+        .output()
+        .unwrap();
+    let own: u64 = String::from_utf8_lossy(&apps.stdout)
         .lines()
-        .find_map(|l| {
-            let (i, m) = l.split_once(',')?;
-            (i.trim().parse::<u32>().ok()? == gpu).then(|| m.trim().parse().ok())?
+        .filter_map(|l| {
+            let p: Vec<&str> = l.split(',').map(str::trim).collect();
+            (p.len() == 3 && p[2] == uuid && p[0].parse::<u32>().ok()? == std::process::id()).then(|| p[1].parse::<u64>().ok())?
         })
-        .unwrap_or(0)
+        .sum();
+    used.saturating_sub(own)
 }
 
 fn twenty_seconds() -> Vec<f32> {
@@ -487,6 +499,28 @@ fn twenty_seconds() -> Vec<f32> {
     }
     pcm.truncate(rate as usize * 20);
     pcm
+}
+
+#[test]
+fn the_speech_check_passes_recorded_speech_and_fails_white_noise() {
+    for wav in [&include_bytes!("fixtures/voice/speech.wav")[..], include_bytes!("fixtures/voice/ask.wav"), include_bytes!("fixtures/voice/barge.wav")] {
+        let (pcm, rate) = agentbench::voice::read_wav(wav).unwrap();
+        let s = sound_of(&pcm, rate);
+        assert!(speech_like(&s), "speech: {s:?}");
+    }
+    let mut seed = 1u32;
+    let noise: Vec<f32> = (0..48_000)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 * 0.6 - 0.3
+        })
+        .collect();
+    let s = sound_of(&noise, 24_000);
+    assert!(!speech_like(&s), "white noise: {s:?}");
+    let hum: Vec<f32> = (0..48_000).map(|i| 0.2 * (i as f32 * 0.05).sin()).collect();
+    let s = sound_of(&hum, 24_000);
+    assert!(!speech_like(&s), "a steady tone: {s:?}");
+    assert!(!speech_like(&sound_of(&vec![0.0; 48_000], 24_000)), "silence");
 }
 
 #[test]
@@ -521,6 +555,7 @@ fn the_real_model_loads_answers_with_sound_and_frees_its_gpu() {
     let block = agentbench::voice::RATE as usize / 50;
     let start = Instant::now();
     let (mut pulled, mut sound) = (0, 0);
+    let mut played = Vec::new();
     let mut next_pull = Instant::now();
     for (i, chunk) in clip.chunks(block).enumerate() {
         let due = start + Duration::from_millis(20 * i as u64);
@@ -534,12 +569,43 @@ fn the_real_model_loads_answers_with_sound_and_frees_its_gpu() {
             let f = h.state().voice_test_duplex_pull().unwrap();
             pulled += 1;
             sound += f.iter().any(|v| v.abs() > 1e-4) as usize;
+            played.extend(f);
         }
     }
     let sent = h.state().voice_test_duplex_sent();
-    eprintln!("20 s streamed: {sent} frames sent, {pulled} pulled, {sound} with sound");
+    let muted = h.state().voice_test_duplex_muted();
+    let heard = sound_of(&played, 24_000);
+    eprintln!("20 s streamed: {sent} frames sent, {pulled} pulled, {sound} with sound, {muted} muted before speech, played {heard:?}");
+    if let Ok(out) = std::env::var("AGENTBENCH_REAL_PLAYED") {
+        std::fs::write(out, agentbench::voice::wav_bytes(&played, 24_000)).unwrap();
+    }
     assert!(sent >= 140, "{sent}");
     assert!(sound > pulled / 4, "frames came back with sound: {sound} of {pulled}");
+    assert!(speech_like(&heard), "what was played is not speech like: {heard:?}");
+    h.state_mut().voice_test_speech().duplex_replies = true;
+    let sid = h.state().supervisor_chat().unwrap();
+    h.state_mut().voice_test_send("what are the workers doing");
+    let t = Instant::now();
+    while h.state().voice_test_duplex_says().len() < 2 {
+        assert!(t.elapsed() < Duration::from_secs(60), "no says: {:?}", h.state().voice_test_notice());
+        h.state_mut().voice_test_hear(&vec![0.0005f32; agentbench::voice::RATE as usize / 50]);
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut reply = Vec::new();
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(8) {
+        h.state_mut().voice_test_hear(&vec![0.0005f32; agentbench::voice::RATE as usize * 133 / 1000]);
+        h.step();
+        reply.extend(h.state().voice_test_duplex_pull().unwrap());
+        std::thread::sleep(Duration::from_millis(133));
+    }
+    let said = sound_of(&reply, 24_000);
+    eprintln!("said reply in {sid:?}: {said:?}");
+    if let Ok(out) = std::env::var("AGENTBENCH_REAL_PLAYED") {
+        std::fs::write(format!("{out}.reply.wav"), agentbench::voice::wav_bytes(&reply, 24_000)).unwrap();
+    }
+    assert!(said.rms < 0.01 || speech_like(&said), "the said reply is noise: {said:?}");
     assert!(h.state().voice_test_notice().is_none_or(|n| !n.contains("voice model")), "{:?}", h.state().voice_test_notice());
     h.state_mut().voice_test_speech().hands_free = false;
     until(&mut h, "the engine to stop", |h| h.state().voice_test_engine().pid().is_none());
@@ -549,7 +615,8 @@ fn the_real_model_loads_answers_with_sound_and_frees_its_gpu() {
         std::thread::sleep(Duration::from_millis(200));
     }
     let after = smi_used(gpu);
-    eprintln!("after switch off: GPU {gpu} {after} MiB");
+    let apps = std::process::Command::new("nvidia-smi").args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader"]).output().unwrap();
+    eprintln!("after switch off: GPU {gpu} {after} MiB besides this test, compute apps: {}", String::from_utf8_lossy(&apps.stdout).replace('\n', "; "));
     assert!(after <= before + 200, "the memory is freed: {after} MiB against {before} before");
 }
 
