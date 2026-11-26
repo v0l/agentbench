@@ -231,6 +231,7 @@ dependencies = [
  "fontdb",
  "image",
  "jni",
+ "libc",
  "log",
  "ndk",
  "ndk-context",
