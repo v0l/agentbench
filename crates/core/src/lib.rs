@@ -2551,6 +2551,8 @@ pub struct DiskReading {
     pub write_ms: f32,
     #[serde(default)]
     pub queue_ms: f32,
+    #[serde(default)]
+    pub bytes_rate: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

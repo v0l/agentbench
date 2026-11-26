@@ -33,13 +33,14 @@ struct DiskCounters {
     writes: u64,
     write_ms: u64,
     weighted_ms: u64,
+    sectors: u64,
 }
 
 pub struct Reader {
     root: PathBuf,
     cores: u32,
     live: bool,
-    last: HashMap<String, DiskCounters>,
+    last: HashMap<String, (i64, DiskCounters)>,
     vm: VecDeque<(i64, u64, u64)>,
 }
 
@@ -130,12 +131,14 @@ impl Reader {
         let mounts = self.read("/proc/self/mountinfo").map(|t| mountinfo(&t)).unwrap_or_default();
         r.swap_device = self.read("/proc/swaps").and_then(|t| swap_device(&t, &mounts));
         if let Some(stats) = self.read("/proc/diskstats") {
-            r.disks = self.disks(&stats, &mounts, devices);
+            let mut wanted = devices.to_vec();
+            wanted.extend(r.swap_device.clone());
+            r.disks = self.disks(&stats, &mounts, &wanted, now);
         }
         r
     }
 
-    fn disks(&mut self, stats: &str, mounts: &[Mount], devices: &[String]) -> Vec<DiskReading> {
+    fn disks(&mut self, stats: &str, mounts: &[Mount], devices: &[String], now: i64) -> Vec<DiskReading> {
         let rows = diskstats(stats);
         let mut out: Vec<DiskReading> = Vec::new();
         for path in devices {
@@ -143,15 +146,17 @@ impl Reader {
             if out.iter().any(|d| d.device == row.name) {
                 continue;
             }
-            let prev = self.last.insert(row.name.clone(), row.counters).unwrap_or_default();
+            let (at, prev) = self.last.insert(row.name.clone(), (now, row.counters)).unwrap_or((now, DiskCounters::default()));
             let d = |a: u64, b: u64| a.saturating_sub(b) as f32;
             let writes = d(row.counters.writes, prev.writes);
             let ios = d(row.counters.ios, prev.ios);
+            let secs = (now - at) as f32 / 1000.0;
             out.push(DiskReading {
                 device: row.name.clone(),
                 path: path.clone(),
                 write_ms: if writes > 0.0 { d(row.counters.write_ms, prev.write_ms) / writes } else { 0.0 },
                 queue_ms: if ios > 0.0 { d(row.counters.weighted_ms, prev.weighted_ms) / ios } else { 0.0 },
+                bytes_rate: if secs > 0.0 { d(row.counters.sectors, prev.sectors) * 512.0 / secs } else { 0.0 },
             });
         }
         out
@@ -289,6 +294,7 @@ fn diskstats(text: &str) -> Vec<Row> {
                     writes: n(7)?,
                     write_ms: n(10)?,
                     weighted_ms: n(13)?,
+                    sectors: n(5)? + n(9)?,
                 },
             })
         })
@@ -397,6 +403,20 @@ pub(crate) mod tests {
         fake_proc(dir.path(), &[("proc/vmstat", &vm(1000, 152_000))]);
         let r = reader.sample_at(&[], 30_000);
         assert_eq!((r.swap_in_rate, r.swap_out_rate), (Some(0.0), Some(5000.0)));
+    }
+
+    #[test]
+    fn the_swap_device_is_always_read_with_its_byte_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        desktop(dir.path(), 1000, 1000);
+        let mut reader = Reader::at(dir.path(), 48);
+        reader.sample_at(&["/".into()], 0);
+        let stats = " 259       2 nvme0n1p2 100 0 800 50 100 0 800 80 0 100 130 0 0 0 0\n 259       5 nvme1n1p1 1000 0 28000 500 1100 0 9000 2500 3 900 3000 0 0 0 0\n";
+        fake_proc(dir.path(), &[("proc/diskstats", stats)]);
+        let r = reader.sample_at(&["/".into()], 10_000);
+        let swap = r.disks.iter().find(|d| d.device == "nvme1n1p1").expect("the swap device is read");
+        assert_eq!(swap.bytes_rate, 20_000.0 * 512.0 / 10.0);
+        assert_eq!(swap.write_ms, 15.0);
     }
 
     #[test]
