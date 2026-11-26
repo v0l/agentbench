@@ -4,8 +4,9 @@ pub const REMIND_AT: [u32; 2] = [15, 30];
 pub const ESCALATE_AT: u32 = 45;
 pub const THINKING_LIMIT: Duration = Duration::from_secs(600);
 
-const PLANNING_OR_EDITING: [&str; 8] = [
+const PLANNING_OR_EDITING: [&str; 9] = [
     "todo_write",
+    "save_file",
     "todowrite",
     "edit_file",
     "write_file",

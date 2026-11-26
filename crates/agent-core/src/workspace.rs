@@ -140,6 +140,47 @@ impl Workspace {
         Ok(format!("{verb} {} ({} bytes)", self.shown(&file), content.len()))
     }
 
+    pub fn save(&self, from: &str, to: &str, overwrite: bool) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        let source = self.resolve_for(from, Access::Read)?;
+        let file = self.resolve_for(to, Access::Write)?;
+        if !source.is_file() {
+            return Err(format!("{from} is not a file"));
+        }
+        if file == self.root || file.is_dir() {
+            return Err(format!("{} is a folder", self.shown(&file)));
+        }
+        if let Ok(rel) = file.strip_prefix(&self.root) {
+            if rel.components().any(|c| c.as_os_str() == ".git") {
+                return Err(format!("{} is inside .git", self.shown(&file)));
+            }
+        }
+        if file.exists() && !overwrite && self.tracked(&file) {
+            return Err(format!(
+                "{} is a tracked file; pass overwrite=true to replace it",
+                self.shown(&file)
+            ));
+        }
+        let bytes = fs::read(&source).map_err(|e| format!("{from}: {e}"))?;
+        if let Some(dir) = file.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", self.shown(dir)))?;
+        }
+        fs::write(&file, &bytes).map_err(|e| format!("{}: {e}", self.shown(&file)))?;
+        let sum: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+        Ok(format!("saved {} ({} bytes, sha256 {sum})", self.shown(&file), bytes.len()))
+    }
+
+    fn tracked(&self, file: &Path) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["ls-files", "--error-unmatch", "--"])
+            .arg(file)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
     pub fn edit(&self, path: &str, old: &str, new: &str, all: bool) -> Result<String, String> {
         if old.is_empty() {
             return Err("`old` is empty; use write_file to create or replace a file".into());
@@ -271,6 +312,52 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bench-ws-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         Workspace::open(&dir).unwrap()
+    }
+
+    #[test]
+    fn save_file_copies_bytes_and_reports_the_hash() {
+        let ws = space("save-ok");
+        let src = std::env::temp_dir().join(format!("bench-save-src-{}", std::process::id()));
+        fs::write(&src, b"abc").unwrap();
+        let mut ws = ws;
+        ws = ws.with_grants(Grants::default());
+        ws.grants().grant(std::env::temp_dir(), false);
+        let out = ws.save(src.to_str().unwrap(), "fx/a.json", false).unwrap();
+        assert!(out.contains("3 bytes"), "{out}");
+        assert!(out.contains("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "{out}");
+        assert_eq!(fs::read(ws.root().join("fx/a.json")).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn save_file_refuses_a_target_outside_the_workspace() {
+        let ws = space("save-out");
+        fs::write(ws.root().join("a"), b"x").unwrap();
+        assert!(ws.save("a", "../escape", false).is_err());
+        assert!(ws.save("a", "/tmp/escape-bench", false).is_err());
+        assert!(ws.save("a", ".git/config", false).is_err());
+    }
+
+    #[test]
+    fn save_file_refuses_a_source_it_may_not_read() {
+        let ws = space("save-src");
+        assert!(ws.save("/etc/hostname", "h", false).is_err());
+        assert!(!ws.root().join("h").exists());
+    }
+
+    #[test]
+    fn save_file_refuses_to_replace_a_tracked_file_without_overwrite() {
+        let ws = space("save-tracked");
+        let git = |a: &[&str]| {
+            std::process::Command::new("git").arg("-C").arg(ws.root()).args(a).output().unwrap()
+        };
+        git(&["init", "-q"]);
+        fs::write(ws.root().join("t.rs"), b"old").unwrap();
+        fs::write(ws.root().join("n.rs"), b"new").unwrap();
+        git(&["add", "t.rs"]);
+        assert!(ws.save("n.rs", "t.rs", false).unwrap_err().contains("overwrite=true"));
+        assert_eq!(fs::read(ws.root().join("t.rs")).unwrap(), b"old");
+        ws.save("n.rs", "t.rs", true).unwrap();
+        assert_eq!(fs::read(ws.root().join("t.rs")).unwrap(), b"new");
     }
 
     #[test]
