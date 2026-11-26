@@ -29,6 +29,10 @@ impl Voice {
     pub fn take_speech_start(&mut self) -> bool {
         false
     }
+    pub fn set_tap(&mut self, _: bool) {}
+    pub fn take_tapped(&mut self) -> (Vec<f32>, u32) {
+        (Vec::new(), super::RATE)
+    }
     pub fn open(&self) -> bool {
         false
     }

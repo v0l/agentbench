@@ -49,6 +49,7 @@ struct Take {
     heard_speech: bool,
     echo: Option<Box<super::echo::Canceller>>,
     cancelled: usize,
+    tapped: usize,
 }
 
 #[cfg(local_speech)]
@@ -69,6 +70,7 @@ pub struct Voice {
     shown: Option<(f32, f32)>,
     quiet_stop: Option<f32>,
     speech_started: bool,
+    tap: Option<(Vec<f32>, u32)>,
 }
 
 impl Default for Voice {
@@ -84,6 +86,7 @@ impl Default for Voice {
             shown: None,
             quiet_stop: None,
             speech_started: false,
+            tap: None,
         }
     }
 }
@@ -136,6 +139,19 @@ impl Voice {
         std::mem::take(&mut self.speech_started)
     }
 
+    pub fn set_tap(&mut self, on: bool) {
+        if on != self.tap.is_some() {
+            self.tap = on.then(|| (Vec::new(), RATE));
+        }
+    }
+
+    pub fn take_tapped(&mut self) -> (Vec<f32>, u32) {
+        match &mut self.tap {
+            Some((pcm, rate)) => (std::mem::take(pcm), *rate),
+            None => (Vec::new(), RATE),
+        }
+    }
+
     pub fn open(&self) -> bool {
         matches!(&self.state, State::Listening(t) if t.open)
     }
@@ -176,6 +192,7 @@ impl Voice {
             heard_speech: false,
             echo: None,
             cancelled: 0,
+            tapped: 0,
         }));
         self.take_id += 1;
         heard
@@ -264,6 +281,16 @@ impl Voice {
                 take.cancelled = heard.len();
             }
             take.endpoint.set_hang(settings.hang_secs);
+            if take.open
+                && let Some((tap, rate)) = &mut self.tap
+            {
+                let from = take.tapped.min(heard.len());
+                if tap.len() < take.rate as usize * 10 {
+                    tap.extend_from_slice(&heard[from..]);
+                }
+                *rate = take.rate;
+            }
+            take.tapped = heard.len();
             let said = take.endpoint.feed(&heard);
             if take.open && !take.endpoint.spoke() {
                 let keep = take.rate as usize * super::LEAD_SECONDS;
@@ -272,6 +299,7 @@ impl Voice {
                     heard.drain(..drop);
                     take.endpoint.forget(drop);
                     take.cancelled = take.cancelled.saturating_sub(drop);
+                    take.tapped = take.tapped.saturating_sub(drop);
                 }
             }
             (said, heard.len())
@@ -332,6 +360,7 @@ impl Voice {
             take.endpoint = Endpoint::open(rate);
             take.heard_speech = false;
             take.cancelled = 0;
+            take.tapped = 0;
             if let Some(pcm) = self.trimmed(heard, rate, quiet, settings, true) {
                 self.read(pcm, settings, None, wake);
             }
@@ -534,6 +563,7 @@ fn open(device: &str) -> Result<Take, String> {
             heard_speech: false,
             echo: None,
             cancelled: 0,
+            tapped: 0,
         })
     }
     #[cfg(not(target_os = "android"))]
@@ -604,8 +634,9 @@ fn open_cpal(wanted: &str) -> Result<Take, String> {
         partial_busy: Arc::new(AtomicBool::new(false)),
         open: false,
         heard_speech: false,
-            echo: None,
-            cancelled: 0,
+        echo: None,
+        cancelled: 0,
+        tapped: 0,
     })
 }
 
@@ -834,6 +865,7 @@ mod tests {
                 heard_speech: false,
             echo: None,
             cancelled: 0,
+            tapped: 0,
             })),
             ..Voice::default()
         }
@@ -882,6 +914,28 @@ mod tests {
         assert!(v.open(), "a failed reading does not close it");
         v.cancel();
         assert!(!v.open() && !v.listening());
+    }
+
+    #[test]
+    fn the_tap_hands_on_every_open_sample_once_even_when_room_is_dropped() {
+        let mut v = Voice::default();
+        let mic = v.open_fake();
+        let settings = Settings { mode: Mode::Server, url: "http://127.0.0.1:9/v1".into(), ..Default::default() };
+        v.tick(&settings, || {});
+        assert!(v.take_tapped().0.is_empty(), "nothing is kept until the tap is on");
+        v.set_tap(true);
+        let mut fed = 0;
+        let mut got = 0;
+        for _ in 0..30 {
+            mic.lock().unwrap().extend(vec![0.001f32; RATE as usize]);
+            fed += RATE as usize;
+            v.tick(&settings, || {});
+            let (pcm, rate) = v.take_tapped();
+            assert_eq!(rate, RATE);
+            got += pcm.len();
+        }
+        assert!(mic.lock().unwrap().len() < fed, "room before speech was dropped");
+        assert_eq!(got, fed);
     }
 
     #[test]
