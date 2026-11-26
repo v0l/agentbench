@@ -550,6 +550,32 @@ fn the_real_model_loads_answers_with_sound_and_frees_its_gpu() {
     assert!(after <= before + 200, "the memory is freed: {after} MiB against {before} before");
 }
 
+#[test]
+fn the_local_voice_settings_fit_at_both_sizes() {
+    use egui_kittest::kittest::Queryable;
+    let rig = rig();
+    let kit = Kit::new("ok");
+    for (tag, size) in [("1280", [1280.0, 800.0]), ("390", [390.0, 844.0])] {
+        let mut h = app(&rig, size);
+        kit.attach(&mut h, vec![card(0, 2), card(1, 90)]);
+        h.state_mut().open_settings_page("speech");
+        h.run_steps(2);
+        until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
+        h.run_steps(4);
+        h.get_by_label("replies in its voice").scroll_to_me();
+        h.run_steps(4);
+        let shown = texts(&h);
+        for want in ["Haru-4B (local)", "model found in", "loads on GPU 1 (Test card 1): it has the most free memory, 90.0 GB", "engine: inference-bench-server 0.0.0-fake"] {
+            assert!(shown.contains(want), "{tag}: {want} is missing");
+        }
+        for label in ["replies in its voice", "record", "unload after"] {
+            let r = h.get_by_label(label).rect();
+            assert!(r.right() <= size[0] && r.left() >= 0.0, "{label} runs off a {tag} screen: {r:?}");
+        }
+        shot(&mut h, &format!("engine-settings-{tag}"));
+    }
+}
+
 fn hold_an_engine() {
     let dir = PathBuf::from(std::env::var(HOLDER_ENV).unwrap());
     let rig = rig_with(vec![agent("glib", REPLY)]);
