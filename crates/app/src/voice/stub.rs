@@ -192,6 +192,9 @@ impl Bridge {
     pub fn pull_frame(&self) -> Option<Vec<f32>> {
         None
     }
+    pub fn muted_frames(&self) -> u64 {
+        0
+    }
 }
 
 pub fn heard_note(heard: &str, said: &str) -> String {

@@ -380,6 +380,16 @@ pub fn shot(h: &mut Harness<'_, App>, name: &str) {
     }
 }
 
+pub fn voice_clip_file() -> String {
+    let path = std::env::temp_dir().join(format!("agentbench-test-voice-{}.wav", std::process::id()));
+    if !path.is_file() {
+        let part = path.with_extension(format!("{:?}.part", std::thread::current().id()));
+        std::fs::write(&part, include_bytes!("../fixtures/voice/speech.wav")).unwrap();
+        std::fs::rename(&part, &path).unwrap();
+    }
+    path.display().to_string()
+}
+
 
 pub fn click(h: &mut Harness<'_, App>, x: f32, y: f32) {
     let pos = egui::pos2(x, y);

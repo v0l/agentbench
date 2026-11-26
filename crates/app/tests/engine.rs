@@ -236,6 +236,7 @@ fn app(rig: &Rig, size: [f32; 2]) -> Harness<'static, agentbench::App> {
     );
     h.state_mut().voice_test_silent();
     h.state_mut().voice_test_hands_free(agentbench::voice::Sink::Headphones);
+    h.state_mut().voice_test_speech().duplex_voice = voice_clip_file();
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h
 }
@@ -283,8 +284,10 @@ fn hands_free_starts_the_engine_and_talks_to_it_without_showing_its_port_or_key(
     assert!(config.contains(&format!("127.0.0.1:{port}")) && !config.contains(&key), "{config}");
     assert!(std::fs::read_to_string(kit.engine_dir().join("engine.log")).unwrap().contains("fake engine: loading Haru-4B"));
     let mut sound = 0;
-    for _ in 0..40 {
-        h.state_mut().voice_test_hear(&vec![0.001f32; 1600]);
+    let (speech, rate) = agentbench::voice::read_wav(include_bytes!("fixtures/voice/speech.wav")).unwrap();
+    let speech = agentbench::voice::to_whisper_rate(&speech, rate);
+    for chunk in speech.chunks(1600).take(40) {
+        h.state_mut().voice_test_hear(chunk);
         h.step();
         std::thread::sleep(Duration::from_millis(40));
         sound += h.state().voice_test_duplex_pull().is_some_and(|f| f.iter().any(|v| *v != 0.0)) as usize;
@@ -568,7 +571,7 @@ fn the_local_voice_settings_fit_at_both_sizes() {
         for want in ["Haru-4B (local)", "model found in", "loads on GPU 1 (Test card 1): it has the most free memory, 90.0 GB", "engine: inference-bench-server 0.0.0-fake"] {
             assert!(shown.contains(want), "{tag}: {want} is missing");
         }
-        for label in ["replies in its voice", "record", "unload after"] {
+        for label in ["replies in its voice", "model speaks first", "record again", "unload after"] {
             let r = h.get_by_label(label).rect();
             assert!(r.right() <= size[0] && r.left() >= 0.0, "{label} runs off a {tag} screen: {r:?}");
         }

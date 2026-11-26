@@ -363,12 +363,14 @@ impl App {
                         let tint = match word {
                             "supervisor thinking" | "connecting" | "reconnecting" | "loading" => TRACE,
                             "model speaking" => VALUE,
+                            "record your voice clip first" => FAULT,
                             _ => OK,
                         };
                         let progress = (word == "loading").then(|| self.voice_progress()).flatten();
                         let shown: String = match word {
                             "supervisor thinking" if narrow => "thinking".into(),
                             "model speaking" if narrow => "speaking".into(),
+                            "record your voice clip first" if narrow => "record voice clip".into(),
                             "loading" if narrow => progress.as_deref().map_or("loading".into(), |p| p.replace("loading the voice model, ", "loading ")),
                             "loading" => progress.unwrap_or_else(|| "loading the voice model".into()),
                             w => w.into(),

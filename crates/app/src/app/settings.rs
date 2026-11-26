@@ -943,8 +943,14 @@ pub(super) fn duplex_section(
             toggle_row(
                 ui,
                 "replies in its voice",
-                "On: the supervisor's replies are spoken by the duplex model. Off: they are read aloud as before, and the model only listens and backchannels.",
+                "On: the supervisor's replies are spoken by the duplex model, which is often hard to follow. Off: they are read aloud by text to speech, and the model only listens and backchannels.",
                 &mut sp.duplex_replies,
+            );
+            toggle_row(
+                ui,
+                "model speaks first",
+                "On: the model may greet you before you say anything. Off: nothing it says is played until you speak or a reply is sent to it.",
+                &mut sp.duplex_speak_first,
             );
             row_help(
                 ui,
@@ -958,6 +964,9 @@ pub(super) fn duplex_section(
                         }
                         if !sp.duplex_voice.is_empty() && !recording {
                             Line::new().value("recorded").size(12.0).show(ui);
+                        }
+                        if sp.duplex_voice.is_empty() && !recording {
+                            Line::new().value("needed before the model is used").size(12.0).show(ui);
                         }
                     });
                 },

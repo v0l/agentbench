@@ -42,6 +42,8 @@ struct Shared {
     epoch: Instant,
     voiced_at: AtomicU64,
     connected: AtomicBool,
+    unmuted: AtomicBool,
+    muted: AtomicU64,
 }
 
 impl Shared {
@@ -91,6 +93,8 @@ impl Link {
             epoch: Instant::now(),
             voiced_at: AtomicU64::new(0),
             connected: AtomicBool::new(false),
+            unmuted: AtomicBool::new(false),
+            muted: AtomicU64::new(0),
         });
         let player = if manual { Player::Manual } else { Player::Device(play(shared.clone())?) };
         let (cmd, rx) = channel();
@@ -114,6 +118,14 @@ impl Link {
 
     pub fn interrupt(&self) {
         let _ = self.cmd.send(Cmd::Control(json!({"type": "interrupt"})));
+    }
+
+    pub fn unmute(&self) {
+        self.shared.unmuted.store(true, Ordering::Relaxed);
+    }
+
+    pub fn muted_frames(&self) -> u64 {
+        self.shared.muted.load(Ordering::Relaxed)
     }
 
     pub fn connected(&self) -> bool {
@@ -274,7 +286,11 @@ fn session(o: &Options, rx: &Receiver<Cmd>, tx: &Sender<Event>, shared: &Shared,
         }
         match ws.read() {
             Ok(Message::Binary(b)) => {
-                shared.jitter.lock().unwrap_or_else(|e| e.into_inner()).push(from_pcm16(&b));
+                if shared.unmuted.load(Ordering::Relaxed) {
+                    shared.jitter.lock().unwrap_or_else(|e| e.into_inner()).push(from_pcm16(&b));
+                } else {
+                    shared.muted.fetch_add(1, Ordering::Relaxed);
+                }
             }
             Ok(Message::Text(t)) => {
                 let v: Value = serde_json::from_str(&t).unwrap_or_default();

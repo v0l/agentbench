@@ -44,6 +44,7 @@ pub struct Settings {
     pub duplex_key: String,
     pub duplex_voice: String,
     pub duplex_replies: bool,
+    pub duplex_speak_first: bool,
     pub duplex_local: bool,
     pub duplex_path: String,
     pub duplex_gpu: String,
@@ -86,12 +87,13 @@ pub fn model_problem(dir: &std::path::Path) -> Option<String> {
     (!missing.is_empty()).then(|| format!("{} has no {}", dir.display(), missing.join(" and no ")))
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DuplexModel {
     pub url: String,
     pub model: String,
     pub key: String,
     pub voice: String,
+    pub speak_first: bool,
 }
 
 pub const DEFAULT_TALK_KEY: &str = "F9";
@@ -126,7 +128,8 @@ impl Default for Settings {
             duplex_model: String::new(),
             duplex_key: String::new(),
             duplex_voice: String::new(),
-            duplex_replies: true,
+            duplex_replies: false,
+            duplex_speak_first: false,
             duplex_local: false,
             duplex_path: String::new(),
             duplex_gpu: String::new(),
@@ -189,7 +192,8 @@ impl Settings {
         s.duplex_model = st.get_string("voice_duplex_model").unwrap_or_default();
         s.duplex_key = st.get_string("voice_duplex_key").unwrap_or_default();
         s.duplex_voice = st.get_string("voice_duplex_voice").unwrap_or_default();
-        s.duplex_replies = st.get_string("voice_duplex_replies").as_deref() != Some("0");
+        s.duplex_replies = st.get_string("voice_duplex_says").as_deref() == Some("1");
+        s.duplex_speak_first = st.get_string("voice_duplex_speak_first").as_deref() == Some("1");
         s.duplex_local = st.get_string("voice_duplex_choice").as_deref() == Some("haru");
         s.duplex_path = st.get_string("voice_duplex_path").unwrap_or_default();
         s.duplex_gpu = st.get_string("voice_duplex_gpu").unwrap_or_default();
@@ -238,7 +242,8 @@ impl Settings {
         st.set_string("voice_duplex_model", self.duplex_model.clone());
         st.set_string("voice_duplex_key", self.duplex_key.clone());
         st.set_string("voice_duplex_voice", self.duplex_voice.clone());
-        st.set_string("voice_duplex_replies", if self.duplex_replies { "1" } else { "0" }.into());
+        st.set_string("voice_duplex_says", if self.duplex_replies { "1" } else { "0" }.into());
+        st.set_string("voice_duplex_speak_first", if self.duplex_speak_first { "1" } else { "0" }.into());
         st.set_string("voice_duplex_choice", if self.duplex_local { "haru" } else { "" }.into());
         st.set_string("voice_duplex_path", self.duplex_path.clone());
         st.set_string("voice_duplex_gpu", self.duplex_gpu.clone());
@@ -254,7 +259,11 @@ impl Settings {
     }
 
     pub fn local_duplex(&self) -> Option<std::path::PathBuf> {
-        (self.duplex_local && self.duplex_url.trim().is_empty()).then(|| self.duplex_dir())
+        (self.duplex_local && self.duplex_url.trim().is_empty() && !self.duplex_needs_clip()).then(|| self.duplex_dir())
+    }
+
+    pub fn duplex_needs_clip(&self) -> bool {
+        (self.duplex_local || !self.duplex_url.trim().is_empty()) && self.duplex_voice.trim().is_empty()
     }
 
     pub fn duplex_gpu(&self) -> Option<u32> {
@@ -263,11 +272,12 @@ impl Settings {
 
     pub fn duplex(&self) -> Option<DuplexModel> {
         let url = self.duplex_url.trim();
-        (!url.is_empty()).then(|| DuplexModel {
+        (!url.is_empty() && !self.duplex_needs_clip()).then(|| DuplexModel {
             url: url.to_string(),
             model: self.duplex_model.trim().to_string(),
             key: self.duplex_key.trim().to_string(),
             voice: self.duplex_voice.trim().to_string(),
+            speak_first: self.duplex_speak_first,
         })
     }
 
@@ -442,19 +452,21 @@ mod tests {
     fn the_duplex_model_is_off_until_a_server_is_named_and_is_kept() {
         let s = Settings::default();
         assert_eq!(s.duplex(), None);
-        assert!(s.duplex_replies);
+        assert!(!s.duplex_replies, "Haru reading queued text is hard to follow, so replies stay text to speech");
+        assert!(!s.duplex_speak_first);
         let mut m = Mem::default();
         Settings {
             duplex_url: " http://gpu:8080 ".into(),
             duplex_model: "Haru-4B".into(),
             duplex_key: "k".into(),
             duplex_voice: "/tmp/me.wav".into(),
-            duplex_replies: false,
+            duplex_replies: true,
+            duplex_speak_first: true,
             ..Default::default()
         }
         .save(&mut m);
         let back = Settings::load(Some(&m));
-        assert!(!back.duplex_replies);
+        assert!(back.duplex_replies);
         assert_eq!(
             back.duplex(),
             Some(DuplexModel {
@@ -462,8 +474,17 @@ mod tests {
                 model: "Haru-4B".into(),
                 key: "k".into(),
                 voice: "/tmp/me.wav".into(),
+                speak_first: true,
             })
         );
+    }
+
+    #[test]
+    fn replies_in_its_voice_saved_on_by_the_old_default_load_off() {
+        use eframe::Storage;
+        let mut m = Mem::default();
+        m.set_string("voice_duplex_replies", "1".into());
+        assert!(!Settings::load(Some(&m)).duplex_replies);
     }
 
     #[test]
@@ -475,6 +496,7 @@ mod tests {
         let mut m = Mem::default();
         Settings {
             duplex_local: true,
+            duplex_voice: "/m/me.wav".into(),
             duplex_path: "/m/Haru-4B".into(),
             duplex_gpu: "1".into(),
             engine_idle_secs: 0,
@@ -491,8 +513,27 @@ mod tests {
     }
 
     #[test]
+    fn a_duplex_model_without_a_voice_clip_is_not_used() {
+        let s = Settings { duplex_local: true, ..Default::default() };
+        assert!(s.duplex_needs_clip());
+        assert_eq!(s.local_duplex(), None, "an unconditioned voice is noise");
+        let s = Settings { duplex_url: "http://gpu:8080".into(), ..Default::default() };
+        assert!(s.duplex_needs_clip());
+        assert_eq!(s.duplex(), None);
+        let s = Settings { duplex_local: true, duplex_voice: "/tmp/me.wav".into(), ..Default::default() };
+        assert!(!s.duplex_needs_clip());
+        assert!(s.local_duplex().is_some());
+        assert!(!Settings::default().duplex_needs_clip(), "none chosen needs nothing");
+    }
+
+    #[test]
     fn a_server_address_wins_over_the_local_model() {
-        let s = Settings { duplex_local: true, duplex_url: "http://gpu:8080".into(), ..Default::default() };
+        let s = Settings {
+            duplex_local: true,
+            duplex_url: "http://gpu:8080".into(),
+            duplex_voice: "/tmp/me.wav".into(),
+            ..Default::default()
+        };
         assert_eq!(s.local_duplex(), None);
         assert!(s.duplex().is_some());
     }

@@ -93,6 +93,9 @@ pub fn start_message(model: &DuplexModel) -> Result<Value, String> {
     if !model.model.is_empty() {
         start["model"] = model.model.clone().into();
     }
+    if model.speak_first {
+        start["speak_first"] = true.into();
+    }
     if let Some(voice) = voice_clip(&model.voice)? {
         start["voice"] = voice.into();
     }
@@ -124,6 +127,9 @@ impl Bridge {
         let options = Options { url: ws_url(&model.url), key: model.key.clone(), start };
         match Link::open(options, self.manual, wake) {
             Ok(link) => {
+                if model.speak_first {
+                    link.unmute();
+                }
                 self.link = Some(link);
                 self.model = Some(model);
                 self.conn = Conn::Connecting;
@@ -177,6 +183,7 @@ impl Bridge {
 
     pub fn say(&mut self, sentence: &str, now: Instant) {
         let Some(link) = &self.link else { return };
+        link.unmute();
         link.say(sentence);
         self.says.push(sentence.to_string());
         self.said_at = Some(now);
@@ -219,6 +226,7 @@ impl Bridge {
             self.speech_since = None;
             return out;
         }
+        link.unmute();
         let since = *self.speech_since.get_or_insert(now);
         if !self.interrupted
             && (self.queued(now) || more_to_say)
@@ -244,6 +252,10 @@ impl Bridge {
     pub fn pull_frame(&self) -> Option<Vec<f32>> {
         self.link.as_ref().filter(|l| l.manual()).map(|l| l.pull_frame())
     }
+
+    pub fn muted_frames(&self) -> u64 {
+        self.link.as_ref().map_or(0, |l| l.muted_frames())
+    }
 }
 
 #[cfg(test)]
@@ -265,13 +277,16 @@ mod tests {
 
     #[test]
     fn the_start_names_the_model_and_the_fixed_card_in_relay_mode() {
-        let m = DuplexModel { url: "http://x".into(), model: "Haru-4B".into(), key: String::new(), voice: String::new() };
+        let m = DuplexModel { url: "http://x".into(), model: "Haru-4B".into(), ..Default::default() };
         let s = start_message(&m).unwrap();
         assert_eq!(s["type"], "start");
         assert_eq!(s["mode"], "relay");
         assert_eq!(s["model"], "Haru-4B");
         assert!(s["card"]["relationship"].as_str().unwrap().contains("relay"));
         assert!(s.get("voice").is_none());
+        assert!(s.get("speak_first").is_none(), "the model waits for the user");
+        let s = start_message(&DuplexModel { speak_first: true, ..m }).unwrap();
+        assert_eq!(s["speak_first"], true);
     }
 
     #[test]

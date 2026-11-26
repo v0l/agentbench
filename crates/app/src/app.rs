@@ -2054,6 +2054,7 @@ impl App {
             model: crate::voice::LOCAL_DUPLEX.into(),
             key,
             voice: self.speech.duplex_voice.trim().to_string(),
+            speak_first: self.speech.duplex_speak_first,
         })
     }
 
@@ -2119,6 +2120,9 @@ impl App {
         }
         if self.session_by_id(sid).is_some_and(|s| s.status.busy()) {
             return Some("supervisor thinking");
+        }
+        if self.speech.duplex_needs_clip() {
+            return Some("record your voice clip first");
         }
         Some("listening")
     }
@@ -2247,6 +2251,11 @@ impl App {
     #[doc(hidden)]
     pub fn voice_test_duplex_pull(&self) -> Option<Vec<f32>> {
         self.bridge.pull_frame()
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_duplex_muted(&self) -> u64 {
+        self.bridge.muted_frames()
     }
 
     fn converse_tick(&mut self, ctx: &egui::Context) {

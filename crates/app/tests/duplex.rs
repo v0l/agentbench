@@ -153,6 +153,7 @@ fn duplex_chat(rig: &Rig, fake: &Fake, size: [f32; 2]) -> (Harness<'static, agen
     h.state_mut().voice_test_silent();
     h.state_mut().voice_test_hands_free(agentbench::voice::Sink::Headphones);
     h.state_mut().voice_test_duplex(&fake.url);
+    h.state_mut().voice_test_speech().duplex_voice = voice_clip_file();
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().open_supervisor();
     until(&mut h, "the supervisor chat", |h| h.state().supervisor_chat().is_some());
@@ -218,6 +219,8 @@ fn reply_frames_play_in_order_and_a_late_frame_plays_silence() {
     supervisor(&rig, "glib");
     let fake = Fake::start();
     let (mut h, _) = duplex_chat(&rig, &fake, [1280.0, 800.0]);
+    hear_live(&mut h, &clip(ASK)[..agentbench::voice::RATE as usize]);
+    assert!(h.state().voice_test_in_speech());
     let level = |f: &[f32]| (f.iter().sum::<f32>() / f.len() as f32 * 10.0).round() / 10.0;
     for l in [0.1, 0.2, 0.3] {
         fake.reply(l);
@@ -246,6 +249,127 @@ fn reply_frames_play_in_order_and_a_late_frame_plays_silence() {
     assert_eq!(next, 0.5, "the late frame is dropped so the delay does not grow");
 }
 
+#[test]
+fn by_default_replies_are_read_by_text_to_speech_while_the_model_listens() {
+    let rig = rig_with(vec![agent("glib", THREE_SENTENCES)]);
+    supervisor(&rig, "glib");
+    let fake = Fake::start();
+    let (mut h, sid) = duplex_chat(&rig, &fake, [1280.0, 800.0]);
+    h.state_mut().voice_test_send("what are the workers doing");
+    until(&mut h, "the reply", |h| h.state().transcript_talk(sid).iter().any(|l| l.starts_with("assistant: ")));
+    let mut spoken = Vec::new();
+    let t = Instant::now();
+    while spoken.is_empty() && t.elapsed() < Duration::from_secs(20) {
+        spoken.extend(h.state_mut().voice_test_spoken());
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(spoken.first().is_some_and(|s| s.contains("two workers")), "{spoken:?}");
+    assert!(fake.says().is_empty(), "nothing is sent to the model to say");
+    assert!(h.state().voice_test_duplex_on(), "the model still listens");
+}
+
+#[test]
+fn nothing_the_model_says_is_played_before_the_user_speaks() {
+    let rig = rig_with(vec![agent("glib", THREE_SENTENCES)]);
+    supervisor(&rig, "glib");
+    let fake = Fake::start();
+    let (mut h, _) = duplex_chat(&rig, &fake, [1280.0, 800.0]);
+    let start = fake.seen.lock().unwrap().start.clone().unwrap();
+    assert!(start.get("speak_first").is_none(), "{start}");
+    for _ in 0..10 {
+        fake.reply(0.3);
+    }
+    let t = Instant::now();
+    while h.state().voice_test_duplex_muted() < 10 {
+        assert!(t.elapsed() < Duration::from_secs(10), "the frames never arrived");
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for _ in 0..10 {
+        let f = h.state().voice_test_duplex_pull().unwrap();
+        assert!(f.iter().all(|v| *v == 0.0), "a frame was played with no user speech");
+    }
+    assert_eq!(h.state().talk_state(), Some("listening"), "babble is not the model speaking");
+
+    hear_live(&mut h, &clip(ASK)[..agentbench::voice::RATE as usize]);
+    fake.reply(0.3);
+    fake.reply(0.3);
+    let t = Instant::now();
+    loop {
+        h.step();
+        if h.state().voice_test_duplex_pull().unwrap().iter().any(|v| *v != 0.0) {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(10), "once the user spoke the reply plays");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn speak_first_plays_the_model_before_the_user_speaks() {
+    let rig = rig_with(vec![agent("glib", THREE_SENTENCES)]);
+    supervisor(&rig, "glib");
+    let fake = Fake::start();
+    let mut h = harness_cfg(
+        vec![
+            ("url".into(), rig.url.clone()),
+            ("voice_converse".into(), "1".into()),
+            ("voice_hands_free".into(), "1".into()),
+            ("voice_mode".into(), "agentbench".into()),
+            ("voice_duplex_speak_first".into(), "1".into()),
+        ],
+        Cfg::default(),
+    );
+    h.state_mut().voice_test_silent();
+    h.state_mut().voice_test_hands_free(agentbench::voice::Sink::Headphones);
+    h.state_mut().voice_test_duplex(&fake.url);
+    h.state_mut().voice_test_speech().duplex_voice = voice_clip_file();
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_supervisor();
+    until(&mut h, "the duplex session", |h| h.state().voice_test_duplex_on());
+    assert_eq!(fake.seen.lock().unwrap().start.clone().unwrap()["speak_first"], true);
+    fake.reply(0.3);
+    fake.reply(0.3);
+    let t = Instant::now();
+    while !h.state().voice_test_duplex_pull().unwrap().iter().any(|v| *v != 0.0) {
+        assert!(t.elapsed() < Duration::from_secs(10), "speak first plays at once");
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(h.state().voice_test_duplex_muted(), 0);
+}
+
+#[test]
+fn without_a_voice_clip_the_duplex_model_is_not_used_and_the_chip_says_so() {
+    let rig = rig_with(vec![agent("glib", THREE_SENTENCES)]);
+    supervisor(&rig, "glib");
+    let fake = Fake::start();
+    for (tag, size) in [("1280", [1280.0, 800.0]), ("390", [390.0, 844.0])] {
+        let mut h = harness_cfg(
+            vec![
+                ("url".into(), rig.url.clone()),
+                ("voice_converse".into(), "1".into()),
+                ("voice_hands_free".into(), "1".into()),
+                ("voice_mode".into(), "agentbench".into()),
+            ],
+            Cfg { size, ..Cfg::default() },
+        );
+        h.state_mut().voice_test_silent();
+        h.state_mut().voice_test_hands_free(agentbench::voice::Sink::Headphones);
+        h.state_mut().voice_test_duplex(&fake.url);
+        until(&mut h, "the overview", |h| h.state().overview().is_some());
+        h.state_mut().open_supervisor();
+        until(&mut h, "the clip line", |h| h.state().talk_state() == Some("record your voice clip first"));
+        until_label(&mut h, "hands free listening");
+        chip_fits(&h, size, "no clip");
+        shot(&mut h, &format!("duplex-no-clip-{tag}"));
+        h.run_steps(20);
+        assert!(fake.seen.lock().unwrap().start.is_none(), "no session is opened");
+        assert_eq!(h.state().voice_test_duplex_url(), None);
+    }
+}
+
 fn chip_fits(h: &Harness<'static, agentbench::App>, size: [f32; 2], what: &str) {
     use egui_kittest::kittest::Queryable;
     let r = h.get_by_label("hands free listening").rect();
@@ -259,6 +383,7 @@ fn a_supervisor_reply_goes_to_the_engine_as_say_messages_and_the_indicator_follo
     for (tag, size) in [("1280", [1280.0, 800.0]), ("390", [390.0, 844.0])] {
         let fake = Fake::start();
         let (mut h, sid) = duplex_chat(&rig, &fake, size);
+        h.state_mut().voice_test_speech().duplex_replies = true;
         until(&mut h, "listening", |h| h.state().talk_state() == Some("listening"));
         until_label(&mut h, "hands free listening");
         shot(&mut h, &format!("duplex-listening-{tag}"));
@@ -293,6 +418,7 @@ fn an_utterance_becomes_a_supervisor_turn_and_a_barge_in_sends_interrupt() {
     supervisor(&rig, "glib");
     let fake = Fake::start();
     let (mut h, sid) = duplex_chat(&rig, &fake, [1280.0, 800.0]);
+    h.state_mut().voice_test_speech().duplex_replies = true;
 
     let before = h.state().voice_test_duplex_sent();
     let ask = clip(ASK);
@@ -377,7 +503,7 @@ fn the_duplex_settings_fit_at_both_sizes() {
         h.run_steps(4);
         h.get_by_label("replies in its voice").scroll_to_me();
         h.run_steps(4);
-        for label in ["replies in its voice", "record"] {
+        for label in ["replies in its voice", "model speaks first", "record"] {
             let r = h.get_by_label(label).rect();
             assert!(r.right() <= size[0], "{label} runs off a {tag} screen: {r:?}");
         }
@@ -403,6 +529,7 @@ fn a_real_duplex_server_takes_the_start_frames_say_and_interrupt() {
     h.state_mut().voice_test_silent();
     h.state_mut().voice_test_hands_free(agentbench::voice::Sink::Headphones);
     h.state_mut().voice_test_duplex(&url);
+    h.state_mut().voice_test_speech().duplex_voice = voice_clip_file();
     h.state_mut().voice_test_duplex_model(&std::env::var("AGENTBENCH_DUPLEX_MODEL").unwrap_or_default());
     until(&mut h, "the overview", |h| h.state().overview().is_some());
     h.state_mut().open_supervisor();
