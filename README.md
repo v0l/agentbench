@@ -462,12 +462,29 @@ the pressure limits, then the cap comes back one worker per step. Every change
 goes to the autopilot feed, the supervisor gets one notice per episode, and
 `GET /api/autopilot` has `pressure {state, reason, since, readings,
 effective_cap, configured_cap}`. `agentbench autopilot` and the app status line
-show it as `scaled to 2 of 8: io full 22%, swapping 1400 pages/s, swap 19 GB (swap on nvme1n1p1)`.
+show it as `scaled to 2 of 8: memory stall 14 percent while swapping, swap disk queue 6.1 ms against 1.2 ms normal`.
 The reason names the rule that fired with its numbers (`swap 91 percent full`,
-`swap grew 1.5 GB in 60 s to 20 GB`). When the state is `ok` with more than
+`swapping takes 83 percent of nvme1n1p1 (82.5 MB/s of 100.0 MB/s peak), queue 3.5 ms against 2.0 ms normal`). When the state is `ok` with more than
 `_swap_gb` of swap used, the reason reads `swap 23 GB used, idle`, so it is
 clear that the swap is old pages and not a reason to throttle.
 Off Linux the readings are unknown and the state stays `ok`.
+
+Swapping is judged by measured harm on this host, never by a fixed page rate.
+The device that holds swap (from `/proc/swaps`) is always read from
+`/proc/diskstats`, and each sample keeps its queue time (weighted io ms per io),
+write latency (write ms per write) and bytes per second. Its normal is the
+median of its samples over the last `_baseline_secs` that were not slow
+(at least 6). While pages move in or out, swapping counts as pressure when:
+
+- memory some avg10 is above `_memory_some` (`memory stall 14 percent while swapping`), or
+- the swap disk is slow: queue or write latency above `_disk_ratio` times normal and also more than `_disk_floor_ms` above it, or
+- swapping takes most of the disk: `(pswpin + pswpout per second) * 4096 / peak` is above `_swap_share_pct`, where peak is the disk's highest measured bytes per second in the baseline window, and the queue is more than `_disk_floor_ms` above normal.
+
+Page movement alone, in either direction, never counts. Critical needs the
+condition on two consecutive samples and for `_critical_hold_secs`, and swap
+readings in the first `_start_grace_secs` after the server starts are ignored,
+since a new server pages its own memory back in.
+Settings `autopilot_pressure_swap_pages` and `autopilot_pressure_critical_swap_pages` set as a stopgap before this are no longer needed and can be deleted.
 
 Settings (rows of the `settings` table in `agentbench.db`, each threshold named with the `autopilot_pressure_` prefix):
 
@@ -478,8 +495,8 @@ Settings (rows of the `settings` table in `agentbench.db`, each threshold named 
 | `_io_full` | 15 | pressure: io full avg10 above, % |
 | `_memory_some` | 10 | pressure: memory some avg10 above, % |
 | `_mem_available_gb` | 12 | pressure: MemAvailable under, GB |
-| `_swap_gb` | 4 | pressure: swap used above, GB, and growing by at least `_swap_grow_gb` over the hold time while paging out (over 10 pages/s). Stale swap that sits still or creeps never counts |
-| `_swap_grow_gb` | 1 | how much swap used must grow over the hold time to count as growing, GB, 0 turns the growth rule off |
+| `_swap_gb` | 0 (off) | pressure: swap used above, GB, and growing by at least `_swap_grow_gb` over the hold time while swapping does measured harm (rules above) |
+| `_swap_grow_gb` | 0 (off) | how much swap used must grow over the hold time to count as growing, GB |
 | `_swap_full_pct` | 85 | critical: swap used above this percent of SwapTotal, since the next memory spike would be killed, 0 is off |
 | `_cpu_some` | 40 | pressure: cpu some avg60 above, % |
 | `_load_per_core` | 0.7 | pressure: 1 minute load per core above |
@@ -488,10 +505,15 @@ Settings (rows of the `settings` table in `agentbench.db`, each threshold named 
 | `_critical_io_full` | 30 | critical: io full avg10 above, % |
 | `_critical_memory_full` | 5 | critical: memory full avg10 above, % |
 | `_critical_mem_available_gb` | 5 | critical: MemAvailable under, GB |
-| `_swap_pages` | 100 | pressure: swapping now, pages per second in or out (from `/proc/vmstat`, last 60 s), 0 is off |
-| `_critical_swap_pages` | 1000 | critical: swapping now, pages per second in or out, 0 is off |
-| `_critical_swap_gb` | 0 (off) | critical: swap used above, GB, and only with proof of trouble (swap growing as `_swap_gb` describes, MemAvailable under `_mem_available_gb`, or memory some avg10 above 5%) |
-| `_critical_hold_secs` | 30 | how long a critical reading must hold |
+| `_disk_ratio` | 3 | swap disk slow: queue or write latency above this many times its own normal, 0 is off |
+| `_disk_floor_ms` | 1 | swap disk slow or queue rising: also at least this many ms above normal, so jitter on a quiet disk never counts |
+| `_swap_share_pct` | 50 | swapping takes this percent of the swap disk's measured peak bytes per second, with a rising queue, 0 is off |
+| `_baseline_secs` | 600 | window for the swap disk's normal latency (median of its not slow samples) and its peak bytes per second |
+| `_start_grace_secs` | 60 | swap readings are ignored this long after the server starts |
+| `_swap_pages` | 0 (off) | a person's own limit: pressure while swapping more pages per second in or out than this |
+| `_critical_swap_pages` | 0 (off) | a person's own limit: critical while swapping more pages per second than this |
+| `_critical_swap_gb` | 0 (off) | critical: swap used above, GB, and only with measured harm from swapping or MemAvailable under `_mem_available_gb` |
+| `_critical_hold_secs` | 30 | how long a critical reading must hold, and always two consecutive samples |
 | `_cooldown_secs` | 300 | calm time before pressure clears |
 | `_recover_secs` | 120 | one more worker each this many seconds after clearing |
 

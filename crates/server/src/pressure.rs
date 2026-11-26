@@ -28,6 +28,11 @@ pub struct Limits {
     pub critical_swap_pages: f32,
     pub swap_grow_gb: f32,
     pub swap_full_pct: f32,
+    pub disk_ratio: f32,
+    pub disk_floor_ms: f32,
+    pub swap_share_pct: f32,
+    pub baseline_ms: i64,
+    pub start_grace_ms: i64,
     pub hold_ms: i64,
     pub critical_hold_ms: i64,
     pub cooldown_ms: i64,
@@ -40,7 +45,7 @@ impl Default for Limits {
             io_full: 15.0,
             memory_some: 10.0,
             mem_available_gb: 12.0,
-            swap_gb: 4.0,
+            swap_gb: 0.0,
             cpu_some: 40.0,
             load_per_core: 0.7,
             write_ms: 0.0,
@@ -48,10 +53,15 @@ impl Default for Limits {
             critical_memory_full: 5.0,
             critical_mem_available_gb: 5.0,
             critical_swap_gb: 0.0,
-            swap_pages: 100.0,
-            critical_swap_pages: 1000.0,
-            swap_grow_gb: 1.0,
+            swap_pages: 0.0,
+            critical_swap_pages: 0.0,
+            swap_grow_gb: 0.0,
             swap_full_pct: 85.0,
+            disk_ratio: 3.0,
+            disk_floor_ms: 1.0,
+            swap_share_pct: 50.0,
+            baseline_ms: 600_000,
+            start_grace_ms: 60_000,
             hold_ms: 60_000,
             critical_hold_ms: 30_000,
             cooldown_ms: 300_000,
@@ -87,6 +97,11 @@ pub fn limits(store: &Store) -> Limits {
         critical_swap_pages: f("critical_swap_pages", d.critical_swap_pages),
         swap_grow_gb: f("swap_grow_gb", d.swap_grow_gb),
         swap_full_pct: f("swap_full_pct", d.swap_full_pct),
+        disk_ratio: f("disk_ratio", d.disk_ratio),
+        disk_floor_ms: f("disk_floor_ms", d.disk_floor_ms),
+        swap_share_pct: f("swap_share_pct", d.swap_share_pct),
+        baseline_ms: secs("baseline_secs", d.baseline_ms),
+        start_grace_ms: secs("start_grace_secs", d.start_grace_ms),
         hold_ms: secs("hold_secs", d.hold_ms),
         critical_hold_ms: secs("critical_hold_secs", d.critical_hold_ms),
         cooldown_ms: secs("cooldown_secs", d.cooldown_ms),
@@ -160,16 +175,91 @@ fn swapping_text(r: &PressureReadings) -> String {
 pub struct SwapTrend {
     pub grew: u64,
     pub window_secs: i64,
+    pub disk: Option<SwapDisk>,
 }
 
-const PAGING_OUT_FLOOR: f32 = 10.0;
+const PAGE_BYTES: f32 = 4096.0;
+const BASELINE_SAMPLES: usize = 6;
+const MB: f32 = 1_000_000.0;
 
-fn paging_out(r: &PressureReadings) -> bool {
-    r.swap_out_rate.is_some_and(|v| v > PAGING_OUT_FLOOR)
+#[derive(Clone, Copy, Debug)]
+struct DiskSample {
+    at: i64,
+    queue_ms: f32,
+    write_ms: f32,
+    bytes_rate: f32,
+    idle: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwapDisk {
+    device: String,
+    queue_ms: f32,
+    write_ms: f32,
+    queue_base: f32,
+    write_base: f32,
+    peak: f32,
+}
+
+fn median(mut v: Vec<f32>) -> f32 {
+    v.sort_by(f32::total_cmp);
+    v[v.len() / 2]
+}
+
+fn swapping(r: &PressureReadings) -> bool {
+    r.swap_in_rate.unwrap_or(0.0) + r.swap_out_rate.unwrap_or(0.0) > 0.0
+}
+
+fn swap_bytes(r: &PressureReadings) -> f32 {
+    (r.swap_in_rate.unwrap_or(0.0) + r.swap_out_rate.unwrap_or(0.0)) * PAGE_BYTES
+}
+
+fn rising(v: f32, base: f32, l: &Limits) -> bool {
+    v > base + l.disk_floor_ms
+}
+
+fn slow(v: f32, base: f32, l: &Limits) -> bool {
+    l.disk_ratio > 0.0 && v > base * l.disk_ratio && rising(v, base, l)
+}
+
+impl SwapDisk {
+    fn slow(&self, l: &Limits) -> Option<String> {
+        let text = |what: &str, v: f32, base: f32| format!("swap disk {what} {v:.1} ms against {base:.1} ms normal");
+        if slow(self.queue_ms, self.queue_base, l) {
+            Some(text("queue", self.queue_ms, self.queue_base))
+        } else if slow(self.write_ms, self.write_base, l) {
+            Some(text("writes", self.write_ms, self.write_base))
+        } else {
+            None
+        }
+    }
+
+    fn share(&self, r: &PressureReadings) -> f32 {
+        if self.peak > 0.0 { swap_bytes(r) * 100.0 / self.peak } else { 0.0 }
+    }
+
+    fn crowded(&self, r: &PressureReadings, l: &Limits) -> Option<String> {
+        let share = self.share(r);
+        (l.swap_share_pct > 0.0 && share > l.swap_share_pct && rising(self.queue_ms, self.queue_base, l)).then(|| {
+            format!(
+                "swapping takes {share:.0} percent of {} ({:.1} MB/s of {:.1} MB/s peak), queue {:.1} ms against {:.1} ms normal",
+                self.device,
+                swap_bytes(r) / MB,
+                self.peak / MB,
+                self.queue_ms,
+                self.queue_base
+            )
+        })
+    }
+}
+
+fn harmed(r: &PressureReadings, l: &Limits, trend: &SwapTrend) -> bool {
+    swapping(r)
+        && (above(r.memory_some10, l.memory_some).is_some() || trend.disk.as_ref().is_some_and(|d| d.slow(l).is_some()))
 }
 
 fn growing(r: &PressureReadings, l: &Limits, trend: &SwapTrend) -> bool {
-    l.swap_grow_gb > 0.0 && gb(trend.grew) >= l.swap_grow_gb as f64 && paging_out(r)
+    l.swap_grow_gb > 0.0 && gb(trend.grew) >= l.swap_grow_gb as f64 && harmed(r, l, trend)
 }
 
 fn grew_text(used: u64, r: &PressureReadings, trend: &SwapTrend) -> String {
@@ -194,14 +284,21 @@ fn hits(r: &PressureReadings, l: &Limits, trend: &SwapTrend) -> (Vec<Hit>, Vec<H
         p.push(pct("io_full", "io full", v));
     }
     if let Some(v) = above(r.memory_some10, l.memory_some) {
-        p.push(pct("memory_some", "memory some", v));
+        if swapping(r) {
+            p.push(Hit { key: "memory_some", text: format!("memory stall {v:.0} percent while swapping") });
+        } else {
+            p.push(pct("memory_some", "memory some", v));
+        }
     }
     if let Some(m) = r.mem_available.filter(|m| gb(*m) < l.mem_available_gb as f64) {
         p.push(Hit { key: "mem_available", text: format!("{} available", gb_text(m)) });
     }
     let rate = swap_rate(r);
+    let disk = trend.disk.as_ref().filter(|_| swapping(r));
     if l.swap_pages > 0.0 && rate > l.swap_pages {
         p.push(Hit { key: "swap", text: swapping_text(r) });
+    } else if let Some(text) = disk.and_then(|d| d.slow(l).or_else(|| d.crowded(r, l))) {
+        p.push(Hit { key: "swap", text });
     } else if let Some(s) = r.swap_used.filter(|s| growing(r, l, trend) && gb(*s) > l.swap_gb as f64) {
         p.push(Hit { key: "swap", text: grew_text(s, r, trend) });
     }
@@ -231,9 +328,7 @@ fn hits(r: &PressureReadings, l: &Limits, trend: &SwapTrend) -> (Vec<Hit>, Vec<H
     if l.critical_swap_pages > 0.0 && rate > l.critical_swap_pages {
         c.push(Hit { key: "c_swap", text: swapping_text(r) });
     } else if let Some(s) = r.swap_used.filter(|s| l.critical_swap_gb > 0.0 && gb(*s) > l.critical_swap_gb as f64) {
-        let trouble = growing(r, l, trend)
-            || r.mem_available.is_some_and(|m| gb(m) < l.mem_available_gb as f64)
-            || above(r.memory_some10, 5.0).is_some();
+        let trouble = harmed(r, l, trend) || r.mem_available.is_some_and(|m| gb(m) < l.mem_available_gb as f64);
         if trouble {
             c.push(Hit { key: "c_swap", text: swap_text(s, &r.swap_device) });
         }
@@ -259,6 +354,8 @@ pub struct Monitor {
     critical_quiet_since: Option<i64>,
     recover: Option<(u32, i64)>,
     swaps: VecDeque<(i64, u64)>,
+    started: Option<i64>,
+    swap_disk: Option<(String, VecDeque<DiskSample>)>,
     last_cap: Option<u32>,
     last_at: i64,
     pub(crate) notified: bool,
@@ -295,9 +392,34 @@ impl Monitor {
 
     fn sustained(&self, hits: &[Hit], hold: i64, now: i64) -> Vec<String> {
         hits.iter()
-            .filter(|h| self.held.get(h.key).is_some_and(|at| now - at >= hold))
+            .filter(|h| self.held.get(h.key).is_some_and(|at| *at < now && now - at >= hold))
             .map(|h| h.text.clone())
             .collect()
+    }
+
+    fn swap_disk(&mut self, r: &PressureReadings, l: &Limits, now: i64) -> Option<SwapDisk> {
+        let name = r.swap_device.clone()?;
+        let d = r.disks.iter().find(|d| d.device == name)?;
+        if self.swap_disk.as_ref().is_none_or(|(n, _)| *n != name) {
+            self.swap_disk = Some((name.clone(), VecDeque::new()));
+        }
+        let history = &mut self.swap_disk.as_mut()?.1;
+        while history.front().is_some_and(|s| now - s.at > l.baseline_ms) {
+            history.pop_front();
+        }
+        let idle: Vec<&DiskSample> = history.iter().filter(|s| s.idle).collect();
+        let peak = history.iter().map(|s| s.bytes_rate).fold(d.bytes_rate, f32::max);
+        let disk = (idle.len() >= BASELINE_SAMPLES).then(|| SwapDisk {
+            device: name,
+            queue_ms: d.queue_ms,
+            write_ms: d.write_ms,
+            queue_base: median(idle.iter().map(|s| s.queue_ms).collect()),
+            write_base: median(idle.iter().map(|s| s.write_ms).collect()),
+            peak,
+        });
+        let idle = disk.as_ref().is_none_or(|d| d.slow(l).is_none());
+        history.push_back(DiskSample { at: now, queue_ms: d.queue_ms, write_ms: d.write_ms, bytes_rate: d.bytes_rate, idle });
+        disk
     }
 
     fn enter(&mut self, to: PressureState, reason: String, now: i64) -> (PressureState, PressureState) {
@@ -322,8 +444,15 @@ impl Monitor {
         let grew = r.swap_used.map_or(0, |s| {
             self.swaps.iter().rev().skip(1).map(|(_, v)| *v).min().map_or(0, |low| s.saturating_sub(low))
         });
-        let trend = SwapTrend { grew, window_secs: l.hold_ms / 1000 };
-        let (p, c) = hits(&r, l, &trend);
+        let trend = SwapTrend { grew, window_secs: l.hold_ms / 1000, disk: self.swap_disk(&r, l, now) };
+        let started = *self.started.get_or_insert(now);
+        let (mut p, mut c) = hits(&r, l, &trend);
+        if now - started < l.start_grace_ms {
+            let paging = swapping(&r);
+            let own_page_in = |h: &Hit| matches!(h.key, "swap" | "c_swap") || (paging && h.key == "memory_some");
+            p.retain(|h| !own_page_in(h));
+            c.retain(|h| !own_page_in(h));
+        }
         self.readings = r;
         let keys: HashSet<&'static str> = p.iter().chain(&c).map(|h| h.key).collect();
         self.held.retain(|k, _| keys.contains(k));
@@ -410,6 +539,7 @@ impl Monitor {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use agentbench_core::DiskReading;
 
     pub(crate) fn calm() -> PressureReadings {
         PressureReadings {
@@ -524,17 +654,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn swap_counts_only_while_it_grows_and_names_its_device() {
+    fn a_users_growth_rule_still_needs_measured_harm_and_names_its_device() {
         let mut m = Monitor::default();
         let gib = 1024 * 1024 * 1024u64;
-        let flat = PressureReadings { swap_used: Some(6 * gib), ..calm() };
-        run(&mut m, &flat, 0, 200 * S);
-        assert_eq!(m.state(), PressureState::Ok, "a flat swap is not pressure");
-        let mut t = 210 * S;
+        let l = Limits { swap_gb: 4.0, swap_grow_gb: 1.0, memory_some: 20.0, ..Limits::default() };
         let mut used = 6 * gib;
-        while m.state() == PressureState::Ok && t < 400 * S {
+        for i in 0..30 {
             used += gib / 4;
-            m.observe(PressureReadings { swap_used: Some(used), swap_out_rate: Some(50.0), ..calm() }, &Limits::default(), 8, t);
+            m.observe(PressureReadings { swap_used: Some(used), swap_out_rate: Some(50.0), ..calm() }, &l, 8, i * 10 * S);
+        }
+        assert_eq!(m.state(), PressureState::Ok, "growth with nothing waiting is not pressure");
+        let mut t = 300 * S;
+        while m.state() == PressureState::Ok && t < 600 * S {
+            used += gib / 4;
+            m.observe(PressureReadings { swap_used: Some(used), swap_out_rate: Some(50.0), memory_some10: Some(25.0), ..calm() }, &l, 8, t);
             t += 10 * S;
         }
         assert_eq!(m.state(), PressureState::Pressure);
@@ -645,7 +778,7 @@ pub(crate) mod tests {
         let mut used = 20 * gb_;
         while m.state() == PressureState::Ok && t < 300 * S {
             used += gb_ / 4;
-            m.observe(PressureReadings { swap_used: Some(used), swap_out_rate: Some(400.0), ..live_idle_host() }, &l, 5, t);
+            m.observe(PressureReadings { swap_used: Some(used), swap_out_rate: Some(400.0), memory_some10: Some(14.0), ..live_idle_host() }, &l, 5, t);
             t += 10 * S;
         }
         assert_eq!(m.state(), PressureState::Pressure);
@@ -674,13 +807,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn heavy_paging_out_is_critical_with_the_used_size_in_the_reason() {
-        let mut m = Monitor::default();
+    fn heavy_paging_alone_is_not_critical_but_a_users_page_limit_is() {
         let gib = 1024 * 1024 * 1024u64;
         let r = PressureReadings { swap_used: Some(18 * gib), mem_available: Some(34 * gib), swap_in_rate: Some(0.0), swap_out_rate: Some(5000.0), ..calm() };
-        run(&mut m, &r, 0, 30 * S);
-        assert_eq!(m.state(), PressureState::Critical);
-        assert!(m.reason.contains("swap 18 GB"), "{}", m.reason);
+        let mut m = Monitor::default();
+        run(&mut m, &r, 0, 600 * S);
+        assert_eq!(m.state(), PressureState::Ok);
+        let mut set = Monitor::default();
+        let l = Limits { critical_swap_pages: 1000.0, ..Limits::default() };
+        for i in 0..12 {
+            set.observe(r.clone(), &l, 8, i * 10 * S);
+        }
+        assert_eq!(set.state(), PressureState::Critical);
+        assert!(set.reason.contains("swap 18 GB"), "{}", set.reason);
     }
 
     #[test]
@@ -706,6 +845,152 @@ pub(crate) mod tests {
         assert_eq!(m.state(), PressureState::Ok);
     }
 
+    fn on_disk(r: PressureReadings, queue_ms: f32, write_ms: f32, bytes_rate: f32) -> PressureReadings {
+        let disk = DiskReading { device: "nvme1n1p1".into(), path: "/mnt/data".into(), write_ms, queue_ms, bytes_rate };
+        PressureReadings { swap_device: Some("nvme1n1p1".into()), disks: vec![disk], ..r }
+    }
+
+    fn live_restart_host() -> PressureReadings {
+        let r = PressureReadings {
+            swap_in_rate: Some(148.25),
+            swap_out_rate: Some(0.0),
+            memory_some10: Some(0.0),
+            memory_full10: Some(0.0),
+            io_full10: Some(0.01),
+            io_some10: Some(0.01),
+            mem_available: Some(33_000_000_000),
+            swap_used: Some(21_100_000_000),
+            swap_total: Some(51_500_000_000),
+            load_per_core: Some(0.15),
+            ..calm()
+        };
+        on_disk(r, 1.2, 0.4, 600_000.0)
+    }
+
+    fn observe_all(m: &mut Monitor, l: &Limits, rs: &[PressureReadings], from: i64) -> Vec<Event> {
+        let mut out = Vec::new();
+        for (i, r) in rs.iter().enumerate() {
+            out.extend(m.observe(r.clone(), l, 5, from + i as i64 * 10 * S));
+        }
+        out
+    }
+
+    #[test]
+    fn the_live_restart_host_paging_its_own_pages_back_in_stays_ok() {
+        let mut m = Monitor::default();
+        let l = Limits::default();
+        for i in 0..90 {
+            let ev = m.observe(live_restart_host(), &l, 5, i * 10 * S);
+            assert!(ev.is_empty(), "sample {i}: {ev:?}");
+        }
+        assert_eq!(m.state(), PressureState::Ok);
+        assert_eq!(m.effective_cap(5, 900 * S, &l), 5);
+    }
+
+    #[test]
+    fn the_same_page_rate_on_a_slow_swap_disk_with_memory_stall_is_pressure() {
+        let mut m = Monitor::default();
+        let l = Limits::default();
+        observe_all(&mut m, &l, &vec![live_restart_host(); 12], 0);
+        let slow = on_disk(PressureReadings { memory_some10: Some(14.0), ..live_restart_host() }, 6.1, 0.4, 600_000.0);
+        observe_all(&mut m, &l, &vec![slow; 8], 120 * S);
+        assert_eq!(m.state(), PressureState::Pressure);
+        assert!(m.reason.contains("memory stall 14 percent while swapping"), "{}", m.reason);
+        assert!(m.reason.contains("swap disk queue 6.1 ms against 1.2 ms normal"), "{}", m.reason);
+    }
+
+    #[test]
+    fn a_slow_swap_disk_alone_is_pressure_only_while_swapping() {
+        let l = Limits::default();
+        let slow = on_disk(live_restart_host(), 6.1, 0.4, 600_000.0);
+        let mut m = Monitor::default();
+        observe_all(&mut m, &l, &vec![live_restart_host(); 12], 0);
+        observe_all(&mut m, &l, &vec![slow.clone(); 8], 120 * S);
+        assert_eq!(m.state(), PressureState::Pressure);
+        assert_eq!(m.reason, "swap disk queue 6.1 ms against 1.2 ms normal");
+        let mut still = Monitor::default();
+        let quiet = PressureReadings { swap_in_rate: Some(0.0), ..slow };
+        observe_all(&mut still, &l, &vec![live_restart_host(); 12], 0);
+        observe_all(&mut still, &l, &vec![quiet; 30], 120 * S);
+        assert_eq!(still.state(), PressureState::Ok, "a slow disk with no swapping is not swap pressure");
+    }
+
+    #[test]
+    fn a_fast_and_a_slow_swap_disk_differ_only_through_their_measured_latency() {
+        let l = Limits::default();
+        let paging = PressureReadings { swap_in_rate: Some(3000.0), ..live_restart_host() };
+        let fast: Vec<PressureReadings> = (0..60).map(|i| on_disk(paging.clone(), if i < 12 { 0.1 } else { 0.4 }, 0.1, 12_000_000.0)).collect();
+        let mut m = Monitor::default();
+        assert!(observe_all(&mut m, &l, &fast, 0).is_empty());
+        assert_eq!(m.state(), PressureState::Ok, "jitter under the floor on a fast disk");
+        let mut slow_disk = Monitor::default();
+        let idle: Vec<PressureReadings> = (0..12).map(|_| on_disk(paging.clone(), 4.0, 3.0, 100_000_000.0)).collect();
+        observe_all(&mut slow_disk, &l, &idle, 0);
+        assert_eq!(slow_disk.state(), PressureState::Ok, "a slow disk at its own baseline");
+        observe_all(&mut slow_disk, &l, &vec![on_disk(paging.clone(), 9.0, 3.0, 12_000_000.0); 7], 120 * S);
+        assert_eq!(slow_disk.state(), PressureState::Ok, "over the floor but under three times normal");
+        observe_all(&mut slow_disk, &l, &vec![on_disk(paging, 15.0, 3.0, 12_000_000.0); 8], 190 * S);
+        assert_eq!(slow_disk.state(), PressureState::Pressure);
+        assert_eq!(slow_disk.reason, "swap disk queue 15.0 ms against 4.0 ms normal");
+    }
+
+    #[test]
+    fn a_page_rate_alone_in_either_direction_is_never_pressure() {
+        let l = Limits::default();
+        for r in [
+            PressureReadings { swap_in_rate: Some(3000.0), ..live_restart_host() },
+            PressureReadings { swap_out_rate: Some(50000.0), ..live_restart_host() },
+            PressureReadings { swap_out_rate: Some(50000.0), disks: vec![], ..live_restart_host() },
+        ] {
+            let mut m = Monitor::default();
+            assert!(observe_all(&mut m, &l, &vec![r; 60], 0).is_empty());
+            assert_eq!(m.state(), PressureState::Ok);
+        }
+    }
+
+    #[test]
+    fn swapping_that_takes_most_of_the_disk_with_a_rising_queue_is_pressure() {
+        let l = Limits::default();
+        let mut m = Monitor::default();
+        let idle: Vec<PressureReadings> = (0..12).map(|_| on_disk(live_restart_host(), 2.0, 1.0, 100_000_000.0)).collect();
+        observe_all(&mut m, &l, &idle, 0);
+        let crowded = on_disk(PressureReadings { swap_out_rate: Some(20000.0), ..live_restart_host() }, 3.5, 1.0, 90_000_000.0);
+        observe_all(&mut m, &l, &vec![crowded.clone(); 8], 120 * S);
+        assert_eq!(m.state(), PressureState::Pressure);
+        assert!(m.reason.starts_with("swapping takes 83 percent of nvme1n1p1 (82.5 MB/s of 100.0 MB/s peak), queue 3.5 ms against 2.0 ms normal"), "{}", m.reason);
+        let mut flat = Monitor::default();
+        observe_all(&mut flat, &l, &idle, 0);
+        observe_all(&mut flat, &l, &vec![on_disk(crowded, 2.5, 1.0, 90_000_000.0); 30], 120 * S);
+        assert_eq!(flat.state(), PressureState::Ok, "a high share with a flat queue is the disk coping");
+    }
+
+    #[test]
+    fn the_first_minute_after_start_is_ignored() {
+        let l = Limits { critical_swap_pages: 1000.0, ..Limits::default() };
+        let burst = on_disk(PressureReadings { swap_in_rate: Some(30000.0), memory_some10: Some(30.0), ..live_restart_host() }, 40.0, 9.0, 120_000_000.0);
+        let mut m = Monitor::default();
+        let mut samples = vec![burst.clone(); 6];
+        samples.extend(vec![live_restart_host(); 60]);
+        assert!(observe_all(&mut m, &l, &samples, 0).is_empty());
+        assert_eq!(m.state(), PressureState::Ok);
+        let mut later = Monitor::default();
+        observe_all(&mut later, &l, &vec![live_restart_host(); 7], 0);
+        observe_all(&mut later, &l, &vec![burst; 6], 70 * S);
+        assert_eq!(later.state(), PressureState::Critical, "after the first minute the same burst counts");
+    }
+
+    #[test]
+    fn critical_needs_two_consecutive_samples() {
+        let l = Limits { critical_hold_ms: 0, ..Limits::default() };
+        let mut m = Monitor::default();
+        m.observe(calm(), &l, 8, 0);
+        assert!(m.observe(heavy(), &l, 8, 10 * S).is_empty(), "one sample");
+        m.observe(calm(), &l, 8, 20 * S);
+        assert!(m.observe(heavy(), &l, 8, 30 * S).is_empty(), "one sample again");
+        let ev = m.observe(heavy(), &l, 8, 40 * S);
+        assert!(matches!(&ev[..], [Event::Changed { to: PressureState::Critical, cap: 0, .. }]), "{ev:?}");
+    }
+
     #[test]
     fn unknown_readings_stay_ok() {
         let mut m = Monitor::default();
@@ -717,10 +1002,10 @@ pub(crate) mod tests {
     fn the_status_line_names_the_scaled_cap_and_the_reason() {
         let mut m = Monitor::default();
         let gib = 1024 * 1024 * 1024u64;
-        let l = Limits::default();
+        let l = Limits { critical_swap_pages: 1000.0, ..Limits::default() };
         let mut used = 18 * gib + gib / 2;
         let mut t = 0;
-        while m.state() == PressureState::Ok && t < 200 * S {
+        while m.state() != PressureState::Critical && t < 300 * S {
             used += gib / 8;
             let r = PressureReadings { io_full10: Some(22.0), swap_used: Some(used), swap_out_rate: Some(5000.0), ..calm() };
             m.observe(r, &l, 8, t);
@@ -729,7 +1014,7 @@ pub(crate) mod tests {
         let snap = m.snapshot(8, t, &l);
         assert_eq!(snap.state, PressureState::Critical);
         let line = snap.line().unwrap();
-        assert!(line.starts_with("starts paused, 0 of 8: swapping 5000 pages/s, swap 19 GB (swap on nvme1n1p1)"), "{line}");
+        assert!(line.starts_with("starts paused, 0 of 8: swapping 5000 pages/s, swap 20 GB (swap on nvme1n1p1)"), "{line}");
         let p = HostPressure { state: PressureState::Pressure, effective_cap: 2, reason: "io full 22%, swap 19 GB".into(), ..snap };
         assert_eq!(p.line().unwrap(), "scaled to 2 of 8: io full 22%, swap 19 GB");
     }

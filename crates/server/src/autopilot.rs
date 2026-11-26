@@ -2940,6 +2940,8 @@ mod tests {
         r.store.set_setting(crate::pressure::SETTING, "off").unwrap();
         load(&r, &heavy(), 0, 200 * S);
         load(&r, &agentbench_core::PressureReadings { swap_used: Some(48_000_000_000), ..live_idle_host() }, 210 * S, 400 * S);
+        let storm = agentbench_core::PressureReadings { swap_in_rate: Some(90_000.0), swap_out_rate: Some(90_000.0), memory_some10: Some(60.0), ..live_idle_host() };
+        load(&r, &storm, 410 * S, 600 * S);
         r.ap.tick();
         assert_eq!(running_issues(&r), 2);
         assert!(!state_for(&r.ap.runner).pressure.unwrap().enabled);
