@@ -370,6 +370,45 @@ fn without_a_voice_clip_the_duplex_model_is_not_used_and_the_chip_says_so() {
     }
 }
 
+#[test]
+fn a_voice_setting_edited_on_disk_survives_the_settings_window_and_the_next_save() {
+    let rig = rig();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.ron");
+    let write = |pairs: &[(&str, &str)]| {
+        let all: std::collections::HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        std::fs::write(&path, ron::ser::to_string_pretty(&all, Default::default()).unwrap()).unwrap();
+    };
+    write(&[("voice_duplex_choice", "haru"), ("voice_hang_secs", "3")]);
+    let mut h = harness_cfg(
+        vec![
+            ("url".into(), rig.url.clone()),
+            ("voice_duplex_choice".into(), "haru".into()),
+            ("voice_hang_secs".into(), "3".into()),
+        ],
+        Cfg::default(),
+    );
+    h.state_mut().watch_speech_file(path.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_settings_page("speech");
+    until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
+    h.state_mut().voice_test_settings_speech().unwrap().hang_secs = 7.0;
+    std::thread::sleep(Duration::from_millis(20));
+    write(&[("voice_duplex_choice", "haru"), ("voice_hang_secs", "3"), ("voice_duplex_voice", "/disk/me.wav"), ("voice_headphones", "1")]);
+    until(&mut h, "the disk edit", |h| h.state().voice_test_settings().duplex_voice == "/disk/me.wav");
+    assert_eq!(h.state_mut().voice_test_settings_speech().unwrap().duplex_voice, "/disk/me.wav", "the open window follows it");
+    h.state_mut().settings_save();
+    h.run_steps(4);
+    let s = h.state().voice_test_settings();
+    assert_eq!(s.duplex_voice, "/disk/me.wav", "saving the window does not undo it");
+    assert_eq!(s.headphones, Some(true));
+    assert_eq!(s.hang_secs, 7.0, "what was changed in the window is kept");
+    let mut saved = Mem::default();
+    h.state().store(&mut saved);
+    assert_eq!(saved.0["voice_duplex_voice"], "/disk/me.wav");
+    assert_eq!(saved.0["voice_hang_secs"], "7");
+}
+
 fn chip_fits(h: &Harness<'static, agentbench::App>, size: [f32; 2], what: &str) {
     use egui_kittest::kittest::Queryable;
     let r = h.get_by_label("hands free listening").rect();

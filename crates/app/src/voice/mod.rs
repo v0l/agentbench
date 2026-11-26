@@ -12,7 +12,7 @@
 //! shape of a result. The microphone and the two readers live in `native`, and platforms with no
 //! microphone to open (the browser) get `stub`, which says so.
 
-mod settings;
+pub mod settings;
 pub(crate) mod autosend;
 pub use settings::{AUTO_SEND_SECS, DuplexModel, LOCAL_DUPLEX, LOCAL_MODELS, Mode, Settings, default_model_dir, model_problem};
 

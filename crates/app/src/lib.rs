@@ -71,7 +71,11 @@ pub fn run_native(home: Option<std::path::PathBuf>) -> eframe::Result<()> {
         "agentbench",
         opts,
         Box::new(move |cc| {
-            Ok(Box::new(App::with_local(&cc.egui_ctx, cc.storage, None, Some(local_server(home)))))
+            let mut app = App::with_local(&cc.egui_ctx, cc.storage, None, Some(local_server(home)));
+            if let Some(dir) = eframe::storage_dir("agentbench") {
+                app.watch_speech_file(dir.join("app.ron"));
+            }
+            Ok(Box::new(app))
         }),
     )
 }

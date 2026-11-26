@@ -328,6 +328,100 @@ impl Settings {
     }
 }
 
+impl Settings {
+    pub fn keys(&self) -> std::collections::BTreeMap<String, String> {
+        let mut m = Keys::default();
+        self.save(&mut m);
+        m.0
+    }
+
+    pub fn from_keys(keys: std::collections::BTreeMap<String, String>) -> Settings {
+        Settings::load(Some(&Keys(keys)))
+    }
+
+    pub fn merged(base: &std::collections::BTreeMap<String, String>, mine: &Settings, theirs: &std::collections::BTreeMap<String, String>) -> Settings {
+        let mine = mine.keys();
+        let mut out = mine.clone();
+        for k in base.keys().chain(theirs.keys()).filter(|k| k.starts_with("voice_")) {
+            if mine.get(k) != base.get(k) {
+                continue;
+            }
+            match theirs.get(k) {
+                Some(v) => out.insert(k.clone(), v.clone()),
+                None => out.remove(k),
+            };
+        }
+        Settings::from_keys(out)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn on_disk(path: &std::path::Path) -> Option<std::collections::BTreeMap<String, String>> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let all: std::collections::HashMap<String, String> = ron::from_str(&text).ok()?;
+        Some(Settings::from_keys(all.into_iter().filter(|(k, _)| k.starts_with("voice_")).collect()).keys())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Watch {
+    path: std::path::PathBuf,
+    base: std::collections::BTreeMap<String, String>,
+    modified: Option<std::time::SystemTime>,
+    checked: Option<web_time::Instant>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Watch {
+    pub const EVERY: web_time::Duration = web_time::Duration::from_secs(2);
+
+    pub fn new(path: std::path::PathBuf, current: &Settings) -> Watch {
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let base = Settings::on_disk(&path).unwrap_or_else(|| current.keys());
+        Watch { path, base, modified, checked: None }
+    }
+
+    pub fn absorb(&mut self, speech: &mut Settings, now: web_time::Instant, force: bool) -> bool {
+        if !force && self.checked.is_some_and(|c| now.saturating_duration_since(c) < Self::EVERY) {
+            return false;
+        }
+        self.checked = Some(now);
+        let modified = std::fs::metadata(&self.path).and_then(|m| m.modified()).ok();
+        if modified.is_none() || modified == self.modified {
+            return false;
+        }
+        let Some(theirs) = Settings::on_disk(&self.path) else { return false };
+        self.modified = modified;
+        if theirs == self.base {
+            return false;
+        }
+        let merged = Settings::merged(&self.base, speech, &theirs);
+        self.base = theirs;
+        let changed = merged != *speech;
+        *speech = merged;
+        changed
+    }
+
+    pub fn saved(&mut self, speech: &Settings) {
+        self.base = speech.keys();
+    }
+}
+
+#[derive(Default)]
+struct Keys(std::collections::BTreeMap<String, String>);
+
+impl eframe::Storage for Keys {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.into(), value);
+    }
+    fn remove_string(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+    fn flush(&mut self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,6 +465,42 @@ mod tests {
         let back = Settings::load(Some(&m));
         assert_eq!(back.model, "parakeet-tdt-0.6b");
         assert_eq!(back.reply_voice, "Alfie");
+    }
+
+    #[test]
+    fn a_change_on_disk_is_kept_unless_this_window_changed_the_same_setting() {
+        let base = Settings { duplex_local: true, hang_secs: 3.0, ..Default::default() };
+        let mut theirs = base.keys();
+        theirs.insert("voice_duplex_voice".into(), "/disk.wav".into());
+        theirs.insert("voice_hang_secs".into(), "5".into());
+        theirs.insert("voice_headphones".into(), "1".into());
+        let mine = Settings { hang_secs: 8.0, duplex_replies: true, ..base.clone() };
+        let out = Settings::merged(&base.keys(), &mine, &theirs);
+        assert_eq!(out.duplex_voice, "/disk.wav", "untouched here, so the disk wins");
+        assert_eq!(out.headphones, Some(true));
+        assert_eq!(out.hang_secs, 8.0, "changed here, so this window wins");
+        assert!(out.duplex_replies);
+        assert!(out.duplex_local);
+        let mut gone = base.keys();
+        gone.insert("voice_headphones".into(), "0".into());
+        let before = Settings { headphones: Some(false), ..base.clone() };
+        let out = Settings::merged(&gone, &before, &base.keys());
+        assert_eq!(out.headphones, None, "a setting removed on disk is removed here");
+    }
+
+    #[test]
+    fn the_voice_settings_are_read_from_an_eframe_ron_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.ron");
+        let mut all = std::collections::HashMap::new();
+        all.insert("voice_duplex_voice".to_string(), "/me.wav".to_string());
+        all.insert("tiles".to_string(), "1,2".to_string());
+        std::fs::write(&path, ron::ser::to_string_pretty(&all, Default::default()).unwrap()).unwrap();
+        let keys = Settings::on_disk(&path).unwrap();
+        assert!(keys.keys().all(|k| k.starts_with("voice_")));
+        assert_eq!(keys["voice_duplex_voice"], "/me.wav");
+        assert_eq!(keys["voice_hang_secs"], "3", "a missing setting reads as its default");
+        assert_eq!(Settings::on_disk(&dir.path().join("none.ron")), None);
     }
 
     #[test]

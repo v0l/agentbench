@@ -801,6 +801,8 @@ pub struct App {
     hold: crate::voice::Hold,
     hint: Option<(f64, &'static str)>,
     speech: crate::voice::Settings,
+    #[cfg(not(target_arch = "wasm32"))]
+    speech_watch: Option<crate::voice::settings::Watch>,
     /// Reading a reply aloud, and the message being read.
     reader: crate::voice::Reader,
     reading: Option<Id>,
@@ -1044,6 +1046,8 @@ impl App {
             auto: None,
             clock: None,
             speech: crate::voice::Settings::load(storage),
+            #[cfg(not(target_arch = "wasm32"))]
+            speech_watch: None,
             agent_models: HashMap::new(),
             asking_models: HashSet::new(),
             markdown: markdown::Cache::default(),
@@ -1995,6 +1999,27 @@ impl App {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn watch_speech_file(&mut self, path: std::path::PathBuf) {
+        self.speech_watch = Some(crate::voice::settings::Watch::new(path, &self.speech));
+    }
+
+    fn absorb_speech(&mut self, force: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(w) = &mut self.speech_watch else { return };
+            let before = self.speech.keys();
+            if !w.absorb(&mut self.speech, Instant::now(), force) {
+                return;
+            }
+            let now = self.speech.keys();
+            if let Some(st) = &mut self.settings {
+                st.speech = crate::voice::Settings::merged(&before, &st.speech, &now);
+            }
+        }
+        let _ = force;
+    }
+
     fn engine_want(&self) -> crate::voice::engine::Want {
         use crate::voice::engine::{ModelSpec, Plan, Want};
         let Some(dir) = self.speech.local_duplex().filter(|_| self.speech.converse && self.speech.hands_free) else {
@@ -2211,6 +2236,16 @@ impl App {
         self.speech.engine_program = program.to_string();
         self.speech.duplex_gpu = gpu.to_string();
         self.bridge.set_manual();
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_settings(&self) -> &crate::voice::Settings {
+        &self.speech
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_settings_speech(&mut self) -> Option<&mut crate::voice::Settings> {
+        self.settings.as_mut().map(|s| &mut s.speech)
     }
 
     #[doc(hidden)]
@@ -4337,6 +4372,7 @@ impl App {
         let ctx = ui.ctx().clone();
         crate::system::ime_before_frame(&ctx);
         crate::system::deliver_paste(&ctx);
+        self.absorb_speech(false);
         self.tick(&ctx);
         let narrow = ctx.content_rect().width() < 720.0 || ctx.content_rect().height() < 480.0;
         self.narrow = narrow;
@@ -4469,7 +4505,12 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.absorb_speech(true);
         self.store(storage);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(w) = &mut self.speech_watch {
+            w.saved(&self.speech);
+        }
     }
 
     fn on_exit(&mut self) {

@@ -241,6 +241,7 @@ dependencies = [
  "qrcode",
  "reqwest",
  "rfd",
+ "ron",
  "rqrr",
  "rustls",
  "serde",
