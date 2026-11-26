@@ -4425,6 +4425,28 @@ mod tests {
         assert!(told[0].contains("passed earlier in this session and now fails"), "{}", told[0]);
     }
 
+    #[tokio::test]
+    async fn a_test_that_fails_after_an_edit_does_not_mark_the_check_in_stuck() {
+        let r = rig(LONG);
+        let (sid, _) = running_worker(&r).await;
+        ran(&r, sid, "cargo test", GOOD, false);
+        r.store
+            .add_message(
+                sid,
+                &Entry::Tool {
+                    call_id: "edit1".into(),
+                    name: "edit_file".into(),
+                    input: serde_json::json!({ "path": "a.rs" }),
+                    output: Some("ok".into()),
+                    error: false,
+                },
+            )
+            .unwrap();
+        ran(&r, sid, "cargo test", BAD, true);
+        r.ap.tick();
+        assert!(check_ins(&r).await.iter().all(|t| !t.contains("passed earlier in this session")));
+    }
+
     fn write_files(path: &str, from: usize, to: usize, modified_at: std::time::SystemTime) {
         for i in from..to {
             let f = std::fs::File::create(std::path::Path::new(path).join(format!("f{i}.txt"))).unwrap();

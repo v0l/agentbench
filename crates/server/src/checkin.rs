@@ -12,6 +12,7 @@ pub struct Run {
     pub exit: Option<i32>,
     pub failed: bool,
     pub results: Vec<String>,
+    pub edits_before: usize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -39,6 +40,18 @@ fn exit_code(output: &str) -> Option<i32> {
     output[at + 6..].split(|c: char| !(c.is_ascii_digit() || c == '-')).next()?.parse().ok()
 }
 
+fn is_edit(name: &str, input: &serde_json::Value) -> bool {
+    if ["edit_file", "write_file", "replace_in_files"].iter().any(|n| name.eq_ignore_ascii_case(n)) {
+        return true;
+    }
+    let command = input.get("command").and_then(|c| c.as_str()).unwrap_or_default();
+    name.eq_ignore_ascii_case("bash")
+        && (command.contains("sed -i")
+            || ["git apply", "git checkout", "git restore", "git stash", "git reset", "git merge", "git rebase", "git pull"]
+                .iter()
+                .any(|g| command.contains(g)))
+}
+
 fn run_of(input: &serde_json::Value, output: Option<&str>, error: bool) -> Option<Run> {
     let command = key(input.get("command")?.as_str()?);
     let out = output.unwrap_or_default();
@@ -51,7 +64,7 @@ fn run_of(input: &serde_json::Value, output: Option<&str>, error: bool) -> Optio
     let failed = error
         || exit.is_some_and(|c| c != 0)
         || results.iter().any(|l| l.contains("FAILED"));
-    Some(Run { command, exit, failed, results })
+    Some(Run { command, exit, failed, results, edits_before: 0 })
 }
 
 pub fn read_session(store: &Store, session: &Session) -> Transcript {
@@ -66,13 +79,20 @@ pub fn read(messages: &[Message], fallback: i64) -> Transcript {
     let mut runs = Vec::new();
     let mut compactions = 0;
     let mut last_tool_at = 0;
+    let mut edits = 0;
     for (i, m) in messages.iter().enumerate() {
+        if let Entry::Tool { name, input, .. } = &m.entry
+            && is_edit(name, input)
+        {
+            edits += 1;
+        }
         match &m.entry {
             Entry::Tool { name, input, output, error, .. } if name.eq_ignore_ascii_case("bash") => {
                 last_tool_at = last_tool_at.max(m.created_at);
                 if output.is_some()
-                    && let Some(run) = run_of(input, output.as_deref(), *error)
+                    && let Some(mut run) = run_of(input, output.as_deref(), *error)
                 {
+                    run.edits_before = edits;
                     runs.push(run);
                 }
             }
@@ -112,7 +132,10 @@ impl Transcript {
 
     pub fn regression(&self) -> Option<String> {
         let last = self.runs.iter().rev().find(|r| is_test(&r.command))?;
-        let earlier_pass = self.runs.iter().any(|r| r.command == last.command && !r.failed);
+        let earlier_pass = self
+            .runs
+            .iter()
+            .any(|r| r.command == last.command && !r.failed && r.edits_before == last.edits_before);
         (last.failed && earlier_pass).then(|| last.command.clone())
     }
 }
@@ -428,6 +451,41 @@ mod tests {
         assert_eq!(read(&m, 0).regression(), None);
         let m = [passes(1, "cargo test"), fails(2, "cargo test"), passes(3, "cargo test")];
         assert_eq!(read(&m, 0).regression(), None);
+    }
+
+    fn edit(id: i64) -> Message {
+        Message {
+            entry: Entry::Tool {
+                call_id: id.to_string(),
+                name: "edit_file".into(),
+                input: json!({ "path": "a.rs" }),
+                output: Some("ok".into()),
+                error: false,
+            },
+            ..said(id, &[])
+        }
+    }
+
+    #[test]
+    fn a_failure_after_an_edit_is_not_a_regression() {
+        let m = [passes(1, "cargo test"), edit(2), fails(3, "cargo test")];
+        assert_eq!(read(&m, 0).regression(), None);
+        let m = [passes(1, "cargo test"), edit(2), fails(3, "cargo test"), passes(4, "cargo test"), fails(5, "cargo test")];
+        assert_eq!(read(&m, 0).regression().as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn a_failure_with_no_edit_since_the_pass_is_a_regression() {
+        let m = [edit(1), passes(2, "cargo test"), bash(3, "ls", "x", false), fails(4, "cargo test")];
+        assert_eq!(read(&m, 0).regression().as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn repeated_failure_after_an_edit_still_counts() {
+        let m = [passes(1, "cargo test"), edit(2), fails(3, "cargo test"), fails(4, "cargo test"), fails(5, "cargo test")];
+        let t = read(&m, 0);
+        assert_eq!(t.regression(), None);
+        assert_eq!(t.repeated_failure(3).as_deref(), Some("cargo test"));
     }
 
     #[test]
