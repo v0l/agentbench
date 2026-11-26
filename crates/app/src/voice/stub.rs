@@ -186,6 +186,12 @@ impl Bridge {
     pub fn take_heard(&mut self) -> Option<String> {
         None
     }
+    #[doc(hidden)]
+    pub fn set_manual(&mut self) {}
+    #[doc(hidden)]
+    pub fn pull_frame(&self) -> Option<Vec<f32>> {
+        None
+    }
 }
 
 pub fn heard_note(heard: &str, said: &str) -> String {

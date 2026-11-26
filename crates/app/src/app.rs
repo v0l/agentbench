@@ -2018,7 +2018,7 @@ impl App {
         }
         let (pcm, rate) = self.voice.take_tapped();
         self.bridge.feed(&pcm, rate);
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         let more = self.converse.pending() || self.reader.busy();
         for out in self.bridge.tick(self.voice.in_speech(), more, now) {
             match out {
@@ -2051,7 +2051,7 @@ impl App {
                 _ => {}
             }
         }
-        if self.bridge.speaking() || self.reader.busy() || self.bridge.queued(std::time::Instant::now()) {
+        if self.bridge.speaking() || self.reader.busy() || self.bridge.queued(Instant::now()) {
             return Some("model speaking");
         }
         if self.session_by_id(sid).is_some_and(|s| s.status.busy()) {

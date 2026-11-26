@@ -59,8 +59,30 @@ Not yet measured: a real speaker and microphone in a real room, and the sound ca
 
 ## Duplex model (Haru)
 
-A full duplex model listens and speaks at once: one 133 ms frame in (3200 samples at 24 kHz), one frame of audio and text out. The engine work is tracked in inference-bench, and its gap list is not written yet, so the client here is not built. The shape planned for it:
+A full duplex model listens and speaks at once: one 133 ms frame in (3200 samples at 24 kHz), one frame of audio and text out. inference-bench serves it on `/v1/duplex` (`docs/specrt-haru.md` there, section 14).
 
-- A `duplex model` setting names the server. Hands free uses it when set, and falls back to speech to text, the supervisor and text to speech when not.
-- A websocket client in `agent-voice` streams microphone frames and plays reply frames as they arrive, with a two frame jitter buffer and a reconnect.
-- The model has no tools, so it cannot be the supervisor. A bridge sits between them: the model's own text stream of what you said becomes a text turn for the supervisor, and the supervisor's short replies are spoken through the model's character card.
+### Settings
+
+Under voice input, with voice mode and hands free on, the `duplex model` section has:
+
+- `duplex server`: the inference-bench address, such as `http://gpu-box:8080`. Empty keeps today's path: speech to text, the supervisor, read aloud.
+- `duplex model name` and `duplex key`: sent as `model` and as a bearer token.
+- `replies in its voice`: on, the supervisor's replies are spoken by the model; off, they are read aloud as before and the model only listens and backchannels (the fallback of section 10 if constrained text proves hard to follow).
+- `voice clip`: press record, speak, press stop. Up to 30 s is kept as `duplex-voice.wav` in the agentbench home and sent as the voice reference at the start of each session.
+
+### What happens
+
+- The microphone stays open as in hands free, through the same headphones check and echo canceller. Its samples, after cancelling, are resampled to 24 kHz and sent as 6400 byte frames as each one fills (`voice::duplex::Framer`, `voice::link`).
+- The session starts with a fixed card (`voice::bridge::card`: name Bench, a calm persona that relays answers from an assistant) in `relay` mode, so the model only listens and backchannels until it is given words.
+- Reply frames play through a jitter buffer of two frames (`voice::duplex::Jitter`). A frame that is late plays as silence and is dropped when it comes, so the delay never grows; a burst is cut to the buffer.
+- A dropped socket reconnects with a backoff of 0.25 s doubling to 8 s, and starts the session again.
+- Whisper still reads the same microphone: each utterance ended by the band and hang logic is a supervisor turn.
+- Each finished sentence of the supervisor's reply (from `Converse`) is sent as `say`.
+- Speaking for 400 ms while said words are still pending sends `interrupt`. The `said` answer is the part you heard, and the next turn starts with `(I cut your spoken reply off; I heard only: "...")` so the supervisor knows where you stopped it.
+- The chat header shows `connecting`, `listening`, `hearing you`, `supervisor thinking`, `model speaking` or `reconnecting`. On a phone the long ones read `thinking` and `speaking`, in place of the supervisor chip.
+
+### Tests
+
+`crates/app/tests/duplex.rs` runs the app against a fake duplex server: frames of 6400 bytes about every 133 ms, replies in order, silence for a late frame, a reply as `say` messages, an utterance as a turn (Whisper base on CPU), a barge in as one `interrupt`, the voice clip in `start`, the fallback, and the indicator and settings at 1280 and 390 wide (`AGENTBENCH_SHOTS=dir` keeps the pictures).
+
+Not covered here: the real model. Talking to Haru-4B served on GPU1 (about 16 GB with four slots) is the owner's check.
