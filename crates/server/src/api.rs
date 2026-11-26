@@ -3380,17 +3380,17 @@ mod tests {
         assert_eq!(a["pressure"]["state"], "ok");
         let ap = crate::autopilot::Autopilot::new(f.api.runner.clone());
         f.api.runner.store().set_setting("autopilot_cap", "8").unwrap();
-        let busy = agentbench_core::PressureReadings { known: true, io_full10: Some(22.0), ..Default::default() };
+        let busy = agentbench_core::PressureReadings { known: true, io_some10: Some(22.0), io_some60: Some(22.0), ..Default::default() };
         for t in 0..=6 {
             ap.observe_pressure(busy.clone(), t * 10_000);
         }
         let (_, a) = call(&f.app, "GET", "/api/autopilot", None, T).await;
         let p = &a["pressure"];
         assert_eq!((p["state"].as_str(), p["effective_cap"].as_u64(), p["configured_cap"].as_u64()), (Some("pressure"), Some(4), Some(8)), "{a}");
-        assert_eq!(p["reason"], "io full 22%");
+        assert_eq!(p["reason"], "io stall 22 percent");
         assert_eq!(p["since"], 60_000);
-        assert_eq!(p["readings"]["io_full10"], 22.0);
-        assert!(a["activity"].as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("host pressure ok to pressure: io full 22%")), "{a}");
+        assert_eq!(p["readings"]["io_some10"], 22.0);
+        assert!(a["activity"].as_array().unwrap().iter().any(|l| l["text"].as_str().unwrap().contains("host pressure ok to pressure: io stall 22 percent")), "{a}");
         let (_, o) = call(&f.app, "GET", "/api/overview", None, T).await;
         assert_eq!(o["autopilot"]["pressure"]["effective_cap"], 4);
     }

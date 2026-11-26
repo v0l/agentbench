@@ -2795,11 +2795,11 @@ mod tests {
         let st = state_for(&r.ap.runner);
         let p = st.pressure.clone().unwrap();
         assert_eq!((p.state, p.effective_cap, p.configured_cap), (agentbench_core::PressureState::Pressure, 2, 4));
-        assert_eq!(p.reason, "io full 22%");
-        assert!(st.status_line().contains("scaled to 2 of 4: io full 22%"), "{}", st.status_line());
+        assert_eq!(p.reason, "io stall 22 percent");
+        assert!(st.status_line().contains("scaled to 2 of 4: io stall 22 percent"), "{}", st.status_line());
         let changes: Vec<String> = feed(&r).into_iter().filter(|l| l.contains("host pressure ok to pressure")).collect();
         assert_eq!(changes.len(), 1, "{changes:?}");
-        assert!(changes[0].contains("io full 22%") && changes[0].contains("scaled to 2 of 4"), "{}", changes[0]);
+        assert!(changes[0].contains("io stall 22 percent") && changes[0].contains("scaled to 2 of 4"), "{}", changes[0]);
     }
 
     #[tokio::test]
@@ -2905,8 +2905,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_nearly_full_swap_starts_nothing_tells_each_worker_once_and_names_the_rule() {
-        use crate::pressure::tests::live_idle_host;
-        let full = agentbench_core::PressureReadings { swap_used: Some(44_600_000_000), ..live_idle_host() };
+        use crate::pressure::tests::nearly_full_swap;
+        let full = nearly_full_swap();
         let r = pressure_rig(2, 4);
         r.ap.tick();
         let sids: Vec<_> = r.store.workers().unwrap().iter().map(|w| w.session).collect();
@@ -2920,7 +2920,7 @@ mod tests {
         }
         let p = state_for(&r.ap.runner).pressure.unwrap();
         assert_eq!((p.state, p.effective_cap), (agentbench_core::PressureState::Critical, 0));
-        assert_eq!(p.reason, "swap 91 percent full");
+        assert_eq!(p.reason, "swap 91 percent full while memory stall rises to 3.0 percent");
         assert!(feed(&r).iter().any(|l| l.contains("to critical: swap 91 percent full")), "{:?}", feed(&r));
 
         let off = pressure_rig(2, 4);
@@ -2935,13 +2935,15 @@ mod tests {
 
     #[tokio::test]
     async fn the_off_setting_ignores_pressure() {
-        use crate::pressure::tests::{heavy, live_idle_host};
+        use crate::pressure::tests::{heavy, live_idle_host, nearly_full_swap, stalled};
         let r = pressure_rig(2, 2);
         r.store.set_setting(crate::pressure::SETTING, "off").unwrap();
         load(&r, &heavy(), 0, 200 * S);
-        load(&r, &agentbench_core::PressureReadings { swap_used: Some(48_000_000_000), ..live_idle_host() }, 210 * S, 400 * S);
-        let storm = agentbench_core::PressureReadings { swap_in_rate: Some(90_000.0), swap_out_rate: Some(90_000.0), memory_some10: Some(60.0), ..live_idle_host() };
-        load(&r, &storm, 410 * S, 600 * S);
+        load(&r, &nearly_full_swap(), 210 * S, 400 * S);
+        load(&r, &stalled(60.0), 410 * S, 600 * S);
+        let storm = agentbench_core::PressureReadings { swap_in_rate: Some(90_000.0), swap_out_rate: Some(90_000.0), ..stalled(60.0) };
+        load(&r, &storm, 610 * S, 800 * S);
+        load(&r, &agentbench_core::PressureReadings { swap_used: Some(48_000_000_000), ..live_idle_host() }, 810 * S, 900 * S);
         r.ap.tick();
         assert_eq!(running_issues(&r), 2);
         assert!(!state_for(&r.ap.runner).pressure.unwrap().enabled);

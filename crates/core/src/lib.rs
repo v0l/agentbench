@@ -2595,6 +2595,8 @@ pub struct PressureReadings {
     pub load_per_core: Option<f32>,
     #[serde(default)]
     pub disks: Vec<DiskReading>,
+    #[serde(default)]
+    pub worker_resident: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -42,6 +42,7 @@ pub struct Reader {
     live: bool,
     last: HashMap<String, (i64, DiskCounters)>,
     vm: VecDeque<(i64, u64, u64)>,
+    workers_of: Option<u32>,
 }
 
 const SWAP_WINDOW_MS: i64 = 60_000;
@@ -63,11 +64,12 @@ impl Reader {
             live: cfg!(target_os = "linux"),
             last: HashMap::new(),
             vm: VecDeque::new(),
+            workers_of: Some(std::process::id()),
         }
     }
 
     pub fn at(root: &Path, cores: u32) -> Reader {
-        Reader { root: root.to_path_buf(), cores: cores.max(1), live: true, last: HashMap::new(), vm: VecDeque::new() }
+        Reader { root: root.to_path_buf(), cores: cores.max(1), live: true, last: HashMap::new(), vm: VecDeque::new(), workers_of: None }
     }
 
     fn read(&self, path: &str) -> Option<String> {
@@ -134,6 +136,9 @@ impl Reader {
             let mut wanted = devices.to_vec();
             wanted.extend(r.swap_device.clone());
             r.disks = self.disks(&stats, &mounts, &wanted, now);
+        }
+        if let Some(root) = self.workers_of {
+            r.worker_resident = Some(agent_core::limits::largest_child(root));
         }
         r
     }
