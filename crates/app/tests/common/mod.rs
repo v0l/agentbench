@@ -225,6 +225,9 @@ fn rig_model_full(
 }
 
 fn hold_gpu_lock() {
+    if std::env::var_os("AGENTBENCH_UI_LOCK_INHERITED").is_some() {
+        return;
+    }
     static LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| {
         let path = std::env::temp_dir().join("agentbench-ui-tests.lock");

@@ -2014,9 +2014,6 @@ impl App {
         let idle = Duration::from_secs(self.speech.engine_idle_secs);
         if let Some(n) = self.engine.sync(want, idle, Instant::now()) {
             self.notice = Some((false, n));
-            if self.engine.failed().is_some() && self.voice.open() {
-                self.pause_hands_free();
-            }
         }
         if busy && (self.engine.pid().is_some() || self.engine.loading()) {
             ctx.request_repaint_after(Duration::from_millis(250));
