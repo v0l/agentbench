@@ -361,15 +361,19 @@ impl App {
                     }
                     if let Some(word) = talk {
                         let tint = match word {
-                            "supervisor thinking" | "connecting" | "reconnecting" => TRACE,
+                            "supervisor thinking" | "connecting" | "reconnecting" | "loading" => TRACE,
                             "model speaking" => VALUE,
                             _ => OK,
                         };
-                        let shown = match word {
-                            "supervisor thinking" if narrow => "thinking",
-                            "model speaking" if narrow => "speaking",
-                            w => w,
+                        let progress = (word == "loading").then(|| self.voice_progress()).flatten();
+                        let shown: String = match word {
+                            "supervisor thinking" if narrow => "thinking".into(),
+                            "model speaking" if narrow => "speaking".into(),
+                            "loading" if narrow => progress.as_deref().map_or("loading".into(), |p| p.replace("loading the voice model, ", "loading ")),
+                            "loading" => progress.unwrap_or_else(|| "loading the voice model".into()),
+                            w => w.into(),
                         };
+                        let shown = shown.as_str();
                         let c = chip(ui, shown, tint, true).on_hover_text(
                             "hands free: the microphone is open while this chat is. Speak to talk over the reply; press the talk key to stop.",
                         );

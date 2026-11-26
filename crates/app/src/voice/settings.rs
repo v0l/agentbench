@@ -44,6 +44,46 @@ pub struct Settings {
     pub duplex_key: String,
     pub duplex_voice: String,
     pub duplex_replies: bool,
+    pub duplex_local: bool,
+    pub duplex_path: String,
+    pub duplex_gpu: String,
+    pub engine_idle_secs: u64,
+    pub engine_program: String,
+}
+
+pub const LOCAL_DUPLEX: &str = "Haru-4B";
+pub const DEFAULT_ENGINE_IDLE_SECS: u64 = 600;
+const HF_REPO: &str = "models--higurashi-ai--Haru-4B";
+
+pub fn default_model_dir_in(home: &std::path::Path, hf_home: Option<&std::path::Path>) -> std::path::PathBuf {
+    let hub = match hf_home {
+        Some(h) => h.join("hub"),
+        None => home.join(".cache/huggingface/hub"),
+    };
+    let snapshots = hub.join(HF_REPO).join("snapshots");
+    let newest = std::fs::read_dir(&snapshots)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("config.json").is_file())
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    newest.unwrap_or_else(|| home.join("models").join(LOCAL_DUPLEX))
+}
+
+pub fn default_model_dir() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+    let hf = std::env::var_os("HF_HOME").map(std::path::PathBuf::from);
+    default_model_dir_in(&home, hf.as_deref())
+}
+
+pub fn model_problem(dir: &std::path::Path) -> Option<String> {
+    if !dir.is_dir() {
+        return Some(format!("no folder at {}; download {LOCAL_DUPLEX} there or pick its folder", dir.display()));
+    }
+    let missing: Vec<&str> =
+        ["config.json", "model.safetensors"].into_iter().filter(|f| !dir.join(f).is_file()).collect();
+    (!missing.is_empty()).then(|| format!("{} has no {}", dir.display(), missing.join(" and no ")))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -87,6 +127,11 @@ impl Default for Settings {
             duplex_key: String::new(),
             duplex_voice: String::new(),
             duplex_replies: true,
+            duplex_local: false,
+            duplex_path: String::new(),
+            duplex_gpu: String::new(),
+            engine_idle_secs: DEFAULT_ENGINE_IDLE_SECS,
+            engine_program: String::new(),
         }
     }
 }
@@ -145,6 +190,13 @@ impl Settings {
         s.duplex_key = st.get_string("voice_duplex_key").unwrap_or_default();
         s.duplex_voice = st.get_string("voice_duplex_voice").unwrap_or_default();
         s.duplex_replies = st.get_string("voice_duplex_replies").as_deref() != Some("0");
+        s.duplex_local = st.get_string("voice_duplex_choice").as_deref() == Some("haru");
+        s.duplex_path = st.get_string("voice_duplex_path").unwrap_or_default();
+        s.duplex_gpu = st.get_string("voice_duplex_gpu").unwrap_or_default();
+        if let Some(n) = st.get_string("voice_engine_idle_secs").and_then(|n| n.parse().ok()) {
+            s.engine_idle_secs = n;
+        }
+        s.engine_program = st.get_string("voice_engine_program").unwrap_or_default();
         // A Kokoro id (`af_heart`) from before Phonon is not a name the server knows; it would be
         // read in the default voice anyway, so it is dropped here.
         if let Some(v) = st.get_string("voice_reply").filter(|v| !v.is_empty() && !v.contains('_'))
@@ -187,6 +239,26 @@ impl Settings {
         st.set_string("voice_duplex_key", self.duplex_key.clone());
         st.set_string("voice_duplex_voice", self.duplex_voice.clone());
         st.set_string("voice_duplex_replies", if self.duplex_replies { "1" } else { "0" }.into());
+        st.set_string("voice_duplex_choice", if self.duplex_local { "haru" } else { "" }.into());
+        st.set_string("voice_duplex_path", self.duplex_path.clone());
+        st.set_string("voice_duplex_gpu", self.duplex_gpu.clone());
+        st.set_string("voice_engine_idle_secs", self.engine_idle_secs.to_string());
+        st.set_string("voice_engine_program", self.engine_program.clone());
+    }
+
+    pub fn duplex_dir(&self) -> std::path::PathBuf {
+        match self.duplex_path.trim() {
+            "" => default_model_dir(),
+            p => std::path::PathBuf::from(p),
+        }
+    }
+
+    pub fn local_duplex(&self) -> Option<std::path::PathBuf> {
+        (self.duplex_local && self.duplex_url.trim().is_empty()).then(|| self.duplex_dir())
+    }
+
+    pub fn duplex_gpu(&self) -> Option<u32> {
+        self.duplex_gpu.trim().parse().ok()
     }
 
     pub fn duplex(&self) -> Option<DuplexModel> {
@@ -392,6 +464,64 @@ mod tests {
                 voice: "/tmp/me.wav".into(),
             })
         );
+    }
+
+    #[test]
+    fn the_local_voice_model_is_off_by_default_and_its_settings_are_kept() {
+        let s = Settings::default();
+        assert!(!s.duplex_local);
+        assert_eq!(s.engine_idle_secs, 600);
+        assert_eq!(s.local_duplex(), None);
+        let mut m = Mem::default();
+        Settings {
+            duplex_local: true,
+            duplex_path: "/m/Haru-4B".into(),
+            duplex_gpu: "1".into(),
+            engine_idle_secs: 0,
+            engine_program: "/opt/ib/inference-bench-server".into(),
+            ..Default::default()
+        }
+        .save(&mut m);
+        let back = Settings::load(Some(&m));
+        assert!(back.duplex_local);
+        assert_eq!(back.duplex_gpu, "1");
+        assert_eq!(back.engine_idle_secs, 0);
+        assert_eq!(back.engine_program, "/opt/ib/inference-bench-server");
+        assert_eq!(back.local_duplex(), Some(std::path::PathBuf::from("/m/Haru-4B")));
+    }
+
+    #[test]
+    fn a_server_address_wins_over_the_local_model() {
+        let s = Settings { duplex_local: true, duplex_url: "http://gpu:8080".into(), ..Default::default() };
+        assert_eq!(s.local_duplex(), None);
+        assert!(s.duplex().is_some());
+    }
+
+    #[test]
+    fn the_model_folder_defaults_to_the_hugging_face_cache_then_home_models() {
+        let home = tempfile::tempdir().unwrap();
+        let plain = home.path().join("models/Haru-4B");
+        assert_eq!(default_model_dir_in(home.path(), None), plain);
+        let snap = home.path().join(".cache/huggingface/hub/models--higurashi-ai--Haru-4B/snapshots/abc");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("config.json"), "{}").unwrap();
+        assert_eq!(default_model_dir_in(home.path(), None), snap);
+        let hf = home.path().join("hf");
+        assert_eq!(default_model_dir_in(home.path(), Some(&hf)), plain, "HF_HOME replaces the cache");
+    }
+
+    #[test]
+    fn a_model_folder_says_plainly_what_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = model_problem(dir.path()).unwrap();
+        assert!(p.contains("config.json") && p.contains("model.safetensors"), "{p}");
+        std::fs::write(dir.path().join("config.json"), "{}").unwrap();
+        let p = model_problem(dir.path()).unwrap();
+        assert!(!p.contains("config.json") && p.contains("model.safetensors"), "{p}");
+        std::fs::write(dir.path().join("model.safetensors"), "").unwrap();
+        assert_eq!(model_problem(dir.path()), None);
+        let gone = model_problem(&dir.path().join("nope")).unwrap();
+        assert!(gone.contains("no folder"), "{gone}");
     }
 
     #[test]

@@ -114,6 +114,7 @@ impl App {
         let mut restart_now = false;
         let mut clip_action = None;
         let recording = self.voice.recording();
+        let local_voice = self.local_voice(&st.speech);
         let mut providers = false;
         let can_close = self.client.is_some() || self.starting.is_some();
         let has_local = self.local.is_some();
@@ -237,7 +238,7 @@ impl App {
                     speech_section(ui, &mut st.speech, st.voices.as_ref(), st.speech_models.as_ref());
                     if st.speech.converse && st.speech.hands_free {
                         ui.add_space(8.0);
-                        clip_action = duplex_section(ui, &mut st.speech, recording);
+                        clip_action = duplex_section(ui, &mut st.speech, recording, &local_voice);
                     }
                     ui.add_space(8.0);
                     speech_devices(ui, &st.speech, st.audio.as_ref(), can_close);
@@ -834,59 +835,164 @@ pub(super) fn is_loopback(url: &str) -> bool {
     host.is_empty() || matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1" | "0.0.0.0")
 }
 
+pub(super) struct LocalVoice {
+    pub gpus: Result<Vec<crate::voice::engine::Gpu>, String>,
+    pub program: Result<(std::path::PathBuf, String), String>,
+    pub running: Option<String>,
+}
+
+fn toggle_row(ui: &mut Ui, label: &str, help: &str, on: &mut bool) {
+    row_help(ui, label, help, |ui| {
+        let was = *on;
+        let t = tap_toggle(ui, if was { "on" } else { "off" }, was);
+        t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, was, label));
+        if t.clicked() {
+            *on = !was;
+        }
+    });
+}
+
+fn local_voice_rows(ui: &mut Ui, sp: &mut crate::voice::Settings, local: &LocalVoice) {
+    use crate::voice::engine::{NEED_MIB, choose_gpu, gb};
+    let default_dir = crate::voice::default_model_dir();
+    row_help(
+        ui,
+        "model folder",
+        "Where Haru-4B was downloaded, with config.json and model.safetensors. Empty uses the Hugging Face cache, or ~/models/Haru-4B.",
+        |ui| {
+            field(ui, &mut sp.duplex_path, &default_dir.display().to_string());
+        },
+    );
+    match crate::voice::model_problem(&sp.duplex_dir()) {
+        Some(p) => status(ui, false, &p),
+        None => status(ui, true, &format!("model found in {}", sp.duplex_dir().display())),
+    }
+    row_help(
+        ui,
+        "GPU",
+        "The card the voice model loads on. It needs about 16 GB free. Auto picks the card with the most free memory.",
+        |ui| match &local.gpus {
+            Ok(gpus) => {
+                let mut options = vec![(String::new(), "auto".to_string())];
+                options.extend(gpus.iter().map(|g| {
+                    (g.index.to_string(), format!("GPU {}, {}, {} free", g.index, g.name, gb(g.free_mib)))
+                }));
+                choice_fit(ui, "duplex-gpu", &mut sp.duplex_gpu, options);
+            }
+            Err(e) => {
+                Line::new().value(e).size(12.0).show(ui);
+            }
+        },
+    );
+    if let Some(r) = &local.running {
+        status(ui, true, r);
+    } else if let Ok(gpus) = &local.gpus {
+        match choose_gpu(gpus, sp.duplex_gpu(), NEED_MIB) {
+            Ok((g, why)) => status(ui, true, &format!("loads on GPU {} ({}): {why}", g.index, g.name)),
+            Err(e) => status(ui, false, &e),
+        }
+    }
+    row_help(
+        ui,
+        "unload after",
+        "Minutes hands free can be off before the voice model leaves the GPU. 0 keeps it loaded while hands free is set up.",
+        |ui| {
+            let mut minutes = sp.engine_idle_secs / 60;
+            let drag = ui.add(egui::DragValue::new(&mut minutes).range(0..=240).suffix(" min"));
+            drag.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::SpinButton, true, "unload after"));
+            sp.engine_idle_secs = minutes * 60;
+        },
+    );
+    match &local.program {
+        Ok((_, version)) => status(ui, true, &format!("engine: {version}")),
+        Err(e) => status(ui, false, e),
+    }
+}
+
 pub(super) fn duplex_section(
     ui: &mut Ui,
     sp: &mut crate::voice::Settings,
     recording: bool,
+    local: &LocalVoice,
 ) -> Option<bool> {
     let mut clip = None;
     section(ui, "duplex model", "a full duplex voice, such as Haru", |ui| {
         row_help(
             ui,
+            "voice model",
+            "A model that listens and speaks at once. Agentbench loads it on this machine's GPU while hands free is on. None uses speech to text and read aloud instead.",
+            |ui| {
+                let mut picked = if sp.duplex_local { "haru" } else { "" }.to_string();
+                choice_fit(
+                    ui,
+                    "duplex-choice",
+                    &mut picked,
+                    [
+                        ("haru".to_string(), format!("{} (local)", crate::voice::LOCAL_DUPLEX)),
+                        (String::new(), "none, read aloud".to_string()),
+                    ],
+                );
+                sp.duplex_local = picked == "haru";
+            },
+        );
+        let remote = !sp.duplex_url.trim().is_empty();
+        if sp.duplex_local && !remote {
+            local_voice_rows(ui, sp, local);
+        }
+        if sp.duplex_local || remote {
+            toggle_row(
+                ui,
+                "replies in its voice",
+                "On: the supervisor's replies are spoken by the duplex model. Off: they are read aloud as before, and the model only listens and backchannels.",
+                &mut sp.duplex_replies,
+            );
+            row_help(
+                ui,
+                "voice clip",
+                "A few seconds of your chosen voice, recorded once. The model speaks in it. Up to 30 seconds is kept.",
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let label = if recording { "stop recording" } else if sp.duplex_voice.is_empty() { "record" } else { "record again" };
+                        if ui.add(Key::new(label).outline(if recording { FAULT } else { VALUE })).clicked() {
+                            clip = Some(!recording);
+                        }
+                        if !sp.duplex_voice.is_empty() && !recording {
+                            Line::new().value("recorded").size(12.0).show(ui);
+                        }
+                    });
+                },
+            );
+        }
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(egui_bench::text::legend("advanced")).wrap());
+        row_help(
+            ui,
             "duplex server",
-            "An inference-bench server with a duplex model loaded. Hands free then streams the microphone to it and it speaks the supervisor's replies. Empty uses speech to text and read aloud instead.",
+            "An inference-bench server that already runs a duplex model, here or on another machine. When set it is used and nothing is loaded here.",
             |ui| {
                 field(ui, &mut sp.duplex_url, "http://gpu-box:8080");
             },
         );
-        if sp.duplex_url.trim().is_empty() {
-            return;
+        if remote {
+            row_help(ui, "duplex model name", "Sent as model. Empty uses the one the server has loaded.", |ui| {
+                field(ui, &mut sp.duplex_model, "Haru-4B");
+            });
+            row_help(ui, "duplex key", "Sent as a bearer token. Leave empty if the server needs none.", |ui| {
+                secret(ui, &mut sp.duplex_key);
+            });
+            if sp.duplex_local {
+                status(ui, true, "the duplex server is set, so the local model is not loaded");
+            }
+        } else if sp.duplex_local {
+            row_help(
+                ui,
+                "engine program",
+                "The inference-bench-server that runs the model. Empty looks on PATH, then in ~/.cargo/bin.",
+                |ui| {
+                    field(ui, &mut sp.engine_program, "inference-bench-server");
+                },
+            );
         }
-        row_help(ui, "duplex model name", "Sent as model. Empty uses the one the server has loaded.", |ui| {
-            field(ui, &mut sp.duplex_model, "Haru-4B");
-        });
-        row_help(ui, "duplex key", "Sent as a bearer token. Leave empty if the server needs none.", |ui| {
-            secret(ui, &mut sp.duplex_key);
-        });
-        row_help(
-            ui,
-            "replies in its voice",
-            "On: the supervisor's replies are spoken by the duplex model. Off: they are read aloud as before, and the model only listens and backchannels.",
-            |ui| {
-                let on = sp.duplex_replies;
-                let t = tap_toggle(ui, if on { "on" } else { "off" }, on);
-                t.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, on, "replies in its voice"));
-                if t.clicked() {
-                    sp.duplex_replies = !on;
-                }
-            },
-        );
-        row_help(
-            ui,
-            "voice clip",
-            "A few seconds of your chosen voice, recorded once. The model speaks in it. Up to 30 seconds is kept.",
-            |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    let label = if recording { "stop recording" } else if sp.duplex_voice.is_empty() { "record" } else { "record again" };
-                    if ui.add(Key::new(label).outline(if recording { FAULT } else { VALUE })).clicked() {
-                        clip = Some(!recording);
-                    }
-                    if !sp.duplex_voice.is_empty() && !recording {
-                        Line::new().value("recorded").size(12.0).show(ui);
-                    }
-                });
-            },
-        );
     });
     clip
 }

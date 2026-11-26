@@ -14,7 +14,7 @@
 
 mod settings;
 pub(crate) mod autosend;
-pub use settings::{AUTO_SEND_SECS, DuplexModel, LOCAL_MODELS, Mode, Settings};
+pub use settings::{AUTO_SEND_SECS, DuplexModel, LOCAL_DUPLEX, LOCAL_MODELS, Mode, Settings, default_model_dir, model_problem};
 
 mod converse;
 pub use converse::{Converse, Talk, TalkKey};
@@ -29,6 +29,7 @@ pub mod duplex;
 pub mod link;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bridge;
+pub mod engine;
 #[cfg(not(target_arch = "wasm32"))]
 pub use bridge::{Bridge, Conn, Out, VOICE_SECONDS, heard_note};
 

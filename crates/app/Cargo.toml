@@ -79,6 +79,9 @@ clap = { version = "4.6", features = ["derive", "env"] }
 fontdb = "0.23"
 opener = "0.8"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.37", default-features = false, features = ["wayland", "x11"] }
 

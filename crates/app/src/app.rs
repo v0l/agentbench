@@ -812,6 +812,7 @@ pub struct App {
     talk_turn: bool,
     hands_free: HandsFree,
     bridge: crate::voice::Bridge,
+    engine: crate::voice::engine::Engine,
     auto: Option<(Tile, crate::voice::autosend::Countdown)>,
     clock: Option<f64>,
     /// Models on the server the native agent is saved to use. None until asked.
@@ -1039,6 +1040,7 @@ impl App {
             talk_turn: false,
             hands_free: Default::default(),
             bridge: Default::default(),
+            engine: Default::default(),
             auto: None,
             clock: None,
             speech: crate::voice::Settings::load(storage),
@@ -1993,8 +1995,69 @@ impl App {
         }
     }
 
+    fn engine_want(&self) -> crate::voice::engine::Want {
+        use crate::voice::engine::{ModelSpec, Plan, Want};
+        let Some(dir) = self.speech.local_duplex().filter(|_| self.speech.converse && self.speech.hands_free) else {
+            return Want::Off;
+        };
+        let plan = Plan {
+            models: vec![ModelSpec { id: crate::voice::LOCAL_DUPLEX.into(), path: dir, kind: "duplex".into() }],
+            gpu: self.speech.duplex_gpu(),
+            program: self.speech.engine_program.trim().to_string(),
+        };
+        if self.voice.open() && self.hands_free_wanted() { Want::Use(plan) } else { Want::Idle(plan) }
+    }
+
+    fn engine_tick(&mut self, ctx: &egui::Context) {
+        let want = self.engine_want();
+        let busy = want != crate::voice::engine::Want::Off;
+        let idle = Duration::from_secs(self.speech.engine_idle_secs);
+        if let Some(n) = self.engine.sync(want, idle, Instant::now()) {
+            self.notice = Some((false, n));
+            if self.engine.failed().is_some() && self.voice.open() {
+                self.pause_hands_free();
+            }
+        }
+        if busy && (self.engine.pid().is_some() || self.engine.loading()) {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    pub fn voice_progress(&self) -> Option<String> {
+        self.engine.progress(Instant::now())
+    }
+
+    fn local_voice(&mut self, sp: &crate::voice::Settings) -> settings::LocalVoice {
+        let shown = sp.converse && sp.hands_free && sp.duplex_local && sp.duplex_url.trim().is_empty();
+        if !shown {
+            return settings::LocalVoice { gpus: Ok(Vec::new()), program: Err(String::new()), running: None };
+        }
+        let running = self.engine.gpu().map(|g| match self.engine.endpoint() {
+            Some(_) => format!("loaded on GPU {} ({})", g.index, g.name),
+            None => format!("loading on GPU {} ({})", g.index, g.name),
+        });
+        settings::LocalVoice {
+            gpus: self.engine.gpus(),
+            program: self.engine.program(sp.engine_program.trim()),
+            running,
+        }
+    }
+
     fn duplex_wanted(&self) -> Option<crate::voice::DuplexModel> {
-        (self.voice.open() && self.hands_free_wanted()).then(|| self.speech.duplex()).flatten()
+        if !(self.voice.open() && self.hands_free_wanted()) {
+            return None;
+        }
+        if let Some(m) = self.speech.duplex() {
+            return Some(m);
+        }
+        self.speech.local_duplex()?;
+        let (url, key) = self.engine.endpoint()?;
+        Some(crate::voice::DuplexModel {
+            url,
+            model: crate::voice::LOCAL_DUPLEX.into(),
+            key,
+            voice: self.speech.duplex_voice.trim().to_string(),
+        })
     }
 
     fn bridge_says(&self) -> bool {
@@ -2043,6 +2106,9 @@ impl App {
         }
         if self.voice.in_speech() {
             return Some("hearing you");
+        }
+        if self.engine.loading() && self.speech.local_duplex().is_some() {
+            return Some("loading");
         }
         if self.bridge.active() {
             match self.bridge.conn() {
@@ -2120,6 +2186,50 @@ impl App {
     #[doc(hidden)]
     pub fn voice_test_duplex_model(&mut self, model: &str) {
         self.speech.duplex_model = model.to_string();
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_local_engine(
+        &mut self,
+        program: &std::path::Path,
+        model: &std::path::Path,
+        dir: std::path::PathBuf,
+        gpus: Vec<crate::voice::engine::Gpu>,
+    ) {
+        self.speech.duplex_local = true;
+        self.speech.duplex_path = model.display().to_string();
+        self.speech.engine_program = program.display().to_string();
+        self.engine.set_test(dir, gpus);
+        self.bridge.set_manual();
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_real_engine(&mut self, program: &str, model: &str, gpu: u32) {
+        self.speech.duplex_local = true;
+        self.speech.duplex_path = model.to_string();
+        self.speech.engine_program = program.to_string();
+        self.speech.duplex_gpu = gpu.to_string();
+        self.bridge.set_manual();
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_speech(&mut self) -> &mut crate::voice::Settings {
+        &mut self.speech
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_engine(&self) -> &crate::voice::engine::Engine {
+        &self.engine
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_pause(&mut self) {
+        self.pause_hands_free();
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_duplex_url(&self) -> Option<String> {
+        self.duplex_wanted().map(|m| m.url)
     }
 
     #[doc(hidden)]
@@ -3093,6 +3203,7 @@ impl App {
         }
         self.converse_tick(ctx);
         self.hands_free_tick(ctx);
+        self.engine_tick(ctx);
         let speech = self.speech_now();
         self.voice.tick(&speech, wake);
         let bridge_on = self.bridge_tick(ctx);
@@ -4353,6 +4464,10 @@ impl eframe::App for App {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.store(storage);
+    }
+
+    fn on_exit(&mut self) {
+        self.engine.stop_now();
     }
 }
 
