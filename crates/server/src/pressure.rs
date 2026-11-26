@@ -359,6 +359,13 @@ impl Monitor {
             PressureState::Pressure if !p.is_empty() && changed.is_none() => {
                 self.reason = p.iter().map(|h| h.text.clone()).collect::<Vec<_>>().join(", ")
             }
+            PressureState::Ok if changed.is_none() => {
+                self.reason = match self.readings.swap_used.filter(|s| gb(*s) > l.swap_gb as f64) {
+                    Some(s) if p.is_empty() && c.is_empty() => format!("swap {} used, idle", gb_text(s)),
+                    _ if self.recover.is_some() => self.reason.clone(),
+                    _ => String::new(),
+                }
+            }
             _ => {}
         }
         let cap = self.effective_cap(configured, now, l);
@@ -592,6 +599,78 @@ pub(crate) mod tests {
         assert!(used > 25_000_000_000);
         assert_eq!(m.state(), PressureState::Ok);
         assert_eq!(m.effective_cap(5, 900 * S, &l), 5);
+    }
+
+    #[test]
+    fn swap_over_the_headroom_line_is_critical_and_says_how_full() {
+        let mut m = Monitor::default();
+        let l = Limits::default();
+        let r = PressureReadings { swap_used: Some(44_600_000_000), ..live_idle_host() };
+        run(&mut m, &r, 0, 20 * S);
+        assert_eq!(m.state(), PressureState::Ok);
+        let ev = run(&mut m, &r, 30 * S, 30 * S);
+        assert!(matches!(&ev[..], [Event::Changed { to: PressureState::Critical, cap: 0, .. }]), "{ev:?}");
+        assert_eq!(m.reason, "swap 91 percent full");
+        assert_eq!(m.effective_cap(8, 30 * S, &l), 0);
+        let mut off = Monitor::default();
+        let l0 = Limits { swap_full_pct: 0.0, ..Limits::default() };
+        for i in 0..30 {
+            off.observe(r.clone(), &l0, 8, i * 10 * S);
+        }
+        assert_eq!(off.state(), PressureState::Ok, "0 turns the headroom rule off");
+        let mut under = Monitor::default();
+        run(&mut under, &PressureReadings { swap_used: Some(41_000_000_000), ..live_idle_host() }, 0, 300 * S);
+        assert_eq!(under.state(), PressureState::Ok, "84 percent is under the line");
+    }
+
+    #[test]
+    fn an_ok_host_with_much_stale_swap_says_why_it_is_not_throttling() {
+        let mut m = Monitor::default();
+        let l = Limits::default();
+        run(&mut m, &live_idle_host(), 0, 120 * S);
+        let snap = m.snapshot(5, 120 * S, &l);
+        assert_eq!(snap.state, PressureState::Ok);
+        assert_eq!(snap.reason, "swap 23 GB used, idle");
+        assert_eq!(snap.line(), None);
+        run(&mut m, &calm(), 130 * S, 130 * S);
+        assert_eq!(m.snapshot(5, 130 * S, &l).reason, "");
+    }
+
+    #[test]
+    fn the_live_flapping_sequence_recovers_and_stays_recovered_on_unchanged_swap() {
+        let mut m = Monitor::default();
+        let l = Limits::default();
+        let gb_ = 1_000_000_000u64;
+        let mut t = 0;
+        let mut used = 20 * gb_;
+        while m.state() == PressureState::Ok && t < 300 * S {
+            used += gb_ / 4;
+            m.observe(PressureReadings { swap_used: Some(used), swap_out_rate: Some(400.0), ..live_idle_host() }, &l, 5, t);
+            t += 10 * S;
+        }
+        assert_eq!(m.state(), PressureState::Pressure);
+        assert_eq!(m.effective_cap(5, t, &l), 2);
+        let settled = used;
+        let mut cleared = None;
+        let mut changes = Vec::new();
+        for i in 0..240u64 {
+            let creep = (i % 3 == 2) as u64 * 10_000_000 + (i / 3) * 1_000_000;
+            let r = PressureReadings { swap_used: Some(settled + creep), ..live_idle_host() };
+            for e in m.observe(r, &l, 5, t) {
+                if let Event::Changed { to, .. } = e {
+                    changes.push((t, to));
+                    if to == PressureState::Ok {
+                        cleared = Some(t);
+                    }
+                }
+            }
+            t += 10 * S;
+        }
+        let cleared = cleared.expect("pressure clears after the calm window");
+        assert_eq!(changes, vec![(cleared, PressureState::Ok)], "no flap back into pressure");
+        assert_eq!(m.state(), PressureState::Ok);
+        assert_eq!(m.effective_cap(5, t, &l), 5);
+        assert!(m.reason.ends_with("used, idle"), "{}", m.reason);
     }
 
     #[test]

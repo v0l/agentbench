@@ -2904,11 +2904,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_nearly_full_swap_starts_nothing_tells_each_worker_once_and_names_the_rule() {
+        use crate::pressure::tests::live_idle_host;
+        let full = agentbench_core::PressureReadings { swap_used: Some(44_600_000_000), ..live_idle_host() };
+        let r = pressure_rig(2, 4);
+        r.ap.tick();
+        let sids: Vec<_> = r.store.workers().unwrap().iter().map(|w| w.session).collect();
+        assert_eq!(sids.len(), 2);
+        apply(&r.store, &AutopilotPatch { cap: Some(4), ..Default::default() }).unwrap();
+        load(&r, &full, 0, 200 * S);
+        r.ap.tick();
+        assert_eq!(r.store.workers().unwrap().len(), 2, "nothing new starts");
+        for sid in &sids {
+            assert_eq!(pause_messages(&r, *sid), 1, "exactly one message to {sid}");
+        }
+        let p = state_for(&r.ap.runner).pressure.unwrap();
+        assert_eq!((p.state, p.effective_cap), (agentbench_core::PressureState::Critical, 0));
+        assert_eq!(p.reason, "swap 91 percent full");
+        assert!(feed(&r).iter().any(|l| l.contains("to critical: swap 91 percent full")), "{:?}", feed(&r));
+
+        let off = pressure_rig(2, 4);
+        off.store.set_setting("autopilot_pressure_swap_full_pct", "0").unwrap();
+        load(&off, &full, 0, 200 * S);
+        off.ap.tick();
+        let p = state_for(&off.ap.runner).pressure.unwrap();
+        assert_eq!(p.state, agentbench_core::PressureState::Ok);
+        assert_eq!(p.reason, "swap 42 GB used, idle");
+        assert_eq!(running_issues(&off), 2);
+    }
+
+    #[tokio::test]
     async fn the_off_setting_ignores_pressure() {
-        use crate::pressure::tests::heavy;
+        use crate::pressure::tests::{heavy, live_idle_host};
         let r = pressure_rig(2, 2);
         r.store.set_setting(crate::pressure::SETTING, "off").unwrap();
         load(&r, &heavy(), 0, 200 * S);
+        load(&r, &agentbench_core::PressureReadings { swap_used: Some(48_000_000_000), ..live_idle_host() }, 210 * S, 400 * S);
         r.ap.tick();
         assert_eq!(running_issues(&r), 2);
         assert!(!state_for(&r.ap.runner).pressure.unwrap().enabled);

@@ -462,7 +462,11 @@ the pressure limits, then the cap comes back one worker per step. Every change
 goes to the autopilot feed, the supervisor gets one notice per episode, and
 `GET /api/autopilot` has `pressure {state, reason, since, readings,
 effective_cap, configured_cap}`. `agentbench autopilot` and the app status line
-show it as `scaled to 2 of 8: io full 22%, swap 19 GB (swap on nvme1n1p1)`.
+show it as `scaled to 2 of 8: io full 22%, swapping 1400 pages/s, swap 19 GB (swap on nvme1n1p1)`.
+The reason names the rule that fired with its numbers (`swap 91 percent full`,
+`swap grew 1.5 GB in 60 s to 20 GB`). When the state is `ok` with more than
+`_swap_gb` of swap used, the reason reads `swap 23 GB used, idle`, so it is
+clear that the swap is old pages and not a reason to throttle.
 Off Linux the readings are unknown and the state stays `ok`.
 
 Settings (rows of the `settings` table in `agentbench.db`, each threshold named with the `autopilot_pressure_` prefix):
@@ -474,7 +478,9 @@ Settings (rows of the `settings` table in `agentbench.db`, each threshold named 
 | `_io_full` | 15 | pressure: io full avg10 above, % |
 | `_memory_some` | 10 | pressure: memory some avg10 above, % |
 | `_mem_available_gb` | 12 | pressure: MemAvailable under, GB |
-| `_swap_gb` | 4 | pressure: swap used above, GB, and growing over the hold time |
+| `_swap_gb` | 4 | pressure: swap used above, GB, and growing by at least `_swap_grow_gb` over the hold time while paging out (over 10 pages/s). Stale swap that sits still or creeps never counts |
+| `_swap_grow_gb` | 1 | how much swap used must grow over the hold time to count as growing, GB, 0 turns the growth rule off |
+| `_swap_full_pct` | 85 | critical: swap used above this percent of SwapTotal, since the next memory spike would be killed, 0 is off |
 | `_cpu_some` | 40 | pressure: cpu some avg60 above, % |
 | `_load_per_core` | 0.7 | pressure: 1 minute load per core above |
 | `_write_ms` | 0 (off) | pressure: write latency on a watched device above, ms |
@@ -484,7 +490,7 @@ Settings (rows of the `settings` table in `agentbench.db`, each threshold named 
 | `_critical_mem_available_gb` | 5 | critical: MemAvailable under, GB |
 | `_swap_pages` | 100 | pressure: swapping now, pages per second in or out (from `/proc/vmstat`, last 60 s), 0 is off |
 | `_critical_swap_pages` | 1000 | critical: swapping now, pages per second in or out, 0 is off |
-| `_critical_swap_gb` | 0 (off) | critical: swap used above, GB, and only with proof of trouble (swap grew over 1 GB in 60 s, MemAvailable under `_mem_available_gb`, or memory some avg10 above 5%) |
+| `_critical_swap_gb` | 0 (off) | critical: swap used above, GB, and only with proof of trouble (swap growing as `_swap_gb` describes, MemAvailable under `_mem_available_gb`, or memory some avg10 above 5%) |
 | `_critical_hold_secs` | 30 | how long a critical reading must hold |
 | `_cooldown_secs` | 300 | calm time before pressure clears |
 | `_recover_secs` | 120 | one more worker each this many seconds after clearing |

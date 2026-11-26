@@ -645,12 +645,13 @@ pub fn autopilot_text(a: &agentbench_core::AutopilotState) -> String {
             let pct = |v: Option<f32>| v.map_or("?".to_string(), |v| format!("{v:.0}%"));
             let gb = |v: Option<u64>| v.map_or("?".to_string(), |v| format!("{:.1} GB", v as f64 / 1073741824.0));
             out.push_str(&format!(
-                "\nio full {}, memory some {}, cpu some {}, available {}, swap {}{}, load {} per core",
+                "\nio full {}, memory some {}, cpu some {}, available {}, swap {}{}{}, load {} per core",
                 pct(r.io_full10),
                 pct(r.memory_some10),
                 pct(r.cpu_some60),
                 gb(r.mem_available),
                 gb(r.swap_used),
+                r.swap_total.filter(|t| *t > 0).map(|t| format!(" of {}", gb(Some(t)))).unwrap_or_default(),
                 r.swap_device.as_ref().map(|d| format!(" on {d}")).unwrap_or_default(),
                 r.load_per_core.map_or("?".to_string(), |v| format!("{v:.2}")),
             ));
@@ -964,6 +965,31 @@ mod tests {
         assert!(text.starts_with("autopilot: running, 2 of 8 workers; scaled to 2 of 8: io full 22%, swap 19 GB"), "{text}");
         assert!(text.contains("host pressure: pressure"), "{text}");
         assert!(text.contains("workers 2 of 8; language servers 2 running, 9.0 GB resident"), "{text}");
+    }
+
+    #[test]
+    fn the_autopilot_command_says_why_a_host_with_stale_swap_is_not_throttled() {
+        let a = agentbench_core::AutopilotState {
+            enabled: true,
+            cap: 5,
+            pressure: Some(agentbench_core::HostPressure {
+                enabled: true,
+                reason: "swap 23 GB used, idle".into(),
+                effective_cap: 5,
+                configured_cap: 5,
+                readings: agentbench_core::PressureReadings {
+                    known: true,
+                    swap_used: Some(24_800_000_000),
+                    swap_total: Some(49_000_000_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let text = autopilot_text(&a);
+        assert!(text.contains("host pressure: ok (swap 23 GB used, idle), workers 5 of 5"), "{text}");
+        assert!(text.contains("swap 23.1 GB of 45.6 GB,"), "{text}");
     }
 
     fn parse(args: &[&str]) -> GithubAction {

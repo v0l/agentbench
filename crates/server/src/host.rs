@@ -116,6 +116,7 @@ impl Reader {
             r.mem_available = get("MemAvailable");
             if let (Some(total), Some(free)) = (get("SwapTotal"), get("SwapFree")) {
                 r.swap_used = Some(total.saturating_sub(free));
+                r.swap_total = Some(total);
             }
             r.known |= r.mem_available.is_some();
         }
@@ -358,6 +359,7 @@ pub(crate) mod tests {
         assert_eq!((r.io_full10, r.io_some60, r.memory_full10, r.cpu_some60), (Some(21.0), Some(21.0), Some(1.5), Some(41.0)));
         assert_eq!(r.mem_available, Some(9_375_000 * 1024));
         assert_eq!(r.swap_used, Some(20_000_000 * 1024));
+        assert_eq!(r.swap_total, Some(50_331_648 * 1024));
         assert_eq!(r.load_per_core, Some(0.5));
         assert_eq!(r.swap_device.as_deref(), Some("nvme1n1p1"));
         assert_eq!(r.disks.len(), 1);
