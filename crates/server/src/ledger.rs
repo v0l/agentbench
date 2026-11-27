@@ -187,6 +187,13 @@ pub fn closing_for(tool: &str, args: &Value, out: &Value) -> Closing {
     c
 }
 
+pub fn worker_resumed(store: &Store, worker: SessionId) {
+    let stale = store.open_items_targeting("judge", &worker.to_string()).unwrap_or_default();
+    close_items(store, &stale, &Closing::new("resumed").outcome(RESUMED_OUTCOME));
+}
+
+const RESUMED_OUTCOME: &str = "worker resumed, judge on next turn end";
+
 pub fn closed_by(store: &Store, tool: &str, args: &Value, supervisor: SessionId, out: &Value) {
     let target = args.get("id").and_then(Value::as_str).map(|s| s.trim().to_string());
     let closing = closing_for(tool, args, out);
@@ -197,7 +204,17 @@ pub fn closed_by(store: &Store, tool: &str, args: &Value, supervisor: SessionId,
     };
     match tool {
         "judge_session" => on(&["judge"]),
-        "check_in" => on(&["check_in"]),
+        "check_in" => {
+            on(&["check_in"]);
+            let running = target
+                .as_ref()
+                .and_then(|t| t.parse::<SessionId>().ok())
+                .and_then(|id| store.session(id).ok())
+                .is_some_and(|s| s.status == agentbench_core::SessionStatus::Running);
+            if running {
+                on(&["judge"]);
+            }
+        }
         "answer_session" | "escalate_question" => on(&["question"]),
         "unwatch_session" | "read_session" => on(&["watch"]),
         "file_issue" | "start_session" => {

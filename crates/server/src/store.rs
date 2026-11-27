@@ -2827,6 +2827,26 @@ impl Store {
         Ok(db.execute("DELETE FROM supervisor_log WHERE arrived_at < ?1", [before])?)
     }
 
+    pub fn open_items_targeting(&self, kind: &str, target: &str) -> Result<Vec<OpenItem>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT id, kind, target, head, text, delivered_at, log_id FROM open_items
+             WHERE kind = ?1 AND target = ?2 ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![kind, target], |r| {
+            Ok(OpenItem {
+                id: r.get(0)?,
+                kind: r.get(1)?,
+                target: r.get(2)?,
+                head: r.get(3)?,
+                text: r.get(4)?,
+                delivered_at: r.get(5)?,
+                log_id: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn close_open_items(&self, ids: &[Id]) -> Result<()> {
         let db = self.db();
         for id in ids {

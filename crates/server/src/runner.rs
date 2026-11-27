@@ -1624,6 +1624,9 @@ impl Runner {
         };
         let files = self.materialise(session.id, &msg.attachments);
         let _ = self.store.set_status(session.id, SessionStatus::Running);
+        if mode == Mode::Chat {
+            crate::ledger::worker_resumed(&self.store, session.id);
+        }
         crate::quota::set_paused(&self.store, session.id, None);
         self.changed.notify_waiters();
         let cwd = PathBuf::from(&session.cwd);

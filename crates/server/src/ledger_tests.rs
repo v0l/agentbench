@@ -61,6 +61,42 @@ fn judge_session_closes_the_judge_item() {
 }
 
 #[test]
+fn a_worker_resuming_closes_its_judge_item_and_the_next_turn_end_opens_a_new_one() {
+    let w = world();
+    delivered(&w.store, w.boss.id, "judge", Some(w.worker.id), "judge it");
+    delivered(&w.store, w.boss.id, "check_in", Some(w.worker.id), "check on it");
+    let judge_log = w.store.open_items(w.boss.id).unwrap()[0].log_id.unwrap();
+    worker_resumed(&w.store, w.worker.id);
+    let open = w.store.open_items(w.boss.id).unwrap();
+    assert_eq!(open.iter().map(|i| i.kind.as_str()).collect::<Vec<_>>(), ["check_in"]);
+    let log = w.store.log_item(judge_log).unwrap().unwrap();
+    assert_eq!(log.action, "resumed");
+    assert_eq!(log.outcome, "worker resumed, judge on next turn end");
+    let block = pending_block(&w.store, w.boss.id, crate::store::now() + LATER);
+    assert!(!block.contains("judge for session"), "{block}");
+    delivered(&w.store, w.boss.id, "judge", Some(w.worker.id), "judge again");
+    let kinds: Vec<_> = w.store.open_items(w.boss.id).unwrap().into_iter().map(|i| i.kind).collect();
+    assert_eq!(kinds, ["check_in", "judge"]);
+}
+
+#[test]
+fn check_in_closes_the_judge_item_of_a_running_session() {
+    let w = world();
+    w.store.set_status(w.worker.id, agentbench_core::SessionStatus::Running).unwrap();
+    delivered(&w.store, w.boss.id, "judge", Some(w.worker.id), "judge it");
+    closed_by(&w.store, "check_in", &serde_json::json!({"id": w.worker.id.to_string(), "action": "continue"}), w.boss.id, &serde_json::Value::Null);
+    assert!(w.store.open_items(w.boss.id).unwrap().is_empty());
+}
+
+#[test]
+fn check_in_keeps_the_judge_item_of_an_idle_session() {
+    let w = world();
+    delivered(&w.store, w.boss.id, "judge", Some(w.worker.id), "judge it");
+    closed_by(&w.store, "check_in", &serde_json::json!({"id": w.worker.id.to_string(), "action": "continue"}), w.boss.id, &serde_json::Value::Null);
+    assert_eq!(w.store.open_items(w.boss.id).unwrap().len(), 1);
+}
+
+#[test]
 fn a_tool_for_another_session_leaves_the_item_open() {
     let w = world();
     delivered(&w.store, w.boss.id, "judge", Some(w.worker.id), "judge it");
