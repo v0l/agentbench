@@ -2220,15 +2220,30 @@ pub struct Restarted {
     pub interrupted: usize,
     #[serde(default)]
     pub restarting: bool,
+    #[serde(default)]
+    pub parked: Vec<SessionId>,
+    #[serde(default)]
+    pub cut: Vec<SessionId>,
 }
 
 impl Restarted {
     pub fn summary(&self) -> String {
         let turns = if self.waited == 1 { "turn" } else { "turns" };
-        format!(
-            "waited for {} running {turns}: {} finished, {} interrupted by the restart",
-            self.waited, self.finished, self.interrupted
-        )
+        let mut text = format!(
+            "waited for {} running {turns}: {} finished, {} parked at a tool boundary, {} interrupted by the restart",
+            self.waited,
+            self.finished,
+            self.parked.len(),
+            self.interrupted
+        );
+        let ids = |list: &[SessionId]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", ");
+        if !self.parked.is_empty() {
+            text.push_str(&format!("; parked: {}", ids(&self.parked)));
+        }
+        if !self.cut.is_empty() {
+            text.push_str(&format!("; interrupted: {}", ids(&self.cut)));
+        }
+        text
     }
 }
 
@@ -2248,7 +2263,7 @@ pub struct RestartSettings {
     pub supervisor_may_restart: bool,
 }
 
-pub const RESTART_DRAIN_DEFAULT: u64 = 120;
+pub const RESTART_DRAIN_DEFAULT: u64 = 600;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Job {
