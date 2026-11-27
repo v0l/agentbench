@@ -12,6 +12,17 @@ With hands free on, the microphone stays open while the supervisor chat is the o
 - Leaving the chat closes the microphone. The talk key, or the `stop listening` key in the composer, pauses it until you press the talk key again or come back to the chat.
 - The chat header shows `listening`, or `hearing you` while you speak.
 
+### Noise is not sent
+
+Whisper writes words for sounds that are not speech: a clap reads as "you", a breath or a cough as "Thank you.", and large v3 writes `*Clap*`. A hands free take is dropped, never sent, when any of these hold (`voice::sounds_like_noise`, `agent_voice::voice::noise`):
+
+- It has less voice than `shortest speech` (`voice_min_speech_secs`, 0.25 s by default, the shortest speech Silero VAD counts). Voice is the span from the first to the last 20 ms block the endpoint called speech. Such a take is not read at all.
+- Whisper's own scores say it is not speech: no speech probability over 0.6 and average log probability under -1.0, the defaults OpenAI's `transcribe` uses to skip a window. The local reader computes both; a speech server that answers `no_speech_prob` and `avg_logprob` beside `text` (agentbench's own does) is judged the same way.
+- The text is only punctuation (`-`, `...`) or a sound tag in `*`, `[]`, `()` or `<>` (`*clap*`, `[music]`, `(applause)`).
+- The take has less voice than `short take` (`voice_short_take_secs`, 2 s by default) and reads only as a phrase Whisper writes for silence: "you", "thank you", "thanks for watching", "bye", "um", a `www.` address and the like.
+
+A dropped take shows `ignored: sounded like noise` (`ignored noise` on a phone) in the chat header for 3 s, and the microphone stays open. Large v3 turbo scores a clap as confident speech (no speech probability near 0), so for it the voice length and the phrase list do the work. The test fixtures `silence`, `clap`, `breath`, `cough`, `yes` and `stop` in `crates/app/tests/fixtures/voice` are made by `make/noise.py` (the two words from the agentbench text to speech server), and `hands_free_ignores_noise_and_still_sends_a_short_word` runs them through base.en and, when it is installed, large v3 turbo. `cargo run --release -p agent-voice --features speech-cuda --example hear -- take.wav ~/.local/share/agentbench/models whisper-large-v3-turbo` prints both scores for a recording.
+
 ### Headphones
 
 Through speakers, the reply would feed back into the open microphone and barge in on itself. Hands free checks the default output first:

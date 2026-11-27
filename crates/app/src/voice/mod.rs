@@ -73,6 +73,26 @@ pub const HANG_SECONDS: f32 = 3.0;
 
 pub const HANG_RANGE: std::ops::RangeInclusive<f32> = 1.0..=15.0;
 
+pub const MIN_SPEECH_SECONDS: f32 = 0.25;
+pub const MIN_SPEECH_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
+pub const SHORT_TAKE_SECONDS: f32 = 2.0;
+pub const SHORT_TAKE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=10.0;
+pub const IGNORED: &str = "ignored: sounded like noise";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Scores {
+    pub no_speech: f32,
+    pub avg_logprob: f32,
+}
+
+pub fn sounds_like_noise(text: &str, voiced: f32, scores: Option<Scores>, settings: &Settings) -> bool {
+    use agent_voice::voice::noise;
+    voiced < settings.min_speech_secs
+        || scores.is_some_and(|s| noise::not_speech(s.no_speech, s.avg_logprob))
+        || noise::sound_tag(text)
+        || (voiced < settings.short_take_secs && noise::silence_phrase(text))
+}
+
 pub const COUNTDOWN_AFTER: f32 = 1.5;
 
 /// How much new speech is heard between one partial reading starting and the next being allowed.
@@ -158,6 +178,7 @@ pub struct Endpoint {
     quiet: f32,
     level: f32,
     listened: f32,
+    voiced: Option<(f32, f32)>,
 }
 
 impl Endpoint {
@@ -179,6 +200,7 @@ impl Endpoint {
             quiet: 0.0,
             level: 0.0,
             listened: 0.0,
+            voiced: None,
         }
     }
 
@@ -202,6 +224,10 @@ impl Endpoint {
     /// Whether speech has been heard yet.
     pub fn spoke(&self) -> bool {
         self.spoke
+    }
+
+    pub fn voiced_seconds(&self) -> f32 {
+        self.voiced.map_or(0.0, |(from, to)| to - from)
     }
 
     pub fn scanned(&self) -> usize {
@@ -237,6 +263,10 @@ impl Endpoint {
                 self.run += 1;
                 self.quiet = 0.0;
                 self.spoke |= self.run >= 3;
+                if self.spoke {
+                    let from = self.voiced.map_or(self.listened - self.run as f32 * step, |v| v.0);
+                    self.voiced = Some((from, self.listened));
+                }
             } else {
                 self.run = 0;
                 self.quiet += step;
@@ -311,6 +341,7 @@ pub enum Said {
     Partial(String),
     /// The reading of the whole take. Replaces the partials; nothing follows it.
     Final(String),
+    Ignored,
     /// Why there is no text, ending the take.
     Failed(String),
 }
@@ -331,8 +362,58 @@ pub fn append(draft: &mut String, said: &str) {
 mod tests {
     use super::*;
 
+    pub(crate) fn voiced_in(wav: &[u8]) -> f32 {
+        let (pcm, rate) = read_wav(wav).unwrap();
+        let mut take = vec![0.0005f32; RATE as usize * 2];
+        take.extend(to_whisper_rate(&pcm, rate));
+        take.extend(vec![0.0005f32; RATE as usize * 4]);
+        let mut e = Endpoint::open(RATE);
+        let mut at = 0;
+        while at < take.len() {
+            at = (at + RATE as usize / 10).min(take.len());
+            if e.feed(&take[..at]) == Heard::Done {
+                break;
+            }
+        }
+        e.voiced_seconds()
+    }
+
+    #[test]
+    fn a_clap_has_too_little_voice_and_a_short_word_has_enough() {
+        let min = Settings::default().min_speech_secs;
+        assert_eq!(voiced_in(include_bytes!("../../tests/fixtures/voice/silence.wav")), 0.0);
+        assert!(voiced_in(include_bytes!("../../tests/fixtures/voice/clap.wav")) < min);
+        for (name, wav) in [
+            ("yes", &include_bytes!("../../tests/fixtures/voice/yes.wav")[..]),
+            ("stop", &include_bytes!("../../tests/fixtures/voice/stop.wav")[..]),
+        ] {
+            let v = voiced_in(wav);
+            assert!(v >= min && v < 1.0, "{name}: {v}");
+        }
+        let v = voiced_in(include_bytes!("../../tests/fixtures/voice/ask.wav"));
+        assert!(v > 1.0, "{v}");
+    }
     fn tone(seconds: f32, amp: f32) -> Vec<f32> {
         (0..(seconds * RATE as f32) as usize).map(|i| amp * (i as f32 * 0.1).sin()).collect()
+    }
+
+    #[test]
+    fn noise_takes_are_ignored_and_short_words_are_kept() {
+        let s = Settings::default();
+        let sure = Some(Scores { no_speech: 0.02, avg_logprob: -0.1 });
+        let doubt = Some(Scores { no_speech: 0.93, avg_logprob: -1.9 });
+        assert!(sounds_like_noise("you", 0.06, sure, &s), "too little voice");
+        assert!(sounds_like_noise("Stop.", 0.6, doubt, &s), "whisper says it is not speech");
+        assert!(sounds_like_noise("*clap*", 0.8, sure, &s));
+        assert!(sounds_like_noise("-", 0.8, sure, &s));
+        assert!(sounds_like_noise("(applause)", 5.0, None, &s));
+        assert!(sounds_like_noise("you", 0.74, None, &s));
+        assert!(sounds_like_noise("Thank you.", 0.42, sure, &s));
+        assert!(!sounds_like_noise("Thank you.", 2.5, sure, &s), "a long take may really say it");
+        assert!(!sounds_like_noise("Yes.", 0.44, sure, &s));
+        assert!(!sounds_like_noise("Stop.", 0.34, None, &s));
+        let off = Settings { min_speech_secs: 0.0, short_take_secs: 0.0, ..Default::default() };
+        assert!(!sounds_like_noise("you", 0.06, None, &off), "both lengths are the user's");
     }
 
     #[test]

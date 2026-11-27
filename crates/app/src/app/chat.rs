@@ -361,7 +361,7 @@ impl App {
                     }
                     if let Some(word) = talk {
                         let tint = match word {
-                            "supervisor thinking" | "connecting" | "reconnecting" | "loading" => TRACE,
+                            "supervisor thinking" | "connecting" | "reconnecting" | "loading" | crate::voice::IGNORED => TRACE,
                             "model speaking" => VALUE,
                             "record your voice clip first" => FAULT,
                             _ => OK,
@@ -371,6 +371,7 @@ impl App {
                             "supervisor thinking" if narrow => "thinking".into(),
                             "model speaking" if narrow => "speaking".into(),
                             "record your voice clip first" if narrow => "record voice clip".into(),
+                            crate::voice::IGNORED if narrow => "ignored noise".into(),
                             "loading" if narrow => progress.as_deref().map_or("loading".into(), |p| p.replace("loading the voice model, ", "loading ")),
                             "loading" => progress.unwrap_or_else(|| "loading the voice model".into()),
                             w => w.into(),

@@ -39,6 +39,8 @@ pub struct Settings {
     pub input_device: String,
     pub talk_key: String,
     pub hang_secs: f32,
+    pub min_speech_secs: f32,
+    pub short_take_secs: f32,
     pub duplex_url: String,
     pub duplex_model: String,
     pub duplex_key: String,
@@ -124,6 +126,8 @@ impl Default for Settings {
             input_device: String::new(),
             talk_key: DEFAULT_TALK_KEY.into(),
             hang_secs: super::HANG_SECONDS,
+            min_speech_secs: super::MIN_SPEECH_SECONDS,
+            short_take_secs: super::SHORT_TAKE_SECONDS,
             duplex_url: String::new(),
             duplex_model: String::new(),
             duplex_key: String::new(),
@@ -185,6 +189,12 @@ impl Settings {
         if let Some(h) = st.get_string("voice_hang_secs").and_then(|h| h.parse::<f32>().ok()) {
             s.hang_secs = h.clamp(*super::HANG_RANGE.start(), *super::HANG_RANGE.end());
         }
+        if let Some(v) = st.get_string("voice_min_speech_secs").and_then(|v| v.parse::<f32>().ok()) {
+            s.min_speech_secs = v.clamp(*super::MIN_SPEECH_RANGE.start(), *super::MIN_SPEECH_RANGE.end());
+        }
+        if let Some(v) = st.get_string("voice_short_take_secs").and_then(|v| v.parse::<f32>().ok()) {
+            s.short_take_secs = v.clamp(*super::SHORT_TAKE_RANGE.start(), *super::SHORT_TAKE_RANGE.end());
+        }
         s.url = st.get_string("voice_url").unwrap_or_default();
         s.key = st.get_string("voice_key").unwrap_or_default();
         s.server_model = st.get_string("voice_server_model").unwrap_or_default();
@@ -238,6 +248,8 @@ impl Settings {
         st.set_string("voice_input", self.input_device.clone());
         st.set_string("voice_talk_key", self.talk_key.clone());
         st.set_string("voice_hang_secs", self.hang_secs.to_string());
+        st.set_string("voice_min_speech_secs", self.min_speech_secs.to_string());
+        st.set_string("voice_short_take_secs", self.short_take_secs.to_string());
         st.set_string("voice_duplex_url", self.duplex_url.clone());
         st.set_string("voice_duplex_model", self.duplex_model.clone());
         st.set_string("voice_duplex_key", self.duplex_key.clone());
@@ -528,6 +540,21 @@ mod tests {
         assert_eq!(Settings::load(Some(&m)).auto_send_secs, 30);
         m.set_string("voice_auto_send_secs", "0".into());
         assert_eq!(Settings::load(Some(&m)).auto_send_secs, 1);
+    }
+
+    #[test]
+    fn the_noise_settings_default_kept_and_clamped() {
+        let d = Settings::default();
+        assert_eq!(d.min_speech_secs, 0.25);
+        assert_eq!(d.short_take_secs, 2.0);
+        let mut m = Mem::default();
+        Settings { min_speech_secs: 0.5, short_take_secs: 4.0, ..Default::default() }.save(&mut m);
+        let back = Settings::load(Some(&m));
+        assert_eq!((back.min_speech_secs, back.short_take_secs), (0.5, 4.0));
+        eframe::Storage::set_string(&mut m, "voice_min_speech_secs", "99".into());
+        eframe::Storage::set_string(&mut m, "voice_short_take_secs", "-1".into());
+        let back = Settings::load(Some(&m));
+        assert_eq!((back.min_speech_secs, back.short_take_secs), (2.0, 0.0));
     }
 
     #[test]

@@ -45,7 +45,7 @@ pub struct Reading {
 
 impl Reading {
     pub fn not_speech(&self) -> bool {
-        self.no_speech as f64 > m::NO_SPEECH_THRESHOLD && (self.avg_logprob as f64) < m::LOGPROB_THRESHOLD
+        crate::voice::not_speech(self.no_speech, self.avg_logprob)
     }
 }
 

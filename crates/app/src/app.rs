@@ -40,6 +40,7 @@ use agent_ui::widgets::{code_block, spinner};
 
 const SIDE_W: f32 = 320.0;
 const RETRY: Duration = Duration::from_secs(3);
+const IGNORED_SHOWN: Duration = Duration::from_secs(3);
 /// The most tiles any grid has.
 const SLOTS: usize = Grid::MAX_SIDE * Grid::MAX_SIDE;
 /// The space between tiles of the grid.
@@ -812,6 +813,8 @@ pub struct App {
     last_talk: Option<crate::voice::Talk>,
     conversing: Option<SessionId>,
     talk_turn: bool,
+    ignored_at: Option<Instant>,
+    ignored_count: usize,
     hands_free: HandsFree,
     bridge: crate::voice::Bridge,
     engine: crate::voice::engine::Engine,
@@ -1040,6 +1043,8 @@ impl App {
             last_talk: None,
             conversing: None,
             talk_turn: false,
+            ignored_at: None,
+            ignored_count: 0,
             hands_free: Default::default(),
             bridge: Default::default(),
             engine: Default::default(),
@@ -1977,6 +1982,16 @@ impl App {
     }
 
     #[doc(hidden)]
+    pub fn voice_test_ignored(&mut self) {
+        self.ignored_at = Some(Instant::now());
+    }
+
+    #[doc(hidden)]
+    pub fn voice_test_ignored_count(&self) -> usize {
+        self.ignored_count
+    }
+
+    #[doc(hidden)]
     pub fn voice_test_notice(&self) -> Option<String> {
         self.notice.as_ref().map(|(_, t)| t.clone())
     }
@@ -2129,6 +2144,9 @@ impl App {
         }
         if self.voice.in_speech() {
             return Some("hearing you");
+        }
+        if self.ignored_at.is_some_and(|at| at.elapsed() < IGNORED_SHOWN) {
+            return Some(crate::voice::IGNORED);
         }
         if self.engine.loading() && self.speech.local_duplex().is_some() {
             return Some("loading");
@@ -3258,6 +3276,13 @@ impl App {
             self.notice = Some((false, format!("stopped after {hang:.0} s of quiet")));
         }
         for said in self.voice.poll() {
+            if matches!(said, crate::voice::Said::Ignored) {
+                self.talk_turn = false;
+                self.ignored_at = Some(Instant::now());
+                self.ignored_count += 1;
+                ctx.request_repaint_after(IGNORED_SHOWN);
+                continue;
+            }
             if self.talk_turn && !matches!(said, crate::voice::Said::Partial(_)) {
                 self.talk_turn = false;
                 if let crate::voice::Said::Final(text) = &said
@@ -3284,6 +3309,7 @@ impl App {
                     self.drop_speech();
                     self.notice = Some((false, e));
                 }
+                crate::voice::Said::Ignored => {}
             }
         }
         if self.voice.busy() {

@@ -4,7 +4,7 @@
 //! Whisper, and the request to a server. The window asks [`Voice::poll`] once a frame what has
 //! finished.
 
-use super::{Endpoint, Heard, MAX_SECONDS, MIN_PEAK, MIN_SECONDS, Mode, RATE, Said, Settings};
+use super::{Endpoint, Heard, MAX_SECONDS, MIN_PEAK, MIN_SECONDS, Mode, RATE, Said, Scores, Settings};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -20,6 +20,7 @@ pub enum Event {
     Text(String),
     /// A reading of take number `.0` while it is still going.
     Partial(u64, String),
+    Ignored,
     /// Why nothing was.
     Failed(String),
 }
@@ -56,6 +57,12 @@ struct Take {
 type Loaded = Arc<Mutex<Option<agent_voice::speech::Transcriber>>>;
 #[cfg(not(local_speech))]
 type Loaded = ();
+
+enum Reason {
+    Partial(u64, Arc<AtomicBool>),
+    Open(f32),
+    Take,
+}
 
 pub struct Voice {
     state: State,
@@ -367,7 +374,7 @@ impl Voice {
                     };
                     let busy = take.partial_busy.clone();
                     let id = self.take_id;
-                    self.read(pcm, settings, Some((id, busy)), wake);
+                    self.read(pcm, settings, Reason::Partial(id, busy), wake);
                 }
             }
             Heard::Waiting => {}
@@ -398,13 +405,18 @@ impl Voice {
         {
             let rate = take.rate;
             let quiet = take.endpoint.quiet_seconds();
+            let voiced = take.endpoint.voiced_seconds();
             let heard = std::mem::take(&mut *take.heard.lock().unwrap_or_else(|e| e.into_inner()));
             take.endpoint = Endpoint::open(rate);
             take.heard_speech = false;
             take.cancelled = 0;
             take.tapped = 0;
+            if voiced < settings.min_speech_secs {
+                let _ = self.tx.send(Event::Ignored);
+                return;
+            }
             if let Some(pcm) = self.trimmed(heard, rate, quiet, settings, true) {
-                self.read(pcm, settings, None, wake);
+                self.read(pcm, settings, Reason::Open(voiced), wake);
             }
             return;
         }
@@ -418,7 +430,7 @@ impl Voice {
         if let Some(pcm) = self.trimmed(heard, rate, quiet, settings, false) {
             self.state = State::Reading;
             self.status = "reading".into();
-            self.read(pcm, settings, None, wake);
+            self.read(pcm, settings, Reason::Take, wake);
         }
     }
 
@@ -470,7 +482,7 @@ impl Voice {
         self.state = State::Reading;
         self.status = "reading".into();
         self.shown = None;
-        self.read(pcm, settings, None, wake);
+        self.read(pcm, settings, Reason::Take, wake);
         Ok(())
     }
 
@@ -480,7 +492,7 @@ impl Voice {
         &self,
         pcm: Vec<f32>,
         settings: &Settings,
-        partial: Option<(u64, Arc<AtomicBool>)>,
+        why: Reason,
         wake: impl Fn() + Send + Sync + 'static,
     ) {
         let tx = self.tx.clone();
@@ -489,24 +501,33 @@ impl Voice {
         std::thread::Builder::new()
             .name("agentbench-speech".into())
             .spawn(move || {
-                let quiet = partial.is_some();
+                let quiet = matches!(why, Reason::Partial(..));
                 let said = match settings.mode {
                     Mode::Local => read_locally(&settings, &pcm, &tx, &wake, &loaded, quiet),
                     Mode::Server => read_on_server(&settings, &pcm),
                     // `Settings::resolved` turns this into a server before a take is read.
                     Mode::Agentbench => Err("not connected to an agentbench server".to_string()),
                 };
-                match partial {
-                    Some((id, busy)) => {
+                match why {
+                    Reason::Partial(id, busy) => {
                         busy.store(false, Ordering::Relaxed);
                         // A partial that fails says nothing: the last reading reports it.
-                        if let Ok(t) = said {
+                        if let Ok((t, _)) = said {
                             let _ = tx.send(Event::Partial(id, t));
                         }
                     }
-                    None => {
+                    Reason::Open(voiced) => {
                         let _ = tx.send(match said {
-                            Ok(t) => Event::Text(t),
+                            Ok((t, scores)) if super::sounds_like_noise(&t, voiced, scores, &settings) => {
+                                Event::Ignored
+                            }
+                            Ok((t, _)) => Event::Text(t),
+                            Err(e) => Event::Failed(e),
+                        });
+                    }
+                    Reason::Take => {
+                        let _ = tx.send(match said {
+                            Ok((t, _)) => Event::Text(t),
                             Err(e) => Event::Failed(e),
                         });
                     }
@@ -534,6 +555,7 @@ impl Voice {
                     self.status.clear();
                     out.push(Said::Final(t));
                 }
+                Event::Ignored => out.push(Said::Ignored),
                 Event::Failed(e) => {
                     if self.reading() {
                         self.state = State::Idle;
@@ -730,7 +752,7 @@ fn read_locally(
     wake: &(impl Fn() + Send + Sync + 'static),
     loaded: &Loaded,
     quiet: bool,
-) -> Result<String, String> {
+) -> Result<(String, Option<Scores>), String> {
     let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
     let t = slot.get_or_insert_with(|| agent_voice::speech::Transcriber::new(models_dir()));
     let id = settings.local_model();
@@ -748,7 +770,8 @@ fn read_locally(
         let _ = tx.send(Event::Status("reading".into()));
         wake();
     }
-    t.transcribe(pcm)
+    let r = t.read(pcm)?;
+    Ok((r.text, Some(Scores { no_speech: r.no_speech, avg_logprob: r.avg_logprob })))
 }
 
 #[cfg(not(local_speech))]
@@ -759,12 +782,12 @@ fn read_locally(
     _: &(impl Fn() + Send + Sync + 'static),
     _: &Loaded,
     _: bool,
-) -> Result<String, String> {
+) -> Result<(String, Option<Scores>), String> {
     Err("this build has no local speech model; choose a speech server in settings".into())
 }
 
 /// Post the take as a WAV to an OpenAI compatible transcription endpoint.
-fn read_on_server(settings: &Settings, pcm: &[f32]) -> Result<String, String> {
+fn read_on_server(settings: &Settings, pcm: &[f32]) -> Result<(String, Option<Scores>), String> {
     let url = settings.endpoint();
     let wav = super::wav_bytes(pcm, RATE);
     let model = if settings.server_model.trim().is_empty() {
@@ -799,10 +822,18 @@ fn read_on_server(settings: &Settings, pcm: &[f32]) -> Result<String, String> {
         }
         // `{"text": "..."}`, or a plain body from a server that ignored the format.
         Ok(match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(v) => v.get("text").and_then(|t| t.as_str()).unwrap_or_default().trim().to_string(),
-            Err(_) => body.trim().to_string(),
+            Ok(v) => (
+                v.get("text").and_then(|t| t.as_str()).unwrap_or_default().trim().to_string(),
+                scores_of(&v),
+            ),
+            Err(_) => (body.trim().to_string(), None),
         })
     })
+}
+
+fn scores_of(v: &serde_json::Value) -> Option<Scores> {
+    let num = |k: &str| v.get(k).and_then(|n| n.as_f64()).map(|n| n as f32);
+    Some(Scores { no_speech: num("no_speech_prob")?, avg_logprob: num("avg_logprob")? })
 }
 
 #[cfg(test)]
@@ -863,13 +894,22 @@ mod tests {
             ..Default::default()
         };
         let said = read_on_server(&settings, &vec![0.1f32; 16_000]).unwrap();
-        assert_eq!(said, "hello there");
+        assert_eq!(said, ("hello there".to_string(), None));
         let sent = seen.join().unwrap();
         assert!(sent.starts_with("POST /v1/audio/transcriptions"), "{sent:.200}");
         assert!(sent.to_lowercase().contains("authorization: bearer sekret"));
         assert!(sent.contains("multipart/form-data"));
         assert!(sent.contains("name=\"model\""));
         assert!(sent.contains("RIFF"));
+    }
+
+    #[test]
+    fn a_server_that_scores_the_reading_hands_the_scores_on() {
+        let (url, _) = serve(r#"{"text":"you","no_speech_prob":0.9,"avg_logprob":-1.8}"#);
+        let settings = Settings { mode: Mode::Server, url, ..Default::default() };
+        let (text, scores) = read_on_server(&settings, &vec![0.1f32; 16_000]).unwrap();
+        assert_eq!(text, "you");
+        assert_eq!(scores, Some(Scores { no_speech: 0.9, avg_logprob: -1.8 }));
     }
 
     #[test]
