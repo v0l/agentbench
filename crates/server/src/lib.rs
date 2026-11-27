@@ -32,7 +32,6 @@ pub mod providers;
 pub mod restart;
 pub mod runner;
 pub mod seed;
-pub mod speech;
 pub mod store;
 pub mod supervisor_log;
 pub mod terminal;
@@ -41,7 +40,8 @@ pub mod tools;
 pub mod triage;
 pub mod tui;
 pub mod worktree_sweep;
-pub mod voice;
+pub mod engine;
+pub mod audio;
 
 pub use agent_native::{fold, http};
 
@@ -68,6 +68,8 @@ pub struct Config {
     pub agents: Vec<JsonCommand>,
     #[serde(default)]
     pub prices: quota::Prices,
+    #[serde(default)]
+    pub speech: engine::Settings,
 }
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7420";
@@ -127,16 +129,16 @@ impl Config {
         self.agents_with_speech(model, titles, None)
     }
 
-    /// The agents, with the native agent reading sound files through `speech` as well.
+    /// The agents, with the native agent reading sound files through `ears` as well.
     pub fn agents_with_speech(
         &self,
         model: agent::native::Shared,
         titles: Option<titles::Titles>,
-        speech: Option<speech::Speech>,
+        ears: Option<Arc<dyn agent::native::Ears>>,
     ) -> Vec<Box<dyn Agent>> {
         let mut native = agent::Native::shared(model);
         native.reader = titles.map(|t| Arc::new(t) as Arc<dyn agent_core::web::Reader>);
-        native.ears = speech.map(|s| Arc::new(s) as Arc<dyn agent::native::Ears>);
+        native.ears = ears;
         native.pace.prices = self.prices.clone();
         native.browsers = agent::browser::Browsers::saved_in(home());
         native.code =
@@ -209,22 +211,34 @@ pub async fn serve_config(
     }
     let model = agent::native::Shared::new(saved_model(&store, &config.model));
     let titles = titles::Titles::new(saved_title_model(&store, &config.title_model), model.clone());
-    // One Whisper for the transcription endpoint and the agent's read_file, so it loads once.
-    let speech = speech::Speech::new(home().join("models"), &speech_model(&store));
-    let agents =
-        config.agents_with_speech(model.clone(), Some(titles.clone()), Some(speech.clone()));
-    let voice = voice::Voice::default();
+    let audio = Audio::new(config.speech.clone(), home().join("models"), &speech_model(&store), home().join("speech-engine"));
+    let agents = config.agents_with_speech(model.clone(), Some(titles.clone()), Some(audio.ears()));
     serve_inner(
         store,
         agents,
         Some(model),
         Some(titles),
-        Some((speech, voice)),
+        Some(audio),
         bind(listen).await?,
         web,
         shutdown,
     )
     .await
+}
+
+#[derive(Clone)]
+pub struct Audio {
+    pub engines: engine::Engines,
+}
+
+impl Audio {
+    pub fn new(settings: engine::Settings, models: PathBuf, default: &str, dir: PathBuf) -> Audio {
+        Audio { engines: engine::Engines::new(settings, models, default, dir) }
+    }
+
+    pub fn ears(&self) -> Arc<dyn agent::native::Ears> {
+        Arc::new(audio::Ears(self.engines.clone()))
+    }
 }
 
 /// The model a speech request gets when it names none of ours: set it with
@@ -256,9 +270,22 @@ pub async fn serve_agents(
     models: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    let speech = speech::Speech::new(models.clone(), &speech_model(&store));
-    let voice = voice::Voice::new(models.join("phonon"));
-    serve_inner(store, agents, model, None, Some((speech, voice)), listener, None, shutdown).await.map(|_| ())
+    serve_agents_with(store, agents, model, listener, models.clone(), engine::Settings::default(), models.join("speech-engine"), shutdown).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_agents_with(
+    store: store::Store,
+    agents: Vec<Box<dyn Agent>>,
+    model: Option<agent::native::Shared>,
+    listener: tokio::net::TcpListener,
+    models: PathBuf,
+    speech: engine::Settings,
+    engine_dir: PathBuf,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), String> {
+    let audio = Audio::new(speech, models, &speech_model(&store), engine_dir);
+    serve_inner(store, agents, model, None, Some(audio), listener, None, shutdown).await.map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -267,7 +294,7 @@ async fn serve_inner(
     agents: Vec<Box<dyn Agent>>,
     model: Option<agent::native::Shared>,
     titles: Option<titles::Titles>,
-    speech: Option<(speech::Speech, voice::Voice)>,
+    audio: Option<Audio>,
     listener: tokio::net::TcpListener,
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
@@ -287,8 +314,8 @@ async fn serve_inner(
     let _ = projects::ensure_supervisor(&store, &home().join("supervisor"));
     autopilot::migrate(&store).map_err(|e| e.0)?;
     let token = token(&store).map_err(|e| e.0)?;
-    let (speech, voice) = speech.unwrap_or_else(|| {
-        (speech::Speech::new(home().join("models"), &speech_model(&store)), voice::Voice::default())
+    let Audio { engines } = audio.unwrap_or_else(|| {
+        Audio::new(Default::default(), home().join("models"), &speech_model(&store), home().join("speech-engine"))
     });
     let mut runner = runner::Runner::new(store, agents);
     let titles = titles.or_else(|| {
@@ -301,7 +328,7 @@ async fn serve_inner(
     }
     *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
         runner::Base { url: local_url(listen), token: token.clone() };
-    let api = api::Api { runner, token, model, speech, voice };
+    let api = api::Api { runner, token, model, engines };
     api.runner.resume(&stale);
     api.runner.deliver_backlog();
     autopilot::spawn(api.runner.clone());

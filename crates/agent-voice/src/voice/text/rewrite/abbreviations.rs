@@ -1,5 +1,5 @@
 use super::split_suffix;
-use crate::speech::phonon::text::Lang;
+use crate::voice::text::Lang;
 
 const EN: &[(&str, &str)] = &[
     ("Lt", "Lieutenant"),

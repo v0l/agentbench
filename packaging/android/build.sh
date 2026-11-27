@@ -51,7 +51,7 @@ esac
 echo "== rust"
 JNI=$ROOT/target/android-jni
 rm -rf "$JNI"
-cargo ndk --platform 26 -t "$ABI" -o "$JNI" build --lib -p agentbench --no-default-features --features local-speech $FLAG
+cargo ndk --platform 26 -t "$ABI" -o "$JNI" build --lib -p agentbench $FLAG
 LIB=$JNI/$ABI/libagentbench.so
 [ -f "$LIB" ] || { echo "cargo ndk did not produce $LIB" >&2; exit 1; }
 

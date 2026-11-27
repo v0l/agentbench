@@ -1030,7 +1030,7 @@ pub(super) fn speech_section(
             (Mode::Agentbench, "agentbench server", None),
             (Mode::Server, "other server", None),
         ];
-        if cfg!(local_speech) {
+        if crate::voice::settings::LOCAL {
             options.insert(0, (Mode::Local, "this device", None));
         }
         segments(ui, &mut sp.mode, &options);
@@ -1045,7 +1045,7 @@ pub(super) fn speech_section(
                 row_help(
                     ui,
                     "model",
-                    "Whisper, run by agentbench on this device. Downloaded the first time you speak.",
+                    "Whisper, run by the engine of the agentbench server on this machine. Downloaded the first time you speak.",
                     |ui| {
                         choice_fit(
                             ui,
@@ -1467,16 +1467,16 @@ fn speech_devices(
         row_help(
             ui,
             "server",
-            "The agentbench server. Kokoro reads replies aloud and Whisper reads voice input there. With no card, or a build without CUDA, they run on the processor, which is several times slower.",
+            "The agentbench server. Phonon reads replies aloud and Whisper reads voice input there, through the inference-bench engine it starts on its GPU. With no free card the engine runs them on the processor, which is several times slower.",
             |ui| {
                 Line::new().value(server_line).size(12.0).show(ui);
             },
         );
-        if cfg!(local_speech) && sp.mode == crate::voice::Mode::Local {
+        if crate::voice::settings::LOCAL && sp.mode == crate::voice::Mode::Local {
             row_help(
                 ui,
                 "this device",
-                "Whisper for voice input, run by this window. A build with the cuda feature uses the card.",
+                "Whisper for voice input, read by the agentbench server on this machine through its engine.",
                 |ui| {
                     Line::new().value(crate::voice::local_device()).size(12.0).show(ui);
                 },

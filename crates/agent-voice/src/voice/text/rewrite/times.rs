@@ -1,7 +1,7 @@
 //! Times of day: "3:45PM" becomes "3-45 PM", "08:20" in German "8 Uhr 20".
 
 use super::{digits, suffix};
-use crate::speech::phonon::text::Lang;
+use crate::voice::text::Lang;
 
 /// A time of day in the way `lang` writes it, read the way it is spoken. Spanish and Portuguese
 /// times are left alone.

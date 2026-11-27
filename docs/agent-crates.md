@@ -8,7 +8,7 @@ The agent is split into two library crates in this repo, plus the pieces that st
 | `crates/agent-native` | GPL-3.0-only | `agent-core`, `agentbench-core` | the native agent loop, its tools, and the contract the runner drives agents through |
 | `crates/server` | GPL-3.0-only | both | runner, store, API, autopilot, and the external CLI agents |
 | `crates/agent-ui` | MIT | `agent-core` (feature `agent`), egui_bench (theme, key, markdown) | the chat display widgets both apps draw with, and with `agent`: chat, pane, settings and `Agent<H>`/`Host`/`serve` |
-| `crates/agent-voice` | MIT | none of ours | audio helpers, speech client, Whisper and Phonon through candle |
+| `crates/agent-voice` | MIT | none of ours | audio helpers, speech client, voice catalogue and text rules, and the manager of the inference-bench engine child that runs Whisper, Phonon and Haru |
 
 `agent-core` is MIT so MIT and GPL apps can use it. `agent-native` is GPL like the rest of agentbench.
 
@@ -82,7 +82,7 @@ egui_bench no longer holds any agent code. Everything left egui_bench for this r
 | from egui_bench | to | licence |
 |---|---|---|
 | `src/agent/{chat,pane,settings}.rs`, `Agent`, `Host`, `serve`, `desk` | `crates/agent-ui` | MIT |
-| `src/speech/*` (Whisper, Phonon, Kokoro), `src/voice/*` (audio helpers, speech client, model list) and the speech examples | `crates/agent-voice` (feature `speech`, `speech-cuda`, `speech-metal`) | MIT |
+| `src/voice/*` (audio helpers, speech client, model list); the candle `src/speech/*` (Whisper, Phonon, Kokoro) is gone, speech runs in the inference-bench engine | `crates/agent-voice` | MIT |
 
 `agent-ui` uses egui_bench only for its theme, keys, markdown and prelude. Apps outside this repo take the crates by git:
 

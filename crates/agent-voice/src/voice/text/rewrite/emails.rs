@@ -1,7 +1,7 @@
 //! Email addresses: "laurent.mazare@gmail.com" becomes "laurent dot mazare at gmail dot com".
 
 use super::{spell_short, suffix};
-use crate::speech::phonon::text::Lang;
+use crate::voice::text::Lang;
 
 /// An email address with its separators spoken in `lang` and a two-letter top-level domain
 /// spelled out: "a.b@gra-dium.fr" becomes "a dot b at gra dash dium dot F-R".

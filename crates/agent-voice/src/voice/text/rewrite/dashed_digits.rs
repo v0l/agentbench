@@ -1,7 +1,7 @@
 //! Digits in groups: "555-123-4567" becomes "555 123 4 5 6 7".
 
 use super::split_suffix;
-use crate::speech::phonon::text::Lang;
+use crate::voice::text::Lang;
 
 /// Digit sequences with at least two `-` or `_` separators, such as phone numbers, ISBNs, card
 /// numbers or identifiers: dashes become spaces, underscores are spoken, groups of up to 3 digits

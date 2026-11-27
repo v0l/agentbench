@@ -1,7 +1,7 @@
 //! Phone numbers: "+16502349653" becomes "plus 1 6-5-zero 2-3-4 9-6-5-3".
 
 use super::{digits, suffix};
-use crate::speech::phonon::text::Lang;
+use crate::voice::text::Lang;
 
 /// A phone number written as one run of digits, grouped the way it is read out: international
 /// numbers by their country code, local ones by the conventions of `lang`. Within a group

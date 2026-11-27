@@ -17,8 +17,7 @@ const YES: &[u8] = include_bytes!("fixtures/voice/yes.wav");
 const STOP: &[u8] = include_bytes!("fixtures/voice/stop.wav");
 
 fn models_dir() -> Option<PathBuf> {
-    static CPU_SPEECH: std::sync::Once = std::sync::Once::new();
-    CPU_SPEECH.call_once(|| unsafe { std::env::set_var("AGENTBENCH_SPEECH_DEVICE", "cpu") });
+    speech_engine()?;
     let dir = std::env::var("AGENTBENCH_MODELS").ok().map(PathBuf::from).or_else(|| {
         Some(dirs_home()?.join(".local/share/agentbench/models"))
     })?;
@@ -114,6 +113,9 @@ fn a_spoken_take_reaches_the_supervisor_and_its_reply_is_spoken_back() {
         "the first sentence is spoken before the reply ends: {spoken:?}"
     );
     assert!(transcript.iter().any(|l| l.starts_with("assistant: ")), "{transcript:?}");
+    let log = rig.engine_log();
+    assert!(log.contains("agentbench starts"), "the take and the reply went through the engine child: {log}");
+    assert!(log.contains("/v1/audio/transcriptions") && log.contains("/v1/audio/speech"), "{log}");
 }
 
 #[test]

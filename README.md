@@ -33,10 +33,11 @@ changes in [CHANGELOG.md](CHANGELOG.md).
 cargo run --release -p agentbench
 ```
 
-A build from source runs Whisper and read aloud on an NVIDIA card by default, so it needs the
-CUDA toolkit. A machine without a card still runs the build, on the CPU. On a Mac use
-`--no-default-features --features metal`, and anywhere without the toolkit
-`--no-default-features --features local-speech`.
+Voice input and read aloud run in the inference-bench engine, which the server starts as a child
+process on the GPU with the most free memory (or `[speech] gpu = N` in `agentbench.toml`), and on
+the CPU when no card has room. Install it with
+`cargo install --locked --git https://github.com/v0l/inference-bench inference-bench-server`; the
+agentbench build itself needs no GPU toolkit.
 
 The window starts the server in the background if it is not already running,
 and connects to it. The server keeps running after the window closes so agents
@@ -675,8 +676,7 @@ level with no model is left out.
 ## Web and Android
 
 ```sh
-cargo build -p agentbench --lib --release --target wasm32-unknown-unknown \
-    --no-default-features --features local-speech
+cargo build -p agentbench --lib --release --target wasm32-unknown-unknown
 wasm-bindgen --target web --no-typescript --out-dir web/pkg \
     target/wasm32-unknown-unknown/release/agentbench.wasm
 agentbench-server --web web

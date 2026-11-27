@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 /// The checkpoint, pinned so a new upload cannot change the voice under the user.
 pub const MODEL_REPO: &str = "gradium/phonon-31m-en";
-pub const MODEL_REVISION: &str = "8c64b55ec301728e2d1695bfea87a08a267d0c2d";
+pub const MODEL_REVISION: &str = "92741c5b07d085ff840e26fea8ce43110b87852f";
 pub const VOICE_REPO: &str = "gradium/phonon-voices";
 pub const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 pub const CATALOG: &str = "voices.jsonl";
@@ -97,9 +97,41 @@ pub fn voice_path(dir: &Path, v: &Voice) -> PathBuf {
     dir.join(&v.filename)
 }
 
+pub fn needs_new_config(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("config.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .is_some_and(|v| v.get("model_type").is_none())
+}
+
+pub fn fetch_model(dir: &Path, progress: &dyn Fn(super::download::Progress<'_>)) -> Result<(), String> {
+    if needs_new_config(dir) {
+        let old = dir.join("config.json");
+        std::fs::rename(&old, dir.join("config.json.old")).map_err(|e| format!("{}: {e}", old.display()))?;
+    }
+    for f in MODEL_FILES {
+        super::download::get(&model_url(f), &dir.join(f), f, progress)?;
+    }
+    super::download::get(&voice_url(CATALOG), &dir.join(CATALOG), CATALOG, progress)
+}
+
+pub fn fetch_catalogue(dir: &Path) -> Result<(), String> {
+    super::download::get(&voice_url(CATALOG), &dir.join(CATALOG), CATALOG, &|_| {})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_old_runtime_config_is_replaced_and_the_hub_one_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!needs_new_config(dir.path()), "nothing to replace before a download");
+        std::fs::write(dir.path().join("config.json"), r#"{"flow_lm": {}, "model_id": "phonon"}"#).unwrap();
+        assert!(needs_new_config(dir.path()));
+        std::fs::write(dir.path().join("config.json"), r#"{"flow_lm": {}, "model_type": "gradium_phonon_tts"}"#).unwrap();
+        assert!(!needs_new_config(dir.path()));
+    }
 
     #[test]
     fn the_catalogue_keeps_english_voices_with_safe_names() {

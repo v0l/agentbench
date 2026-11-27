@@ -3,7 +3,7 @@
 
 use super::tlds::is_tld;
 use super::{spell_short, suffix};
-use crate::speech::phonon::text::{Lang, SpecialChars};
+use crate::voice::text::{Lang, SpecialChars};
 use std::borrow::Cow;
 
 /// A web address, with an optional `http://` or `https://` in front and an optional path of

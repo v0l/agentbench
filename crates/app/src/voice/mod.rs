@@ -3,10 +3,11 @@
 //! The microphone is opened by the speak key or its hotkey and closed when you go quiet (or press
 //! the key again), so the window never listens to the room in between. While you talk the take
 //! so far is read every couple of seconds and the words appear in the draft; when you stop, the
-//! whole take is read once more and replaces them. What was said is turned into text either
-//! by Whisper running on this machine (candle, off the UI thread, fetched once from Hugging
-//! Face) or by any server that speaks OpenAI's `/v1/audio/transcriptions`. The words land in the
-//! draft for you to read and send; nothing is sent on its own.
+//! whole take is read once more and replaces them. What was said is turned into text by an
+//! agentbench server (the one on this machine, or the one this window is connected to), whose
+//! inference-bench engine child runs Whisper, or by any server that speaks OpenAI's
+//! `/v1/audio/transcriptions`. The words land in the draft for you to read and send; nothing is
+//! sent on its own.
 //!
 //! This module holds what is the same on every platform: the settings, the audio helpers and the
 //! shape of a result. The microphone and the two readers live in `native`, and platforms with no
@@ -29,7 +30,18 @@ pub mod duplex;
 pub mod link;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bridge;
-pub mod engine;
+pub mod engine {
+    pub use agent_voice::engine::*;
+
+    pub const NEED_MIB: u64 = 16 * 1024;
+
+    pub fn dir() -> std::path::PathBuf {
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        return agentbench_server::home().join("voice-engine");
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        return std::env::temp_dir().join("agentbench-voice-engine");
+    }
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub use bridge::{Bridge, Conn, Out, VOICE_SECONDS, heard_note};
 

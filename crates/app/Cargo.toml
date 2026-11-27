@@ -10,15 +10,6 @@ repository.workspace = true
 [lib]
 crate-type = ["lib", "cdylib"]
 
-[features]
-default = ["cuda"]
-# Whisper on this machine. Without it voice input can only use a server.
-local-speech = ["agent-voice/speech"]
-# Run Whisper on an NVIDIA card when there is one. Needs the CUDA toolkit to build.
-cuda = ["local-speech", "agent-voice/speech-cuda"]
-# Run Whisper on the Apple GPU through Metal. Builds for macOS and iOS only.
-metal = ["local-speech", "agent-voice/speech-metal"]
-
 [[bin]]
 name = "agentbench"
 path = "src/main.rs"
@@ -72,8 +63,7 @@ cpal = "0.18"
 tungstenite = { version = "0.29", default-features = false, features = ["handshake", "__rustls-tls"] }
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
-# Whisper on this machine through candle.
-agentbench-server = { path = "../server", default-features = false }
+agentbench-server = { path = "../server" }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
 clap = { version = "4.6", features = ["derive", "env"] }

@@ -21,7 +21,7 @@ Whisper writes words for sounds that are not speech: a clap reads as "you", a br
 - The text is only punctuation (`-`, `...`) or a sound tag in `*`, `[]`, `()` or `<>` (`*clap*`, `[music]`, `(applause)`).
 - The take has less voice than `short take` (`voice_short_take_secs`, 2 s by default) and reads only as a phrase Whisper writes for silence: "you", "thank you", "thanks for watching", "bye", "um", a `www.` address and the like.
 
-A dropped take shows `ignored: sounded like noise` (`ignored noise` on a phone) in the chat header for 3 s, and the microphone stays open. Large v3 turbo scores a clap as confident speech (no speech probability near 0), so for it the voice length and the phrase list do the work. The test fixtures `silence`, `clap`, `breath`, `cough`, `yes` and `stop` in `crates/app/tests/fixtures/voice` are made by `make/noise.py` (the two words from the agentbench text to speech server), and `hands_free_ignores_noise_and_still_sends_a_short_word` runs them through base.en and, when it is installed, large v3 turbo. `cargo run --release -p agent-voice --features speech-cuda --example hear -- take.wav ~/.local/share/agentbench/models whisper-large-v3-turbo` prints both scores for a recording.
+A dropped take shows `ignored: sounded like noise` (`ignored noise` on a phone) in the chat header for 3 s, and the microphone stays open. Large v3 turbo scores a clap as confident speech (no speech probability near 0), so for it the voice length and the phrase list do the work. The test fixtures `silence`, `clap`, `breath`, `cough`, `yes` and `stop` in `crates/app/tests/fixtures/voice` are made by `make/noise.py` (the two words from the agentbench text to speech server), and `hands_free_ignores_noise_and_still_sends_a_short_word` runs them through base.en and, when it is installed, large v3 turbo. `curl -H "Authorization: Bearer $(agentbench-server token)" -F file=@take.wav -F model=whisper-large-v3-turbo localhost:7420/v1/audio/transcriptions` prints both scores for a recording.
 
 ### Headphones
 
@@ -104,7 +104,20 @@ When hands free opens the microphone with the local model chosen (`voice::engine
 - If it dies, the notice says so and it is started once more after 2 s. A second death leaves it off with the last lines of its log in the notice; hands free carries on with speech to text and read aloud. Turning hands free off and on again tries afresh.
 - Its output goes to `voice-engine/engine.log` in the agentbench home.
 
-The child loads a list of models on one port with one key, so speech to text and text to speech will move onto the same child later (inference-bench issue 1474); today they still run in the agentbench server through candle.
+The child loads a list of models on one port with one key. Speech to text and read aloud have their own child, started by the agentbench server (see Speech through the engine below).
+
+## Speech through the engine
+
+The agentbench server answers `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/audio/voices`, `/v1/audio/models` and `/v1/audio/status` by passing them to an inference-bench engine child it starts itself (`crates/server/src/engine.rs`, `crates/server/src/audio.rs`), with the manager in `agent_voice::engine` that the hands free child uses too. The desktop window with voice input on "this device" posts to the agentbench server on this machine; the phone and the web build post to the server they are connected to. None of them changed: the routes take the same bodies and answer the same shapes as before.
+
+- The child is started on the first speech request, with every Whisper model in `models/` and Phonon in `models/phonon` listed and none preloaded, so each loads on its first request. It is stopped after `[speech] idle_secs` (600 by default) without a request.
+- It goes on the card with the most free memory, or `[speech] gpu = N`; with no card that has room, or `[speech] cpu = true`, it runs on the CPU. `[speech] program` names the engine binary when it is not on the PATH or in `~/.cargo/bin`.
+- A Whisper model is fetched into `models/<id>` with its `generation_config.json` and `preprocessor_config.json`, which the engine reads. Phonon is fetched at the hub revision `92741c5b`, whose config the engine reads; an old runtime config from the candle days is kept as `config.json.old`.
+- The take is resampled to 16 kHz once and sent as float samples, so it is not rounded to PCM16 a second time. `verbose_json` is asked for, and the no speech probability and average log probability the hands free noise filter reads are made from its segments the way the candle reader made them (the least likely window, the token weighted mean).
+- Its log is `speech-engine/engine.log` in the agentbench home.
+- `speech.backend = "candle"` is refused with a message; candle is gone.
+
+Parity on this machine (inference-bench `docs/specrt-speech.md`, section 5): the 205 LibriSpeech clips through `/v1/audio/transcriptions` give the same transcripts as transformers on whisper-base.en and whisper-large-v3-turbo, and the 80 Phonon sentences through `/v1/audio/speech` are byte equal to the engine's own run and score the same word error rate as candle did.
 
 ### What happens
 

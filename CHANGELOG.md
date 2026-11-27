@@ -6,6 +6,12 @@ All notable changes to Agentbench are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Voice input and read aloud run in the inference-bench engine. The server starts `inference-bench-server` as a child process on a GPU (or the CPU) on the first speech request and passes `/v1/audio/*` to it; the window's "this device" voice input posts to the server on this machine. The routes take and answer what they did before, so phones, the web build and other clients change nothing. `[speech]` in `agentbench.toml` sets `gpu`, `cpu`, `program` and `idle_secs`.
+
+### Removed
+- Candle, Kokoro and the in-process Whisper and Phonon, with the `cuda`, `metal` and `local-speech` features and the CUDA toolkit in the release builds. `speech.backend = "candle"` is refused with a message.
+
 ## [0.10.0] - 2026-11-25
 
 ### Added
