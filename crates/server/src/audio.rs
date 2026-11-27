@@ -103,11 +103,14 @@ pub async fn read(engines: &Engines, id: &str, pcm: &[f32], extra: &[(String, St
     Ok((heard(&v), child))
 }
 
-pub async fn speak(engines: &Engines, input: &str, voice: &str, stream: bool) -> Result<Response, Failure> {
+pub async fn speak(engines: &Engines, input: &str, voice: &str, stream: bool, seed: Option<u64>) -> Result<Response, Failure> {
     let child = engines.child(Need::Speech).await.map_err(internal)?;
     let mut body = json!({"model": child.model, "input": input, "voice": voice});
     if stream {
         body["response_format"] = json!("pcm");
+    }
+    if let Some(s) = seed {
+        body["seed"] = json!(s);
     }
     let res = crate::http::client()
         .post(format!("{}/v1/audio/speech", child.url))

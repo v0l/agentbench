@@ -14,7 +14,7 @@ use web_time::Instant;
 /// What the worker has to say.
 pub enum Event {
     /// Progress worth showing while the user waits.
-    #[cfg_attr(not(local_speech), allow(dead_code))]
+    #[allow(dead_code)]
     Status(String),
     /// What was said.
     Text(String),
@@ -53,9 +53,6 @@ struct Take {
     tapped: usize,
 }
 
-#[cfg(local_speech)]
-type Loaded = Arc<Mutex<Option<agent_voice::speech::Transcriber>>>;
-#[cfg(not(local_speech))]
 type Loaded = ();
 
 enum Reason {
@@ -513,9 +510,11 @@ impl Voice {
             .spawn(move || {
                 let quiet = matches!(why, Reason::Partial(..));
                 let said = match settings.mode {
-                    Mode::Local => read_locally(&settings, &pcm, &tx, &wake, &loaded, quiet),
                     Mode::Server => read_on_server(&settings, &pcm),
-                    // `Settings::resolved` turns this into a server before a take is read.
+                    Mode::Local => {
+                        let _ = (&tx, &wake, &loaded, quiet);
+                        Err("the agentbench server on this machine has not started yet".to_string())
+                    }
                     Mode::Agentbench => Err("not connected to an agentbench server".to_string()),
                 };
                 match why {
@@ -580,34 +579,18 @@ impl Voice {
 
     /// Whether the files of `model` are already on this machine.
     pub fn installed(model: &str) -> bool {
-        #[cfg(local_speech)]
-        {
-            agent_voice::speech::Transcriber::new(models_dir()).installed(model)
-        }
-        #[cfg(not(local_speech))]
-        {
+        #[cfg(not(target_os = "android"))]
+        return agent_voice::voice::models::installed(&agentbench_server::home().join("models"), model);
+        #[cfg(target_os = "android")]
+        return {
             let _ = model;
             false
-        }
+        };
     }
 }
 
-/// What this window's own Whisper runs on, `GPU` or `CPU`. Opening the card to find out takes a
-/// moment, so it is found out once.
-#[cfg(local_speech)]
 pub fn local_device() -> String {
-    static DEVICE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    DEVICE.get_or_init(|| agent_voice::speech::best_device().1).to_string()
-}
-
-#[cfg(not(local_speech))]
-pub fn local_device() -> String {
-    "not in this build".into()
-}
-
-#[cfg(local_speech)]
-fn models_dir() -> std::path::PathBuf {
-    agentbench_server::home().join("models")
+    "the agentbench server on this machine".into()
 }
 
 /// Open the default microphone and start collecting mono samples.
@@ -752,48 +735,6 @@ pub(super) fn push<T: cpal::SizedSample>(
             Err(now) => cur = now,
         }
     }
-}
-
-#[cfg(local_speech)]
-fn read_locally(
-    settings: &Settings,
-    pcm: &[f32],
-    tx: &Sender<Event>,
-    wake: &(impl Fn() + Send + Sync + 'static),
-    loaded: &Loaded,
-    quiet: bool,
-) -> Result<(String, Option<Scores>), String> {
-    let mut slot = loaded.lock().unwrap_or_else(|e| e.into_inner());
-    let t = slot.get_or_insert_with(|| agent_voice::speech::Transcriber::new(models_dir()));
-    let id = settings.local_model();
-    if !t.installed(id) {
-        t.download(id, &|p| {
-            let of = if p.total_mb > 0 { format!(" of {} MB", p.total_mb) } else { String::new() };
-            let _ = tx.send(Event::Status(format!("downloading {}: {} MB{of}", p.name, p.got_mb)));
-            wake();
-        })?;
-    }
-    let _ = tx.send(Event::Status("loading the speech model".into()));
-    wake();
-    t.load(id)?;
-    if !quiet {
-        let _ = tx.send(Event::Status("reading".into()));
-        wake();
-    }
-    let r = t.read(pcm)?;
-    Ok((r.text, Some(Scores { no_speech: r.no_speech, avg_logprob: r.avg_logprob })))
-}
-
-#[cfg(not(local_speech))]
-fn read_locally(
-    _: &Settings,
-    _: &[f32],
-    _: &Sender<Event>,
-    _: &(impl Fn() + Send + Sync + 'static),
-    _: &Loaded,
-    _: bool,
-) -> Result<(String, Option<Scores>), String> {
-    Err("this build has no local speech model; choose a speech server in settings".into())
 }
 
 /// Post the take as a WAV to an OpenAI compatible transcription endpoint.
@@ -1101,36 +1042,5 @@ mod tests {
         // The limit stops a forgotten microphone growing without end.
         push(&[0.1f32; 10], 1, 3, &heard, &peak);
         assert_eq!(heard.lock().unwrap().len(), 3);
-    }
-
-    /// Needs a model on disc: `AGENTBENCH_TEST_MODEL=~/.local/share/waveshark/models/whisper-base.en`
-    /// and a recording: `AGENTBENCH_TEST_WAV=said.wav` (16 bit mono). Prints what it read.
-    #[cfg(local_speech)]
-    #[test]
-    #[ignore = "needs a downloaded model and a recording"]
-    fn whisper_reads_a_recording() {
-        let (Some(dir), Some(wav)) =
-            (std::env::var_os("AGENTBENCH_TEST_MODEL"), std::env::var_os("AGENTBENCH_TEST_WAV"))
-        else {
-            panic!("set AGENTBENCH_TEST_MODEL and AGENTBENCH_TEST_WAV");
-        };
-        let bytes = std::fs::read(wav).unwrap();
-        let rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
-        let pcm: Vec<f32> = bytes[44..]
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
-            .collect();
-        let pcm = super::super::to_whisper_rate(&pcm, rate);
-        let files = agent_voice::speech::Files::in_dir(std::path::Path::new(&dir)).unwrap();
-        let (device, on) = agent_voice::speech::best_device();
-        let mut w = agent_voice::speech::Whisper::load(&files, device).unwrap();
-        let t = std::time::Instant::now();
-        let said = w.transcribe(&pcm).unwrap();
-        println!(
-            "on {on}: {:.1}s audio in {:.1}s: {said}",
-            pcm.len() as f32 / 16_000.0,
-            t.elapsed().as_secs_f32()
-        );
-        assert!(!said.trim().is_empty());
     }
 }

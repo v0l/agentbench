@@ -281,9 +281,10 @@ pub async fn serve_agents(
     models: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    serve_agents_with(store, agents, model, listener, models, engine::Settings::default(), shutdown).await
+    serve_agents_with(store, agents, model, listener, models.clone(), engine::Settings::default(), models.join("speech-engine"), shutdown).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_agents_with(
     store: store::Store,
     agents: Vec<Box<dyn Agent>>,
@@ -291,9 +292,9 @@ pub async fn serve_agents_with(
     listener: tokio::net::TcpListener,
     models: PathBuf,
     speech: engine::Settings,
+    engine_dir: PathBuf,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    let engine_dir = models.join("speech-engine");
     let audio = Audio::new(speech, models, &speech_model(&store), engine_dir);
     serve_inner(store, agents, model, None, Some(audio), listener, None, shutdown).await.map(|_| ())
 }

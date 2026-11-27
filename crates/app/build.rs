@@ -1,12 +1,4 @@
 fn main() {
-    // Whisper on this device: the `local-speech` feature everywhere but Android, where the phone
-    // only records and the agentbench server reads what it heard.
-    println!("cargo:rustc-check-cfg=cfg(local_speech)");
-    if std::env::var_os("CARGO_FEATURE_LOCAL_SPEECH").is_some()
-        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android")
-    {
-        println!("cargo:rustc-cfg=local_speech");
-    }
     // The camera that scans a pairing code lives in its own NDK library, which `ndk-sys` does not
     // link for us.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {

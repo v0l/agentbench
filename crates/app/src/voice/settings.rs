@@ -4,7 +4,7 @@
 /// Where the words come from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
-    /// Whisper on this machine, through candle.
+    /// Whisper through the engine, run by the agentbench server on this machine.
     Local,
     /// An OpenAI compatible `/v1/audio/transcriptions`.
     Server,
@@ -56,6 +56,7 @@ pub struct Settings {
 }
 
 pub const LOCAL_DUPLEX: &str = "Haru-4B";
+pub const LOCAL: bool = cfg!(not(any(target_os = "android", target_arch = "wasm32")));
 pub const DEFAULT_ENGINE_IDLE_SECS: u64 = 600;
 const HF_REPO: &str = "models--higurashi-ai--Haru-4B";
 
@@ -102,7 +103,7 @@ pub const AUTO_SEND_SECS: std::ops::RangeInclusive<u32> = 1..=30;
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            mode: if !cfg!(local_speech) {
+            mode: if !LOCAL {
                 // A phone is better at listening than at reading: let the server do that.
                 Mode::Agentbench
             } else {
@@ -153,7 +154,7 @@ impl Settings {
             return s;
         };
         match st.get_string("voice_mode").as_deref() {
-            Some("local") if cfg!(local_speech) => s.mode = Mode::Local,
+            Some("local") if LOCAL => s.mode = Mode::Local,
             Some("server") => s.mode = Mode::Server,
             Some("agentbench") => s.mode = Mode::Agentbench,
             _ => {}
@@ -301,8 +302,8 @@ impl Settings {
     /// What is missing before speech can be read, or `None` when it can.
     pub fn problem(&self) -> Option<&'static str> {
         match self.mode {
-            Mode::Local if !cfg!(local_speech) => {
-                Some("this build has no local speech model; choose a speech server in settings")
+            Mode::Local if !LOCAL => {
+                Some("this device does not run speech models; choose the agentbench server in settings")
             }
             Mode::Server if self.url.trim().is_empty() => {
                 Some("set a speech server address in settings first")
@@ -311,11 +312,21 @@ impl Settings {
         }
     }
 
-    /// These settings as a plain speech server, with `mode` Agentbench turned into the connected
-    /// agentbench server's own endpoint, token and the model picked here.
+    /// These settings as a plain speech server: `Agentbench` becomes the connected server's own
+    /// endpoint and token, and `Local` the agentbench server on this machine, which reads with the
+    /// engine.
     pub fn resolved(&self, agentbench: Option<(&str, &str)>) -> Settings {
+        self.resolved_with(agentbench, agentbench)
+    }
+
+    pub fn resolved_with(&self, agentbench: Option<(&str, &str)>, local: Option<(&str, &str)>) -> Settings {
         let mut s = self.clone();
-        if let (Mode::Agentbench, Some((url, token))) = (self.mode, agentbench) {
+        let to = match self.mode {
+            Mode::Agentbench => agentbench,
+            Mode::Local => local,
+            Mode::Server => None,
+        };
+        if let Some((url, token)) = to {
             s.mode = Mode::Server;
             let url = url.trim().trim_end_matches('/');
             let url = if url.starts_with("http://") || url.starts_with("https://") {
@@ -325,7 +336,7 @@ impl Settings {
             };
             s.url = format!("{}/v1", url.trim_end_matches('/'));
             s.key = token.to_string();
-            s.server_model = self.model.clone();
+            s.server_model = if self.mode == Mode::Local { self.local_model().to_string() } else { self.model.clone() };
         }
         s
     }
@@ -735,6 +746,17 @@ mod tests {
         assert_eq!(model_problem(dir.path()), None);
         let gone = model_problem(&dir.path().join("nope")).unwrap();
         assert!(gone.contains("no folder"), "{gone}");
+    }
+
+    #[test]
+    fn this_device_reads_with_its_own_agentbench_server_and_a_model_it_knows() {
+        let s = Settings { mode: Mode::Local, model: "whisper-small.en".into(), ..Default::default() };
+        let r = s.resolved_with(Some(("http://far:7420", "remote")), Some(("127.0.0.1:7420", "mine")));
+        assert_eq!((r.mode, r.endpoint().as_str(), r.key.as_str(), r.server_model.as_str()), (Mode::Server, "http://127.0.0.1:7420/v1/audio/transcriptions", "mine", "whisper-small.en"));
+        let odd = Settings { model: "large-from-another-server".into(), ..s.clone() };
+        assert_eq!(odd.resolved_with(None, Some(("127.0.0.1:7420", "mine"))).server_model, DEFAULT_MODEL);
+        assert_eq!(s.resolved_with(Some(("http://far:7420", "remote")), None).mode, Mode::Local, "no server here yet");
+        assert_eq!(s.problem(), None, "a desktop build reads here with no feature");
     }
 
     #[test]

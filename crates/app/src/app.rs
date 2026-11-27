@@ -729,6 +729,9 @@ pub struct App {
     /// The address a phone reaches the server at, for the pairing code. Kept on this device.
     external: String,
     starting: Option<std::sync::mpsc::Receiver<Result<Server, String>>>,
+    own: Option<Server>,
+    own_tried: bool,
+    own_starting: Option<std::sync::mpsc::Receiver<Result<Server, String>>>,
     overview: Option<Overview>,
     cursor: Option<Id>,
     watching: bool,
@@ -955,6 +958,9 @@ impl App {
             remote,
             external: storage.and_then(|s| s.get_string("external")).unwrap_or_default(),
             starting: None,
+            own: None,
+            own_tried: false,
+            own_starting: None,
             overview: None,
             cursor: None,
             watching: false,
@@ -1186,6 +1192,7 @@ impl App {
         match rx.try_recv() {
             Ok(Ok(server)) => {
                 self.starting = None;
+                self.own = Some(server.clone());
                 self.connect_to(ctx, server);
             }
             Ok(Err(e)) => {
@@ -1633,7 +1640,37 @@ impl App {
     /// the address and token of the server this window is connected to.
     fn speech_now(&self) -> crate::voice::Settings {
         let server = self.client.as_ref().map(|c| (c.server.url.as_str(), c.server.token.as_str()));
-        self.speech.resolved(server)
+        let own = self.own.as_ref().or_else(|| self.client.as_ref().filter(|_| !self.remote).map(|c| &c.server));
+        self.speech.resolved_with(server, own.map(|s| (s.url.as_str(), s.token.as_str())))
+    }
+
+    fn own_server(&mut self) {
+        if self.own.is_some() || self.own_tried || self.speech.mode != crate::voice::Mode::Local || !self.remote {
+            return;
+        }
+        let Some(local) = self.local.clone() else { return };
+        self.own_tried = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        crate::spawn_blocking(move || {
+            let _ = tx.send((local.start)());
+        });
+        self.own_starting = Some(rx);
+    }
+
+    fn poll_own(&mut self) {
+        let Some(rx) = &self.own_starting else { return };
+        match rx.try_recv() {
+            Ok(Ok(s)) => {
+                self.own = Some(s);
+                self.own_starting = None;
+            }
+            Ok(Err(e)) => {
+                self.own_starting = None;
+                self.notice = Some((false, format!("could not start the agentbench server on this machine: {e}")));
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.own_starting = None,
+        }
     }
 
     /// Read a reply aloud with the connected server's voice, or stop if that reply is being read.
@@ -4439,6 +4476,8 @@ impl App {
         crate::system::ime_before_frame(&ctx);
         crate::system::deliver_paste(&ctx);
         self.absorb_speech(false);
+        self.own_server();
+        self.poll_own();
         self.tick(&ctx);
         let narrow = ctx.content_rect().width() < 720.0 || ctx.content_rect().height() < 480.0;
         self.narrow = narrow;

@@ -273,6 +273,8 @@ struct SpeechRequest {
     /// else is one WAV when all of it is made.
     #[serde(default)]
     response_format: String,
+    #[serde(default)]
+    seed: Option<u64>,
 }
 
 fn compression() -> tower_http::compression::CompressionLayer<
@@ -327,7 +329,7 @@ async fn speak(
     let started = std::time::Instant::now();
     if api.engines.settings.backend == crate::engine::Backend::Engine {
         let stream = req.response_format.eq_ignore_ascii_case("pcm");
-        let res = crate::audio::speak(&api.engines, text, &voice, stream).await.map_err(|(s, e)| Failure(s, e))?;
+        let res = crate::audio::speak(&api.engines, text, &voice, stream, req.seed).await.map_err(|(s, e)| Failure(s, e))?;
         tracing::info!("speech through the engine, first bytes in {:.1}s", started.elapsed().as_secs_f32());
         return Ok(res);
     }

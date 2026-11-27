@@ -64,6 +64,16 @@ pub fn rig_with(extra: Vec<Box<dyn agentbench_server::agent::Agent>>) -> Rig {
     rig_on("http://127.0.0.1:9/v1", extra)
 }
 
+pub fn speech_settings() -> agentbench_server::engine::Settings {
+    let gpu = std::env::var("AGENTBENCH_SPEECH_GPU").ok().and_then(|g| g.parse().ok());
+    agentbench_server::engine::Settings {
+        program: std::env::var("AGENTBENCH_REAL_ENGINE").unwrap_or_default(),
+        cpu: gpu.is_none(),
+        gpu,
+        ..Default::default()
+    }
+}
+
 pub fn rig_with_models(
     extra: Vec<Box<dyn agentbench_server::agent::Agent>>,
     models: PathBuf,
@@ -193,6 +203,7 @@ fn rig_model_full(
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
     let models = models.unwrap_or_else(|| dir.path().join("models"));
+    let engine_dir = dir.path().join("speech-engine");
     let mut extra = Some(extra);
     let mut echo = Some(echo);
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
@@ -210,12 +221,14 @@ fn rig_model_full(
             let mut agents: Vec<Box<dyn agentbench_server::agent::Agent>> = vec![Box::new(echo)];
             agents.push(Box::new(agentbench_server::agent::Native::shared(model.clone())));
             agents.extend(extra);
-            let _ = agentbench_server::serve_agents(
+            let _ = agentbench_server::serve_agents_with(
                 s,
                 agents,
                 Some(model),
                 listener,
                 models,
+                speech_settings(),
+                engine_dir,
                 std::future::pending(),
             )
             .await;

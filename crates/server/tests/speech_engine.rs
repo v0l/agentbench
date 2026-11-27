@@ -193,8 +193,9 @@ fn rig(backend: Backend) -> Rig {
     let url = format!("http://{}", listener.local_addr().unwrap());
     let settings = Settings { backend, program: program.display().to_string(), cpu: true, ..Default::default() };
     let m = models;
+    let engine_dir = dir.path().join("engine");
     rt.spawn(async move {
-        let _ = agentbench_server::serve_agents_with(store, Vec::new(), None, listener, m, settings, std::future::pending()).await;
+        let _ = agentbench_server::serve_agents_with(store, Vec::new(), None, listener, m, settings, engine_dir, std::future::pending()).await;
     });
     let r = Rig { url, token, seen, _dir: dir, _rt: rt };
     for _ in 0..100 {
@@ -310,11 +311,13 @@ fn speech_as_one_wav_for_the_client_that_asks_for_one() {
         .agent()
         .post(format!("{}/v1/audio/speech", r.url))
         .header("authorization", &format!("Bearer {}", r.token))
-        .send_json(json!({"model": "kokoro", "input": "Hello there."}))
+        .send_json(json!({"model": "kokoro", "input": "Hello there.", "seed": 1484}))
         .unwrap();
     assert_eq!(res.headers().get("content-type").unwrap(), "audio/wav");
     let (pcm, rate) = agent_voice::voice::read_wav(&res.body_mut().read_to_vec().unwrap()).unwrap();
     assert_eq!((pcm.len(), rate), (3 * FRAME, 24_000));
+    let s = r.seen().into_iter().find(|s| s["route"] == "speech").unwrap();
+    assert_eq!(s["body"]["seed"], 1484, "a seed is passed on, for a repeatable reading");
     let blank = r.agent().post(format!("{}/v1/audio/speech", r.url)).header("authorization", &format!("Bearer {}", r.token)).send_json(json!({"input": "  "})).unwrap();
     assert_eq!(blank.status().as_u16(), 400, "nothing to say is refused here, as before");
 }
