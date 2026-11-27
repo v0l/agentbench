@@ -3294,9 +3294,7 @@ impl App {
         } else if bridge_on && self.voice.in_speech() {
             self.talk_turn = true;
         }
-        if let Some(hang) = self.voice.take_quiet_stop() {
-            self.notice = Some((false, format!("stopped after {hang:.0} s of quiet")));
-        }
+        self.voice.take_quiet_stop();
         for said in self.voice.poll() {
             if self.talk_turn && !matches!(said, crate::voice::Said::Partial(_)) {
                 self.talk_turn = false;
@@ -5037,6 +5035,24 @@ mod tests {
         assert!(app.terminal.as_ref().unwrap().jobs.is_empty());
         app.handle(Reply::Jobs(a, vec![job]));
         assert_eq!(app.terminal.as_ref().unwrap().jobs.len(), 1);
+    }
+
+    #[test]
+    fn a_take_ending_on_quiet_sets_no_notice() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, None, None);
+        app.voice.fake_quiet_stop(3.0);
+        app.tick(&ctx);
+        assert!(app.notice.is_none(), "{:?}", app.notice);
+    }
+
+    #[test]
+    fn a_voice_error_still_sets_a_notice() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, None, None);
+        app.voice.fake_failure("no microphone");
+        app.tick(&ctx);
+        assert_eq!(app.notice, Some((false, "no microphone".into())));
     }
 
     #[test]

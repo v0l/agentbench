@@ -133,6 +133,16 @@ impl Voice {
             .then(|| (settings.hang_secs - quiet).max(0.0))
     }
 
+    #[doc(hidden)]
+    pub fn fake_failure(&mut self, why: &str) {
+        let _ = self.tx.send(Event::Failed(why.into()));
+    }
+
+    #[doc(hidden)]
+    pub fn fake_quiet_stop(&mut self, hang: f32) {
+        self.quiet_stop = Some(hang);
+    }
+
     pub fn take_quiet_stop(&mut self) -> Option<f32> {
         self.quiet_stop.take()
     }
