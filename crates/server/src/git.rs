@@ -7,6 +7,7 @@ pub struct Tree {
     pub head: Option<String>,
     pub branch: Option<String>,
     pub bare: bool,
+    pub locked: bool,
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -41,6 +42,7 @@ pub fn parse_worktrees(porcelain: &str) -> Vec<Tree> {
                     head: None,
                     branch: None,
                     bare: false,
+                    locked: false,
                 });
             }
             "HEAD" => {
@@ -56,6 +58,11 @@ pub fn parse_worktrees(porcelain: &str) -> Vec<Tree> {
             "bare" => {
                 if let Some(t) = &mut current {
                     t.bare = true;
+                }
+            }
+            "locked" => {
+                if let Some(t) = &mut current {
+                    t.locked = true;
                 }
             }
             _ => {}
@@ -167,6 +174,8 @@ fn create_worktree(main: &Path, branch: &str, base: Option<&str>, path: &Path) -
     Ok(())
 }
 
+pub const NOT_REMOVED_NOTE: &str = "AGENTBENCH-NOT-REMOVED.txt";
+
 pub fn remove_worktree(main: &Path, path: &Path, force: bool) -> Result<(), String> {
     let target = path.to_string_lossy().into_owned();
     let mut args = vec!["worktree", "remove"];
@@ -174,12 +183,121 @@ pub fn remove_worktree(main: &Path, path: &Path, force: bool) -> Result<(), Stri
         args.push("--force");
     }
     args.push(&target);
-    git(main, &args)?;
-    Ok(())
+    let Err(e) = git(main, &args) else { return Ok(()) };
+    let still_listed = worktrees(main).is_ok_and(|ts| ts.iter().any(|t| same_path(&t.path, path)));
+    if !path.exists() || still_listed {
+        return Err(e);
+    }
+    let _ = std::fs::remove_dir_all(path);
+    let _ = std::fs::remove_file(path.join(".git"));
+    let _ = git(main, &["worktree", "prune"]);
+    if !path.exists() {
+        return Ok(());
+    }
+    let left = leftover_files(path, 20);
+    let note = format!(
+        "agentbench removed this git worktree, but these files could not be deleted by {}, so the folder is not a checkout any more. Delete it by hand, for example with sudo rm -rf {}\n\n{}\n",
+        std::env::var("USER").unwrap_or_else(|_| "this user".into()),
+        path.display(),
+        left.join("\n")
+    );
+    let _ = std::fs::write(path.join(NOT_REMOVED_NOTE), note);
+    Err(format!(
+        "{} was half removed: these files could not be deleted ({}); a note is left in {}",
+        path.display(),
+        left.join(", "),
+        NOT_REMOVED_NOTE
+    ))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
+
+fn leftover_files(dir: &Path, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            out.push(d.strip_prefix(dir).unwrap_or(&d).display().to_string());
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(p);
+            } else if p.file_name().is_none_or(|n| n != NOT_REMOVED_NOTE) {
+                out.push(p.strip_prefix(dir).unwrap_or(&p).display().to_string());
+            }
+            if out.len() >= limit {
+                return out;
+            }
+        }
+    }
+    out
 }
 
 pub fn delete_branch(main: &Path, branch: &str) -> Result<(), String> {
     git(main, &["branch", "-d", branch]).map(|_| ())
+}
+
+pub fn merged_into_default(main: &Path, rev: &str, default: &str) -> bool {
+    if git(main, &["merge-base", "--is-ancestor", rev, &format!("refs/heads/{default}")]).is_ok() {
+        return true;
+    }
+    push_remote(main).is_some_and(|remote| {
+        git(main, &["merge-base", "--is-ancestor", rev, &format!("refs/remotes/{remote}/{default}")]).is_ok()
+    })
+}
+
+pub fn in_origin(main: &Path, rev: &str, default: &str) -> Option<String> {
+    let remote = push_remote(main)?;
+    let _ = git(main, &["fetch", "-q", &remote, &format!("+refs/heads/{default}:refs/remotes/{remote}/{default}")]);
+    git(main, &["merge-base", "--is-ancestor", rev, &format!("refs/remotes/{remote}/{default}")])
+        .ok()
+        .map(|_| format!("{remote}/{default}"))
+}
+
+pub fn fast_forward(dir: &Path, to: &str) -> Result<(), String> {
+    git(dir, &["merge", "-q", "--ff-only", to]).map(|_| ())
+}
+
+pub fn prune_worktrees(main: &Path) -> Result<(), String> {
+    git(main, &["worktree", "prune"]).map(|_| ())
+}
+
+pub fn commits_ahead(main: &Path, rev: &str, default: &str) -> usize {
+    git(main, &["rev-list", "--count", &format!("refs/heads/{default}..{rev}")])
+        .ok()
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn tracked_and_untracked(path: &Path) -> Result<(Vec<String>, Vec<String>), String> {
+    let out = git(path, &["status", "--porcelain"])?;
+    let mut tracked = Vec::new();
+    let mut untracked = Vec::new();
+    for l in out.lines().filter(|l| l.len() > 3) {
+        let file = l[3..].rsplit(" -> ").next().unwrap_or(&l[3..]).trim_matches('"').to_string();
+        if l.starts_with("??") {
+            untracked.push(file);
+        } else {
+            tracked.push(file);
+        }
+    }
+    Ok((tracked, untracked))
+}
+
+pub fn delete_merged_branch(main: &Path, branch: &str, default: Option<&str>) -> Result<(), String> {
+    if delete_branch(main, branch).is_ok() {
+        return Ok(());
+    }
+    match default {
+        Some(d) if d != branch && merged_into_default(main, &format!("refs/heads/{branch}"), d) => {
+            git(main, &["branch", "-D", branch]).map(|_| ())
+        }
+        _ => Err(format!("{branch} is not merged into the default branch")),
+    }
 }
 
 pub fn current_branch(dir: &Path) -> Option<String> {

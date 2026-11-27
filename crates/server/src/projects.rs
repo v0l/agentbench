@@ -267,13 +267,13 @@ pub fn tidy_worktree(
     let mut out = Tidied { removed: Some(w.path.clone()), ..Default::default() };
     if let Some(b) = w.branch {
         let main = Path::new(&project.path);
-        if !git::is_merged(main, &b) {
-            out.branch_kept = Some(format!("{b}: not merged into the default branch"));
-        } else {
-            match git::delete_branch(main, &b) {
-                Ok(()) => out.branch_deleted = true,
-                Err(e) => out.branch_kept = Some(format!("{b}: {e}")),
+        let default = git::default_branch(main, project.branch.as_deref());
+        match git::delete_merged_branch(main, &b, default.as_deref()) {
+            Ok(()) => out.branch_deleted = true,
+            Err(_) if !git::is_merged(main, &b) => {
+                out.branch_kept = Some(format!("{b}: not merged into the default branch"))
             }
+            Err(e) => out.branch_kept = Some(format!("{b}: {e}")),
         }
     }
     Ok(out)

@@ -1637,14 +1637,7 @@ impl Api for StoreApi {
                 {
                     return Err("that branch has no concluded_pass verdict for its current head; judge it with judge_session first".into());
                 }
-                let main_dir = s.project(other.project_id).map(|p| p.path).map_err(|e| e.0)?;
                 let tree = s.worktree(other.worktree_id).map_err(|e| e.0)?;
-                if let Some(b) = tree.branch.as_deref().filter(|_| !tree.main)
-                    && crate::git::is_merged(std::path::Path::new(&main_dir), b)
-                    && crate::git::in_remote(std::path::Path::new(&main_dir))
-                {
-                    return Err(format!("{b} is already merged and pushed to origin; the autopilot marks the issue done and closes the session"));
-                }
                 match crate::autopilot::ship(s, &other) {
                     Ok(done) if done.pr.is_some() => {
                         let target = self.runner.get().ok().and_then(|r| r.titles().and_then(|t| t.target()));
@@ -1660,6 +1653,9 @@ impl Api for StoreApi {
                             "deployed": done.deployed.as_ref().map(|r| r.is_ok()),
                             "summary": done.describe(),
                         });
+                        if done.already.is_some() {
+                            out["already_merged"] = json!(true);
+                        }
                         if let (Some(Err(_)), Some(i)) = (&done.pushed, other.issue_id) {
                             let _ = s.add_comment(
                                 i,
