@@ -80,6 +80,14 @@ pub fn speech_settings() -> agentbench_server::engine::Settings {
     }
 }
 
+pub fn speech_engine() -> Option<String> {
+    let p = std::env::var("AGENTBENCH_REAL_ENGINE").ok().filter(|p| Path::new(p).is_file());
+    if p.is_none() {
+        eprintln!("speech needs an inference-bench-server with the audio routes: set AGENTBENCH_REAL_ENGINE");
+    }
+    p
+}
+
 pub fn rig_with_models(
     extra: Vec<Box<dyn agentbench_server::agent::Agent>>,
     models: PathBuf,

@@ -17,6 +17,7 @@ const YES: &[u8] = include_bytes!("fixtures/voice/yes.wav");
 const STOP: &[u8] = include_bytes!("fixtures/voice/stop.wav");
 
 fn models_dir() -> Option<PathBuf> {
+    speech_engine()?;
     let dir = std::env::var("AGENTBENCH_MODELS").ok().map(PathBuf::from).or_else(|| {
         Some(dirs_home()?.join(".local/share/agentbench/models"))
     })?;

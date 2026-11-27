@@ -108,6 +108,7 @@ impl Fake {
 }
 
 fn models_dir() -> Option<PathBuf> {
+    speech_engine()?;
     let dir = std::env::var("AGENTBENCH_MODELS")
         .ok()
         .map(PathBuf::from)
