@@ -68,6 +68,8 @@ pub struct Model {
     pub keep_pictures: usize,
     #[serde(default)]
     pub max_tokens: u64,
+    #[serde(default = "default_loop_guard")]
+    pub loop_guard: usize,
 }
 
 /// One rung of the ladder. A level with no model is not set up. One with no
@@ -110,6 +112,12 @@ fn default_keep_pictures() -> usize {
     4
 }
 
+pub const DEFAULT_LOOP_GUARD: usize = 3;
+
+fn default_loop_guard() -> usize {
+    DEFAULT_LOOP_GUARD
+}
+
 fn default_url() -> String {
     agent_core::config::DEFAULT_URL.to_string()
 }
@@ -139,6 +147,7 @@ impl Default for Model {
             request_budget: default_request_budget(),
             keep_pictures: default_keep_pictures(),
             max_tokens: 0,
+            loop_guard: default_loop_guard(),
         }
     }
 }
@@ -1487,6 +1496,27 @@ fn struggling_hint(base: &Model, model: &Model) -> Option<String> {
 
 const STRUGGLE: usize = 3;
 
+struct Repeats {
+    key: String,
+    failed: usize,
+    warned: bool,
+}
+
+fn call_key(name: &str, input: &Value) -> String {
+    format!("{name} {input}")
+}
+
+fn last_line(error: &str) -> &str {
+    error.lines().rev().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no message")
+}
+
+fn repeat_message(name: &str, input: &Value, count: usize, error: &str) -> String {
+    format!(
+        "you ran this exact {name} call {count} times and it failed each time with: {}; change the command or the approach, or tell the user what is blocking you\n{input}",
+        last_line(error)
+    )
+}
+
 fn code_section(languages: &[String]) -> String {
     if languages.is_empty() {
         return String::new();
@@ -2025,6 +2055,8 @@ impl Agent for Native {
         let mut failures = 0usize;
         let mut nudged = false;
         let mut cut_short = 0u32;
+        let mut repeats: Option<Repeats> = None;
+        let mut last_error = String::new();
         messages.prompt(user_message(turn.prompt, turn.files).await);
         let tools = tool_list(
             &base,
@@ -2137,6 +2169,7 @@ impl Agent for Native {
             messages.push(message);
             let mut attached: Vec<Value> = Vec::new();
             let mut edited: Vec<std::path::PathBuf> = Vec::new();
+            let mut ending: Option<String> = None;
             for call in &reply.calls {
                 let parsed = files::args(&call.args);
                 let input = parsed.clone().unwrap_or(Value::String(call.args.clone()));
@@ -2152,7 +2185,28 @@ impl Agent for Native {
                 } else {
                     self.patience.tool
                 };
+                let key = call_key(name, &input);
+                let blocked = if ending.is_some() {
+                    Some("not run: the turn ended because this call kept failing".to_string())
+                } else {
+                    match repeats.as_mut() {
+                        Some(r) if base.loop_guard > 0 && r.key == key && r.failed >= base.loop_guard => {
+                            let message = repeat_message(name, &input, r.failed, &last_error);
+                            if r.warned {
+                                ending = Some(format!(
+                                    "I stopped because {name} {input} failed {} times in a row with: {}",
+                                    r.failed,
+                                    last_line(&last_error)
+                                ));
+                            }
+                            r.warned = true;
+                            Some(message)
+                        }
+                        _ => None,
+                    }
+                };
                 let result = match parsed {
+                    _ if blocked.is_some() => Ok(blocked.clone().unwrap_or_default()),
                     Err(e) => Err(e),
                     Ok(_) if !self.scope.allows(name) => {
                         Err(format!("{name} is not available in this chat"))
@@ -2234,6 +2288,19 @@ impl Agent for Native {
                 let result = result
                     .map(|o| self.secrets.scrub(&session_key, &o))
                     .map_err(|e| self.secrets.scrub(&session_key, &e));
+                if blocked.is_none() {
+                    match (&result, repeats.as_mut()) {
+                        (Err(e), Some(r)) if r.key == key => {
+                            r.failed += 1;
+                            last_error = e.clone();
+                        }
+                        (Err(e), _) => {
+                            repeats = Some(Repeats { key, failed: 1, warned: false });
+                            last_error = e.clone();
+                        }
+                        (Ok(_), _) => repeats = None,
+                    }
+                }
                 failures = if result.is_err() && name != "switch_model" { failures + 1 } else { 0 };
                 let result = match result {
                     Err(e) if failures >= STRUGGLE && !nudged && !turn.context.supervisor => {
@@ -2282,6 +2349,11 @@ impl Agent for Native {
                 if io.stopped() {
                     return Err("stopped".into());
                 }
+            }
+            if let Some(text) = ending {
+                io.emit(Event::Text { delta: text });
+                io.emit(Event::Done);
+                return Ok(());
             }
             // A tool result is text only, so what read_file saw goes in the next user message.
             if !attached.is_empty() {
@@ -6824,6 +6896,127 @@ for line in sys.stdin:
         assert!(!io.events().iter().any(|e| matches!(e, Event::Paused { .. })));
     }
 
+    fn missing(n: usize) -> Value {
+        json!({"path": format!("nope-{n}.txt")})
+    }
+
+    fn all_results(asked: &std::sync::mpsc::Receiver<Value>) -> Vec<Vec<String>> {
+        asked.try_iter().map(|r| tool_results(&r)).collect()
+    }
+
+    #[tokio::test]
+    async fn the_same_failing_call_is_not_run_a_fourth_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut replies: Vec<Vec<Value>> =
+            (1..=4).map(|i| vec![call(&format!("c{i}"), "read_file", missing(0))]).collect();
+        replies.push(vec![say("ok")]);
+        let (url, asked) = stub(replies);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        let last = all_results(&asked).pop().unwrap();
+        assert_eq!(last.len(), 4, "{last:?}");
+        assert!(last[..3].iter().all(|r| r.contains("error")), "{last:?}");
+        assert!(last[3].contains("exact read_file call 3 times"), "{last:?}");
+        assert!(last[3].contains("tell the user what is blocking you"), "{last:?}");
+        let ends: Vec<bool> = io
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::ToolEnd { error, .. } => Some(*error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends, vec![true, true, true, false], "the guard shows as a normal result");
+    }
+
+    #[tokio::test]
+    async fn repeating_after_the_guard_message_ends_the_turn_with_a_plain_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let replies = (1..=6).map(|i| vec![call(&format!("c{i}"), "read_file", missing(0))]).collect();
+        let (url, asked) = stub(replies);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        assert_eq!(asked.try_iter().count(), 5);
+        let said: String = io
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::Text { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(said.contains("read_file") && said.contains("nope-0.txt") && said.contains("3 times"), "{said}");
+        assert!(io.events().contains(&Event::Done));
+    }
+
+    #[tokio::test]
+    async fn a_model_that_varies_its_arguments_is_never_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut replies: Vec<Vec<Value>> =
+            (1..=8).map(|i| vec![call(&format!("c{i}"), "read_file", missing(i))]).collect();
+        replies.push(vec![say("giving up")]);
+        let (url, asked) = stub(replies);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        let last = all_results(&asked).pop().unwrap();
+        assert_eq!(last.len(), 8);
+        assert!(last.iter().all(|r| !r.contains("exact")), "{last:?}");
+    }
+
+    #[tokio::test]
+    async fn the_same_call_succeeding_ten_times_is_never_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("poll.txt"), "same").unwrap();
+        let mut replies: Vec<Vec<Value>> = (1..=10)
+            .map(|i| vec![call(&format!("c{i}"), "read_file", json!({"path": "poll.txt"}))])
+            .collect();
+        replies.push(vec![say("done")]);
+        let (url, asked) = stub(replies);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        let last = all_results(&asked).pop().unwrap();
+        assert_eq!(last.len(), 10);
+        assert!(last.iter().all(|r| !r.contains("exact") && !r.contains("error")), "{last:?}");
+    }
+
+    #[tokio::test]
+    async fn a_loop_guard_of_zero_lets_every_repeat_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut replies: Vec<Vec<Value>> =
+            (1..=6).map(|i| vec![call(&format!("c{i}"), "read_file", missing(0))]).collect();
+        replies.push(vec![say("done")]);
+        let (url, asked) = stub(replies);
+        let native =
+            Native::new(Model { url, model: "m".into(), loop_guard: 0, ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        let last = all_results(&asked).pop().unwrap();
+        assert_eq!(last.len(), 6);
+        assert!(last.iter().all(|r| r.contains("error") && !r.contains("exact")), "{last:?}");
+    }
+
+    #[tokio::test]
+    async fn a_model_that_changes_its_command_after_the_guard_message_carries_on() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("real.txt"), "hello").unwrap();
+        let mut replies: Vec<Vec<Value>> =
+            (1..=4).map(|i| vec![call(&format!("c{i}"), "read_file", missing(0))]).collect();
+        replies.push(vec![call("c5", "read_file", json!({"path": "real.txt"}))]);
+        replies.push(vec![call("c6", "read_file", missing(0))]);
+        replies.push(vec![say("all good")]);
+        let (url, asked) = stub(replies);
+        let native = Native::new(Model { url, model: "m".into(), ..Model::default() });
+        let io = TestIo::new(Arc::new(FakeApi));
+        run(&native, dir.path(), "go", &io).await.unwrap();
+        let last = all_results(&asked).pop().unwrap();
+        assert_eq!(last.len(), 6);
+        assert!(last[4].contains("hello"), "{last:?}");
+        assert!(last[5].contains("error") && !last[5].contains("exact"), "{last:?}");
+    }
 }
 
 #[cfg(test)]
