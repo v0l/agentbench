@@ -114,6 +114,9 @@ fn a_spoken_take_reaches_the_supervisor_and_its_reply_is_spoken_back() {
         "the first sentence is spoken before the reply ends: {spoken:?}"
     );
     assert!(transcript.iter().any(|l| l.starts_with("assistant: ")), "{transcript:?}");
+    let log = rig.engine_log();
+    assert!(log.contains("agentbench starts"), "the take and the reply went through the engine child: {log}");
+    assert!(log.contains("/v1/audio/transcriptions") && log.contains("/v1/audio/speech"), "{log}");
 }
 
 #[test]

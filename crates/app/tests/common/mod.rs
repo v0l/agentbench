@@ -20,6 +20,12 @@ pub struct Rig {
     pub _rt: tokio::runtime::Runtime,
 }
 
+impl Rig {
+    pub fn engine_log(&self) -> String {
+        std::fs::read_to_string(self._dir.path().join("speech-engine/engine.log")).unwrap_or_default()
+    }
+}
+
 pub fn repo(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     for args in [
