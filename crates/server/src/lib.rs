@@ -6,6 +6,7 @@ pub mod autopilot;
 pub mod checkin;
 pub mod cli;
 pub mod compact;
+pub mod connect;
 pub mod git;
 pub mod github;
 pub mod groom;
@@ -30,6 +31,7 @@ pub mod pressure;
 pub mod providers;
 pub mod restart;
 pub mod runner;
+pub mod seed;
 pub mod speech;
 pub mod store;
 pub mod supervisor_log;
@@ -202,6 +204,9 @@ pub async fn serve_config(
     web: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<bool, String> {
+    if let Some(said) = seed::model_from(&store, &config.model, |n| std::env::var(n).ok()).map_err(|e| e.0)? {
+        tracing::info!("{said}");
+    }
     let model = agent::native::Shared::new(saved_model(&store, &config.model));
     let titles = titles::Titles::new(saved_title_model(&store, &config.title_model), model.clone());
     // One Whisper for the transcription endpoint and the agent's read_file, so it loads once.

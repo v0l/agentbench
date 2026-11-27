@@ -800,9 +800,34 @@ pub fn host_name(url: &str) -> String {
     if host.is_empty() { "workspace".to_string() } else { host }
 }
 
+impl Remote {
+    pub fn take_link(&mut self) -> bool {
+        let Some(p) = agentbench_core::pairing::Pairing::parse(&self.url) else {
+            return false;
+        };
+        self.url = p.url;
+        self.token = p.token;
+        if !p.name.trim().is_empty() {
+            self.name = p.name.trim().to_string();
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pasted_connect_link_fills_the_name_address_and_token() {
+        let mut w = Remote { slot: 1, name: String::new(), url: String::new(), token: String::new(), icon: String::new() };
+        w.url = " agentbench://pair?url=http%3A%2F%2F10.100.2.73%3A7420&token=abc123&name=i9 ".into();
+        assert!(w.take_link());
+        assert_eq!((w.name.as_str(), w.url.as_str(), w.token.as_str()), ("i9", "http://10.100.2.73:7420", "abc123"));
+        w.url = "https://agentbench.example.com".into();
+        assert!(!w.take_link(), "a plain address is left as typed");
+        assert_eq!(w.url, "https://agentbench.example.com");
+    }
 
     #[test]
     fn a_tagged_id_names_its_server_and_the_primary_keeps_plain_ids() {

@@ -1,0 +1,11 @@
+target
+**/target
+.git
+.worktrees
+.shots
+web/pkg
+docs
+*.md
+!README.md
+Dockerfile
+.dockerignore

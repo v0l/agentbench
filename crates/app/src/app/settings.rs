@@ -743,7 +743,9 @@ pub(super) fn servers_section(ui: &mut Ui, st: &mut Settings) {
                 field(ui, &mut r.name, "workstation");
             });
             row(ui, "address", |ui| {
-                field(ui, &mut r.url, "https://agentbench.example.com");
+                if field(ui, &mut r.url, "https://agentbench.example.com").changed() {
+                    r.take_link();
+                }
             });
             row(ui, "token", |ui| {
                 secret(ui, &mut r.token);
@@ -826,7 +828,7 @@ pub(super) fn pairing_of(st: &Settings) -> Option<agentbench_core::pairing::Pair
         return None;
     };
     (!st.pair_token.trim().is_empty() && !url.is_empty())
-        .then(|| agentbench_core::pairing::Pairing { url, token: st.pair_token.trim().to_string() })
+        .then(|| agentbench_core::pairing::Pairing { url, token: st.pair_token.trim().to_string(), ..Default::default() })
 }
 
 pub(super) fn is_loopback(url: &str) -> bool {

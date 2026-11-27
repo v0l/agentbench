@@ -14,7 +14,7 @@ pub fn version_text() -> &'static str {
 pub struct Cli {
     #[arg(long)]
     pub home: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, env = "AGENTBENCH_LISTEN")]
     pub listen: Option<SocketAddr>,
     #[arg(long)]
     pub web: Option<PathBuf>,
@@ -232,6 +232,15 @@ pub enum Command {
     Token {
         #[arg(long)]
         rotate: bool,
+    },
+    /// Print the name, address and token a window needs to add this server as a workspace.
+    Connect {
+        /// The address the window reaches this server at, like http://10.0.0.2:7420.
+        #[arg(long)]
+        url: Option<String>,
+        /// The workspace name shown in the window; default this machine's host name.
+        #[arg(long, env = "AGENTBENCH_NAME")]
+        name: Option<String>,
     },
     Agents,
     #[command(about = "The supervisor's questions log.")]
@@ -789,6 +798,20 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                 store.delete_setting("token").map_err(|e| e.0)?;
             }
             println!("{}", token(&store).map_err(|e| e.0)?);
+            Ok(())
+        }
+        Command::Connect { url, name } => {
+            let listen = cli
+                .listen
+                .or(config.listen)
+                .unwrap_or_else(|| DEFAULT_LISTEN.parse().expect("default listen address"));
+            let found = crate::connect::url_for(url.as_deref(), listen, crate::connect::route_address)?;
+            let name = name
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())
+                .or_else(|| sysinfo::System::host_name().ok())
+                .unwrap_or_else(|| "workspace".to_string());
+            print!("{}", crate::connect::text(&name, &found, &token(&store).map_err(|e| e.0)?));
             Ok(())
         }
         Command::Add { path, name } => {

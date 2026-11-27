@@ -280,6 +280,21 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  docker:
+    name: docker image
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
+      - uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7
+        with:
+          context: .
+          push: false
+          tags: agentbench-server:${{ github.event.inputs.tag || github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
     needs: [build, android]
     # A pushed tag publishes. A manual run is a dry run: it builds every package and stops.

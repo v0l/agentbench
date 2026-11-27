@@ -98,6 +98,98 @@ TimeoutStopSec=150
 `KillMode=mixed` sends SIGTERM to the server only, so the agents it runs keep working
 through the drain; whatever is left gets SIGKILL when the timeout passes.
 
+## Remote workspace with Docker
+
+The `Dockerfile` at the root builds an image that runs `agentbench-server serve` and nothing
+else: no window, no GPU, speech on the CPU. It has git, curl, ssh, bash and a C toolchain
+for agents to work in a repo, and runs as user `agent` (uid 1000). Everything it keeps is in
+the `/data` volume: the database and token, the memory notes in `/data/memory`, and repos
+in `/data/git` with their worktrees beside them in `/data/git/.worktrees`.
+
+```sh
+docker build -t agentbench-server .
+docker run -d --name agentbench --restart unless-stopped --stop-timeout 150 \
+  -p 7420:7420 -v agentbench:/data \
+  -e AGENTBENCH_MODEL_URL=http://10.0.0.5:8001/v1 \
+  -e AGENTBENCH_MODEL=qwen3-coder \
+  -e AGENTBENCH_MODEL_KEY=sk-... \
+  agentbench-server
+```
+
+Or with compose:
+
+```yaml
+services:
+  agentbench:
+    build: .
+    image: agentbench-server
+    restart: unless-stopped
+    stop_grace_period: 150s
+    ports:
+      - "7420:7420"
+    volumes:
+      - agentbench:/data
+    environment:
+      AGENTBENCH_MODEL_URL: http://10.0.0.5:8001/v1
+      AGENTBENCH_MODEL: qwen3-coder
+      AGENTBENCH_MODEL_KEY: ${AGENTBENCH_MODEL_KEY}
+      AGENTBENCH_NAME: build-box
+      GIT_AUTHOR_NAME: agentbench
+      GIT_AUTHOR_EMAIL: agentbench@example.com
+      GIT_COMMITTER_NAME: agentbench
+      GIT_COMMITTER_EMAIL: agentbench@example.com
+volumes:
+  agentbench:
+```
+
+The model variables are read once, on the first start with no model saved:
+`AGENTBENCH_MODEL_URL` (an OpenAI style `/v1` address), `AGENTBENCH_MODEL`,
+`AGENTBENCH_MODEL_KEY`, and `AGENTBENCH_MODEL_LOW`, `AGENTBENCH_MODEL_MED` and
+`AGENTBENCH_MODEL_HIGH` for the levels. After that the saved model wins, so a change made
+under **settings** in the window is kept across restarts. The log says the model was set
+and whether a key was given, never the key.
+
+`--stop-timeout 150` (or `stop_grace_period`) gives running turns the 120 second drain
+before Docker kills them; Docker's default of 10 seconds cuts them off.
+
+To add the workspace to a window, ask the container for its address and token:
+
+```sh
+docker exec agentbench agentbench-server connect --url http://10.0.0.7:7420
+```
+
+```
+name   build-box
+url    http://10.0.0.7:7420
+token  4ce52443...
+
+In the window, open Add a workspace and paste this into the address field:
+agentbench://pair?url=http%3A%2F%2F10.0.0.7%3A7420&token=4ce52443...&name=build-box
+```
+
+Paste the last line into the address field of **Add a workspace** (the + in the bar) and the
+name, address and token fill in. Give `--url` the address the window reaches, the host's
+and not the container's; without it `connect` uses the listen address, with `0.0.0.0`
+replaced by the machine's own address, which inside a container is the container's.
+`--name` or `AGENTBENCH_NAME` sets the name, the host name otherwise.
+
+To work on a repo, clone it into the volume and add it as a project:
+
+```sh
+docker exec agentbench git clone https://github.com/you/repo.git /data/git/repo
+docker exec agentbench agentbench-server add /data/git/repo
+```
+
+For a private repo, put a deploy key in `/home/agent/.ssh` (mount it read only with
+`-v ~/.ssh/deploy:/home/agent/.ssh:ro`) or clone over https with a token. `/home/agent` is
+not in the volume, so settings made with `git config --global` there are lost when the
+container is made again; give the git identity as the `GIT_*` variables above.
+
+The token is the only thing between the network and an agent that runs commands in the
+container. Keep port 7420 on a LAN or a VPN, or put it behind a TLS reverse proxy and give
+the window its `https://` address. Never expose 7420 to the internet without one.
+`agentbench-server token --rotate` inside the container makes a new token.
+
 ## Chatting in a terminal
 
 ```sh
