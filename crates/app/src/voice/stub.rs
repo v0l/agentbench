@@ -23,6 +23,10 @@ impl Voice {
     pub fn closing_in(&self, _: &Settings) -> Option<f32> {
         None
     }
+    #[doc(hidden)]
+    pub fn fake_failure(&mut self, _: &str) {}
+    #[doc(hidden)]
+    pub fn fake_quiet_stop(&mut self, _: f32) {}
     pub fn take_quiet_stop(&mut self) -> Option<f32> {
         None
     }
