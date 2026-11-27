@@ -36,6 +36,19 @@ impl Files {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reading {
+    pub text: String,
+    pub no_speech: f32,
+    pub avg_logprob: f32,
+}
+
+impl Reading {
+    pub fn not_speech(&self) -> bool {
+        self.no_speech as f64 > m::NO_SPEECH_THRESHOLD && (self.avg_logprob as f64) < m::LOGPROB_THRESHOLD
+    }
+}
+
 pub struct Whisper {
     model: m::model::Whisper,
     tokenizer: Tokenizer,
@@ -46,6 +59,7 @@ pub struct Whisper {
     eot: u32,
     transcribe: u32,
     no_timestamps: u32,
+    no_speech: Option<u32>,
     /// `<|en|>` for a multilingual model, none for an English only one, which has no such token.
     language: Option<u32>,
 }
@@ -120,6 +134,7 @@ impl Whisper {
             eot: token(&tokenizer, m::EOT_TOKEN)?,
             transcribe: token(&tokenizer, m::TRANSCRIBE_TOKEN)?,
             no_timestamps: token(&tokenizer, m::NO_TIMESTAMPS_TOKEN)?,
+            no_speech: m::NO_SPEECH_TOKENS.iter().find_map(|t| token(&tokenizer, t).ok()),
             model,
             tokenizer,
             device,
@@ -131,11 +146,20 @@ impl Whisper {
 
     /// 16 kHz mono PCM to text.
     pub fn transcribe(&mut self, pcm: &[f32]) -> Result<String> {
+        Ok(self.read(pcm)?.text)
+    }
+
+    pub fn read(&mut self, pcm: &[f32]) -> Result<Reading> {
         let mut out = String::new();
+        let mut no_speech = f32::INFINITY;
+        let (mut logprob, mut tokens) = (0.0f32, 0usize);
         for chunk in pcm.chunks(WINDOW) {
             let mut window = chunk.to_vec();
             window.resize(WINDOW, 0.0);
-            let text = self.window(&window)?;
+            let (text, nothing, sum, n) = self.window(&window)?;
+            no_speech = no_speech.min(nothing);
+            logprob += sum;
+            tokens += n;
             let text = text.trim();
             if !text.is_empty() {
                 if !out.is_empty() {
@@ -144,10 +168,14 @@ impl Whisper {
                 out.push_str(text);
             }
         }
-        Ok(out)
+        Ok(Reading {
+            text: out,
+            no_speech: if no_speech.is_finite() { no_speech } else { 0.0 },
+            avg_logprob: logprob / tokens.max(1) as f32,
+        })
     }
 
-    fn window(&mut self, pcm: &[f32]) -> Result<String> {
+    fn window(&mut self, pcm: &[f32]) -> Result<(String, f32, f32, usize)> {
         let bins = self.model.config.num_mel_bins;
         let mel = audio::pcm_to_mel(&self.model.config, pcm, &self.mel_filters);
         let frames = mel.len() / bins;
@@ -158,7 +186,7 @@ impl Whisper {
         self.decode(&mel)
     }
 
-    fn decode(&mut self, mel: &Tensor) -> Result<String> {
+    fn decode(&mut self, mel: &Tensor) -> Result<(String, f32, f32, usize)> {
         let features = self.model.encoder.forward(mel, true).map_err(candle)?;
         let max_positions = self.model.config.max_target_positions;
         let sample_len = max_positions / 2;
@@ -167,6 +195,7 @@ impl Whisper {
         tokens.extend(self.language);
         tokens.push(self.transcribe);
         tokens.push(self.no_timestamps);
+        let (mut no_speech, mut logprob, mut picked) = (0.0f32, 0.0f32, 0usize);
 
         for i in 0..sample_len {
             let t = Tensor::new(tokens.as_slice(), &self.device)
@@ -175,6 +204,25 @@ impl Whisper {
                 .map_err(candle)?;
             let ys = self.model.decoder.forward(&t, &features, i == 0).map_err(candle)?;
             let (_, seq_len, _) = ys.dims3().map_err(candle)?;
+            if i == 0
+                && let Some(id) = self.no_speech
+            {
+                let first = self
+                    .model
+                    .decoder
+                    .final_linear(&ys.i(..1).map_err(candle)?)
+                    .map_err(candle)?
+                    .i(0)
+                    .map_err(candle)?
+                    .i(0)
+                    .map_err(candle)?;
+                no_speech = softmax(&first, 0)
+                    .map_err(candle)?
+                    .i(id as usize)
+                    .map_err(candle)?
+                    .to_scalar::<f32>()
+                    .map_err(candle)?;
+            }
             let logits = self
                 .model
                 .decoder
@@ -194,12 +242,15 @@ impl Whisper {
                 .max_by(|(_, a), (_, b)| a.total_cmp(b))
                 .map(|(i, _)| i as u32)
                 .unwrap_or(self.eot);
+            logprob += p.get(next as usize).copied().unwrap_or(0.0).max(f32::MIN_POSITIVE).ln();
+            picked += 1;
             if next == self.eot || tokens.len() > max_positions {
                 break;
             }
             tokens.push(next);
         }
-        self.tokenizer.decode(&tokens, true).map_err(|e| format!("whisper detokenise: {e}"))
+        let text = self.tokenizer.decode(&tokens, true).map_err(|e| format!("whisper detokenise: {e}"))?;
+        Ok((text, no_speech, logprob, picked))
     }
 }
 
