@@ -898,7 +898,14 @@ impl App {
                 ui.available_width(),
             );
             let visible = ui.clip_rect().expand2(Vec2::new(0.0, OVERSCAN));
-            for m in &messages {
+            let haru = self.haru_words(s.id);
+            for (i, m) in messages.iter().enumerate() {
+                let until = messages.get(i + 1).map_or(i64::MAX, |n| n.created_at);
+                let spoken: Vec<&str> = haru
+                    .iter()
+                    .filter(|(at, _)| *at >= m.created_at && *at < until)
+                    .map(|(_, t)| t.as_str())
+                    .collect();
                 // Each entry gets a ui of the column's width, clipped to it, so one with
                 // something that cannot wrap does not widen the entries after it.
                 let column = egui::Rect::from_min_size(
@@ -908,6 +915,7 @@ impl App {
                 // An entry that was measured and is out of sight is not laid out, only
                 // given the room it took.
                 if let Some(h) = heights.known(m.id)
+                    && spoken.is_empty()
                     && seek_to != Some(m.id)
                     && !(egui::Rect::from_min_size(column.min, Vec2::new(column.width(), h)))
                         .intersects(visible)
@@ -927,6 +935,9 @@ impl App {
                         .intersect(ui.clip_rect()),
                 );
                 self.entry(&mut one, m, s.id);
+                for words in &spoken {
+                    haru_line(&mut one, words);
+                }
                 let used = one.min_rect();
                 let h = (used.bottom().max(column.top()) - column.top()).max(0.0);
                 heights.measured(m.id, h);
@@ -1067,7 +1078,18 @@ fn names_projects(app: &App) -> Vec<Project> {
     app.overview().iter().flat_map(|o| &o.projects).filter(|p| !p.builtin()).cloned().collect()
 }
 
-pub(super) fn waiting_label(n: usize) -> String {
+pub(super) fn haru_line(ui: &mut Ui, words: &str) {
+    ui.add_space(4.0);
+    let r = ui
+        .horizontal_wrapped(|ui| {
+            ui.add_space(13.0);
+            Line::new().legend("Haru, voice model").size(10.0).tint(LEGEND).gap(8.0).value(words).size(12.0).tint(VALUE).wrapped(ui);
+        })
+        .response;
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, format!("voice model said: {words}")));
+}
+
+fn waiting_label(n: usize) -> String {
     match n {
         1 => "1 message waiting until I am idle".into(),
         n => format!("{n} messages waiting until I am idle"),

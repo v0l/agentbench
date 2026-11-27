@@ -612,6 +612,14 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
+const HARU_GAP: Duration = Duration::from_secs(2);
+
+struct HaruWords {
+    at: i64,
+    last: Instant,
+    text: String,
+}
+
 #[derive(Default)]
 struct HandsFree {
     paused: Option<SessionId>,
@@ -814,6 +822,7 @@ pub struct App {
     talk_turn: bool,
     hands_free: HandsFree,
     bridge: crate::voice::Bridge,
+    haru: HashMap<SessionId, Vec<HaruWords>>,
     engine: crate::voice::engine::Engine,
     auto: Option<(Tile, crate::voice::autosend::Countdown)>,
     clock: Option<f64>,
@@ -1042,6 +1051,7 @@ impl App {
             talk_turn: false,
             hands_free: Default::default(),
             bridge: Default::default(),
+            haru: HashMap::new(),
             engine: Default::default(),
             auto: None,
             clock: None,
@@ -2080,11 +2090,37 @@ impl App {
             key,
             voice: self.speech.duplex_voice.trim().to_string(),
             speak_first: self.speech.duplex_speak_first,
+            free: self.speech.duplex_free,
         })
     }
 
     fn bridge_says(&self) -> bool {
-        self.bridge.active() && self.speech.duplex_replies
+        self.bridge.active() && !self.bridge.free() && self.speech.duplex_replies
+    }
+
+    fn haru_heard(&mut self, words: &str, now: Instant) {
+        let Some(sid) = self.conversing else { return };
+        let list = self.haru.entry(sid).or_default();
+        match list.last_mut() {
+            Some(last) if now.saturating_duration_since(last.last) < HARU_GAP => {
+                last.text.push_str(words);
+                last.last = now;
+            }
+            _ if words.trim().is_empty() => {}
+            _ => list.push(HaruWords { at: agentbench_core::now_ms(), last: now, text: words.to_string() }),
+        }
+    }
+
+    pub fn haru_words(&self, session: SessionId) -> Vec<(i64, String)> {
+        self.haru
+            .get(&session)
+            .map(|l| {
+                l.iter()
+                    .map(|w| (w.at, w.text.split_whitespace().collect::<Vec<_>>().join(" ")))
+                    .filter(|(_, t)| !t.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn bridge_tick(&mut self, ctx: &egui::Context) -> bool {
@@ -2111,6 +2147,7 @@ impl App {
                 crate::voice::Out::Interrupted => self.barge_in(),
                 crate::voice::Out::Heard(text) => self.bridge.note_heard(text),
                 crate::voice::Out::Notice(n) => self.notice = Some((false, n)),
+                crate::voice::Out::Words(w) => self.haru_heard(&w, now),
             }
         }
         if self.bridge_says() && !self.voice.in_speech() {
@@ -2316,6 +2353,9 @@ impl App {
                     self.converse.feed(m.id, text, !busy || !last);
                 }
             }
+        }
+        if self.bridge.free() {
+            while self.converse.next().is_some() {}
         }
         if !self.reader.busy()
             && !self.bridge_says()

@@ -15,12 +15,15 @@ pub const CARD_NAME: &str = "Bench";
 pub const CARD_PERSONA: &str = "A calm, warm voice assistant who speaks in short plain sentences and never makes things up.";
 pub const CARD_RELATIONSHIP: &str = "You relay answers from an assistant that manages the user's coding projects.";
 pub const CARD_SITUATION: &str = "The user talks to the assistant hands free through you. Say the words you are given; otherwise listen and keep quiet.";
+pub const FREE_RELATIONSHIP: &str = "You are the voice the user talks to while an assistant manages their coding projects and shows its answers on screen.";
+pub const FREE_SITUATION: &str = "The user talks to you hands free while they work. Answer in your own words, briefly and calmly, like a helpful colleague. When they ask for work to be done, say it is being passed on and the answer will show on screen.";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Out {
     Interrupted,
     Heard(String),
     Notice(String),
+    Words(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,13 +70,15 @@ impl Default for Bridge {
     }
 }
 
-pub fn card() -> Value {
+pub fn card(free: bool) -> Value {
+    let (relationship, situation) =
+        if free { (FREE_RELATIONSHIP, FREE_SITUATION) } else { (CARD_RELATIONSHIP, CARD_SITUATION) };
     json!({
         "name": CARD_NAME,
         "persona": CARD_PERSONA,
         "backchannel": "low",
-        "relationship": CARD_RELATIONSHIP,
-        "situation": CARD_SITUATION,
+        "relationship": relationship,
+        "situation": situation,
     })
 }
 
@@ -89,7 +94,8 @@ pub fn voice_clip(path: &str) -> Result<Option<String>, String> {
 }
 
 pub fn start_message(model: &DuplexModel) -> Result<Value, String> {
-    let mut start = json!({"type": "start", "card": card(), "mode": "relay"});
+    let mode = if model.free { "free" } else { "relay" };
+    let mut start = json!({"type": "start", "card": card(model.free), "mode": mode});
     if !model.model.is_empty() {
         start["model"] = model.model.clone().into();
     }
@@ -127,7 +133,7 @@ impl Bridge {
         let options = Options { url: ws_url(&model.url), key: model.key.clone(), start };
         match Link::open(options, self.manual, wake) {
             Ok(link) => {
-                if model.speak_first {
+                if model.speak_first && model.free {
                     link.unmute();
                 }
                 self.link = Some(link);
@@ -151,6 +157,10 @@ impl Bridge {
 
     pub fn active(&self) -> bool {
         self.link.is_some()
+    }
+
+    pub fn free(&self) -> bool {
+        self.link.is_some() && self.model.as_ref().is_some_and(|m| m.free)
     }
 
     pub fn conn(&self) -> Conn {
@@ -200,6 +210,7 @@ impl Bridge {
 
     pub fn tick(&mut self, user_speaking: bool, more_to_say: bool, now: Instant) -> Vec<Out> {
         let mut out = Vec::new();
+        let free = self.free();
         let Some(link) = &self.link else { return out };
         for e in link.poll() {
             match e {
@@ -216,17 +227,27 @@ impl Bridge {
                 }
                 Event::Refused(why) => out.push(Out::Notice(format!("the duplex model: {why}"))),
                 Event::Said { text, .. } => out.push(Out::Heard(text)),
+                Event::Text(t) if free => out.push(Out::Words(t)),
                 Event::Text(_) => {}
             }
         }
         if link.speaking() {
             self.voiced_at = Some(now);
         }
+        if !free {
+            if self.queued(now) {
+                link.unmute();
+            } else {
+                link.mute();
+            }
+        }
         if !user_speaking {
             self.speech_since = None;
             return out;
         }
-        link.unmute();
+        if free {
+            link.unmute();
+        }
         let since = *self.speech_since.get_or_insert(now);
         if !self.interrupted
             && (self.queued(now) || more_to_say)
@@ -287,6 +308,19 @@ mod tests {
         assert!(s.get("speak_first").is_none(), "the model waits for the user");
         let s = start_message(&DuplexModel { speak_first: true, ..m }).unwrap();
         assert_eq!(s["speak_first"], true);
+    }
+
+    #[test]
+    fn the_free_start_asks_haru_to_answer_in_its_own_words() {
+        let m = DuplexModel { url: "http://x".into(), model: "Haru-4B".into(), free: true, ..Default::default() };
+        let s = start_message(&m).unwrap();
+        assert_eq!(s["mode"], "free");
+        assert_eq!(s["model"], "Haru-4B");
+        let card = &s["card"];
+        assert_eq!(card["situation"], FREE_SITUATION);
+        assert!(card["situation"].as_str().unwrap().contains("own words"));
+        assert!(!card.to_string().contains("relay") && !card.to_string().contains("words you are given"), "{card}");
+        assert!(card["persona"].as_str().unwrap().contains("calm"));
     }
 
     #[test]
