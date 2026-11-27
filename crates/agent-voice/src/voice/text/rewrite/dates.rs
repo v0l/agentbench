@@ -1,7 +1,7 @@
 //! Numeric dates: "20/12/2015" becomes "20-12 2015".
 
 use super::{digits, suffix};
-use crate::speech::phonon::text::Lang;
+use crate::voice::text::Lang;
 
 /// A date written `D/M` or `D/M/Y`, in either day-month order, with the slashes read as a pause:
 /// "20/12/2015" becomes "20-12 2015", and "1/5" becomes "1-5". The same in every language.

@@ -1,5 +1,5 @@
 use super::split_suffix;
-use crate::speech::phonon::text::Lang;
+use crate::voice::text::Lang;
 
 pub(super) fn elongations(word: &str, lang: Lang) -> Option<String> {
     if lang != Lang::En {

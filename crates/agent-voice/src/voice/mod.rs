@@ -4,9 +4,14 @@
 
 pub mod audio;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod catalogue;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod client;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod download;
 pub mod models;
 pub mod noise;
+pub mod text;
 
 pub use audio::{SPEECH_RATE, chunks, read_wav, resample, speakable, to_whisper_rate, wav_bytes};
 #[cfg(not(target_arch = "wasm32"))]

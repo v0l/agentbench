@@ -1,7 +1,7 @@
 //! Numbers read out with their scale words.
 
 use super::{all_digits, split_suffix, suffix};
-use crate::speech::phonon::text::Lang;
+use crate::voice::text::Lang;
 
 /// Large numbers with their scale words: "1,234.56" becomes "1 thousand 234 point 56", and in
 /// French "1234,56" becomes "mille 234 virgule 56". Values under a thousand and years stay as

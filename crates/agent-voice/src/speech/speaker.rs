@@ -1,6 +1,6 @@
 //! Kokoro on disc, fetched once and kept loaded between sentences.
 
-use super::download::Progress;
+use crate::voice::download::Progress;
 use super::speak::{DEFAULT_VOICE, DeviceChoice, Engine, Files, installed, label_of, wanted};
 use std::path::PathBuf;
 
@@ -55,7 +55,7 @@ impl Speaker {
     /// all there.
     pub fn download(&self, voice: &str, progress: &dyn Fn(Progress<'_>)) -> Result<(), String> {
         for (url, name) in wanted(voice) {
-            super::download::get(&url, &self.dir.join(&name), &name, progress)?;
+            crate::voice::download::get(&url, &self.dir.join(&name), &name, progress)?;
         }
         Ok(())
     }

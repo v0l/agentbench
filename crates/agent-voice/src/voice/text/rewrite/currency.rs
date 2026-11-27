@@ -3,7 +3,7 @@
 
 use super::numbers::number_words;
 use super::{all_digits, split_suffix};
-use crate::speech::phonon::text::Lang;
+use crate::voice::text::Lang;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Currency {
@@ -57,7 +57,7 @@ impl Currency {
 /// Whether `c` is a currency symbol the rule reads. The character pass joins one to the number
 /// before it, so that "250 €", as French, German, Spanish and Portuguese write it, reads as
 /// "250€".
-pub(in crate::speech::phonon::text) fn is_symbol(c: char) -> bool {
+pub(in crate::voice::text) fn is_symbol(c: char) -> bool {
     Currency::from_symbol(c).is_some()
 }
 

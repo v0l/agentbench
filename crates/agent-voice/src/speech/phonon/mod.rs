@@ -11,9 +11,9 @@ mod flow;
 mod mimi;
 pub mod plan;
 mod seanet;
-pub mod text;
+pub use crate::voice::text;
 mod transformer;
-pub mod voices;
+pub use crate::voice::catalogue as voices;
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::VarBuilder;

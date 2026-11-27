@@ -1,6 +1,6 @@
 //! A Whisper model on disc, fetched once and kept loaded between takes.
 
-use super::download::Progress;
+use crate::voice::download::Progress;
 use super::whisper::{Files, Reading, Whisper, best_device};
 use crate::voice::model;
 use std::path::{Path, PathBuf};
@@ -78,7 +78,7 @@ fn fetch(repo: &str, dir: &Path, progress: &dyn Fn(Progress<'_>)) -> Result<(), 
     let name = repo.rsplit('/').next().unwrap_or(repo);
     for file in FILES {
         let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
-        super::download::get(&url, &dir.join(file), name, progress)?;
+        crate::voice::download::get(&url, &dir.join(file), name, progress)?;
     }
     Ok(())
 }

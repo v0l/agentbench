@@ -1,9 +1,9 @@
 //! Phonon on disc, fetched once and kept loaded: the model, its catalogue of voices, each voice
 //! fetched the first time it is asked for.
 
-use super::download::{Progress, get};
+use crate::voice::download::{Progress, get};
 use super::phonon::Phonon;
-use super::phonon::voices::{self, CATALOG, DEFAULT_VOICE, MODEL_FILES, Voice};
+use crate::voice::catalogue::{self as voices, CATALOG, DEFAULT_VOICE, MODEL_FILES, Voice};
 use std::path::PathBuf;
 
 /// Loads Phonon the first time it is needed and speaks with whichever voice is asked for. The

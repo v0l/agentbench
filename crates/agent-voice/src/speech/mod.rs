@@ -7,7 +7,8 @@
 //! other machines at `/v1/audio/transcriptions` and `/v1/audio/speech`, which is what
 //! [`crate::voice::Server`] talks to.
 
-mod download;
+pub use crate::voice::{DEFAULT_MODEL, LOCAL_MODELS, ModelInfo, model};
+pub use crate::voice::download::Progress;
 pub mod phonon;
 pub mod speak;
 mod speaker;
@@ -15,8 +16,6 @@ mod transcriber;
 mod voicer;
 mod whisper;
 
-pub use crate::voice::{DEFAULT_MODEL, LOCAL_MODELS, ModelInfo, model};
-pub use download::Progress;
 pub use speaker::{MAX_SECONDS, Said, Speaker};
 pub use transcriber::Transcriber;
 pub use voicer::Voicer;
