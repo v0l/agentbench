@@ -6,6 +6,7 @@ pub mod autopilot;
 pub mod checkin;
 pub mod cli;
 pub mod compact;
+pub mod connect;
 pub mod git;
 pub mod github;
 pub mod groom;
