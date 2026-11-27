@@ -163,7 +163,10 @@ fn duplex_chat_with(
         ("voice_mode".into(), "agentbench".into()),
         ("voice_model".into(), "whisper-base.en".into()),
     ];
-    cfg.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    cfg.extend(extra.iter().filter(|(_, v)| *v != "unset").map(|(k, v)| (k.to_string(), v.to_string())));
+    if !extra.iter().any(|(k, _)| *k == "voice_duplex_haru_only") {
+        cfg.push(("voice_duplex_haru_only".into(), "0".into()));
+    }
     let mut h = harness_cfg(cfg, Cfg { size, ..Cfg::default() });
     h.state_mut().voice_test_silent();
     h.state_mut().voice_test_hands_free(agentbench::voice::Sink::Headphones);
@@ -408,6 +411,123 @@ fn nothing_the_model_says_is_played_before_the_user_speaks() {
         assert!(t.elapsed() < Duration::from_secs(10), "once the user spoke the reply plays");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+struct Counting {
+    url: String,
+    hits: Arc<Mutex<usize>>,
+}
+
+fn counting_transcriber() -> Counting {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let hits = Arc::new(Mutex::new(0usize));
+    let h = hits.clone();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { return };
+            let mut buf = [0u8; 65536];
+            let mut seen = Vec::new();
+            loop {
+                let n = s.read(&mut buf).unwrap_or(0);
+                seen.extend_from_slice(&buf[..n]);
+                let Some(body_at) = seen.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4) else {
+                    if n == 0 {
+                        break;
+                    }
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&seen[..body_at]).to_lowercase();
+                let want = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                    .unwrap_or(0);
+                if n == 0 || seen.len() >= body_at + want {
+                    break;
+                }
+            }
+            if String::from_utf8_lossy(&seen).contains("/audio/transcriptions") {
+                *h.lock().unwrap() += 1;
+            }
+            let body = r#"{"text":"what are the workers doing"}"#;
+            let _ = write!(s, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+    Counting { url, hits }
+}
+
+fn spoken_take(haru_only: bool) -> (Harness<'static, agentbench::App>, Fake, Counting, SessionId) {
+    let rig = Box::leak(Box::new(rig_with(vec![agent("glib", THREE_SENTENCES)])));
+    supervisor(rig, "glib");
+    let fake = Fake::start();
+    let stt = counting_transcriber();
+    let (mut h, sid) = duplex_chat_with(
+        rig,
+        &fake,
+        [1280.0, 800.0],
+        &[
+            ("voice_mode", "server"),
+            ("voice_url", &stt.url),
+            ("voice_duplex_haru_only", if haru_only { "unset" } else { "0" }),
+        ],
+    );
+    hear_live(&mut h, &clip(ASK));
+    fake.text(" Hello there.");
+    h.run_steps(10);
+    std::thread::sleep(Duration::from_millis(500));
+    h.run_steps(10);
+    (h, fake, stt, sid)
+}
+
+#[test]
+fn with_haru_chosen_and_nothing_saved_a_spoken_take_is_not_transcribed_and_sends_no_turn() {
+    let (mut h, fake, stt, sid) = spoken_take(true);
+    assert_eq!(*stt.hits.lock().unwrap(), 0, "no transcription request was made");
+    assert!(!h.state().transcript_talk(sid).iter().any(|l| l.starts_with("user: ")), "no supervisor turn");
+    assert!(h.state_mut().voice_test_spoken().is_empty(), "nothing is read aloud");
+    assert!(h.state().voice_test_duplex_on(), "the duplex session stays");
+    assert!(h.state().voice_test_duplex_sent() > 0, "the microphone still reaches Haru");
+    fake.reply(0.3);
+    fake.reply(0.3);
+    let t = Instant::now();
+    loop {
+        h.step();
+        if h.state().voice_test_duplex_pull().unwrap().iter().any(|v| *v != 0.0) {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(10), "Haru's audio plays");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    until_label(&mut h, "voice model said: Hello there.");
+}
+
+#[test]
+fn with_haru_only_the_supervisor_reply_to_typed_text_is_not_read_aloud() {
+    let rig = rig_with(vec![agent("glib", THREE_SENTENCES)]);
+    supervisor(&rig, "glib");
+    let fake = Fake::start();
+    let (mut h, sid) = duplex_chat_with(&rig, &fake, [1280.0, 800.0], &[("voice_duplex_haru_only", "unset"), ("voice_duplex_free", "0")]);
+    let start = fake.seen.lock().unwrap().start.clone().unwrap();
+    assert_eq!(start["mode"], "free");
+    h.state_mut().voice_test_send("what are the workers doing");
+    until(&mut h, "the reply", |h| h.state().transcript_talk(sid).iter().any(|l| l.starts_with("assistant: ")));
+    let mut spoken = Vec::new();
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(3) {
+        spoken.extend(h.state_mut().voice_test_spoken());
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert!(spoken.is_empty(), "{spoken:?}");
+    assert!(fake.says().is_empty());
+}
+
+#[test]
+fn with_haru_only_off_a_spoken_take_is_transcribed_and_sent_to_the_supervisor() {
+    let (mut h, _fake, stt, sid) = spoken_take(false);
+    until(&mut h, "the user turn", |h| h.state().transcript_talk(sid).iter().any(|l| l.starts_with("user: ")));
+    assert!(*stt.hits.lock().unwrap() >= 1, "the take was transcribed");
 }
 
 #[test]
@@ -662,9 +782,9 @@ fn the_duplex_settings_fit_at_both_sizes() {
         h.run_steps(2);
         until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
         h.run_steps(4);
-        h.get_by_label("Haru replies in its own words").scroll_to_me();
+        h.get_by_label("Haru only").scroll_to_me();
         h.run_steps(4);
-        for label in ["Haru replies in its own words", "model speaks first", "record"] {
+        for label in ["Haru only", "Haru talks, the supervisor acts on what you said", "read the supervisor's replies aloud", "model speaks first", "record"] {
             let r = h.get_by_label(label).rect();
             assert!(r.right() <= size[0], "{label} runs off a {tag} screen: {r:?}");
         }

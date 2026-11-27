@@ -2144,12 +2144,16 @@ impl App {
             key,
             voice: self.speech.duplex_voice.trim().to_string(),
             speak_first: self.speech.duplex_speak_first,
-            free: self.speech.duplex_free,
+            free: self.speech.duplex_free || self.speech.duplex_haru_only,
         })
     }
 
     fn bridge_says(&self) -> bool {
         self.bridge.active() && !self.bridge.free() && self.speech.duplex_replies
+    }
+
+    fn haru_only_now(&self) -> bool {
+        self.speech.haru_only() && self.bridge.active()
     }
 
     fn haru_heard(&mut self, words: &str, now: Instant) {
@@ -2411,7 +2415,7 @@ impl App {
                 }
             }
         }
-        if self.bridge.free() {
+        if self.bridge.free() || self.haru_only_now() {
             while self.converse.next().is_some() {}
         }
         if !self.reader.busy()
@@ -3343,9 +3347,12 @@ impl App {
         self.hands_free_tick(ctx);
         self.engine_tick(ctx);
         let speech = self.speech_now();
+        self.voice.set_discard(self.haru_only_now());
         self.voice.tick(&speech, wake);
         let bridge_on = self.bridge_tick(ctx);
-        if self.voice.take_speech_start() && !bridge_on {
+        if self.haru_only_now() {
+            self.talk_turn = false;
+        } else if self.voice.take_speech_start() && !bridge_on {
             self.barge_in();
             self.talk_turn = true;
         } else if bridge_on && self.voice.in_speech() {

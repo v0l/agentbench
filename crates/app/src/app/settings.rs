@@ -942,26 +942,51 @@ pub(super) fn duplex_section(
             local_voice_rows(ui, sp, local);
         }
         if sp.duplex_local || remote {
-            toggle_row(
+            let mut mode = if sp.duplex_haru_only {
+                "haru only"
+            } else if sp.duplex_free {
+                "haru and supervisor"
+            } else {
+                "read aloud"
+            };
+            row_help(
                 ui,
-                "Haru replies in its own words",
-                "On: the model answers you itself in a calm voice, its words are shown in the chat, and the supervisor's replies stay on screen as text. Your speech still goes to the supervisor as a turn. Off: relay, the model stays silent unless it is given words to say.",
-                &mut sp.duplex_free,
+                "who you talk to",
+                "Haru only: talk with Haru, nothing is sent to the supervisor and its replies are not read aloud. Haru and supervisor: Haru answers in its own words and the supervisor acts on what you said. Read aloud: the model stays silent and the supervisor's replies are read aloud.",
+                |ui| {
+                    ui.vertical(|ui| {
+                        for (id, label) in [
+                            ("haru only", "Haru only"),
+                            ("haru and supervisor", "Haru talks, the supervisor acts on what you said"),
+                            ("read aloud", "read the supervisor's replies aloud"),
+                        ] {
+                            let on = mode == id;
+                            let text = if on { format!("{label} (active)") } else { label.to_string() };
+                            let r = ui.add(Key::new(&text).outline(if on { VALUE } else { LEGEND }));
+                            r.widget_info(|| egui::WidgetInfo::selected(egui::Role::RadioButton, true, on, label));
+                            if r.clicked() {
+                                mode = id;
+                            }
+                        }
+                    });
+                },
             );
-            if !sp.duplex_free {
-                toggle_row(
-                    ui,
-                    "replies in its voice",
-                    "On: the supervisor's replies are spoken by the duplex model, which is often hard to follow. Off: they are read aloud by text to speech, and the model stays silent.",
-                    &mut sp.duplex_replies,
-                );
-            }
+            sp.duplex_haru_only = mode == "haru only";
+            sp.duplex_free = mode != "read aloud";
             if sp.duplex_free {
                 toggle_row(
                     ui,
                     "model speaks first",
                     "On: the model may greet you before you say anything. Off: nothing it says is played until you speak.",
                     &mut sp.duplex_speak_first,
+                );
+            }
+            if mode == "read aloud" {
+                toggle_row(
+                    ui,
+                    "replies in its voice",
+                    "On: the supervisor's replies are spoken by the duplex model, which is often hard to follow. Off: they are read aloud by text to speech, and the model stays silent.",
+                    &mut sp.duplex_replies,
                 );
             }
             row_help(

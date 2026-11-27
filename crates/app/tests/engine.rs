@@ -633,13 +633,13 @@ fn the_local_voice_settings_fit_at_both_sizes() {
         h.run_steps(2);
         until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
         h.run_steps(4);
-        h.get_by_label("Haru replies in its own words").scroll_to_me();
+        h.get_by_label("Haru only").scroll_to_me();
         h.run_steps(4);
         let shown = texts(&h);
         for want in ["Haru-4B (local)", "model found in", "loads on GPU 1 (Test card 1): it has the most free memory, 90.0 GB", "engine: inference-bench-server 0.0.0-fake"] {
             assert!(shown.contains(want), "{tag}: {want} is missing");
         }
-        for label in ["Haru replies in its own words", "model speaks first", "record again", "unload after"] {
+        for label in ["Haru only", "Haru talks, the supervisor acts on what you said", "read the supervisor's replies aloud", "model speaks first", "record again", "unload after"] {
             let r = h.get_by_label(label).rect();
             assert!(r.right() <= size[0] && r.left() >= 0.0, "{label} runs off a {tag} screen: {r:?}");
         }
@@ -659,8 +659,8 @@ fn the_real_model_in_free_mode_answers_a_spoken_question_in_words() {
         h.state_mut().voice_test_speech().duplex_voice = c;
     }
     h.state_mut().voice_test_speech().model = "whisper-base.en".into();
-    assert!(h.state().voice_test_settings().duplex_free, "free mode is the default");
     h.state_mut().voice_test_real_engine(&program, &model, real_gpu());
+    assert!(h.state().voice_test_settings().haru_only(), "Haru only is the default");
     h.state_mut().open_supervisor();
     let t = Instant::now();
     while !h.state().voice_test_duplex_on() {
@@ -691,6 +691,7 @@ fn the_real_model_in_free_mode_answers_a_spoken_question_in_words() {
         }
     }
     let cut = ((asked * 24_000.0) as usize).min(played.len());
+    let log_before_judging = rig.engine_log();
     let reply = played[cut..].to_vec();
     if let Ok(out) = std::env::var("AGENTBENCH_REAL_PLAYED") {
         std::fs::write(&out, agentbench::voice::wav_bytes(&played, 24_000)).unwrap();
@@ -706,7 +707,8 @@ fn the_real_model_in_free_mode_answers_a_spoken_question_in_words() {
     eprintln!("Haru's text stream: {text:?}");
     eprintln!("chat: {turns:?}");
     assert!(h.state().voice_test_duplex_says().is_empty(), "free mode sends no say");
-    assert!(turns.iter().any(|l| l.starts_with("user: ")), "the spoken question reached the supervisor: {turns:?}");
+    assert!(!turns.iter().any(|l| l.starts_with("user: ")), "Haru only sends nothing to the supervisor: {turns:?}");
+    assert!(!log_before_judging.contains("/v1/audio/transcriptions"), "no transcription request: {log_before_judging}");
     let words = |s: &str| -> Vec<String> {
         s.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).filter(|w| !w.is_empty()).collect()
     };
