@@ -325,6 +325,7 @@ impl Io for Sink {
             Event::Summary(text) => {
                 chat.entry(Entry::Summary { text });
             }
+            Event::Parked => {}
             Event::Done => {
                 chat.text = None;
                 chat.thinking = None;

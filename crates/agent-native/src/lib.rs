@@ -134,6 +134,7 @@ pub enum Event {
     Diagnostics { text: String, broken: Vec<String> },
     Sent(Vec<agentbench_core::Sent>),
     Summary(String),
+    Parked,
     Error(String),
     Done,
 }
@@ -154,6 +155,9 @@ pub trait Io: Send + Sync {
         None
     }
     fn steer(&self) -> Option<Steer>;
+    fn parking(&self) -> bool {
+        false
+    }
     async fn ask(&self, question: Question) -> Result<String, String>;
     /// Put several questions at once; one answer back for each, in order.
     async fn ask_many(&self, questions: Vec<Question>) -> Result<Vec<String>, String>;

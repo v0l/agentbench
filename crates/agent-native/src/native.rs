@@ -876,12 +876,12 @@ fn agentbench_specs() -> Vec<Spec> {
         Spec::new(
             "restart_server",
             "Supervisor chat only. Restart the agentbench server, for example after installing a new build. Use it instead of systemctl restart or pkill. \
-             It waits until no other turn is running or the drain limit passes (restart_drain_secs, default 120 s), then restarts; turns that outlive the drain are interrupted and resumed afterwards. \
-             Off by default: the user is asked each time unless they switched it on in settings. Your own turn ends with the restart and resumes with a note saying how many turns finished and how many were interrupted.",
+             It lets each running turn finish its current tool call, parks it there and carries it on after the restart with nothing lost. Only a tool call still running when the drain limit passes (restart_drain_secs, default 600 s) is interrupted and resumed with a restart note. \
+             Off by default: the user is asked each time unless they switched it on in settings. Your own turn ends with the restart and resumes with a note saying which turns finished, were parked or were interrupted.",
             object(
                 json!({
                     "reason": string("Why, for the user"),
-                    "drain_secs": json!({ "type": "integer", "description": "Seconds to wait for running turns; default the server's setting" }),
+                    "drain_secs": json!({ "type": "integer", "description": "Seconds a tool call may still run before it is interrupted; default the server's setting" }),
                 }),
                 &[],
             ),
@@ -1719,7 +1719,7 @@ impl<'a> Log<'a> {
         Log { messages: replay, io }
     }
 
-    fn prompt(&mut self, prompt: Value) {
+    fn prompt(&mut self, prompt: Option<Value>) {
         let mut sent: Vec<Sent> = unanswered(&self.messages)
             .into_iter()
             .map(|id| Sent {
@@ -1727,7 +1727,10 @@ impl<'a> Log<'a> {
                 said: Said::Plain,
             })
             .collect();
-        sent.push(Sent { message: prompt, said: Said::Typed { attachments: Vec::new(), from: Vec::new() } });
+        sent.extend(prompt.map(|message| Sent { message, said: Said::Typed { attachments: Vec::new(), from: Vec::new() } }));
+        if sent.is_empty() {
+            return;
+        }
         self.messages.extend(sent.iter().map(|s| s.message.clone()));
         self.io.emit(Event::Sent(sent));
     }
@@ -2057,7 +2060,11 @@ impl Agent for Native {
         let mut cut_short = 0u32;
         let mut repeats: Option<Repeats> = None;
         let mut last_error = String::new();
-        messages.prompt(user_message(turn.prompt, turn.files).await);
+        if !turn.prompt.is_empty() || !turn.files.is_empty() {
+            messages.prompt(Some(user_message(turn.prompt, turn.files).await));
+        } else {
+            messages.prompt(None);
+        }
         let tools = tool_list(
             &base,
             self.mcp.configured(workspace.root()),
@@ -2077,6 +2084,10 @@ impl Agent for Native {
         for _ in 0..model.steps.max(1) {
             if io.stopped() {
                 return Err("stopped".into());
+            }
+            if io.parking() {
+                io.emit(Event::Parked);
+                return Ok(());
             }
             if base.compact_at > 0 && messages.len() > ROLLING_MIN && {
                 crowded.window = window;
@@ -2186,7 +2197,9 @@ impl Agent for Native {
                     self.patience.tool
                 };
                 let key = call_key(name, &input);
-                let blocked = if ending.is_some() {
+                let blocked = if io.parking() {
+                    Some(PARKED_CALL.to_string())
+                } else if ending.is_some() {
                     Some("not run: the turn ended because this call kept failing".to_string())
                 } else {
                     match repeats.as_mut() {
@@ -2409,6 +2422,8 @@ impl Agent for Native {
 }
 
 const ROLLING_MIN: usize = 4;
+
+const PARKED_CALL: &str = "not run: the server restarted before this call started; run it again if you still need it";
 
 const ROLLING_PROMPT: &str = "The conversation is nearly out of room, so the older part is being folded into a summary; the most recent messages are kept as they are. Summarise everything above, including any earlier summary, so you can carry on from the summary and the recent messages. \
 Keep: what the user asked for, decisions made and why, what is done, what is left, the state of any work in progress, \
