@@ -3403,6 +3403,7 @@ fn skipping_the_onboarding_closes_it_and_it_stays_closed() {
     let rig = onboarding_rig();
     let mut h = harness(rig.url.clone());
     until(&mut h, "the onboarding", |h| h.state().onboarding_open());
+    h.run_steps(30);
     click_label(&mut h, "skip for now");
     assert!(!h.state().onboarding_open());
     until(&mut h, "it is saved", |_| rig.store.setting("onboarding").unwrap().as_deref() == Some("skipped"));
