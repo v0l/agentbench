@@ -789,6 +789,27 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_with_files_that_cannot_be_deleted_is_not_left_looking_like_a_checkout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        testing::repo(&main);
+        let wt = add_worktree(&main, "e2e", None).unwrap();
+        let vol = wt.join("docker-data");
+        std::fs::create_dir_all(&vol).unwrap();
+        std::fs::write(vol.join("pg.db"), "x").unwrap();
+        std::fs::set_permissions(&vol, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let e = remove_worktree(&main, &wt, true);
+        std::fs::set_permissions(&vol, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let e = e.unwrap_err();
+        assert!(e.contains("docker-data/pg.db"), "{e}");
+        assert!(!wt.join(".git").exists(), "no half checkout");
+        let note = std::fs::read_to_string(wt.join(NOT_REMOVED_NOTE)).unwrap();
+        assert!(note.contains("docker-data/pg.db"), "{note}");
+        assert_eq!(worktrees(&main).unwrap().len(), 1, "git forgot the worktree");
+    }
+
+    #[test]
     fn worktree_lifecycle_against_a_real_repo() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("r");

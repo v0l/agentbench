@@ -664,6 +664,10 @@ pub fn autopilot_text(a: &agentbench_core::AutopilotState) -> String {
     } else if let Some(p) = &a.pressure {
         out.push_str(&format!("\nhost pressure: off{}", lsp_text(p)));
     }
+    if !a.kept_worktrees.is_empty() {
+        out.push('\n');
+        out.push_str(crate::worktree_sweep::kept_text(&a.kept_worktrees, 50).trim_end());
+    }
     out
 }
 

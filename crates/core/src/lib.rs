@@ -2502,6 +2502,20 @@ pub struct AutopilotState {
     pub activity: Vec<Activity>,
     #[serde(default)]
     pub pressure: Option<HostPressure>,
+    #[serde(default)]
+    pub kept_worktrees: Vec<KeptWorktree>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct KeptWorktree {
+    pub project_id: Id,
+    #[serde(default)]
+    pub project: String,
+    pub path: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub why: String,
 }
 
 impl AutopilotState {

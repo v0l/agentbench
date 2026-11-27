@@ -38,6 +38,7 @@ pub mod titles;
 pub mod tools;
 pub mod triage;
 pub mod tui;
+pub mod worktree_sweep;
 pub mod voice;
 
 pub use agent_native::{fold, http};
