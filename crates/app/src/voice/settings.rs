@@ -44,6 +44,7 @@ pub struct Settings {
     pub duplex_key: String,
     pub duplex_voice: String,
     pub duplex_replies: bool,
+    pub duplex_free: bool,
     pub duplex_speak_first: bool,
     pub duplex_local: bool,
     pub duplex_path: String,
@@ -94,6 +95,7 @@ pub struct DuplexModel {
     pub key: String,
     pub voice: String,
     pub speak_first: bool,
+    pub free: bool,
 }
 
 pub const DEFAULT_TALK_KEY: &str = "F9";
@@ -129,6 +131,7 @@ impl Default for Settings {
             duplex_key: String::new(),
             duplex_voice: String::new(),
             duplex_replies: false,
+            duplex_free: true,
             duplex_speak_first: false,
             duplex_local: false,
             duplex_path: String::new(),
@@ -193,6 +196,7 @@ impl Settings {
         s.duplex_key = st.get_string("voice_duplex_key").unwrap_or_default();
         s.duplex_voice = st.get_string("voice_duplex_voice").unwrap_or_default();
         s.duplex_replies = st.get_string("voice_duplex_says").as_deref() == Some("1");
+        s.duplex_free = st.get_string("voice_duplex_free").as_deref() != Some("0");
         s.duplex_speak_first = st.get_string("voice_duplex_speak_first").as_deref() == Some("1");
         s.duplex_local = st.get_string("voice_duplex_choice").as_deref() == Some("haru");
         s.duplex_path = st.get_string("voice_duplex_path").unwrap_or_default();
@@ -243,6 +247,7 @@ impl Settings {
         st.set_string("voice_duplex_key", self.duplex_key.clone());
         st.set_string("voice_duplex_voice", self.duplex_voice.clone());
         st.set_string("voice_duplex_says", if self.duplex_replies { "1" } else { "0" }.into());
+        st.set_string("voice_duplex_free", if self.duplex_free { "1" } else { "0" }.into());
         st.set_string("voice_duplex_speak_first", if self.duplex_speak_first { "1" } else { "0" }.into());
         st.set_string("voice_duplex_choice", if self.duplex_local { "haru" } else { "" }.into());
         st.set_string("voice_duplex_path", self.duplex_path.clone());
@@ -278,6 +283,7 @@ impl Settings {
             key: self.duplex_key.trim().to_string(),
             voice: self.duplex_voice.trim().to_string(),
             speak_first: self.duplex_speak_first,
+            free: self.duplex_free,
         })
     }
 
@@ -605,8 +611,22 @@ mod tests {
                 key: "k".into(),
                 voice: "/tmp/me.wav".into(),
                 speak_first: true,
+                free: true,
             })
         );
+    }
+
+    #[test]
+    fn haru_replies_in_its_own_words_by_default_and_relay_is_kept() {
+        use eframe::Storage;
+        assert!(Settings::default().duplex_free);
+        let mut m = Mem::default();
+        assert!(Settings::load(Some(&m)).duplex_free, "a device that never saved it gets free mode");
+        Settings { duplex_free: false, ..Default::default() }.save(&mut m);
+        assert_eq!(m.get_string("voice_duplex_free").as_deref(), Some("0"));
+        assert!(!Settings::load(Some(&m)).duplex_free);
+        let s = Settings { duplex_url: "http://gpu:8080".into(), duplex_voice: "/me.wav".into(), duplex_free: false, ..Default::default() };
+        assert!(!s.duplex().unwrap().free);
     }
 
     #[test]

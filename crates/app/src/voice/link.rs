@@ -124,6 +124,10 @@ impl Link {
         self.shared.unmuted.store(true, Ordering::Relaxed);
     }
 
+    pub fn mute(&self) {
+        self.shared.unmuted.store(false, Ordering::Relaxed);
+    }
+
     pub fn muted_frames(&self) -> u64 {
         self.shared.muted.load(Ordering::Relaxed)
     }

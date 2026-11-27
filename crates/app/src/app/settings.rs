@@ -944,16 +944,26 @@ pub(super) fn duplex_section(
         if sp.duplex_local || remote {
             toggle_row(
                 ui,
-                "replies in its voice",
-                "On: the supervisor's replies are spoken by the duplex model, which is often hard to follow. Off: they are read aloud by text to speech, and the model only listens and backchannels.",
-                &mut sp.duplex_replies,
+                "Haru replies in its own words",
+                "On: the model answers you itself in a calm voice, its words are shown in the chat, and the supervisor's replies stay on screen as text. Your speech still goes to the supervisor as a turn. Off: relay, the model stays silent unless it is given words to say.",
+                &mut sp.duplex_free,
             );
-            toggle_row(
-                ui,
-                "model speaks first",
-                "On: the model may greet you before you say anything. Off: nothing it says is played until you speak or a reply is sent to it.",
-                &mut sp.duplex_speak_first,
-            );
+            if !sp.duplex_free {
+                toggle_row(
+                    ui,
+                    "replies in its voice",
+                    "On: the supervisor's replies are spoken by the duplex model, which is often hard to follow. Off: they are read aloud by text to speech, and the model stays silent.",
+                    &mut sp.duplex_replies,
+                );
+            }
+            if sp.duplex_free {
+                toggle_row(
+                    ui,
+                    "model speaks first",
+                    "On: the model may greet you before you say anything. Off: nothing it says is played until you speak.",
+                    &mut sp.duplex_speak_first,
+                );
+            }
             row_help(
                 ui,
                 "voice clip",

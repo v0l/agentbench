@@ -152,6 +152,7 @@ pub enum Out {
     Interrupted,
     Heard(String),
     Notice(String),
+    Words(String),
 }
 
 #[derive(Default)]
@@ -166,6 +167,9 @@ impl Bridge {
     }
     pub fn close(&mut self) {}
     pub fn active(&self) -> bool {
+        false
+    }
+    pub fn free(&self) -> bool {
         false
     }
     pub fn conn(&self) -> Conn {

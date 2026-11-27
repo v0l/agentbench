@@ -582,6 +582,7 @@ fn the_real_model_loads_answers_with_sound_and_frees_its_gpu() {
     assert!(sent >= 140, "{sent}");
     assert!(sound > pulled / 4, "frames came back with sound: {sound} of {pulled}");
     assert!(speech_like(&heard), "what was played is not speech like: {heard:?}");
+    h.state_mut().voice_test_speech().duplex_free = false;
     h.state_mut().voice_test_speech().duplex_replies = true;
     let sid = h.state().supervisor_chat().unwrap();
     h.state_mut().voice_test_send("what are the workers doing");
@@ -632,18 +633,90 @@ fn the_local_voice_settings_fit_at_both_sizes() {
         h.run_steps(2);
         until(&mut h, "the settings", |h| h.state().settings_loaded() == Some(true));
         h.run_steps(4);
-        h.get_by_label("replies in its voice").scroll_to_me();
+        h.get_by_label("Haru replies in its own words").scroll_to_me();
         h.run_steps(4);
         let shown = texts(&h);
         for want in ["Haru-4B (local)", "model found in", "loads on GPU 1 (Test card 1): it has the most free memory, 90.0 GB", "engine: inference-bench-server 0.0.0-fake"] {
             assert!(shown.contains(want), "{tag}: {want} is missing");
         }
-        for label in ["replies in its voice", "model speaks first", "record again", "unload after"] {
+        for label in ["Haru replies in its own words", "model speaks first", "record again", "unload after"] {
             let r = h.get_by_label(label).rect();
             assert!(r.right() <= size[0] && r.left() >= 0.0, "{label} runs off a {tag} screen: {r:?}");
         }
         shot(&mut h, &format!("engine-settings-{tag}"));
     }
+}
+
+#[test]
+#[ignore = "needs the real engine and model in AGENTBENCH_REAL_ENGINE and AGENTBENCH_REAL_MODEL, Whisper in AGENTBENCH_MODELS, on a free GPU"]
+fn the_real_model_in_free_mode_answers_a_spoken_question_in_words() {
+    let (program, model) = real_engine().expect("AGENTBENCH_REAL_ENGINE and AGENTBENCH_REAL_MODEL");
+    let models = PathBuf::from(std::env::var("AGENTBENCH_MODELS").expect("AGENTBENCH_MODELS"));
+    let rig = rig_with_models(vec![agent("glib", REPLY)], models.clone());
+    supervisor(&rig);
+    let mut h = app(&rig, [1280.0, 800.0]);
+    if let Ok(c) = std::env::var("AGENTBENCH_REAL_CLIP") {
+        h.state_mut().voice_test_speech().duplex_voice = c;
+    }
+    h.state_mut().voice_test_speech().model = "whisper-base.en".into();
+    assert!(h.state().voice_test_settings().duplex_free, "free mode is the default");
+    h.state_mut().voice_test_real_engine(&program, &model, real_gpu());
+    h.state_mut().open_supervisor();
+    let t = Instant::now();
+    while !h.state().voice_test_duplex_on() {
+        assert!(t.elapsed() < Duration::from_secs(300), "no ready: {:?}", h.state().voice_test_notice());
+        h.step();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let sid = h.state().supervisor_chat().unwrap();
+    let question = std::env::var("AGENTBENCH_REAL_QUESTION").ok().map(|p| std::fs::read(p).unwrap());
+    let (pcm, rate) = agentbench::voice::read_wav(question.as_deref().unwrap_or(include_bytes!("fixtures/voice/ask.wav"))).unwrap();
+    let asked = pcm.len() as f32 / rate as f32;
+    let mut ask = agentbench::voice::to_whisper_rate(&pcm, rate);
+    ask.extend(vec![0.0005f32; agentbench::voice::RATE as usize * 14]);
+    let block = agentbench::voice::RATE as usize / 50;
+    let start = Instant::now();
+    let mut next_pull = Instant::now();
+    let mut played = Vec::new();
+    for (i, chunk) in ask.chunks(block).enumerate() {
+        let due = start + Duration::from_millis(20 * i as u64);
+        while Instant::now() < due {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        h.state_mut().voice_test_hear(chunk);
+        h.step();
+        if Instant::now() >= next_pull {
+            next_pull += Duration::from_millis(133);
+            played.extend(h.state().voice_test_duplex_pull().unwrap());
+        }
+    }
+    let cut = ((asked * 24_000.0) as usize).min(played.len());
+    let reply = played[cut..].to_vec();
+    if let Ok(out) = std::env::var("AGENTBENCH_REAL_PLAYED") {
+        std::fs::write(&out, agentbench::voice::wav_bytes(&played, 24_000)).unwrap();
+    }
+    let mut whisper = agent_voice::speech::Transcriber::new(models);
+    whisper.load("whisper-base.en").unwrap();
+    let heard = whisper.transcribe(&agentbench::voice::to_whisper_rate(&played, 24_000)).unwrap();
+    let after = whisper.transcribe(&agentbench::voice::to_whisper_rate(&reply, 24_000)).unwrap();
+    let text = h.state().haru_words(sid);
+    let turns = h.state().transcript_talk(sid);
+    eprintln!("asked {asked:.1} s, played {:.1} s, {:?}", played.len() as f32 / 24_000.0, sound_of(&played, 24_000));
+    eprintln!("Whisper on all Haru played: {heard:?}");
+    eprintln!("Whisper on Haru after the question: {after:?}");
+    eprintln!("Haru's text stream: {text:?}");
+    eprintln!("chat: {turns:?}");
+    assert!(h.state().voice_test_duplex_says().is_empty(), "free mode sends no say");
+    assert!(turns.iter().any(|l| l.starts_with("user: ")), "the spoken question reached the supervisor: {turns:?}");
+    let words = |s: &str| -> Vec<String> {
+        s.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).filter(|w| !w.is_empty()).collect()
+    };
+    let streamed: Vec<String> = text.iter().flat_map(|(_, t)| words(t)).collect();
+    let spoken = words(&heard);
+    let matched = streamed.iter().filter(|w| spoken.contains(w)).count();
+    eprintln!("{matched} of {} streamed words heard by Whisper", streamed.len());
+    assert!(!streamed.is_empty(), "Haru said nothing");
+    assert!(streamed.len() < 3 || matched * 2 >= streamed.len(), "what was played does not say what Haru wrote: {heard:?} against {streamed:?}");
 }
 
 fn hold_an_engine() {
