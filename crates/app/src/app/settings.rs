@@ -1118,6 +1118,14 @@ pub(super) fn speech_section(
         }
         row_help(
             ui,
+            "language",
+            "The language you speak, as a code such as en. Sent with every take so Whisper cannot guess another language from noise. Empty lets Whisper guess.",
+            |ui| {
+                field(ui, &mut sp.language, "en");
+            },
+        );
+        row_help(
+            ui,
             "hold to talk",
             "Hold the speak button while you talk and let go to send. Slide off the button to cancel. Off: tap to start, and it stops when you go quiet.",
             |ui| {

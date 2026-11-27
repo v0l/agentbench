@@ -1,5 +1,6 @@
 pub const NO_SPEECH_THRESHOLD: f32 = 0.6;
 pub const LOGPROB_THRESHOLD: f32 = -1.0;
+pub const COMPRESSION_RATIO_THRESHOLD: f32 = 2.4;
 
 pub fn not_speech(no_speech: f32, avg_logprob: f32) -> bool {
     no_speech > NO_SPEECH_THRESHOLD && avg_logprob < LOGPROB_THRESHOLD
@@ -15,6 +16,19 @@ pub fn sound_tag(text: &str) -> bool {
 
 pub fn no_words(text: &str) -> bool {
     !text.chars().any(char::is_alphanumeric)
+}
+
+pub fn repetition_loop(text: &str) -> bool {
+    use std::io::Write;
+    let bytes = text.trim().as_bytes();
+    if bytes.len() < 24 {
+        return false;
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    if z.write_all(bytes).is_err() {
+        return false;
+    }
+    z.finish().is_ok_and(|c| bytes.len() as f32 / c.len().max(1) as f32 > COMPRESSION_RATIO_THRESHOLD)
 }
 
 pub fn silence_phrase(text: &str) -> bool {
@@ -117,6 +131,17 @@ const SUBTITLE_CREDITS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repetition_loop_is_caught_and_ordinary_sentences_are_not() {
+        let looped = format!("Продолжение {}", "а ".repeat(220));
+        let stutter = "а".repeat(444);
+        assert!(repetition_loop(&looped));
+        assert!(repetition_loop(&stutter));
+        for t in ["yes", "Stop.", "please open the parser file and fix the failing test in the lexer module", "ご視聴ありがとうございました"] {
+            assert!(!repetition_loop(t), "{t:?}");
+        }
+    }
 
     #[test]
     fn whisper_calls_it_silence_only_when_both_defaults_agree() {

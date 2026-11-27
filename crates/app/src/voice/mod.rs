@@ -102,6 +102,7 @@ pub fn sounds_like_noise(text: &str, voiced: f32, scores: Option<Scores>, settin
     voiced < settings.min_speech_secs
         || scores.is_some_and(|s| noise::not_speech(s.no_speech, s.avg_logprob))
         || noise::sound_tag(text)
+        || noise::repetition_loop(text)
         || (voiced < settings.short_take_secs && noise::silence_phrase(text))
 }
 
@@ -424,6 +425,9 @@ mod tests {
         assert!(!sounds_like_noise("Thank you.", 2.5, sure, &s), "a long take may really say it");
         assert!(!sounds_like_noise("Yes.", 0.44, sure, &s));
         assert!(!sounds_like_noise("Stop.", 0.34, None, &s));
+        assert!(sounds_like_noise("ご視聴ありがとうございました", 1.5, sure, &s));
+        assert!(sounds_like_noise(&"а".repeat(444), 12.0, sure, &s));
+        assert!(!sounds_like_noise("止めて", 0.5, sure, &s));
         let off = Settings { min_speech_secs: 0.0, short_take_secs: 0.0, ..Default::default() };
         assert!(!sounds_like_noise("you", 0.06, None, &off), "both lengths are the user's");
     }

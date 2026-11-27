@@ -26,6 +26,7 @@ pub struct Settings {
     pub key: String,
     /// Sent as `model`. Servers that serve one model ignore it, OpenAI wants `whisper-1`.
     pub server_model: String,
+    pub language: String,
     /// The voice replies are read aloud in, one of the server's voice names (`Hadley`). The
     /// agentbench server speaks them.
     pub reply_voice: String,
@@ -55,6 +56,7 @@ pub struct Settings {
     pub engine_program: String,
 }
 
+pub const DEFAULT_LANGUAGE: &str = "en";
 pub const LOCAL_DUPLEX: &str = "Haru-4B";
 pub const LOCAL: bool = cfg!(not(any(target_os = "android", target_arch = "wasm32")));
 pub const DEFAULT_ENGINE_IDLE_SECS: u64 = 600;
@@ -113,6 +115,7 @@ impl Default for Settings {
             url: String::new(),
             key: String::new(),
             server_model: String::new(),
+            language: DEFAULT_LANGUAGE.into(),
             reply_voice: agent_voice::voice::DEFAULT_SPOKEN_VOICE.into(),
             hold_to_talk: cfg!(target_os = "android"),
             auto_send: cfg!(target_os = "android"),
@@ -197,6 +200,7 @@ impl Settings {
         s.url = st.get_string("voice_url").unwrap_or_default();
         s.key = st.get_string("voice_key").unwrap_or_default();
         s.server_model = st.get_string("voice_server_model").unwrap_or_default();
+        s.language = st.get_string("voice_language").unwrap_or_else(|| DEFAULT_LANGUAGE.into());
         s.duplex_url = st.get_string("voice_duplex_url").unwrap_or_default();
         s.duplex_model = st.get_string("voice_duplex_model").unwrap_or_default();
         s.duplex_key = st.get_string("voice_duplex_key").unwrap_or_default();
@@ -234,6 +238,7 @@ impl Settings {
         st.set_string("voice_url", self.url.clone());
         st.set_string("voice_key", self.key.clone());
         st.set_string("voice_server_model", self.server_model.clone());
+        st.set_string("voice_language", self.language.clone());
         st.set_string("voice_reply", self.reply_voice.clone());
         st.set_string("voice_hold", if self.hold_to_talk { "1" } else { "0" }.into());
         st.set_string("voice_auto_send", if self.auto_send { "1" } else { "0" }.into());

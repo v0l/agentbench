@@ -528,9 +528,13 @@ impl Voice {
                     Reason::Open(voiced) => {
                         let _ = tx.send(match said {
                             Ok((t, scores)) if super::sounds_like_noise(&t, voiced, scores, &settings) => {
+                                eprintln!("agentbench: ignored take voiced={voiced:.2}s scores={scores:?} text={t:.80?}");
                                 Event::Ignored
                             }
-                            Ok((t, _)) => Event::Text(t),
+                            Ok((t, scores)) => {
+                                eprintln!("agentbench: sent take voiced={voiced:.2}s scores={scores:?} text={t:.80?}");
+                                Event::Text(t)
+                            }
                             Err(e) => Event::Failed(e),
                         });
                     }
@@ -747,16 +751,20 @@ fn read_on_server(settings: &Settings, pcm: &[f32]) -> Result<(String, Option<Sc
         settings.server_model.trim().to_string()
     };
     let key = settings.key.trim().to_string();
+    let language = settings.language.trim().to_string();
     crate::runtime().block_on(async {
         let file = reqwest::multipart::Part::bytes(wav)
             .file_name("speech.wav")
             .mime_str("audio/wav")
             .map_err(|e| e.to_string())?;
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .part("file", file)
             .text("model", model)
             // Words only: a server that cannot do verbose_json still answers this.
             .text("response_format", "json");
+        if !language.is_empty() {
+            form = form.text("language", language);
+        }
         let mut req = crate::client::http().post(&url).multipart(form);
         if !key.is_empty() {
             req = req.bearer_auth(key);
@@ -851,6 +859,8 @@ mod tests {
         assert!(sent.to_lowercase().contains("authorization: bearer sekret"));
         assert!(sent.contains("multipart/form-data"));
         assert!(sent.contains("name=\"model\""));
+        assert!(sent.contains("name=\"language\""), "the language is always sent");
+        assert!(sent.contains("\r\n\r\nen\r\n"), "english by default");
         assert!(sent.contains("RIFF"));
     }
 
