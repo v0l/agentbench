@@ -1,7 +1,7 @@
 //! A Whisper model on disc, fetched once and kept loaded between takes.
 
 use super::download::Progress;
-use super::whisper::{Files, Whisper, best_device};
+use super::whisper::{Files, Reading, Whisper, best_device};
 use crate::voice::model;
 use std::path::{Path, PathBuf};
 
@@ -62,6 +62,11 @@ impl Transcriber {
     pub fn transcribe(&mut self, pcm: &[f32]) -> Result<String, String> {
         let (_, model, _) = self.loaded.as_mut().ok_or("no speech model is loaded")?;
         model.transcribe(pcm)
+    }
+
+    pub fn read(&mut self, pcm: &[f32]) -> Result<Reading, String> {
+        let (_, model, _) = self.loaded.as_mut().ok_or("no speech model is loaded")?;
+        model.read(pcm)
     }
 }
 

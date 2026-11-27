@@ -24,8 +24,14 @@ fn main() -> Result<(), String> {
     let on = t.load(&id)?;
     println!("{id} loaded on {on} in {:?}", start.elapsed());
     let start = std::time::Instant::now();
-    let text = t.transcribe(&pcm)?;
+    let reading = t.read(&pcm)?;
     println!("{:.1}s of audio read in {:?}", pcm.len() as f64 / 16_000.0, start.elapsed());
-    println!("{text}");
+    println!(
+        "no_speech {:.3} avg_logprob {:.3} not_speech {}",
+        reading.no_speech,
+        reading.avg_logprob,
+        reading.not_speech()
+    );
+    println!("{}", reading.text);
     Ok(())
 }

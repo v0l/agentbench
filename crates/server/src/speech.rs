@@ -8,7 +8,7 @@
 //! first time it is asked for and stays loaded after, on the GPU when this build has CUDA and the
 //! machine has a card.
 
-use agent_voice::speech::{DEFAULT_MODEL, Transcriber, model};
+use agent_voice::speech::{DEFAULT_MODEL, Reading, Transcriber, model};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -74,6 +74,10 @@ impl Speech {
     /// Read 16 kHz mono samples, fetching and loading `id` first if need be. Returns the text and
     /// the device it ran on.
     pub async fn read(&self, id: &str, pcm: Vec<f32>) -> Result<(String, &'static str), String> {
+        self.read_scored(id, pcm).await.map(|(r, on)| (r.text, on))
+    }
+
+    pub async fn read_scored(&self, id: &str, pcm: Vec<f32>) -> Result<(Reading, &'static str), String> {
         let have = self.inner.lock().unwrap_or_else(|e| e.into_inner()).installed(id);
         if !have {
             let _one_at_a_time = self.fetching.lock().await;
@@ -102,7 +106,7 @@ impl Speech {
             let mut t = inner.lock().unwrap_or_else(|e| e.into_inner());
             let on = t.load(&id)?;
             *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(on.to_string());
-            t.transcribe(&pcm).map(|text| (text, on))
+            t.read(&pcm).map(|r| (r, on))
         })
         .await
         .map_err(|e| e.to_string())?

@@ -9,6 +9,12 @@ use std::time::Duration;
 
 const ASK: &[u8] = include_bytes!("fixtures/voice/ask.wav");
 const BARGE: &[u8] = include_bytes!("fixtures/voice/barge.wav");
+const SILENCE: &[u8] = include_bytes!("fixtures/voice/silence.wav");
+const CLAP: &[u8] = include_bytes!("fixtures/voice/clap.wav");
+const BREATH: &[u8] = include_bytes!("fixtures/voice/breath.wav");
+const COUGH: &[u8] = include_bytes!("fixtures/voice/cough.wav");
+const YES: &[u8] = include_bytes!("fixtures/voice/yes.wav");
+const STOP: &[u8] = include_bytes!("fixtures/voice/stop.wav");
 
 fn models_dir() -> Option<PathBuf> {
     static CPU_SPEECH: std::sync::Once = std::sync::Once::new();
@@ -158,13 +164,22 @@ fn the_talk_key_holds_to_talk_and_toggles_with_the_microphone() {
 }
 
 fn hands_free_chat(rig: &Rig, sink: agentbench::voice::Sink, size: [f32; 2]) -> (Harness<'static, agentbench::App>, SessionId) {
+    hands_free_chat_with(rig, sink, size, "whisper-base.en")
+}
+
+fn hands_free_chat_with(
+    rig: &Rig,
+    sink: agentbench::voice::Sink,
+    size: [f32; 2],
+    model: &str,
+) -> (Harness<'static, agentbench::App>, SessionId) {
     let mut h = harness_cfg(
         vec![
             ("url".into(), rig.url.clone()),
             ("voice_converse".into(), "1".into()),
             ("voice_hands_free".into(), "1".into()),
             ("voice_mode".into(), "agentbench".into()),
-            ("voice_model".into(), "whisper-base.en".into()),
+            ("voice_model".into(), model.into()),
         ],
         Cfg { size, ..Cfg::default() },
     );
@@ -217,6 +232,77 @@ fn hands_free_starts_a_take_when_you_speak_and_the_words_reach_the_supervisor() 
         assert!(ask.to_lowercase().contains("running"), "{ask}");
         assert!(h.state().hands_free_on(), "the microphone stays open after the take");
     }
+}
+
+#[test]
+fn hands_free_ignores_noise_and_still_sends_a_short_word() {
+    let Some(models) = models_dir() else {
+        eprintln!("skipped: no speech models on this machine");
+        return;
+    };
+    let mut whispers = vec!["whisper-base.en"];
+    if models.join("whisper-large-v3-turbo/model.safetensors").is_file() {
+        whispers.push("whisper-large-v3-turbo");
+    }
+    let rig = rig_with_models(vec![six_sentence_agent("glib")], models);
+    six_sentence_supervisor(&rig);
+    let noises: [(&str, &[u8]); 4] = [("silence", SILENCE), ("clap", CLAP), ("breath", BREATH), ("cough", COUGH)];
+    let words: [(&str, &[u8]); 2] = [("yes", YES), ("stop", STOP)];
+    for model in whispers {
+        let (mut h, sid) = hands_free_chat_with(&rig, agentbench::voice::Sink::Headphones, [1280.0, 800.0], model);
+        until(&mut h, "the microphone to open", |h| h.state().hands_free_on());
+        h.state_mut().voice_test_hear(&room(2.0));
+        h.run_steps(3);
+        let before = h.state().transcript_talk(sid).iter().filter(|l| l.starts_with("user: ")).count();
+        let turns = |h: &Harness<'_, agentbench::App>| {
+            h.state().transcript_talk(sid).into_iter().filter(|l| l.starts_with("user: ")).skip(before).collect::<Vec<_>>()
+        };
+        for (name, wav) in noises {
+            let seen = h.state().voice_test_ignored_count();
+            h.state_mut().voice_test_hear(&clip(wav));
+            if name == "silence" {
+                h.run_steps(20);
+                assert!(!h.state().voice_test_in_speech(), "{model}: silence is not speech");
+            } else {
+                until(&mut h, "the take to be ignored", |h| {
+                    assert_eq!(turns(h), Vec::<String>::new(), "{model}: {name} was sent as words");
+                    h.state().voice_test_ignored_count() > seen
+                });
+                assert_eq!(h.state().talk_state(), Some(agentbench::voice::IGNORED));
+            }
+            h.run_steps(20);
+            assert_eq!(turns(&h), Vec::<String>::new(), "{model}: {name} was sent as words");
+            if name == "clap" && model == "whisper-base.en" {
+                until_label(&mut h, "hands free listening");
+                shot(&mut h, "hands-free-ignored-1280");
+            }
+            assert!(h.state().hands_free_on(), "{model}: the microphone stays open after {name}");
+        }
+        let seen = h.state().voice_test_ignored_count();
+        for (n, (name, wav)) in words.into_iter().enumerate() {
+            h.state_mut().voice_test_hear(&clip(wav));
+            until(&mut h, "the spoken word", |h| {
+                assert_eq!(h.state().voice_test_ignored_count(), seen, "{model}: {name} was ignored as noise");
+                turns(h).len() > n
+            });
+            let said = turns(&h)[n].to_lowercase();
+            assert!(said.contains(name), "{model}: {said}");
+        }
+    }
+}
+
+#[test]
+fn the_ignored_noise_chip_fits_a_phone() {
+    let rig = rig_with(vec![six_sentence_agent("glib")]);
+    six_sentence_supervisor(&rig);
+    let (mut h, _) = hands_free_chat(&rig, agentbench::voice::Sink::Headphones, [390.0, 844.0]);
+    until(&mut h, "the microphone to open", |h| h.state().hands_free_on());
+    h.state_mut().voice_test_ignored();
+    h.run_steps(4);
+    assert_eq!(h.state().talk_state(), Some(agentbench::voice::IGNORED));
+    let chip = h.get_by_label("hands free listening");
+    assert!(chip.rect().right() <= 390.0, "the chip runs off a phone");
+    shot(&mut h, "hands-free-ignored-390");
 }
 
 #[test]

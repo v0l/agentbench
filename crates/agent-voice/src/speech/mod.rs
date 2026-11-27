@@ -20,4 +20,4 @@ pub use download::Progress;
 pub use speaker::{MAX_SECONDS, Said, Speaker};
 pub use transcriber::Transcriber;
 pub use voicer::Voicer;
-pub use whisper::{Files, Whisper, best_device};
+pub use whisper::{Files, Reading, Whisper, best_device};

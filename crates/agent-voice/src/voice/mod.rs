@@ -6,6 +6,7 @@ pub mod audio;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod client;
 pub mod models;
+pub mod noise;
 
 pub use audio::{SPEECH_RATE, chunks, read_wav, resample, speakable, to_whisper_rate, wav_bytes};
 #[cfg(not(target_arch = "wasm32"))]
@@ -14,3 +15,4 @@ pub use models::{
     DEFAULT_MODEL, DEFAULT_SPOKEN_VOICE, DEFAULT_VOICE, LOCAL_MODELS, ModelInfo, VOICES, Voice,
     model,
 };
+pub use noise::not_speech;

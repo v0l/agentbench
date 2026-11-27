@@ -1235,6 +1235,30 @@ pub(super) fn speech_section(
             );
             row_help(
                 ui,
+                "shortest speech",
+                "A hands free take with less voice than this is ignored as noise, never sent. 0.25 s is the shortest speech Silero's voice detector counts. 0 to 2.",
+                |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut sp.min_speech_secs, crate::voice::MIN_SPEECH_RANGE)
+                            .suffix(" s")
+                            .step_by(0.05),
+                    );
+                },
+            );
+            row_help(
+                ui,
+                "short take",
+                "A hands free take shorter than this that reads only as a phrase Whisper invents for silence (\"you\", \"thank you\") is ignored. 0 to 10.",
+                |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut sp.short_take_secs, crate::voice::SHORT_TAKE_RANGE)
+                            .suffix(" s")
+                            .step_by(0.5),
+                    );
+                },
+            );
+            row_help(
+                ui,
                 "listening through",
                 "What the sound plays through, when this machine cannot tell. Asked the first time hands free starts.",
                 |ui| {

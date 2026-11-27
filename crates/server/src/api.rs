@@ -236,9 +236,9 @@ async fn transcribe(
     let pcm = agent_voice::voice::audio::to_whisper_rate(&pcm, rate);
     let id = api.speech.pick(&asked);
     let started = std::time::Instant::now();
-    let (text, on) = api
+    let (reading, on) = api
         .speech
-        .read(&id, pcm.clone())
+        .read_scored(&id, pcm.clone())
         .await
         .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     tracing::info!(
@@ -246,7 +246,11 @@ async fn transcribe(
         pcm.len() as f32 / agent_voice::voice::audio::SPEECH_RATE as f32,
         started.elapsed().as_secs_f32()
     );
-    Ok(Json(json!({ "text": text })))
+    Ok(Json(json!({
+        "text": reading.text,
+        "no_speech_prob": reading.no_speech,
+        "avg_logprob": reading.avg_logprob,
+    })))
 }
 
 #[derive(Deserialize)]
