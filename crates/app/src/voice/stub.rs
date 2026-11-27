@@ -34,6 +34,7 @@ impl Voice {
         false
     }
     pub fn set_tap(&mut self, _: bool) {}
+    pub fn set_discard(&mut self, _: bool) {}
     pub fn take_tapped(&mut self) -> (Vec<f32>, u32) {
         (Vec::new(), super::RATE)
     }

@@ -900,6 +900,12 @@ impl App {
             );
             let visible = ui.clip_rect().expand2(Vec2::new(0.0, OVERSCAN));
             let haru = self.haru_words(s.id);
+            let first = messages.first().map_or(i64::MAX, |m| m.created_at);
+            for (at, words) in &haru {
+                if *at < first {
+                    haru_line(ui, words);
+                }
+            }
             for (i, m) in messages.iter().enumerate() {
                 let until = messages.get(i + 1).map_or(i64::MAX, |n| n.created_at);
                 let spoken: Vec<&str> = haru

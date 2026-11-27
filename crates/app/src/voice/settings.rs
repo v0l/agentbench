@@ -48,6 +48,7 @@ pub struct Settings {
     pub duplex_voice: String,
     pub duplex_replies: bool,
     pub duplex_free: bool,
+    pub duplex_haru_only: bool,
     pub duplex_speak_first: bool,
     pub duplex_local: bool,
     pub duplex_path: String,
@@ -135,6 +136,7 @@ impl Default for Settings {
             duplex_voice: String::new(),
             duplex_replies: false,
             duplex_free: true,
+            duplex_haru_only: true,
             duplex_speak_first: false,
             duplex_local: false,
             duplex_path: String::new(),
@@ -207,6 +209,7 @@ impl Settings {
         s.duplex_voice = st.get_string("voice_duplex_voice").unwrap_or_default();
         s.duplex_replies = st.get_string("voice_duplex_says").as_deref() == Some("1");
         s.duplex_free = st.get_string("voice_duplex_free").as_deref() != Some("0");
+        s.duplex_haru_only = st.get_string("voice_duplex_haru_only").as_deref() != Some("0");
         s.duplex_speak_first = st.get_string("voice_duplex_speak_first").as_deref() == Some("1");
         s.duplex_local = st.get_string("voice_duplex_choice").as_deref() == Some("haru");
         s.duplex_path = st.get_string("voice_duplex_path").unwrap_or_default();
@@ -261,6 +264,7 @@ impl Settings {
         st.set_string("voice_duplex_voice", self.duplex_voice.clone());
         st.set_string("voice_duplex_says", if self.duplex_replies { "1" } else { "0" }.into());
         st.set_string("voice_duplex_free", if self.duplex_free { "1" } else { "0" }.into());
+        st.set_string("voice_duplex_haru_only", if self.duplex_haru_only { "1" } else { "0" }.into());
         st.set_string("voice_duplex_speak_first", if self.duplex_speak_first { "1" } else { "0" }.into());
         st.set_string("voice_duplex_choice", if self.duplex_local { "haru" } else { "" }.into());
         st.set_string("voice_duplex_path", self.duplex_path.clone());
@@ -284,6 +288,10 @@ impl Settings {
         (self.duplex_local || !self.duplex_url.trim().is_empty()) && self.duplex_voice.trim().is_empty()
     }
 
+    pub fn haru_only(&self) -> bool {
+        self.duplex_haru_only && (self.duplex_local || !self.duplex_url.trim().is_empty())
+    }
+
     pub fn duplex_gpu(&self) -> Option<u32> {
         self.duplex_gpu.trim().parse().ok()
     }
@@ -296,7 +304,7 @@ impl Settings {
             key: self.duplex_key.trim().to_string(),
             voice: self.duplex_voice.trim().to_string(),
             speak_first: self.duplex_speak_first,
-            free: self.duplex_free,
+            free: self.duplex_free || self.duplex_haru_only,
         })
     }
 
@@ -663,8 +671,27 @@ mod tests {
         Settings { duplex_free: false, ..Default::default() }.save(&mut m);
         assert_eq!(m.get_string("voice_duplex_free").as_deref(), Some("0"));
         assert!(!Settings::load(Some(&m)).duplex_free);
-        let s = Settings { duplex_url: "http://gpu:8080".into(), duplex_voice: "/me.wav".into(), duplex_free: false, ..Default::default() };
+        let s = Settings { duplex_url: "http://gpu:8080".into(), duplex_voice: "/me.wav".into(), duplex_free: false, duplex_haru_only: false, ..Default::default() };
         assert!(!s.duplex().unwrap().free);
+    }
+
+    #[test]
+    fn haru_only_is_the_default_with_a_voice_model_and_a_saved_off_is_kept() {
+        let mut m = Mem::default();
+        assert!(Settings::load(Some(&m)).duplex_haru_only, "a device that never saved it gets Haru only");
+        let legacy = Settings { duplex_local: true, ..Settings::load(Some(&m)) };
+        assert!(legacy.haru_only());
+        let off = Settings { duplex_haru_only: false, duplex_local: true, ..Default::default() };
+        off.save(&mut m);
+        let back = Settings::load(Some(&m));
+        assert!(!back.duplex_haru_only && !back.haru_only());
+        let on = Settings { duplex_haru_only: true, duplex_local: true, ..Default::default() };
+        on.save(&mut m);
+        assert!(Settings::load(Some(&m)).haru_only());
+        let none = Settings { duplex_haru_only: true, ..Default::default() };
+        assert!(!none.haru_only(), "no voice model, nothing to keep");
+        let remote = Settings { duplex_url: "http://gpu:8080".into(), duplex_voice: "/me.wav".into(), duplex_free: false, duplex_haru_only: true, ..Default::default() };
+        assert!(remote.duplex().unwrap().free, "Haru only always talks for itself");
     }
 
     #[test]

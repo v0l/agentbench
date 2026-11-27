@@ -75,6 +75,7 @@ pub struct Voice {
     quiet_stop: Option<f32>,
     speech_started: bool,
     tap: Option<(Vec<f32>, u32)>,
+    discard: bool,
     recording: bool,
 }
 
@@ -92,6 +93,7 @@ impl Default for Voice {
             quiet_stop: None,
             speech_started: false,
             tap: None,
+            discard: false,
             recording: false,
         }
     }
@@ -159,6 +161,10 @@ impl Voice {
         if on != self.tap.is_some() {
             self.tap = on.then(|| (Vec::new(), RATE));
         }
+    }
+
+    pub fn set_discard(&mut self, on: bool) {
+        self.discard = on;
     }
 
     pub fn take_tapped(&mut self) -> (Vec<f32>, u32) {
@@ -418,6 +424,9 @@ impl Voice {
             take.heard_speech = false;
             take.cancelled = 0;
             take.tapped = 0;
+            if self.discard {
+                return;
+            }
             if voiced < settings.min_speech_secs {
                 let _ = self.tx.send(Event::Ignored);
                 return;
