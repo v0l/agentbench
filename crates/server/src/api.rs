@@ -3500,7 +3500,7 @@ mod tests {
         keep("restart_settings", &restart);
         let _: agentbench_core::RestartSettings = serde_json::from_value(restart).unwrap();
         keep("request_restart", &json!({"drain_secs": 0}));
-        keep("restarted", &json!(agentbench_core::Restarted { waited: 2, finished: 1, interrupted: 1, restarting: true }));
+        keep("restarted", &json!(agentbench_core::Restarted { waited: 2, finished: 1, interrupted: 1, restarting: true, ..Default::default() }));
         let _: Vec<agentbench_core::PullRequest> = serde_json::from_value(pulls).unwrap();
         let overview: agentbench_core::Overview = serde_json::from_value(overview).unwrap();
         assert_eq!(overview.api_version, agentbench_core::API_VERSION);

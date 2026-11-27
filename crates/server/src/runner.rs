@@ -117,12 +117,16 @@ pub struct Runner {
     draining: Arc<std::sync::atomic::AtomicBool>,
     held: Arc<Mutex<()>>,
     drained: Arc<tokio::sync::Mutex<Option<agentbench_core::Restarted>>>,
+    parked: Arc<Mutex<Vec<SessionId>>>,
     pub(crate) relaunch: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) restart: Arc<Notify>,
 }
 
 const HELD_SETTING: &str = "restart_held";
 const INTERRUPTED_SETTING: &str = "restart_interrupted";
+const PARKED_SETTING: &str = "restart_parked";
+const DRAINING_SETTING: &str = "restart_draining";
+const CARRY_ON_NOTICE: &str = "the server restarted; carrying on from the last tool call";
 const WIND_DOWN: Duration = Duration::from_secs(10);
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -199,6 +203,7 @@ impl Runner {
             draining: Default::default(),
             held: Default::default(),
             drained: Default::default(),
+            parked: Default::default(),
             relaunch: Default::default(),
             restart: Default::default(),
         };
@@ -1033,10 +1038,23 @@ impl Runner {
     }
 
     pub fn resume(&self, sessions: &[SessionId]) {
-        let mut all: Vec<SessionId> = sessions.to_vec();
-        for id in self.take_setting::<SessionId>(INTERRUPTED_SETTING) {
+        let _ = self.store.delete_setting(DRAINING_SETTING);
+        let interrupted = self.take_setting::<SessionId>(INTERRUPTED_SETTING);
+        let parked: Vec<SessionId> = self
+            .take_setting::<SessionId>(PARKED_SETTING)
+            .into_iter()
+            .filter(|id| !interrupted.contains(id))
+            .collect();
+        let mut all: Vec<SessionId> = sessions.iter().copied().filter(|id| !parked.contains(id)).collect();
+        for id in interrupted {
             if !all.contains(&id) {
                 all.push(id);
+            }
+        }
+        for id in &parked {
+            let Ok(session) = self.store.session(*id) else { continue };
+            if let Err(e) = self.carry_on(&session) {
+                tracing::warn!("could not carry on the parked turn of {id}: {}", e.0);
             }
         }
         crate::process::restarted(&self.store, all.len());
@@ -1107,6 +1125,7 @@ impl Runner {
 
     pub async fn drain(&self, limit: Duration, except: Option<SessionId>) -> agentbench_core::Restarted {
         self.draining.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.store.set_setting(DRAINING_SETTING, &crate::store::now().to_string());
         self.changed.notify_waiters();
         let busy = |id: &SessionId| self.store.session(*id).is_ok_and(|s| s.status.busy());
         let waited: Vec<SessionId> =
@@ -1120,6 +1139,14 @@ impl Runner {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let cut = left();
+        let parked: Vec<SessionId> = {
+            let all = self.parked_turns();
+            waited.iter().copied().filter(|id| all.contains(id) && !cut.contains(id)).collect()
+        };
+        let carried: Vec<SessionId> = self.parked_turns().clone();
+        if !carried.is_empty() {
+            let _ = self.store.set_setting(PARKED_SETTING, &serde_json::to_string(&carried).unwrap_or_default());
+        }
         let mut resumed = cut.clone();
         if let Some(me) = except {
             resumed.push(me);
@@ -1146,10 +1173,20 @@ impl Runner {
         self.changed.notify_waiters();
         agentbench_core::Restarted {
             waited: waited.len(),
-            finished: waited.len() - cut.len(),
+            finished: waited.len() - cut.len() - parked.len(),
             interrupted: cut.len(),
             restarting: false,
+            parked,
+            cut,
         }
+    }
+
+    fn parked_turns(&self) -> std::sync::MutexGuard<'_, Vec<SessionId>> {
+        self.parked.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn carry_on(&self, session: &Session) -> Result<(), StoreError> {
+        self.dispatch(session, Mode::Chat, |_| Some(Message::default()))
     }
 
     fn send_text(&self, session: &Session, msg: Message, mode: Mode) -> Result<(), StoreError> {
@@ -1278,7 +1315,8 @@ impl Runner {
             runner.not_sent(session_id, "the turn ended first", left);
         }
         runner.changed.notify_waiters();
-        if ran {
+        let parked = runner.parked_turns().contains(&session_id);
+        if ran && !parked {
             if let Ok(done) = runner.store.session(session_id)
                 && done.status == SessionStatus::Idle
             {
@@ -1286,7 +1324,7 @@ impl Runner {
             }
             runner.tell_watchers(session_id);
         }
-        if runner.store.session(session_id).is_ok_and(|s| s.status == SessionStatus::Idle) {
+        if !parked && runner.store.session(session_id).is_ok_and(|s| s.status == SessionStatus::Idle) {
             let _ = runner.deliver_deferred(session_id);
         }
     }
@@ -1581,7 +1619,9 @@ impl Runner {
             .into_iter()
             .map(|m| m.entry)
             .collect();
+        let carrying_on = mode == Mode::Chat && msg.text.is_empty() && msg.attachments.is_empty();
         let entry = match mode {
+            Mode::Chat if carrying_on => Entry::Notice { text: CARRY_ON_NOTICE.into() },
             Mode::Chat => msg.entry(),
             Mode::Compact => Entry::Notice { text: "compacting the conversation".into() },
         };
@@ -1661,7 +1701,7 @@ impl Runner {
                 raw: agent.writes_log(),
                 prompt: msg.attachments.clone(),
                 from: msg.from.clone(),
-                typed: (mode == Mode::Chat).then_some(prompt_row.id),
+                typed: (mode == Mode::Chat && !carrying_on).then_some(prompt_row.id),
                 ..SinkState::default()
             }),
             stop: stop.clone(),
@@ -1679,6 +1719,10 @@ impl Runner {
         if stop.is_cancelled() {
             sink.entry(Entry::Notice { text: "stopped".into() });
             return SessionStatus::Stopped;
+        }
+        if sink.lock().parked {
+            self.parked_turns().push(session.id);
+            return SessionStatus::Running;
         }
         if mode == Mode::Compact && result.is_ok() && !errored {
             let text = std::mem::take(&mut sink.lock().captured);
@@ -1800,6 +1844,7 @@ struct SinkState {
     thinking: Option<(Id, String)>,
     tools: HashMap<String, (Id, serde_json::Value)>,
     errored: bool,
+    parked: bool,
     progress: crate::agent::progress::Watchdog,
 }
 
@@ -2234,8 +2279,16 @@ impl Io for Sink {
             Event::Error(text) => {
                 self.entry(Entry::Error { text });
             }
+            Event::Parked => {
+                self.flush();
+                self.lock().parked = true;
+            }
             Event::Done => self.flush(),
         }
+    }
+
+    fn parking(&self) -> bool {
+        !self.lock().capture && self.runner.draining()
     }
 
     fn stop(&self) -> &CancellationToken {
@@ -5450,7 +5503,10 @@ mod deferred_tests {
             started(&r, &r.boss_log).await;
             let done = r.runner.drain(Duration::from_millis(500), None).await;
             assert_eq!((done.waited, done.finished, done.interrupted), (2, 1, 1), "{done:?}");
-            assert_eq!(done.summary(), "waited for 2 running turns: 1 finished, 1 interrupted by the restart");
+            assert_eq!(
+                done.summary(),
+                format!("waited for 2 running turns: 1 finished, 0 parked at a tool boundary, 1 interrupted by the restart; interrupted: {}", r.boss.id)
+            );
             assert!(notices(&r, r.boss.id).iter().any(|n| n.contains("interrupted by the server restart")));
             assert_eq!(r.store.session(r.worker.id).unwrap().status, SessionStatus::Idle);
             r.boss.id
