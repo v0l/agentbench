@@ -42,9 +42,11 @@ const LATER: i64 = 120_000;
 #[test]
 fn an_item_older_than_a_minute_shows_in_the_pending_block_oldest_first() {
     let w = world();
-    let at = crate::store::now();
     delivered(&w.store, w.boss.id, "user", None, "where is the thing");
     delivered(&w.store, w.boss.id, "check_in", Some(w.worker.id), "check on it");
+    let open = w.store.open_items(w.boss.id).unwrap();
+    let newest = open.iter().map(|i| i.delivered_at).max().unwrap();
+    let at = crate::store::now().max(newest);
     assert_eq!(pending_block(&w.store, w.boss.id, at), "", "fresh items are not listed");
     let block = pending_block(&w.store, w.boss.id, at + LATER);
     assert!(block.starts_with("<pending>") && block.ends_with("</pending>"), "{block}");
