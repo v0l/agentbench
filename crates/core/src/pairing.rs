@@ -4,16 +4,21 @@
 const SCHEME: &str = "agentbench://pair";
 
 /// Where a server is and the token that lets a window in.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pairing {
     pub url: String,
     pub token: String,
+    pub name: String,
 }
 
 impl Pairing {
     /// The link, for a QR code or to paste.
     pub fn link(&self) -> String {
-        format!("{SCHEME}?url={}&token={}", escape(self.url.trim()), escape(self.token.trim()))
+        let link = format!("{SCHEME}?url={}&token={}", escape(self.url.trim()), escape(self.token.trim()));
+        match self.name.trim() {
+            "" => link,
+            name => format!("{link}&name={}", escape(name)),
+        }
     }
 
     /// Reads a link made by [`Pairing::link`]. Anything else, or a link missing either part, is
@@ -22,17 +27,18 @@ impl Pairing {
         let text = text.trim();
         let query = text.strip_prefix(SCHEME)?;
         let query = query.strip_prefix('?')?;
-        let (mut url, mut token) = (None, None);
+        let (mut url, mut token, mut name) = (None, None, String::new());
         for pair in query.split('&') {
             let (k, v) = pair.split_once('=')?;
             match k {
                 "url" => url = Some(unescape(v)?),
                 "token" => token = Some(unescape(v)?),
+                "name" => name = unescape(v)?,
                 _ => {}
             }
         }
         let (url, token) = (url?, token?);
-        (!url.trim().is_empty() && !token.trim().is_empty()).then_some(Pairing { url, token })
+        (!url.trim().is_empty() && !token.trim().is_empty()).then_some(Pairing { url, token, name })
     }
 }
 
@@ -73,7 +79,7 @@ mod tests {
     #[test]
     fn a_link_carries_the_address_and_token_and_reads_back() {
         let p =
-            Pairing { url: "https://agentbench.harkin.network".into(), token: "a/b+c=d&e".into() };
+            Pairing { url: "https://agentbench.harkin.network".into(), token: "a/b+c=d&e".into(), name: String::new() };
         let link = p.link();
         assert!(
             link.starts_with(
@@ -98,5 +104,15 @@ mod tests {
         let p = Pairing::parse("  agentbench://pair?token=t&url=http%3A%2F%2F10.0.0.2%3A7420\n")
             .unwrap();
         assert_eq!((p.url.as_str(), p.token.as_str()), ("http://10.0.0.2:7420", "t"));
+    }
+
+    #[test]
+    fn a_named_link_carries_the_workspace_name() {
+        let p = Pairing { url: "http://10.0.0.2:7420".into(), token: "t".into(), name: "build box".into() };
+        let link = p.link();
+        assert!(link.ends_with("&name=build%20box"), "{link}");
+        assert_eq!(Pairing::parse(&link), Some(p));
+        let old = Pairing::parse("agentbench://pair?url=http%3A%2F%2Fx&token=t").unwrap();
+        assert_eq!(old.name, "");
     }
 }

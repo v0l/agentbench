@@ -236,10 +236,12 @@ impl App {
                     row(ui, "name", |ui| {
                         field(ui, &mut w.name, "workstation");
                     });
-                    row_help(ui, "address", "Where that server listens.", |ui| {
-                        field(ui, &mut w.url, "https://agentbench.example.com");
+                    row_help(ui, "address", "Where that server listens, or the link `agentbench-server connect` prints there.", |ui| {
+                        if field(ui, &mut w.url, "https://agentbench.example.com").changed() {
+                            w.take_link();
+                        }
                     });
-                    row_help(ui, "token", "Printed by `agentbench token` on that machine.", |ui| {
+                    row_help(ui, "token", "Printed by `agentbench-server connect` on that machine.", |ui| {
                         secret(ui, &mut w.token);
                     });
                     row_help(ui, "icon", "Optional. Path to a small image file.", |ui| {

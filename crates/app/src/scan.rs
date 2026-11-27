@@ -95,6 +95,7 @@ mod tests {
         let link = agentbench_core::pairing::Pairing {
             url: "https://agentbench.harkin.network".into(),
             token: "k3Y/with+odd=chars".into(),
+            ..Default::default()
         }
         .link();
         let code = qrcode_rows(&link);

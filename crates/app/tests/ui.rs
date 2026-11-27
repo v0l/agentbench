@@ -1119,7 +1119,7 @@ fn a_pairing_survives_a_process_killed_without_saving() {
     let mut first = pairing_app(file.clone());
     first.run_steps(2);
     assert_eq!(first.state().settings_loaded(), Some(false), "nothing paired yet");
-    let link = agentbench_core::pairing::Pairing { url: rig.url.clone(), token: TOKEN.into() };
+    let link = agentbench_core::pairing::Pairing { url: rig.url.clone(), token: TOKEN.into(), ..Default::default() };
     let ctx = first.ctx.clone();
     first.state_mut().pair(&ctx, link);
     until(&mut first, "the overview", |h| h.state().overview().is_some());
@@ -4160,6 +4160,26 @@ fn wait_for_slot(h: &mut Harness<'_, App>, slot: u32) {
             o.projects.iter().any(|p| agentbench::hub::slot_of(p.id) == slot && p.name == "demo")
         })
     });
+}
+
+#[test]
+fn pasting_a_connect_link_into_add_workspace_fills_the_form_in_one_go() {
+    let (first, second) = (rig(), rig());
+    let mut h = harness(first.url.clone());
+    until(&mut h, "the overview", |h| h.state().overview().is_some());
+    h.state_mut().open_add_workspace_form();
+    h.run_steps(3);
+    let link = agentbench_core::pairing::Pairing { url: second.url.clone(), token: TOKEN.into(), name: "i9 box".into() }.link();
+    h.get_by_label("https://agentbench.example.com").click();
+    h.run_steps(2);
+    h.event(egui::Event::Paste(link));
+    h.run_steps(3);
+    h.get_by_label("add").click();
+    h.run_steps(3);
+    let names = h.state().server_names();
+    assert!(names.iter().any(|(_, n)| n == "i9 box"), "{names:?}");
+    let (slot, _) = names.iter().find(|(_, n)| n == "i9 box").cloned().unwrap();
+    wait_for_slot(&mut h, slot);
 }
 
 #[test]
