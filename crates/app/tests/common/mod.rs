@@ -251,6 +251,7 @@ fn shared_gpu_setup() -> eframe::egui_wgpu::WgpuSetup {
             let mut setup = egui_kittest::wgpu::default_wgpu_setup();
             if let eframe::egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
                 new.instance_descriptor.flags = eframe::egui_wgpu::wgpu::InstanceFlags::empty();
+                new.instance_descriptor.backends = eframe::egui_wgpu::wgpu::Backends::VULKAN;
             }
             let state = egui_kittest::wgpu::create_render_state(setup, eframe::egui_wgpu::RendererOptions::PREDICTABLE);
             eframe::egui_wgpu::WgpuSetupExisting {
