@@ -237,22 +237,10 @@ fn hold_gpu_lock() {
     });
 }
 
-pub fn share_one_device() {
-    SHARE_ONE_DEVICE.store(true, std::sync::atomic::Ordering::SeqCst);
-}
-
-static SHARE_ONE_DEVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn share_one_device() {}
 
 pub fn gpu_setup() -> eframe::egui_wgpu::WgpuSetup {
-    if SHARE_ONE_DEVICE.load(std::sync::atomic::Ordering::SeqCst) {
-        return shared_gpu_setup();
-    }
-    hold_gpu_lock();
-    let mut setup = egui_kittest::wgpu::default_wgpu_setup();
-    if let eframe::egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
-        new.instance_descriptor.flags = eframe::egui_wgpu::wgpu::InstanceFlags::empty();
-    }
-    setup
+    shared_gpu_setup()
 }
 
 fn shared_gpu_setup() -> eframe::egui_wgpu::WgpuSetup {
