@@ -524,7 +524,7 @@ impl StoreApi {
             "restarting": true,
             "running_turns": running,
             "drain_secs": limit,
-            "note": "the server waits for the running turns (up to drain_secs), then restarts; this turn ends with it and resumes afterwards with how many turns finished and how many were interrupted. End your turn now.",
+            "note": "the server lets running turns finish their current tool call and parks them there (a call still running after drain_secs is interrupted), then restarts; this turn ends with it and resumes afterwards with which turns finished, were parked or were interrupted. End your turn now.",
         }))
     }
 

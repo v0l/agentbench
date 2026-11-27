@@ -4679,7 +4679,7 @@ fn the_settings_restart_the_server_after_asking_and_fit_a_phone() {
         h.run_steps(2);
         until(&mut h, "the restart settings", |h| h.state().settings_restart().is_some());
         h.run_steps(3);
-        assert_eq!(h.state().settings_restart().unwrap().drain_secs, 120);
+        assert_eq!(h.state().settings_restart().unwrap().drain_secs, 600);
         let tag = size[0] as u32;
         h.get_by_label("restart server").scroll_to_me();
         h.run_steps(3);
@@ -4693,7 +4693,7 @@ fn the_settings_restart_the_server_after_asking_and_fit_a_phone() {
         h.get_by_label("yes, restart").click();
         let addr = rig.url.trim_start_matches("http://").to_string();
         until(&mut h, "the server to stop for the restart", |_| std::net::TcpStream::connect(&addr).is_err());
-        assert_eq!(rig.store.setting("restart_drain_secs").unwrap().as_deref(), Some("120"));
+        assert_eq!(rig.store.setting("restart_drain_secs").unwrap().as_deref(), Some("600"));
     }
 }
 

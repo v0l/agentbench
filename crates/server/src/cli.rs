@@ -250,7 +250,7 @@ pub enum Command {
     },
     /// Restart the server once no turn is running, or once the drain limit passes.
     Restart {
-        /// Seconds to wait for running turns; default the `restart_drain_secs` setting (120).
+        /// Seconds a tool call may still run before it is interrupted; default the `restart_drain_secs` setting (600).
         #[arg(long)]
         drain_secs: Option<u64>,
     },

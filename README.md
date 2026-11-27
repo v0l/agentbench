@@ -63,12 +63,16 @@ Data lives in `$AGENTBENCH_HOME` (default `~/.local/share/agentbench`):
 
 ### Restarting without cutting turns
 
-When the server is told to stop (SIGTERM, which `systemctl stop` and `systemctl restart`
-send, or Ctrl-C) it stops starting new turns and lets the running ones finish, for up to
-`restart_drain_secs` (120 by default, set under **settings**). A message sent meanwhile
-waits and starts after the restart. A turn still running at the limit is stopped, and when
-the server is back it is resumed with the note "The server restarted at HH:MM; continue
-where you left off". A second signal stops at once.
+When the server drains for a restart it starts no new turns and no new tool calls. Each
+running turn finishes the tool call it is in, then is parked at that boundary: its output
+is kept and, once the server is back, the turn carries on from there with no restart
+prompt. A message sent meanwhile waits and starts after the restart. Only a tool call that
+is still running after `restart_drain_secs` (600 by default, set under **settings**) is
+interrupted; that turn resumes with the note "The server restarted at HH:MM; continue
+where you left off". Agents other than the built in one have no tool boundary to park at,
+so their turns are waited for and cut at the same limit. On SIGTERM under systemd
+(`systemctl stop`) the wait is capped at 20 seconds so it ends inside the unit's stop
+timeout. A second signal stops at once.
 
 To restart, use the command rather than `systemctl restart`:
 
@@ -77,27 +81,23 @@ agentbench-server restart                # waits for running turns, then restart
 agentbench-server restart --drain-secs 30
 ```
 
-It prints how many turns it waited for, how many finished and how many it interrupted.
-The **restart server** key under settings does the same, and the supervisor has a
+It prints how many turns it waited for, how many finished, which were parked and which
+were interrupted. The **restart server** key under settings does the same, and the supervisor has a
 `restart_server` tool that asks you first unless you switch it on in settings. Under
-systemd the server exits with code 75 and systemd starts it again; elsewhere it runs
-itself again in place.
-
-The systemd user unit needs `TimeoutStopSec` at least the drain plus 30 seconds, or
-systemd kills the turns before they finish, and `Restart=on-failure` so the exit code 75
-brings it back:
+systemd the server parks the turns, then exits with code 75 by itself and systemd starts
+it again; elsewhere it runs itself again in place. Because the server exits on its own,
+the drain does not depend on `TimeoutStopSec`, and the usual unit works as it is:
 
 ```ini
 [Service]
 ExecStart=%h/.cargo/bin/agentbench-server --listen 0.0.0.0:7420 serve
 Restart=on-failure
 RestartSec=3
-KillMode=mixed
-TimeoutStopSec=150
+KillMode=control-group
+TimeoutStopSec=30
 ```
 
-`KillMode=mixed` sends SIGTERM to the server only, so the agents it runs keep working
-through the drain; whatever is left gets SIGKILL when the timeout passes.
+`Restart=on-failure` is what brings it back after the exit code 75.
 
 ## Remote workspace with Docker
 

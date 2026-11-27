@@ -536,7 +536,7 @@ impl App {
         {
             c.set_restart_settings(r);
             c.restart_server(r.drain_secs);
-            self.notice = Some((true, format!("the server restarts once running turns finish, up to {} s", r.drain_secs)));
+            self.notice = Some((true, format!("the server restarts once running turns reach their next tool boundary; a tool call is cut after {} s", r.drain_secs)));
         }
         if let Some(start) = clip_action {
             match self.voice_clip(ctx, start) {
