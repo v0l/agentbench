@@ -202,7 +202,7 @@ pub fn router(api: Api) -> Router {
         .route("/v1/audio/status", get(audio_status))
         .route("/api/sessions/{id}/attachments/{file}", get(attachment))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_MAX))
-        .layer(tower_http::compression::CompressionLayer::new().gzip(true))
+        .layer(compression())
         .layer(middleware::from_fn_with_state(api.clone(), auth));
     Router::new()
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
@@ -260,6 +260,32 @@ struct SpeechRequest {
     response_format: String,
 }
 
+fn compression() -> tower_http::compression::CompressionLayer<
+    impl tower_http::compression::Predicate,
+> {
+    use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
+    tower_http::compression::CompressionLayer::new()
+        .gzip(true)
+        .compress_when(DefaultPredicate::new().and(NotForContentType::const_new("audio/")))
+}
+
+fn speech_body(rx: tokio::sync::mpsc::Receiver<Result<Vec<f32>, String>>) -> axum::body::Body {
+    use futures_util::StreamExt;
+    let frames = futures_util::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Some(Ok(pcm)) => {
+                Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(pcm_bytes(&pcm))), rx))
+            }
+            Some(Err(e)) => {
+                tracing::warn!("speech stopped part way: {e}");
+                None
+            }
+            None => None,
+        }
+    });
+    axum::body::Body::from_stream(frames.fuse())
+}
+
 fn pcm_bytes(samples: &[f32]) -> Vec<u8> {
     samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect()
 }
@@ -294,26 +320,13 @@ async fn speak(
             "streaming speech on the {on}, ready in {:.1}s",
             started.elapsed().as_secs_f32()
         );
-        let frames = futures_util::stream::unfold(rx, |mut rx| async move {
-            match rx.recv().await {
-                Some(Ok(pcm)) => {
-                    Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(pcm_bytes(&pcm))), rx))
-                }
-                // A failure part way ends the stream early; the headers are long gone.
-                Some(Err(e)) => {
-                    tracing::warn!("speech stopped part way: {e}");
-                    None
-                }
-                None => None,
-            }
-        });
         return Ok((
             [
                 (axum::http::header::CONTENT_TYPE, "audio/L16".to_string()),
                 (axum::http::HeaderName::from_static("x-sample-rate"), rate.to_string()),
                 (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
             ],
-            axum::body::Body::from_stream(frames),
+            speech_body(rx),
         )
             .into_response());
     }
@@ -1994,6 +2007,51 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("session {sid} never settled");
+    }
+
+    #[tokio::test]
+    async fn a_speech_stream_ends_cleanly_even_through_gzip() {
+        let app = Router::new()
+            .route(
+                "/s",
+                get(|| async {
+                    let (tx, rx) = tokio::sync::mpsc::channel(4);
+                    tokio::spawn(async move {
+                        for _ in 0..3 {
+                            tx.send(Ok(vec![0.25; 4800])).await.unwrap();
+                        }
+                    });
+                    ([(header::CONTENT_TYPE, "text/plain")], speech_body(rx))
+                }),
+            )
+            .layer(tower_http::compression::CompressionLayer::new().gzip(true));
+        let req = axum::http::Request::get("/s")
+            .header("accept-encoding", "gzip")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.headers()["content-encoding"], "gzip");
+        let gz = res.into_body().collect().await.unwrap().to_bytes();
+        let mut pcm = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&gz[..]), &mut pcm)
+            .expect("a whole gzip stream with its trailer");
+        assert_eq!(pcm.len(), 3 * 4800 * 2);
+    }
+
+    #[tokio::test]
+    async fn speech_is_sent_as_it_is_and_json_is_still_gzipped() {
+        let app = Router::new()
+            .route("/a", get(|| async { ([(header::CONTENT_TYPE, "audio/L16")], vec![0u8; 4096]) }))
+            .route("/j", get(|| async { Json(json!({ "text": "a".repeat(4096) })) }))
+            .layer(compression());
+        for (uri, gzipped) in [("/a", false), ("/j", true)] {
+            let req = axum::http::Request::get(uri)
+                .header("accept-encoding", "gzip")
+                .body(Body::empty())
+                .unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.headers().contains_key("content-encoding"), gzipped, "{uri}");
+        }
     }
 
     #[tokio::test]

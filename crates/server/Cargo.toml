@@ -62,6 +62,7 @@ agent-native = { workspace = true, features = ["testing"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+flate2 = "1"
 [[bin]]
 name = "agentbench-server"
 path = "src/main.rs"

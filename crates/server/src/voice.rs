@@ -160,9 +160,17 @@ impl Voice {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let mut v = inner.lock().unwrap_or_else(|e| e.into_inner());
-            let said = v.say(&text, &spoken, |c| tx.blocking_send(Ok(c.to_vec())).is_ok());
-            if let Err(e) = said {
-                let _ = tx.blocking_send(Err(e));
+            let said = v.say(&text, &spoken, |c| match tx.blocking_send(Ok(c.to_vec())) {
+                Ok(()) => true,
+                Err(_) => {
+                    tracing::warn!("speech stopped part way: the listener went away");
+                    false
+                }
+            });
+            if let Err(e) = said
+                && tx.blocking_send(Err(e.clone())).is_err()
+            {
+                tracing::warn!("speech failed after the listener went away: {e}");
             }
         });
         Ok((rate, self.on().unwrap_or_default(), rx))

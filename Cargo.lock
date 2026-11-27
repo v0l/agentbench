@@ -281,6 +281,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "flate2",
  "futures-util",
  "getrandom 0.3.4",
  "http-body-util",
