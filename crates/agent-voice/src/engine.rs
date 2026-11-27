@@ -15,6 +15,7 @@ pub const STOP_GRACE: Duration = Duration::from_secs(5);
 pub const PROGRAM: &str = "inference-bench-server";
 pub const INSTALL: &str = "cargo install --locked --git https://github.com/v0l/inference-bench inference-bench-server";
 pub const DUPLEX_MAX_CTX: usize = 4096;
+pub const MEDIA_JOBS: usize = 4;
 pub const KEY_ENV: &str = "INFERENCE_BENCH_API_KEYS";
 const LOG_TAIL: usize = 6;
 const CACHE_FOR: Duration = Duration::from_secs(5);
@@ -140,7 +141,7 @@ fn quoted(s: &str) -> String {
 
 pub fn config_toml(port: u16, models: &[ModelSpec]) -> String {
     let mut t = format!(
-        "bind = \"127.0.0.1:{port}\"\napi_keys_env = \"{KEY_ENV}\"\nlazy_load = false\nmax_loaded_models = {}\n\n[duplex]\nsessions_per_gpu = 1\nmax_ctx = {DUPLEX_MAX_CTX}\n",
+        "bind = \"127.0.0.1:{port}\"\napi_keys_env = \"{KEY_ENV}\"\nlazy_load = false\nmax_loaded_models = {}\n\n[duplex]\nsessions_per_gpu = 1\nmax_ctx = {DUPLEX_MAX_CTX}\n\n[images]\njobs_per_gpu = {MEDIA_JOBS}\nqueue_depth = 32\n",
         models.len().max(1)
     );
     for m in models {
@@ -715,6 +716,7 @@ mod tests {
         assert!(t.contains("bind = \"127.0.0.1:4100\""), "{t}");
         assert!(t.contains(&format!("api_keys_env = \"{KEY_ENV}\"")));
         assert!(t.contains("sessions_per_gpu = 1") && t.contains("max_ctx = 4096"));
+        assert!(t.contains("[images]\njobs_per_gpu = 4"), "a reading and a transcription run side by side: {t}");
         assert!(t.contains("max_loaded_models = 2"));
         assert_eq!(t.matches("[[models]]").count(), 2);
         assert!(t.contains("model = \"/m/Haru \\\"4B\\\"\""), "{t}");

@@ -24,6 +24,7 @@ pub struct Api {
     pub model: Option<crate::agent::native::Shared>,
     pub speech: crate::speech::Speech,
     pub voice: crate::voice::Voice,
+    pub engines: crate::engine::Engines,
 }
 
 pub struct Failure(StatusCode, String);
@@ -223,27 +224,37 @@ async fn transcribe(
     State(api): State<Api>,
     mut form: axum::extract::Multipart,
 ) -> Result<Json<serde_json::Value>, Failure> {
-    let (mut wav, mut asked) = (None, String::new());
+    let (mut wav, mut asked, mut extra) = (None, String::new(), Vec::new());
     while let Some(field) = form.next_field().await.map_err(|e| bad(e.to_string()))? {
-        match field.name().unwrap_or_default() {
+        match field.name().unwrap_or_default().to_string().as_str() {
             "file" => wav = Some(field.bytes().await.map_err(|e| bad(e.to_string()))?),
             "model" => asked = field.text().await.map_err(|e| bad(e.to_string()))?,
+            name @ ("language" | "prompt" | "temperature") => {
+                let v = field.text().await.map_err(|e| bad(e.to_string()))?;
+                extra.push((name.to_string(), v));
+            }
             _ => {}
         }
     }
     let wav = wav.ok_or_else(|| bad("the form has no file"))?;
     let (pcm, rate) = agent_voice::voice::audio::read_wav(&wav).map_err(bad)?;
     let pcm = agent_voice::voice::audio::to_whisper_rate(&pcm, rate);
-    let id = api.speech.pick(&asked);
     let started = std::time::Instant::now();
+    let seconds = pcm.len() as f32 / agent_voice::voice::audio::SPEECH_RATE as f32;
+    if api.engines.settings.backend == crate::engine::Backend::Engine {
+        let id = api.engines.pick(&asked);
+        let (h, _) = crate::audio::read(&api.engines, &id, &pcm, &extra).await.map_err(|(s, e)| Failure(s, e))?;
+        tracing::info!("read {seconds:.1}s of speech with {id} through the engine in {:.1}s", started.elapsed().as_secs_f32());
+        return Ok(Json(json!({ "text": h.text, "no_speech_prob": h.no_speech, "avg_logprob": h.avg_logprob })));
+    }
+    let id = api.speech.pick(&asked);
     let (reading, on) = api
         .speech
         .read_scored(&id, pcm.clone())
         .await
         .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     tracing::info!(
-        "read {:.1}s of speech with {id} on the {on} in {:.1}s",
-        pcm.len() as f32 / agent_voice::voice::audio::SPEECH_RATE as f32,
+        "read {seconds:.1}s of speech with {id} on the {on} in {:.1}s",
         started.elapsed().as_secs_f32()
     );
     Ok(Json(json!({
@@ -314,6 +325,12 @@ async fn speak(
     }
     let voice = req.voice.clone();
     let started = std::time::Instant::now();
+    if api.engines.settings.backend == crate::engine::Backend::Engine {
+        let stream = req.response_format.eq_ignore_ascii_case("pcm");
+        let res = crate::audio::speak(&api.engines, text, &voice, stream).await.map_err(|(s, e)| Failure(s, e))?;
+        tracing::info!("speech through the engine, first bytes in {:.1}s", started.elapsed().as_secs_f32());
+        return Ok(res);
+    }
     if req.response_format.eq_ignore_ascii_case("pcm") {
         let (rate, on, rx) = api
             .voice
@@ -352,6 +369,9 @@ async fn speak(
 /// Where the speech models run: the device a model loaded now would use, and what each is using
 /// once it has been used.
 async fn audio_status(State(api): State<Api>) -> Json<agentbench_core::AudioStatus> {
+    if api.engines.settings.backend == crate::engine::Backend::Engine {
+        return Json(crate::audio::status(&api.engines).await);
+    }
     let device = tokio::task::spawn_blocking(crate::voice::Voice::device).await.unwrap_or_default();
     Json(agentbench_core::AudioStatus {
         device,
@@ -363,6 +383,14 @@ async fn audio_status(State(api): State<Api>) -> Json<agentbench_core::AudioStat
 /// The speech to text models this server reads with, in OpenAI's `/v1/models` shape plus what a
 /// picker needs: `{"data": [{"id", "label", "size_mb", "installed", "default"}]}`.
 async fn speech_models(State(api): State<Api>) -> Json<serde_json::Value> {
+    if api.engines.settings.backend == crate::engine::Backend::Engine {
+        let (have, default) = (api.engines.whisper_installed(), api.engines.default_model());
+        let data: Vec<_> = agent_voice::voice::LOCAL_MODELS
+            .iter()
+            .map(|m| json!({ "id": m.0, "object": "model", "label": m.2, "size_mb": m.3, "installed": have.iter().any(|h| h == m.0), "default": m.0 == default }))
+            .collect();
+        return Json(json!({ "object": "list", "data": data }));
+    }
     let data: Vec<_> = api
         .speech
         .list()
@@ -376,6 +404,9 @@ async fn speech_models(State(api): State<Api>) -> Json<serde_json::Value> {
 
 /// The voices this server can speak in: `{"voices": [{"id", "label", "installed"}]}`.
 async fn voices(State(api): State<Api>) -> Json<serde_json::Value> {
+    if api.engines.settings.backend == crate::engine::Backend::Engine {
+        return Json(crate::audio::voices(&api.engines).await);
+    }
     if let Err(e) = api.voice.catalogue().await {
         tracing::warn!("could not fetch the voice catalogue: {e}");
     }
@@ -1927,6 +1958,16 @@ mod tests {
         repo: std::path::PathBuf,
     }
 
+    fn test_engines() -> crate::engine::Engines {
+        let dir = std::env::temp_dir().join(format!("agentbench-api-engines-{}", std::process::id()));
+        crate::engine::Engines::new(
+            crate::engine::Settings { backend: crate::engine::Backend::Candle, ..Default::default() },
+            dir.join("models"),
+            "whisper-base.en",
+            dir.join("engine"),
+        )
+    }
+
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let repo_path = dir.path().join("demo");
@@ -1956,6 +1997,7 @@ mod tests {
             model: None,
             speech: Default::default(),
             voice: Default::default(),
+            engines: test_engines(),
         };
         Fixture { app: router(api.clone()), api, _dir: dir, repo: repo_path }
     }
@@ -3048,6 +3090,7 @@ mod tests {
             model: None,
             speech: Default::default(),
             voice: Default::default(),
+            engines: test_engines(),
         };
         let app = router(api.clone());
         let (_, sess) = call(

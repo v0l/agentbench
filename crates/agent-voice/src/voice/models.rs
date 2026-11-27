@@ -83,6 +83,24 @@ pub fn model(id: &str) -> Option<&'static ModelInfo> {
     LOCAL_MODELS.iter().find(|m| m.0 == id)
 }
 
+pub const WHISPER_FILES: [&str; 5] =
+    ["config.json", "generation_config.json", "preprocessor_config.json", "tokenizer.json", "model.safetensors"];
+
+pub fn installed(models: &std::path::Path, id: &str) -> bool {
+    model(id).is_some_and(|m| ["config.json", "tokenizer.json", "model.safetensors"].iter().all(|f| models.join(m.0).join(f).is_file()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fetch(models: &std::path::Path, id: &str, progress: &dyn Fn(super::download::Progress<'_>)) -> Result<std::path::PathBuf, String> {
+    let m = model(id).ok_or_else(|| format!("{id} is not a speech model agentbench knows"))?;
+    let dir = models.join(m.0);
+    for file in WHISPER_FILES {
+        let url = format!("https://huggingface.co/{}/resolve/main/{file}", m.1);
+        super::download::get(&url, &dir.join(file), m.0, progress)?;
+    }
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
