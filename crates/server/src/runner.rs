@@ -5067,6 +5067,30 @@ mod deferred_tests {
     }
 
     #[tokio::test]
+    async fn a_worker_starting_a_chat_turn_closes_its_judge_item() {
+        let r = rig();
+        crate::ledger::delivered(&r.store, r.boss.id, "judge", Some(r.worker.id), "judge the worker");
+        let log_id = r.store.open_items(r.boss.id).unwrap()[0].log_id.unwrap();
+        r.runner.send(&r.worker, "carry on").unwrap();
+        started(&r, &r.worker_log).await;
+        assert!(r.store.open_items(r.boss.id).unwrap().is_empty());
+        let log = r.store.log_item(log_id).unwrap().unwrap();
+        assert_eq!((log.action.as_str(), log.outcome.as_str()), ("resumed", "worker resumed, judge on next turn end"));
+        idle(&r.runner, r.worker.id).await;
+    }
+
+    #[tokio::test]
+    async fn a_compaction_turn_leaves_the_judge_item_open() {
+        let r = rig();
+        crate::ledger::delivered(&r.store, r.boss.id, "judge", Some(r.worker.id), "judge the worker");
+        let prompt = Message { text: COMPACT_PROMPT.into(), ..Default::default() };
+        r.runner.send_text(&r.worker, prompt, Mode::Compact).unwrap();
+        started(&r, &r.worker_log).await;
+        idle(&r.runner, r.worker.id).await;
+        assert_eq!(r.store.open_items(r.boss.id).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_second_judge_request_for_a_judged_head_is_not_delivered_again() {
         let r = rig();
         r.store.set_setting(crate::ledger::HOLD_SETTING, "1").unwrap();
