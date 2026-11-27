@@ -91,11 +91,29 @@ pub fn choose_gpu(gpus: &[Gpu], picked: Option<u32>, need: u64) -> Result<(Gpu, 
     Ok((best.clone(), format!("it has the most free memory, {}", gb(best.free_mib))))
 }
 
+pub fn folder_problem(dir: &Path, name: &str) -> Option<String> {
+    if !dir.is_dir() {
+        return Some(format!("no folder at {}; download {name} there or pick its folder", dir.display()));
+    }
+    let missing: Vec<&str> =
+        ["config.json", "model.safetensors"].into_iter().filter(|f| !dir.join(f).is_file()).collect();
+    (!missing.is_empty()).then(|| format!("{} has no {}", dir.display(), missing.join(" and no ")))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelSpec {
     pub id: String,
     pub path: PathBuf,
     pub kind: String,
+    pub preload: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Host {
+    #[default]
+    Never,
+    Fallback,
+    Always,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,6 +121,17 @@ pub struct Plan {
     pub models: Vec<ModelSpec>,
     pub gpu: Option<u32>,
     pub program: String,
+    pub need_mib: u64,
+    pub host: Host,
+}
+
+pub fn route_of(kind: &str) -> Option<&'static str> {
+    match kind {
+        "duplex" => Some("/v1/duplex"),
+        "transcription" => Some("/v1/audio/transcriptions"),
+        "speech" => Some("/v1/audio/speech"),
+        _ => None,
+    }
 }
 
 fn quoted(s: &str) -> String {
@@ -116,9 +145,10 @@ pub fn config_toml(port: u16, models: &[ModelSpec]) -> String {
     );
     for m in models {
         t.push_str(&format!(
-            "\n[[models]]\nid = {}\nmodel = {}\npreload = true\n",
+            "\n[[models]]\nid = {}\nmodel = {}\npreload = {}\n",
             quoted(&m.id),
-            quoted(&m.path.display().to_string())
+            quoted(&m.path.display().to_string()),
+            m.preload
         ));
     }
     t
@@ -260,13 +290,17 @@ enum Load {
     Failed(String),
 }
 
-fn has_duplex(caps: &Value) -> bool {
-    caps["routes"].as_array().is_some_and(|r| r.iter().any(|r| r["path"] == "/v1/duplex"))
+fn missing_route<'a>(caps: &Value, models: &'a [ModelSpec]) -> Option<&'a str> {
+    let routes = caps["routes"].as_array().cloned().unwrap_or_default();
+    models
+        .iter()
+        .find(|m| route_of(&m.kind).is_some_and(|path| !routes.iter().any(|r| r["path"] == path)))
+        .map(|m| m.kind.as_str())
 }
 
 fn models_ready(listed: &Value, models: &[ModelSpec]) -> bool {
     let data = listed["data"].as_array().cloned().unwrap_or_default();
-    models.iter().all(|m| {
+    models.iter().filter(|m| m.preload).all(|m| {
         data.iter().any(|d| d["id"] == m.id.as_str() && d["type"] == m.kind.as_str() && d["loaded"] != false)
     })
 }
@@ -281,12 +315,14 @@ fn watch(port: u16, key: String, models: Vec<ModelSpec>, load: Arc<Mutex<Load>>,
         }
         if healthy && !capable {
             match get(port, "/v1/capabilities", &key) {
-                Ok((200, caps)) if has_duplex(&caps) => capable = true,
-                Ok((200, _)) => {
-                    return set(Load::Failed(format!(
-                        "this inference-bench-server cannot serve duplex models; update it with: {INSTALL}"
-                    )));
-                }
+                Ok((200, caps)) => match missing_route(&caps, &models) {
+                    None => capable = true,
+                    Some(kind) => {
+                        return set(Load::Failed(format!(
+                            "this inference-bench-server cannot serve {kind} models; update it with: {INSTALL}"
+                        )));
+                    }
+                },
                 Ok((401 | 403, _)) => return set(Load::Failed("the voice engine refused the key agentbench gave it".into())),
                 _ => {}
             }
@@ -305,7 +341,7 @@ struct Running {
     child: Child,
     port: u16,
     key: String,
-    gpu: Gpu,
+    gpu: Option<Gpu>,
     started: Instant,
     load: Arc<Mutex<Load>>,
     stop: Arc<AtomicBool>,
@@ -374,6 +410,12 @@ impl Drop for Engine {
 }
 
 impl Engine {
+    pub fn in_dir(dir: PathBuf) -> Engine {
+        let mut e = Engine::default();
+        e.dir = Some(dir);
+        e
+    }
+
     #[doc(hidden)]
     pub fn set_test(&mut self, dir: PathBuf, gpus: Vec<Gpu>) {
         self.dir = Some(dir);
@@ -382,13 +424,7 @@ impl Engine {
     }
 
     pub fn dir(&self) -> PathBuf {
-        if let Some(d) = &self.dir {
-            return d.clone();
-        }
-        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-        return agentbench_server::home().join("voice-engine");
-        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
-        return std::env::temp_dir().join("agentbench-voice-engine");
+        self.dir.clone().unwrap_or_else(|| std::env::temp_dir().join("agentbench-voice-engine"))
     }
 
     pub fn log_path(&self) -> PathBuf {
@@ -430,7 +466,11 @@ impl Engine {
     }
 
     pub fn gpu(&self) -> Option<&Gpu> {
-        self.running.as_ref().map(|r| &r.gpu)
+        self.running.as_ref().and_then(|r| r.gpu.as_ref())
+    }
+
+    pub fn on_host(&self) -> bool {
+        self.running.as_ref().is_some_and(|r| r.gpu.is_none())
     }
 
     pub fn endpoint(&self) -> Option<(String, String)> {
@@ -554,13 +594,20 @@ impl Engine {
 
     fn start(&mut self, plan: &Plan) -> Result<(), String> {
         for m in &plan.models {
-            if let Some(p) = super::model_problem(&m.path) {
+            if let Some(p) = folder_problem(&m.path, &m.id) {
                 return Err(p);
             }
         }
         let (program, _) = self.program(&plan.program)?;
-        let gpus = self.gpus()?;
-        let (gpu, _) = choose_gpu(&gpus, plan.gpu, NEED_MIB)?;
+        let gpu = match plan.host {
+            Host::Always => None,
+            Host::Never => Some(choose_gpu(&self.gpus()?, plan.gpu, plan.need_mib)?.0),
+            Host::Fallback => match self.gpus().and_then(|g| choose_gpu(&g, plan.gpu, plan.need_mib)) {
+                Ok((g, _)) => Some(g),
+                Err(_) if plan.gpu.is_none() => None,
+                Err(e) => return Err(e),
+            },
+        };
         let port = free_port()?;
         let key = random_key();
         let dir = self.dir();
@@ -573,13 +620,17 @@ impl Engine {
             .append(true)
             .open(&log_path)
             .map_err(|e| format!("{}: {e}", log_path.display()))?;
-        let _ = writeln!(log, "agentbench starts {} on GPU {} ({})", program.display(), gpu.index, gpu.name);
+        match &gpu {
+            Some(g) => writeln!(log, "agentbench starts {} on GPU {} ({})", program.display(), g.index, g.name),
+            None => writeln!(log, "agentbench starts {} on the CPU", program.display()),
+        }
+        .map_err(|e| format!("{}: {e}", log_path.display()))?;
         let log_from = log.metadata().map(|m| m.len()).unwrap_or(0);
         let err = log.try_clone().map_err(|e| e.to_string())?;
         let mut cmd = Command::new(&program);
         cmd.arg("--config")
             .arg(&config)
-            .env("CUDA_VISIBLE_DEVICES", gpu.index.to_string())
+            .env("CUDA_VISIBLE_DEVICES", gpu.as_ref().map(|g| g.index.to_string()).unwrap_or_default())
             .env("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
             .env(KEY_ENV, &key)
             .env("NO_COLOR", "1")
@@ -657,8 +708,8 @@ mod tests {
     #[test]
     fn the_config_loads_a_list_of_models_on_loopback_with_the_key_in_the_environment() {
         let models = vec![
-            ModelSpec { id: "Haru-4B".into(), path: "/m/Haru \"4B\"".into(), kind: "duplex".into() },
-            ModelSpec { id: "other".into(), path: "/m/other".into(), kind: "speech".into() },
+            ModelSpec { id: "Haru-4B".into(), path: "/m/Haru \"4B\"".into(), kind: "duplex".into(), preload: true },
+            ModelSpec { id: "other".into(), path: "/m/other".into(), kind: "speech".into(), preload: false },
         ];
         let t = config_toml(4100, &models);
         assert!(t.contains("bind = \"127.0.0.1:4100\""), "{t}");
@@ -667,6 +718,7 @@ mod tests {
         assert!(t.contains("max_loaded_models = 2"));
         assert_eq!(t.matches("[[models]]").count(), 2);
         assert!(t.contains("model = \"/m/Haru \\\"4B\\\"\""), "{t}");
+        assert!(t.contains("model = \"/m/other\"\npreload = false"), "{t}");
         assert!(!t.contains("api_keys ="), "no key is written to disk");
     }
 
@@ -717,12 +769,43 @@ mod tests {
 
     #[test]
     fn the_models_are_ready_when_each_is_listed_loaded_with_its_type() {
-        let m = vec![ModelSpec { id: "Haru-4B".into(), path: "/m".into(), kind: "duplex".into() }];
+        let m = vec![ModelSpec { id: "Haru-4B".into(), path: "/m".into(), kind: "duplex".into(), preload: true }];
         let listed = |ty: &str, loaded: bool| serde_json::json!({"data": [{"id": "Haru-4B", "type": ty, "loaded": loaded}]});
         assert!(models_ready(&listed("duplex", true), &m));
         assert!(!models_ready(&listed("duplex", false), &m));
         assert!(!models_ready(&listed("chat", true), &m));
-        assert!(has_duplex(&serde_json::json!({"routes": [{"path": "/v1/duplex"}]})));
-        assert!(!has_duplex(&serde_json::json!({"routes": [{"path": "/v1/chat/completions"}]})));
+        assert_eq!(missing_route(&serde_json::json!({"routes": [{"path": "/v1/duplex"}]}), &m), None);
+        assert_eq!(missing_route(&serde_json::json!({"routes": [{"path": "/v1/chat/completions"}]}), &m), Some("duplex"));
+    }
+
+    #[test]
+    fn speech_models_need_their_routes_and_only_the_preloaded_ones_must_be_loaded() {
+        let m = vec![
+            ModelSpec { id: "whisper-base.en".into(), path: "/w".into(), kind: "transcription".into(), preload: true },
+            ModelSpec { id: "whisper-small.en".into(), path: "/s".into(), kind: "transcription".into(), preload: false },
+            ModelSpec { id: "phonon".into(), path: "/p".into(), kind: "speech".into(), preload: true },
+        ];
+        let caps = serde_json::json!({"routes": [{"path": "/v1/audio/transcriptions"}]});
+        assert_eq!(missing_route(&caps, &m), Some("speech"));
+        let caps = serde_json::json!({"routes": [{"path": "/v1/audio/transcriptions"}, {"path": "/v1/audio/speech"}]});
+        assert_eq!(missing_route(&caps, &m), None);
+        let listed = serde_json::json!({"data": [
+            {"id": "whisper-base.en", "type": "transcription", "loaded": true},
+            {"id": "whisper-small.en", "type": "transcription", "loaded": false},
+            {"id": "phonon", "type": "speech", "loaded": true},
+        ]});
+        assert!(models_ready(&listed, &m));
+    }
+
+    #[test]
+    fn a_model_folder_says_plainly_what_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = folder_problem(dir.path(), "Haru-4B").unwrap();
+        assert!(p.contains("config.json") && p.contains("model.safetensors"), "{p}");
+        std::fs::write(dir.path().join("config.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("model.safetensors"), "").unwrap();
+        assert_eq!(folder_problem(dir.path(), "Haru-4B"), None);
+        let gone = folder_problem(&dir.path().join("nope"), "Haru-4B").unwrap();
+        assert!(gone.contains("no folder") && gone.contains("Haru-4B"), "{gone}");
     }
 }

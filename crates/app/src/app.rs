@@ -1057,7 +1057,7 @@ impl App {
             hands_free: Default::default(),
             bridge: Default::default(),
             haru: HashMap::new(),
-            engine: Default::default(),
+            engine: crate::voice::engine::Engine::in_dir(crate::voice::engine::dir()),
             auto: None,
             clock: None,
             speech: crate::voice::Settings::load(storage),
@@ -2051,9 +2051,11 @@ impl App {
             return Want::Off;
         };
         let plan = Plan {
-            models: vec![ModelSpec { id: crate::voice::LOCAL_DUPLEX.into(), path: dir, kind: "duplex".into() }],
+            models: vec![ModelSpec { id: crate::voice::LOCAL_DUPLEX.into(), path: dir, kind: "duplex".into(), preload: true }],
             gpu: self.speech.duplex_gpu(),
             program: self.speech.engine_program.trim().to_string(),
+            need_mib: crate::voice::engine::NEED_MIB,
+            host: crate::voice::engine::Host::Never,
         };
         if self.voice.open() && self.hands_free_wanted() { Want::Use(plan) } else { Want::Idle(plan) }
     }

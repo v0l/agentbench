@@ -82,12 +82,7 @@ pub fn default_model_dir() -> std::path::PathBuf {
 }
 
 pub fn model_problem(dir: &std::path::Path) -> Option<String> {
-    if !dir.is_dir() {
-        return Some(format!("no folder at {}; download {LOCAL_DUPLEX} there or pick its folder", dir.display()));
-    }
-    let missing: Vec<&str> =
-        ["config.json", "model.safetensors"].into_iter().filter(|f| !dir.join(f).is_file()).collect();
-    (!missing.is_empty()).then(|| format!("{} has no {}", dir.display(), missing.join(" and no ")))
+    agent_voice::engine::folder_problem(dir, LOCAL_DUPLEX)
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -29,7 +29,18 @@ pub mod duplex;
 pub mod link;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bridge;
-pub mod engine;
+pub mod engine {
+    pub use agent_voice::engine::*;
+
+    pub const NEED_MIB: u64 = 16 * 1024;
+
+    pub fn dir() -> std::path::PathBuf {
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        return agentbench_server::home().join("voice-engine");
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        return std::env::temp_dir().join("agentbench-voice-engine");
+    }
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub use bridge::{Bridge, Conn, Out, VOICE_SECONDS, heard_note};
 
