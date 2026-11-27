@@ -532,7 +532,7 @@ impl Voice {
                                 Event::Ignored
                             }
                             Ok((t, scores)) => {
-                                eprintln!("agentbench: sent take voiced={voiced:.2}s scores={scores:?} text={t:.80?}");
+                                eprintln!("agentbench: sent take voiced={voiced:.2}s scores={scores:?} chars={}", t.chars().count());
                                 Event::Text(t)
                             }
                             Err(e) => Event::Failed(e),
