@@ -205,6 +205,7 @@ pub fn state(store: &Store) -> AutopilotState {
         workers: workers.iter().filter(|w| is_active(&w.state)).count() as u32,
         activity: store.autopilot_log(30).unwrap_or_default(),
         pressure: None,
+        kept_worktrees: crate::worktree_sweep::load_kept(store),
     }
 }
 
@@ -335,6 +336,10 @@ pub fn summary(store: &Store) -> String {
             p.id,
             p.level(default).label()
         ));
+    }
+    let kept = crate::worktree_sweep::load_kept(store);
+    if !kept.is_empty() {
+        out.push_str(&crate::worktree_sweep::kept_text(&kept, 20));
     }
     out
 }
@@ -668,6 +673,7 @@ pub struct Autopilot {
     merges: Arc<Mutex<HashMap<SessionId, (u32, i64)>>>,
     notified: Arc<Mutex<HashMap<Id, i64>>>,
     dirty: Arc<Mutex<HashMap<Id, DirtyMain>>>,
+    swept_at: Arc<Mutex<Option<i64>>>,
 }
 
 struct DirtyMain {
@@ -689,6 +695,7 @@ impl Autopilot {
             merges: Default::default(),
             notified: Default::default(),
             dirty: Default::default(),
+            swept_at: Default::default(),
         }
     }
 
@@ -1000,12 +1007,50 @@ impl Autopilot {
             self.reconcile(w, now);
         }
         self.sweep(now);
+        self.sweep_worktrees();
         self.ship_untracked(now);
         self.start_more();
         if flag(store, ENABLED) {
             self.groom(now);
             self.judge_unset(now);
         }
+    }
+
+    pub fn sweep_worktrees(&self) {
+        let now = crate::store::now();
+        let store = self.store();
+        if !flag(store, ENABLED) || !auto_close_on(store) {
+            return;
+        }
+        {
+            let mut at = self.swept_at.lock().unwrap_or_else(|e| e.into_inner());
+            if at.is_some_and(|t| now - t < crate::worktree_sweep::SWEEP_EVERY_MS) {
+                return;
+            }
+            *at = Some(now);
+        }
+        let tracked: HashSet<_> = store.workers().unwrap_or_default().iter().map(|w| w.session).collect();
+        let running = |id: SessionId| self.runner.is_running(id);
+        let worked = |id: SessionId| tracked.contains(&id);
+        let done = crate::worktree_sweep::sweep(
+            store,
+            &crate::worktree_sweep::Sweep {
+                now,
+                grace_ms: crate::worktree_sweep::GRACE_MS,
+                running: &running,
+                worked: &worked,
+            },
+        );
+        for id in &done.ended {
+            self.runner.end(*id);
+        }
+        for (p, path) in &done.removed {
+            self.log(Some(*p), None, &format!("removed merged clean worktree {path}"));
+        }
+        for (p, path) in &done.pruned {
+            self.log(Some(*p), None, &format!("pruned worktree {path}, its folder is gone"));
+        }
+        crate::worktree_sweep::save_kept(store, &done.kept);
     }
 
     fn sweep(&self, now: i64) {
@@ -1167,7 +1212,8 @@ impl Autopilot {
         self.runner.end(s.id);
         let _ = store.delete_session(s.id);
         if let (Some(b), Some(p), false) = (tree.branch.as_deref(), &project, tree.main) {
-            let _ = crate::git::delete_branch(Path::new(&p.path), b);
+            let main = Path::new(&p.path);
+            let _ = crate::git::delete_merged_branch(main, b, crate::git::default_branch(main, p.branch.as_deref()).as_deref());
         }
         self.log(
             Some(s.project_id),
@@ -1831,6 +1877,7 @@ pub struct Shipped {
     pub pushed: Option<Result<String, String>>,
     pub deployed: Option<Result<String, String>>,
     pub pr: Option<PullRequestOpened>,
+    pub already: Option<String>,
 }
 
 pub fn after_pr(store: &Store, session: &Session, shipped: &Shipped, target: Option<crate::titles::Target>) {
@@ -1848,6 +1895,9 @@ impl Shipped {
             && e.contains(PROTECTED_PR)
         {
             return format!("{} not merged, {}", self.branch, clip(e, 300));
+        }
+        if let Some(at) = &self.already {
+            return format!("{} was already merged by the autopilot, it is in {at}", self.branch);
         }
         let mut out = format!("merged {} into the main branch", self.branch);
         match &self.pushed {
@@ -1895,6 +1945,18 @@ fn ship_now(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
     {
         return Err(Unshipped::MissingBranch(format!("the tip of {branch} moved after the verdict was given")));
     }
+    let already = |at: String| {
+        if on_default
+            && crate::git::blocking_dirt(main, None).tracked.is_empty()
+            && let Some(remote) = crate::git::push_remote(main)
+        {
+            let _ = crate::git::fast_forward(main, &format!("refs/remotes/{remote}/{main_name}"));
+        }
+        Ok(Shipped { branch: branch.clone(), pushed: Some(Ok(at.clone())), deployed: None, pr: None, already: Some(at) })
+    };
+    if let Some(at) = crate::git::in_origin(main, &tip, &main_name) {
+        return already(at);
+    }
     if on_default {
         let blocking = crate::git::blocking_dirt(main, Some(&branch));
         if !blocking.is_empty() {
@@ -1913,7 +1975,7 @@ fn ship_now(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
         let (title, body) = crate::github::flow::pr_title_and_body(issue.as_ref(), &branch);
         let url = crate::git::open_pull_request(main, &branch, &main_name, &title, &body)
             .map_err(|e| fail(format!("no pull request could be opened: {}", clip(&e, 200))))?;
-        return Ok(Shipped { branch, pushed: None, deployed: None, pr: Some(PullRequestOpened { url, base: main_name }) });
+        return Ok(Shipped { branch, pushed: None, deployed: None, pr: Some(PullRequestOpened { url, base: main_name }), already: None });
     }
     let temp = if on_default {
         None
@@ -1934,8 +1996,14 @@ fn ship_now(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
         return Err(Unshipped::Conflict(files));
     }
     let before = crate::git::head(work);
-    if !crate::git::is_merged(work, &tip) {
-        crate::git::merge_branch(work, &branch).map_err(fail)?;
+    if !crate::git::is_merged(work, &tip)
+        && let Err(e) = crate::git::merge_branch(work, &branch)
+    {
+        if let Some(at) = crate::git::in_origin(main, &tip, &main_name) {
+            drop(temp);
+            return already(at);
+        }
+        return Err(fail(e));
     }
     if !crate::git::is_merged(work, &tip) {
         return Err(fail(format!("{branch} is not in {main_name} after the merge")));
@@ -1950,20 +2018,35 @@ fn ship_now(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
                         _ => Err(format!("{remote}/{main_name} is not at the local head after the push")),
                     }
                 })
-                .map(|()| format!("{remote}/{main_name}"))
-                .map_err(|e| {
-                    if crate::git::is_protected_rejection(&e) {
-                        if let Some(b) = &before {
-                            let _ = crate::git::reset_hard(work, b);
-                        }
-                        protected_pull_request(store, session, main, &remote, &branch, &main_name)
-                    } else {
-                        e
-                    }
-                }),
+                .map(|()| format!("{remote}/{main_name}")),
         ),
         None => None,
     };
+    if let Some(Err(e)) = &pushed
+        && !crate::git::is_protected_rejection(e)
+        && let Some(at) = crate::git::in_origin(main, &tip, &main_name)
+    {
+        if let Some(b) = &before
+            && crate::git::head(work).as_ref() != Some(b)
+        {
+            let _ = crate::git::reset_hard(work, b);
+        }
+        drop(temp);
+        return already(at);
+    }
+    let pushed = pushed.map(|p| {
+        p.map_err(|e| {
+            if crate::git::is_protected_rejection(&e) {
+                if let Some(b) = &before {
+                    let _ = crate::git::reset_hard(work, b);
+                }
+                let remote = crate::git::push_remote(main).unwrap_or_default();
+                protected_pull_request(store, session, main, &remote, &branch, &main_name)
+            } else {
+                e
+            }
+        })
+    });
     let deployed = match &project.deploy {
         Some(cmd) if pushed.as_ref().is_none_or(Result::is_ok)
             && project.allows(default_level(store), Risky::Deploy) =>
@@ -1972,7 +2055,7 @@ fn ship_now(store: &Store, session: &Session) -> Result<Shipped, Unshipped> {
         }
         _ => None,
     };
-    Ok(Shipped { branch, pushed, deployed, pr: None })
+    Ok(Shipped { branch, pushed, deployed, pr: None, already: None })
 }
 
 pub const PROTECTED_PR: &str = "protected, PR opened";
@@ -4261,22 +4344,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_branch_says_already_merged_when_the_branch_is_in_origin() {
+    async fn merge_branch_closes_the_session_and_worktree_when_the_branch_is_already_in_origin() {
         let r = rig(DONE);
         let bare = bare_remote(&r);
-        let a = todo(&r, "a", 0, &[]);
-        let sid = started_by_boss(&r, a).await;
-        settle(&r).await;
-        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
-        commit_in(&tree.path, "feature.txt");
-        judge(&r, sid, "concluded_pass", None).unwrap();
+        let (a, sid, tree) = judged_feature(&r).await;
         let branch = tree.branch.clone().unwrap();
-        crate::git::merge_branch(&r.repo, &branch).unwrap();
-        crate::git::push(&r.repo, "origin", "main").unwrap();
+        git_in(&r.repo, &["push", "-q", "origin", "main"]);
+        let other = r._dir.path().join("other");
+        git_in(&r.repo, &["push", "-q", "origin", &branch]);
+        git_in(r._dir.path(), &["clone", "-q", "-b", "main", bare.to_str().unwrap(), other.to_str().unwrap()]);
+        git_in(&other, &["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "merge", "-q", "--no-ff", "--no-edit", &format!("origin/{branch}")]);
+        git_in(&other, &["push", "-q", "origin", "main"]);
+        git_in(&bare, &["branch", "-D", &branch]);
+        assert!(!crate::git::is_merged(&r.repo, &branch), "the local default branch is behind origin");
+        let out = merge_tool(&r, sid).unwrap();
+        let summary = out["summary"].as_str().unwrap();
+        assert!(summary.contains("already merged by the autopilot"), "{summary}");
+        assert_eq!(out["already_merged"], true);
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.store.session(sid).is_err(), "session closed");
+        assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
+        assert!(!crate::git::branch_exists(&r.repo, &branch), "branch deleted");
+        assert!(r.repo.join("feature.txt").exists(), "the main checkout caught up with origin");
+    }
+
+    fn race_the_push(bare: &std::path::Path) {
+        let hook = bare.join("hooks/pre-receive");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nwhile read old new ref; do\n  if [ \"$ref\" = refs/heads/main ]; then\n    cp -R \"$GIT_QUARANTINE_PATH\"/. objects/\n    env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES git update-ref refs/heads/main \"$new\"\n    echo \"error: cannot lock ref 'refs/heads/main': is at $new but expected $old\" >&2\n    exit 1\n  fi\ndone\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_push_refused_because_origin_already_has_the_merge_counts_as_merged() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let (a, sid, tree) = judged_feature(&r).await;
+        git_in(&r.repo, &["push", "-q", "origin", "main"]);
+        race_the_push(&bare);
+        let out = merge_tool(&r, sid).unwrap();
+        let summary = out["summary"].as_str().unwrap();
+        assert!(summary.contains("already merged by the autopilot"), "{summary}");
         assert!(remote_has(&bare, "feature.txt"));
-        let e = r.ap.runner.tools().call("merge_branch", &serde_json::json!({"id": sid.to_string()}), r.boss.unwrap()).unwrap_err();
-        assert!(e.contains("already merged"), "{e}");
-        assert!(!e.contains("push failed"), "{e}");
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.store.session(sid).is_err(), "session closed");
+        assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
+        assert!(!crate::git::branch_exists(&r.repo, tree.branch.as_deref().unwrap()), "branch deleted");
+    }
+
+    #[tokio::test]
+    async fn the_autopilot_closes_a_worker_whose_branch_is_already_in_origin() {
+        let r = rig(DONE);
+        let bare = bare_remote(&r);
+        let (a, sid) = worked_on(&r).await;
+        set_level(&r.store, r.project, Some(Automation::Ship));
+        auto_close(&r);
+        let tree = r.store.worktree(r.store.session(sid).unwrap().worktree_id).unwrap();
+        git_in(&r.repo, &["push", "-q", "origin", "main"]);
+        race_the_push(&bare);
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(boss_told(&r).await.len(), 1);
+        judge(&r, sid, "concluded_pass", None).unwrap();
+        r.ap.tick();
+        r.ap.tick();
+        assert_eq!(r.store.issue(a).unwrap().state, IssueState::Done);
+        assert!(r.store.session(sid).is_err(), "session closed");
+        assert!(!std::path::Path::new(&tree.path).exists(), "worktree removed");
+        assert!(!crate::git::branch_exists(&r.repo, tree.branch.as_deref().unwrap()), "branch deleted");
+        assert!(r.store.comments(a).unwrap().iter().any(|c| c.body.contains("already merged by the autopilot")));
     }
 
     async fn assert_shipped_and_closed(r: &Rig, a: Id, sid: agentbench_core::SessionId, tree: &agentbench_core::Worktree, bare: &std::path::Path) {
