@@ -100,7 +100,7 @@ async fn describe(r: reqwest::Response) -> String {
     }
 }
 
-fn reason(e: &reqwest::Error) -> String {
+pub(crate) fn reason(e: &reqwest::Error) -> String {
     let mut out = e.to_string();
     let mut source = std::error::Error::source(e);
     while let Some(cause) = source {

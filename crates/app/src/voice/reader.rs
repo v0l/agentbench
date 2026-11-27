@@ -113,8 +113,9 @@ impl Reader {
         if self.silent {
             self.lines.push(text.clone());
         }
+        let log = log_path();
         crate::spawn(async move {
-            produce(&text, &from, rate, &worker, &tx, &*wake).await;
+            produce(&text, &from, rate, &worker, &tx, &*wake, &log).await;
             worker.done.store(true, Ordering::Relaxed);
             wake();
         });
@@ -196,7 +197,8 @@ impl Pcm {
     }
 }
 
-/// Ask for the speech and queue it as it arrives. Says why on the first failure.
+/// Ask for the speech and queue it as it arrives. Says why on the first failure, and keeps a line
+/// about it in the reader's log.
 async fn produce(
     text: &str,
     from: &Source,
@@ -204,6 +206,7 @@ async fn produce(
     shared: &Shared,
     errors: &Sender<String>,
     wake: &(dyn Fn() + Send + Sync),
+    log: &std::path::Path,
 ) {
     let result: Result<(), String> = async {
         let mut resp = request(from, text).await?;
@@ -220,10 +223,24 @@ async fn produce(
         };
         let (mut pcm, mut resample) = (Pcm::default(), Resample::new(in_rate, rate));
         let (mut samples, mut out) = (Vec::new(), Vec::new());
-        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("the voice stopped: {e}"))? {
+        let mut heard = 0usize;
+        loop {
+            let chunk = match resp.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) if shared.stop.load(Ordering::Relaxed) => return Ok(()),
+                Err(e) => {
+                    let secs = heard as f32 / 2.0 / in_rate.max(1) as f32;
+                    return Err(format!(
+                        "the voice cut off after {secs:.1}s: {}",
+                        crate::client::reason(&e)
+                    ));
+                }
+            };
             if shared.stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
+            heard += chunk.len();
             samples.clear();
             out.clear();
             pcm.push(&chunk, &mut samples);
@@ -235,7 +252,29 @@ async fn produce(
     }
     .await;
     if let Err(e) = result {
+        keep(log, &e);
         let _ = errors.send(e);
+    }
+}
+
+fn log_path() -> std::path::PathBuf {
+    #[cfg(not(target_os = "android"))]
+    return agentbench_server::home().join("voice-reader.log");
+    #[cfg(target_os = "android")]
+    return std::env::temp_dir().join("agentbench-voice-reader.log");
+}
+
+fn keep(log: &std::path::Path, line: &str) {
+    use std::io::Write;
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+        let _ = writeln!(f, "{at} {line}");
     }
 }
 
@@ -253,7 +292,10 @@ async fn request(from: &Source, text: &str) -> Result<reqwest::Response, String>
     if !from.voice.trim().is_empty() {
         body["voice"] = from.voice.trim().into();
     }
-    let mut req = crate::client::http().post(&url).json(&body);
+    let mut req = crate::client::http()
+        .post(&url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .json(&body);
     if !from.token.trim().is_empty() {
         req = req.bearer_auth(from.token.trim());
     }
@@ -368,6 +410,15 @@ mod tests {
         headers: &'static str,
         chunks: Vec<Vec<u8>>,
     ) -> (String, std::thread::JoinHandle<String>) {
+        serve_then(status, headers, chunks, true)
+    }
+
+    fn serve_then(
+        status: &'static str,
+        headers: &'static str,
+        chunks: Vec<Vec<u8>>,
+        finish: bool,
+    ) -> (String, std::thread::JoinHandle<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let h = std::thread::spawn(move || {
@@ -403,7 +454,9 @@ mod tests {
                 s.flush().unwrap();
                 std::thread::sleep(std::time::Duration::from_millis(30));
             }
-            s.write_all(b"0\r\n\r\n").unwrap();
+            if finish {
+                s.write_all(b"0\r\n\r\n").unwrap();
+            }
             String::from_utf8_lossy(&got).to_string()
         });
         (url, h)
@@ -420,9 +473,51 @@ mod tests {
     }
 
     fn run(from: &Source, shared: &Shared, rate: u32) -> Vec<String> {
+        let log = tempfile::tempdir().unwrap();
+        run_logged(from, shared, rate, &log.path().join("voice-reader.log"))
+    }
+
+    fn run_logged(from: &Source, shared: &Shared, rate: u32, log: &std::path::Path) -> Vec<String> {
         let (tx, rx) = channel();
-        crate::runtime().block_on(produce("Hello there.", from, rate, shared, &tx, &|| {}));
+        crate::runtime().block_on(produce("Hello there.", from, rate, shared, &tx, &|| {}, log));
         rx.try_iter().collect()
+    }
+
+    #[test]
+    fn speech_is_asked_for_uncompressed() {
+        let (url, sent) = serve("200 OK", "x-sample-rate: 24000\r\n", vec![le(&[0, 100])]);
+        assert!(run(&Source { url, ..Default::default() }, &shared(), 24_000).is_empty());
+        let sent = sent.join().unwrap().to_lowercase();
+        assert!(sent.contains("accept-encoding: identity"), "{sent:.400}");
+        assert!(!sent.contains("gzip"), "{sent:.400}");
+    }
+
+    #[test]
+    fn a_stream_that_breaks_part_way_says_the_voice_cut_off_and_logs_it() {
+        let chunks = vec![le(&[100; 12_000]), le(&[200; 12_000])];
+        let (url, _) = serve_then("200 OK", "x-sample-rate: 24000\r\n", chunks, false);
+        let s = shared();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("voice-reader.log");
+        let errors = run_logged(&Source { url, ..Default::default() }, &s, 24_000, &log);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("the voice cut off after 1.0s: "), "{errors:?}");
+        assert!(errors[0].len() > "the voice cut off after 1.0s: ".len() + 10, "{errors:?}");
+        assert!(s.queue.lock().unwrap().len() >= 23_000, "what came is still played");
+        let kept = std::fs::read_to_string(&log).expect("the log");
+        assert!(kept.contains(&errors[0]), "{kept}");
+    }
+
+    #[test]
+    fn a_break_after_stop_is_not_reported() {
+        let (url, _) = serve_then("200 OK", "x-sample-rate: 24000\r\n", vec![le(&[1; 10])], false);
+        let s = shared();
+        s.stop.store(true, Ordering::Relaxed);
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("voice-reader.log");
+        let errors = run_logged(&Source { url, ..Default::default() }, &s, 24_000, &log);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!log.exists());
     }
 
     fn le(samples: &[i16]) -> Vec<u8> {
