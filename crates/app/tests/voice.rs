@@ -17,8 +17,6 @@ const YES: &[u8] = include_bytes!("fixtures/voice/yes.wav");
 const STOP: &[u8] = include_bytes!("fixtures/voice/stop.wav");
 
 fn models_dir() -> Option<PathBuf> {
-    static CPU_SPEECH: std::sync::Once = std::sync::Once::new();
-    CPU_SPEECH.call_once(|| unsafe { std::env::set_var("AGENTBENCH_SPEECH_DEVICE", "cpu") });
     let dir = std::env::var("AGENTBENCH_MODELS").ok().map(PathBuf::from).or_else(|| {
         Some(dirs_home()?.join(".local/share/agentbench/models"))
     })?;

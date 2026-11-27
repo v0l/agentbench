@@ -3,10 +3,11 @@
 //! The microphone is opened by the speak key or its hotkey and closed when you go quiet (or press
 //! the key again), so the window never listens to the room in between. While you talk the take
 //! so far is read every couple of seconds and the words appear in the draft; when you stop, the
-//! whole take is read once more and replaces them. What was said is turned into text either
-//! by Whisper running on this machine (candle, off the UI thread, fetched once from Hugging
-//! Face) or by any server that speaks OpenAI's `/v1/audio/transcriptions`. The words land in the
-//! draft for you to read and send; nothing is sent on its own.
+//! whole take is read once more and replaces them. What was said is turned into text by an
+//! agentbench server (the one on this machine, or the one this window is connected to), whose
+//! inference-bench engine child runs Whisper, or by any server that speaks OpenAI's
+//! `/v1/audio/transcriptions`. The words land in the draft for you to read and send; nothing is
+//! sent on its own.
 //!
 //! This module holds what is the same on every platform: the settings, the audio helpers and the
 //! shape of a result. The microphone and the two readers live in `native`, and platforms with no

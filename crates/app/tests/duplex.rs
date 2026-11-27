@@ -108,8 +108,6 @@ impl Fake {
 }
 
 fn models_dir() -> Option<PathBuf> {
-    static CPU_SPEECH: std::sync::Once = std::sync::Once::new();
-    CPU_SPEECH.call_once(|| unsafe { std::env::set_var("AGENTBENCH_SPEECH_DEVICE", "cpu") });
     let dir = std::env::var("AGENTBENCH_MODELS")
         .ok()
         .map(PathBuf::from)

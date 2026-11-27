@@ -652,7 +652,7 @@ fn the_local_voice_settings_fit_at_both_sizes() {
 fn the_real_model_in_free_mode_answers_a_spoken_question_in_words() {
     let (program, model) = real_engine().expect("AGENTBENCH_REAL_ENGINE and AGENTBENCH_REAL_MODEL");
     let models = PathBuf::from(std::env::var("AGENTBENCH_MODELS").expect("AGENTBENCH_MODELS"));
-    let rig = rig_with_models(vec![agent("glib", REPLY)], models.clone());
+    let rig = rig_with_models(vec![agent("glib", REPLY)], models);
     supervisor(&rig);
     let mut h = app(&rig, [1280.0, 800.0]);
     if let Ok(c) = std::env::var("AGENTBENCH_REAL_CLIP") {
@@ -695,10 +695,9 @@ fn the_real_model_in_free_mode_answers_a_spoken_question_in_words() {
     if let Ok(out) = std::env::var("AGENTBENCH_REAL_PLAYED") {
         std::fs::write(&out, agentbench::voice::wav_bytes(&played, 24_000)).unwrap();
     }
-    let mut whisper = agent_voice::speech::Transcriber::new(models);
-    whisper.load("whisper-base.en").unwrap();
-    let heard = whisper.transcribe(&agentbench::voice::to_whisper_rate(&played, 24_000)).unwrap();
-    let after = whisper.transcribe(&agentbench::voice::to_whisper_rate(&reply, 24_000)).unwrap();
+    let judge = agent_voice::voice::Server { url: format!("http://{}/v1", rig.url), key: TOKEN.into() };
+    let heard = judge.transcribe(&agentbench::voice::to_whisper_rate(&played, 24_000), "whisper-base.en").unwrap();
+    let after = judge.transcribe(&agentbench::voice::to_whisper_rate(&reply, 24_000), "whisper-base.en").unwrap();
     let text = h.state().haru_words(sid);
     let turns = h.state().transcript_talk(sid);
     eprintln!("asked {asked:.1} s, played {:.1} s, {:?}", played.len() as f32 / 24_000.0, sound_of(&played, 24_000));

@@ -22,8 +22,6 @@ pub struct Api {
     pub runner: Runner,
     pub token: String,
     pub model: Option<crate::agent::native::Shared>,
-    pub speech: crate::speech::Speech,
-    pub voice: crate::voice::Voice,
     pub engines: crate::engine::Engines,
 }
 
@@ -241,27 +239,10 @@ async fn transcribe(
     let pcm = agent_voice::voice::audio::to_whisper_rate(&pcm, rate);
     let started = std::time::Instant::now();
     let seconds = pcm.len() as f32 / agent_voice::voice::audio::SPEECH_RATE as f32;
-    if api.engines.settings.backend == crate::engine::Backend::Engine {
-        let id = api.engines.pick(&asked);
-        let (h, _) = crate::audio::read(&api.engines, &id, &pcm, &extra).await.map_err(|(s, e)| Failure(s, e))?;
-        tracing::info!("read {seconds:.1}s of speech with {id} through the engine in {:.1}s", started.elapsed().as_secs_f32());
-        return Ok(Json(json!({ "text": h.text, "no_speech_prob": h.no_speech, "avg_logprob": h.avg_logprob })));
-    }
-    let id = api.speech.pick(&asked);
-    let (reading, on) = api
-        .speech
-        .read_scored(&id, pcm.clone())
-        .await
-        .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    tracing::info!(
-        "read {seconds:.1}s of speech with {id} on the {on} in {:.1}s",
-        started.elapsed().as_secs_f32()
-    );
-    Ok(Json(json!({
-        "text": reading.text,
-        "no_speech_prob": reading.no_speech,
-        "avg_logprob": reading.avg_logprob,
-    })))
+    let id = api.engines.pick(&asked);
+    let (h, _) = crate::audio::read(&api.engines, &id, &pcm, &extra).await.map_err(|(s, e)| Failure(s, e))?;
+    tracing::info!("read {seconds:.1}s of speech with {id} through the engine in {:.1}s", started.elapsed().as_secs_f32());
+    Ok(Json(json!({ "text": h.text, "no_speech_prob": h.no_speech, "avg_logprob": h.avg_logprob })))
 }
 
 #[derive(Deserialize)]
@@ -286,30 +267,11 @@ fn compression() -> tower_http::compression::CompressionLayer<
         .compress_when(DefaultPredicate::new().and(NotForContentType::const_new("audio/")))
 }
 
-fn speech_body(rx: tokio::sync::mpsc::Receiver<Result<Vec<f32>, String>>) -> axum::body::Body {
-    use futures_util::StreamExt;
-    let frames = futures_util::stream::unfold(rx, |mut rx| async move {
-        match rx.recv().await {
-            Some(Ok(pcm)) => {
-                Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(pcm_bytes(&pcm))), rx))
-            }
-            Some(Err(e)) => {
-                tracing::warn!("speech stopped part way: {e}");
-                None
-            }
-            None => None,
-        }
-    });
-    axum::body::Body::from_stream(frames.fuse())
-}
+pub const INPUT_MAX: usize = 20_000;
 
-fn pcm_bytes(samples: &[f32]) -> Vec<u8> {
-    samples.iter().flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect()
-}
-
-/// OpenAI's text to speech, answered with Kokoro on this machine. Takes `{"input": "...",
-/// "voice": "af_heart"}` and answers a 16 bit mono WAV. With `"response_format": "pcm"` it
-/// answers raw samples instead, a sentence at a time as they are made, with the rate in the
+/// OpenAI's text to speech, answered with Phonon by the engine child. Takes `{"input": "...",
+/// "voice": "Hadley"}` and answers a 16 bit mono WAV. With `"response_format": "pcm"` it
+/// answers raw samples instead, a frame at a time as they are made, with the rate in the
 /// `x-sample-rate` header, so the first words can be played while the rest are still coming.
 async fn speak(
     State(api): State<Api>,
@@ -319,106 +281,36 @@ async fn speak(
     if text.is_empty() {
         return Err(bad("there is nothing to say"));
     }
-    if text.len() > crate::voice::INPUT_MAX {
-        return Err(bad(format!(
-            "too long to say in one go: {} characters at most",
-            crate::voice::INPUT_MAX
-        )));
+    if text.len() > INPUT_MAX {
+        return Err(bad(format!("too long to say in one go: {INPUT_MAX} characters at most")));
     }
-    let voice = req.voice.clone();
     let started = std::time::Instant::now();
-    if api.engines.settings.backend == crate::engine::Backend::Engine {
-        let stream = req.response_format.eq_ignore_ascii_case("pcm");
-        let res = crate::audio::speak(&api.engines, text, &voice, stream, req.seed).await.map_err(|(s, e)| Failure(s, e))?;
-        tracing::info!("speech through the engine, first bytes in {:.1}s", started.elapsed().as_secs_f32());
-        return Ok(res);
-    }
-    if req.response_format.eq_ignore_ascii_case("pcm") {
-        let (rate, on, rx) = api
-            .voice
-            .stream(&voice, text.to_string())
-            .await
-            .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        tracing::info!(
-            "streaming speech on the {on}, ready in {:.1}s",
-            started.elapsed().as_secs_f32()
-        );
-        return Ok((
-            [
-                (axum::http::header::CONTENT_TYPE, "audio/L16".to_string()),
-                (axum::http::HeaderName::from_static("x-sample-rate"), rate.to_string()),
-                (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
-            ],
-            speech_body(rx),
-        )
-            .into_response());
-    }
-    let said = api
-        .voice
-        .say(&voice, text.to_string())
-        .await
-        .map_err(|e| Failure(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    tracing::info!(
-        "said {:.1}s on the {} in {:.1}s",
-        said.samples.len() as f32 / said.rate as f32,
-        said.on,
-        started.elapsed().as_secs_f32()
-    );
-    let wav = agent_voice::voice::audio::wav_bytes(&said.samples, said.rate);
-    Ok(([(axum::http::header::CONTENT_TYPE, "audio/wav")], wav).into_response())
+    let stream = req.response_format.eq_ignore_ascii_case("pcm");
+    let res = crate::audio::speak(&api.engines, text, &req.voice, stream, req.seed).await.map_err(|(s, e)| Failure(s, e))?;
+    tracing::info!("speech through the engine, first bytes in {:.1}s", started.elapsed().as_secs_f32());
+    Ok(res)
 }
 
 /// Where the speech models run: the device a model loaded now would use, and what each is using
 /// once it has been used.
 async fn audio_status(State(api): State<Api>) -> Json<agentbench_core::AudioStatus> {
-    if api.engines.settings.backend == crate::engine::Backend::Engine {
-        return Json(crate::audio::status(&api.engines).await);
-    }
-    let device = tokio::task::spawn_blocking(crate::voice::Voice::device).await.unwrap_or_default();
-    Json(agentbench_core::AudioStatus {
-        device,
-        reading_on: api.speech.on(),
-        speaking_on: api.voice.on(),
-    })
+    Json(crate::audio::status(&api.engines).await)
 }
 
 /// The speech to text models this server reads with, in OpenAI's `/v1/models` shape plus what a
 /// picker needs: `{"data": [{"id", "label", "size_mb", "installed", "default"}]}`.
 async fn speech_models(State(api): State<Api>) -> Json<serde_json::Value> {
-    if api.engines.settings.backend == crate::engine::Backend::Engine {
-        let (have, default) = (api.engines.whisper_installed(), api.engines.default_model());
-        let data: Vec<_> = agent_voice::voice::LOCAL_MODELS
-            .iter()
-            .map(|m| json!({ "id": m.0, "object": "model", "label": m.2, "size_mb": m.3, "installed": have.iter().any(|h| h == m.0), "default": m.0 == default }))
-            .collect();
-        return Json(json!({ "object": "list", "data": data }));
-    }
-    let data: Vec<_> = api
-        .speech
-        .list()
-        .into_iter()
-        .map(|(id, label, size_mb, installed, default)| {
-            json!({ "id": id, "object": "model", "label": label, "size_mb": size_mb, "installed": installed, "default": default })
-        })
+    let (have, default) = (api.engines.whisper_installed(), api.engines.default_model());
+    let data: Vec<_> = agent_voice::voice::LOCAL_MODELS
+        .iter()
+        .map(|m| json!({ "id": m.0, "object": "model", "label": m.2, "size_mb": m.3, "installed": have.iter().any(|h| h == m.0), "default": m.0 == default }))
         .collect();
     Json(json!({ "object": "list", "data": data }))
 }
 
 /// The voices this server can speak in: `{"voices": [{"id", "label", "installed"}]}`.
 async fn voices(State(api): State<Api>) -> Json<serde_json::Value> {
-    if api.engines.settings.backend == crate::engine::Backend::Engine {
-        return Json(crate::audio::voices(&api.engines).await);
-    }
-    if let Err(e) = api.voice.catalogue().await {
-        tracing::warn!("could not fetch the voice catalogue: {e}");
-    }
-    let list: Vec<_> = api
-        .voice
-        .list()
-        .into_iter()
-        .map(|(id, label, installed)| json!({ "id": id, "label": label, "installed": installed }))
-        .collect();
-    Json(json!({ "voices": list }))
+    Json(crate::audio::voices(&api.engines).await)
 }
 
 fn changed(api: &Api) {
@@ -1963,7 +1855,7 @@ mod tests {
     fn test_engines() -> crate::engine::Engines {
         let dir = std::env::temp_dir().join(format!("agentbench-api-engines-{}", std::process::id()));
         crate::engine::Engines::new(
-            crate::engine::Settings { backend: crate::engine::Backend::Candle, ..Default::default() },
+            crate::engine::Settings { program: "/no/engine/in/these/tests".into(), cpu: true, ..Default::default() },
             dir.join("models"),
             "whisper-base.en",
             dir.join("engine"),
@@ -1997,8 +1889,6 @@ mod tests {
             runner: Runner::new(store, vec![Box::new(echo)]),
             token: "secret".into(),
             model: None,
-            speech: Default::default(),
-            voice: Default::default(),
             engines: test_engines(),
         };
         Fixture { app: router(api.clone()), api, _dir: dir, repo: repo_path }
@@ -2058,35 +1948,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_speech_stream_ends_cleanly_even_through_gzip() {
-        let app = Router::new()
-            .route(
-                "/s",
-                get(|| async {
-                    let (tx, rx) = tokio::sync::mpsc::channel(4);
-                    tokio::spawn(async move {
-                        for _ in 0..3 {
-                            tx.send(Ok(vec![0.25; 4800])).await.unwrap();
-                        }
-                    });
-                    ([(header::CONTENT_TYPE, "text/plain")], speech_body(rx))
-                }),
-            )
-            .layer(tower_http::compression::CompressionLayer::new().gzip(true));
-        let req = axum::http::Request::get("/s")
-            .header("accept-encoding", "gzip")
-            .body(Body::empty())
-            .unwrap();
-        let res = app.oneshot(req).await.unwrap();
-        assert_eq!(res.headers()["content-encoding"], "gzip");
-        let gz = res.into_body().collect().await.unwrap().to_bytes();
-        let mut pcm = Vec::new();
-        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&gz[..]), &mut pcm)
-            .expect("a whole gzip stream with its trailer");
-        assert_eq!(pcm.len(), 3 * 4800 * 2);
-    }
-
-    #[tokio::test]
     async fn speech_is_sent_as_it_is_and_json_is_still_gzipped() {
         let app = Router::new()
             .route("/a", get(|| async { ([(header::CONTENT_TYPE, "audio/L16")], vec![0u8; 4096]) }))
@@ -2111,7 +1972,7 @@ mod tests {
         let blank = json!({"input": "   "});
         let (code, _) = call(&f.app, "POST", "/v1/audio/speech", Some(blank), Some("secret")).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "nothing to say");
-        let long = json!({"input": "a".repeat(crate::voice::INPUT_MAX + 1)});
+        let long = json!({"input": "a".repeat(INPUT_MAX + 1)});
         let (code, _) = call(&f.app, "POST", "/v1/audio/speech", Some(long), Some("secret")).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "too long");
     }
@@ -3090,8 +2951,6 @@ mod tests {
             runner: Runner::new(f.api.runner.store().clone(), vec![Box::new(slow)]),
             token: "secret".into(),
             model: None,
-            speech: Default::default(),
-            voice: Default::default(),
             engines: test_engines(),
         };
         let app = router(api.clone());

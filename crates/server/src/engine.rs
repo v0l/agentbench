@@ -10,12 +10,22 @@ pub const SPEECH_MIB: u64 = 4 * 1024;
 const READY_WAIT: Duration = agent_voice::engine::LOAD_WAIT;
 const POLL: Duration = Duration::from_millis(100);
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Backend {
     #[default]
     Engine,
-    Candle,
+}
+
+impl<'de> Deserialize<'de> for Backend {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Backend, D::Error> {
+        match String::deserialize(d)?.as_str() {
+            "engine" => Ok(Backend::Engine),
+            "candle" => Err(serde::de::Error::custom(
+                "speech.backend = \"candle\" is gone: speech runs through the inference-bench engine; remove the line",
+            )),
+            other => Err(serde::de::Error::custom(format!("speech.backend {other:?} is not \"engine\""))),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -296,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn the_speech_backend_reads_from_the_config_with_the_engine_as_default() {
+    fn the_speech_backend_is_the_engine_and_an_old_candle_line_says_what_to_do() {
         #[derive(Deserialize)]
         struct C {
             #[serde(default)]
@@ -304,8 +314,10 @@ mod tests {
         }
         let c: C = toml::from_str("").unwrap();
         assert_eq!(c.speech.backend, Backend::Engine);
-        let c: C = toml::from_str("[speech]\nbackend = \"candle\"\ngpu = 1\nprogram = \"/x/inference-bench-server\"\n").unwrap();
-        assert_eq!((c.speech.backend, c.speech.gpu, c.speech.program.as_str()), (Backend::Candle, Some(1), "/x/inference-bench-server"));
+        let c: C = toml::from_str("[speech]\nbackend = \"engine\"\ngpu = 1\nprogram = \"/x/inference-bench-server\"\n").unwrap();
+        assert_eq!((c.speech.backend, c.speech.gpu, c.speech.program.as_str()), (Backend::Engine, Some(1), "/x/inference-bench-server"));
+        let e = toml::from_str::<C>("[speech]\nbackend = \"candle\"\n").err().unwrap().to_string();
+        assert!(e.contains("is gone") && e.contains("remove the line"), "{e}");
         assert!(toml::from_str::<C>("[speech]\nbackend = \"kokoro\"\n").is_err());
     }
 

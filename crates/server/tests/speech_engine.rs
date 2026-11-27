@@ -1,4 +1,4 @@
-use agentbench_server::engine::{Backend, Settings};
+use agentbench_server::engine::Settings;
 use axum::extract::{Multipart, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -169,7 +169,7 @@ fn phonon(models: &Path) {
     std::fs::write(d.join("voices.jsonl"), r#"{"filename": "voices/a.safetensors", "name": "Hadley", "language": "en", "locale": "en-us"}"#).unwrap();
 }
 
-fn rig(backend: Backend) -> Rig {
+fn rig() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let models = dir.path().join("models");
     whisper(&models, "whisper-base.en");
@@ -191,7 +191,7 @@ fn rig(backend: Backend) -> Rig {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let settings = Settings { backend, program: program.display().to_string(), cpu: true, ..Default::default() };
+    let settings = Settings { program: program.display().to_string(), cpu: true, ..Default::default() };
     let m = models;
     let engine_dir = dir.path().join("engine");
     rt.spawn(async move {
@@ -241,7 +241,7 @@ fn pcm16_wav(seconds: f32, rate: u32) -> Vec<u8> {
 
 #[test]
 fn the_app_multipart_body_is_read_by_the_engine_and_scored_as_candle_scored_it() {
-    let r = rig(Backend::Engine);
+    let r = rig();
     let body = agentbench_server::audio::form(&[("model", "whisper-base.en"), ("response_format", "json")], &pcm16_wav(1.0, 48_000), "b1");
     let (code, v) = r.post_form(body, "b1", &r.token);
     assert_eq!(code, 200, "{v}");
@@ -263,7 +263,7 @@ fn the_app_multipart_body_is_read_by_the_engine_and_scored_as_candle_scored_it()
 
 #[test]
 fn an_unknown_model_gets_the_default_and_the_form_fields_pass_through() {
-    let r = rig(Backend::Engine);
+    let r = rig();
     let body = agentbench_server::audio::form(&[("model", "whisper-1"), ("language", "en"), ("prompt", "hello"), ("temperature", "0.2"), ("other", "x")], &pcm16_wav(0.5, 16_000), "b2");
     let (code, v) = r.post_form(body, "b2", &r.token);
     assert_eq!(code, 200, "{v}");
@@ -275,7 +275,7 @@ fn an_unknown_model_gets_the_default_and_the_form_fields_pass_through() {
 
 #[test]
 fn a_wrong_token_never_reaches_the_engine() {
-    let r = rig(Backend::Engine);
+    let r = rig();
     let body = agentbench_server::audio::form(&[("model", "whisper-base.en")], &pcm16_wav(0.5, 16_000), "b3");
     let (code, _) = r.post_form(body, "b3", "wrong");
     assert_eq!(code, 401);
@@ -284,7 +284,7 @@ fn a_wrong_token_never_reaches_the_engine() {
 
 #[test]
 fn speech_streams_the_engine_frames_with_the_headers_the_reader_needs() {
-    let r = rig(Backend::Engine);
+    let r = rig();
     let mut res = r
         .agent()
         .post(format!("{}/v1/audio/speech", r.url))
@@ -306,7 +306,7 @@ fn speech_streams_the_engine_frames_with_the_headers_the_reader_needs() {
 
 #[test]
 fn speech_as_one_wav_for_the_client_that_asks_for_one() {
-    let r = rig(Backend::Engine);
+    let r = rig();
     let mut res = r
         .agent()
         .post(format!("{}/v1/audio/speech", r.url))
@@ -324,7 +324,7 @@ fn speech_as_one_wav_for_the_client_that_asks_for_one() {
 
 #[test]
 fn the_lists_and_status_come_from_the_engine_in_the_agentbench_shapes() {
-    let r = rig(Backend::Engine);
+    let r = rig();
     let v = r.get("/v1/audio/voices");
     assert_eq!(v["voices"][0]["label"], "Hadley, American", "from the catalogue on disc before the engine runs: {v}");
     let m = r.get("/v1/audio/models");
@@ -346,19 +346,9 @@ fn the_lists_and_status_come_from_the_engine_in_the_agentbench_shapes() {
 
 #[test]
 fn an_engine_error_comes_back_with_its_words() {
-    let r = rig(Backend::Engine);
+    let r = rig();
     let body = agentbench_server::audio::form(&[("model", "whisper-base.en")], &pcm16_wav(0.002, 16_000), "b5");
     let (code, v) = r.post_form(body, "b5", &r.token);
     assert_eq!(code, 500, "a 404 from the engine is not a missing route here: {v}");
     assert_eq!(v["error"], "the speech engine answered: too short for the engine");
-}
-
-#[test]
-fn the_candle_setting_never_starts_the_engine() {
-    let r = rig(Backend::Candle);
-    let v = r.get("/v1/audio/models");
-    assert!(v["data"].as_array().is_some_and(|d| !d.is_empty()));
-    let s = r.get("/v1/audio/status");
-    assert!(s["device"].is_string());
-    assert!(r.seen().is_empty(), "candle reads in process");
 }

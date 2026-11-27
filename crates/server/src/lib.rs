@@ -32,7 +32,6 @@ pub mod providers;
 pub mod restart;
 pub mod runner;
 pub mod seed;
-pub mod speech;
 pub mod store;
 pub mod supervisor_log;
 pub mod terminal;
@@ -41,7 +40,6 @@ pub mod tools;
 pub mod triage;
 pub mod tui;
 pub mod worktree_sweep;
-pub mod voice;
 pub mod engine;
 pub mod audio;
 
@@ -230,25 +228,16 @@ pub async fn serve_config(
 
 #[derive(Clone)]
 pub struct Audio {
-    pub speech: speech::Speech,
-    pub voice: voice::Voice,
     pub engines: engine::Engines,
 }
 
 impl Audio {
     pub fn new(settings: engine::Settings, models: PathBuf, default: &str, dir: PathBuf) -> Audio {
-        Audio {
-            speech: speech::Speech::new(models.clone(), default),
-            voice: voice::Voice::new(models.join("phonon")),
-            engines: engine::Engines::new(settings, models, default, dir),
-        }
+        Audio { engines: engine::Engines::new(settings, models, default, dir) }
     }
 
     pub fn ears(&self) -> Arc<dyn agent::native::Ears> {
-        match self.engines.settings.backend {
-            engine::Backend::Engine => Arc::new(audio::Ears(self.engines.clone())),
-            engine::Backend::Candle => Arc::new(self.speech.clone()),
-        }
+        Arc::new(audio::Ears(self.engines.clone()))
     }
 }
 
@@ -325,7 +314,7 @@ async fn serve_inner(
     let _ = projects::ensure_supervisor(&store, &home().join("supervisor"));
     autopilot::migrate(&store).map_err(|e| e.0)?;
     let token = token(&store).map_err(|e| e.0)?;
-    let Audio { speech, voice, engines } = audio.unwrap_or_else(|| {
+    let Audio { engines } = audio.unwrap_or_else(|| {
         Audio::new(Default::default(), home().join("models"), &speech_model(&store), home().join("speech-engine"))
     });
     let mut runner = runner::Runner::new(store, agents);
@@ -339,7 +328,7 @@ async fn serve_inner(
     }
     *runner.base.lock().unwrap_or_else(|e| e.into_inner()) =
         runner::Base { url: local_url(listen), token: token.clone() };
-    let api = api::Api { runner, token, model, speech, voice, engines };
+    let api = api::Api { runner, token, model, engines };
     api.runner.resume(&stale);
     api.runner.deliver_backlog();
     autopilot::spawn(api.runner.clone());
