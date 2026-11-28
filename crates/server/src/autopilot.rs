@@ -674,7 +674,10 @@ pub struct Autopilot {
     notified: Arc<Mutex<HashMap<Id, i64>>>,
     dirty: Arc<Mutex<HashMap<Id, DirtyMain>>>,
     swept_at: Arc<Mutex<Option<i64>>>,
+    pub(crate) disk_probe: Arc<Mutex<DiskProbe>>,
 }
+
+pub(crate) type DiskProbe = Arc<dyn Fn(&Path) -> Option<(u64, u64)> + Send + Sync>;
 
 struct DirtyMain {
     since: i64,
@@ -696,6 +699,7 @@ impl Autopilot {
             notified: Default::default(),
             dirty: Default::default(),
             swept_at: Default::default(),
+            disk_probe: Arc::new(Mutex::new(Arc::new(crate::target_dirs::free_space))),
         }
     }
 
@@ -1007,9 +1011,15 @@ impl Autopilot {
             self.reconcile(w, now);
         }
         self.sweep(now);
-        self.sweep_worktrees();
+        let low = self.low_disk();
+        if low {
+            self.sweep_target_dirs(now);
+        }
+        self.sweep_worktrees_at(now);
         self.ship_untracked(now);
-        self.start_more();
+        if !low {
+            self.start_more();
+        }
         if flag(store, ENABLED) {
             self.groom(now);
             self.judge_unset(now);
@@ -1017,7 +1027,10 @@ impl Autopilot {
     }
 
     pub fn sweep_worktrees(&self) {
-        let now = crate::store::now();
+        self.sweep_worktrees_at(crate::store::now());
+    }
+
+    fn sweep_worktrees_at(&self, now: i64) {
         let store = self.store();
         if !flag(store, ENABLED) || !auto_close_on(store) {
             return;
@@ -1051,6 +1064,53 @@ impl Autopilot {
             self.log(Some(*p), None, &format!("pruned worktree {path}, its folder is gone"));
         }
         crate::worktree_sweep::save_kept(store, &done.kept);
+        self.sweep_target_dirs(now);
+    }
+
+    fn low_disk(&self) -> bool {
+        let store = self.store();
+        let root = crate::target_dirs::root(store);
+        let probe = self.disk_probe.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some((free, total)) = probe(&root) else { return false };
+        let low = crate::target_dirs::is_low(free, total);
+        let key = "state/low disk".to_string();
+        let was = {
+            let mut said = self.said.lock().unwrap_or_else(|e| e.into_inner());
+            if low { !said.insert(key) } else { said.remove(&key) }
+        };
+        if low && !was {
+            self.log(
+                None,
+                None,
+                &format!(
+                    "low disk: {} free of {} on {}, under {} percent; starting no new workers and sweeping build dirs",
+                    crate::pressure::gb_text(free),
+                    crate::pressure::gb_text(total),
+                    root.display(),
+                    crate::target_dirs::LOW_FREE_PERCENT
+                ),
+            );
+        } else if !low && was {
+            self.log(None, None, &format!("disk space is back: {} free on {}, starting workers again", crate::pressure::gb_text(free), root.display()));
+        }
+        low
+    }
+
+    fn sweep_target_dirs(&self, now: i64) {
+        let store = self.store();
+        let ctx = crate::target_dirs::Ctx { now, ..crate::target_dirs::Ctx::system(store) };
+        let freed = crate::target_dirs::sweep(store, &ctx);
+        for f in &freed {
+            self.log(
+                Some(f.project_id),
+                None,
+                &format!("deleted build dir {} of done issue #{}, freed {}", f.path, f.issue, crate::pressure::gb_text(f.bytes)),
+            );
+        }
+        if freed.len() > 1 {
+            let total: u64 = freed.iter().map(|f| f.bytes).sum();
+            self.log(None, None, &format!("build dir sweep freed {} in {} dirs", crate::pressure::gb_text(total), freed.len()));
+        }
     }
 
     fn sweep(&self, now: i64) {
@@ -3457,6 +3517,67 @@ mod tests {
         settle(&r).await;
         r.ap.tick();
         assert_eq!(started(&r), [a, b, c], "the third starts with no user input");
+    }
+
+    #[tokio::test]
+    async fn low_disk_starts_no_worker_and_sweeps_done_build_dirs_at_once() {
+        let r = rig(DONE);
+        let root = r._dir.path().join("cargo-target");
+        r.store.set_setting(crate::target_dirs::ROOT_SETTING, &root.to_string_lossy()).unwrap();
+        let finished = todo(&r, "finished", 0, &[]);
+        r.store.update_issue(finished, &IssuePatch { state: Some(IssueState::Done), ..Default::default() }).unwrap();
+        let waiting = todo(&r, "waiting", 0, &[]);
+        let done_dir = root.join(format!("demo-{finished}/debug"));
+        std::fs::create_dir_all(&done_dir).unwrap();
+        std::fs::write(done_dir.join("big"), vec![1u8; 32 * 1024]).unwrap();
+        let shared = root.join("demo/debug");
+        std::fs::create_dir_all(&shared).unwrap();
+        on(&r);
+        let free = Arc::new(Mutex::new(5u64));
+        let seen = free.clone();
+        *r.ap.disk_probe.lock().unwrap() = Arc::new(move |_: &Path| Some((*seen.lock().unwrap(), 100)));
+        let later = crate::store::now() + crate::target_dirs::STALE_MS + 60_000;
+        r.ap.tick_at(later);
+        assert!(r.store.workers().unwrap().is_empty(), "no worker starts on a nearly full disk");
+        assert_eq!(r.store.issue(waiting).unwrap().state, IssueState::Todo);
+        assert!(!root.join(format!("demo-{finished}")).exists(), "swept at once");
+        assert!(shared.exists(), "the shared project dir is never touched");
+        let lines = feed(&r);
+        assert!(lines.iter().any(|l| l.starts_with("low disk: ") && l.contains("under 10 percent")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains(&format!("of done issue #{finished}, freed "))), "{lines:?}");
+        r.ap.tick_at(later);
+        assert_eq!(feed(&r).iter().filter(|l| l.starts_with("low disk: ")).count(), 1, "said once per episode");
+        *free.lock().unwrap() = 50;
+        r.ap.tick_at(later);
+        assert_eq!(r.store.workers().unwrap().len(), 1, "starts again once there is room");
+        assert!(feed(&r).iter().any(|l| l.starts_with("disk space is back")));
+    }
+
+    #[tokio::test]
+    async fn the_ten_minute_sweep_deletes_a_done_issue_build_dir_and_reports_the_bytes() {
+        let r = rig(DONE);
+        let root = r._dir.path().join("cargo-target");
+        r.store.set_setting(crate::target_dirs::ROOT_SETTING, &root.to_string_lossy()).unwrap();
+        let finished = todo(&r, "finished", 0, &[]);
+        r.store.update_issue(finished, &IssuePatch { state: Some(IssueState::Done), ..Default::default() }).unwrap();
+        let dir = root.join(format!("demo-{finished}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("big"), vec![1u8; 32 * 1024]).unwrap();
+        on(&r);
+        auto_close(&r);
+        *r.ap.disk_probe.lock().unwrap() = Arc::new(|_: &Path| Some((90, 100)));
+        let now = crate::store::now();
+        r.ap.tick_at(now);
+        assert!(dir.exists(), "touched less than six hours ago");
+        let later = now + crate::target_dirs::STALE_MS + 60_000;
+        r.ap.tick_at(later);
+        assert!(!dir.exists());
+        assert!(feed(&r).iter().any(|l| l.contains("freed 0.0 GB") && l.contains(&dir.to_string_lossy().to_string())), "{:?}", feed(&r));
+        std::fs::create_dir_all(&dir).unwrap();
+        r.ap.tick_at(later + 60_000);
+        assert!(dir.exists(), "the sweep runs every ten minutes, not every tick");
+        r.ap.tick_at(later + crate::worktree_sweep::SWEEP_EVERY_MS + 60_000);
+        assert!(!dir.exists());
     }
 
     #[tokio::test]
