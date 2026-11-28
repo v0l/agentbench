@@ -422,6 +422,14 @@ CREATE TABLE IF NOT EXISTS outbox (
     status TEXT NOT NULL DEFAULT 'pending',
     created_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS target_dirs (
+    path TEXT PRIMARY KEY,
+    project_id INTEGER NOT NULL,
+    issue_id INTEGER NOT NULL,
+    worktree_id INTEGER,
+    session TEXT,
+    created_at INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 const WIRE_TRANSCRIPTS: &str = "native_transcripts_are_wire";
@@ -557,6 +565,15 @@ pub struct Worker {
     pub reworks: u32,
     pub green: bool,
     pub asked_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetDir {
+    pub path: String,
+    pub project_id: Id,
+    pub issue_id: Id,
+    pub worktree_id: Option<Id>,
+    pub session: Option<SessionId>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2459,6 +2476,38 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn add_target_dir(&self, t: &TargetDir) -> Result<()> {
+        self.db().execute(
+            "INSERT INTO target_dirs (path, project_id, issue_id, worktree_id, session, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(path) DO UPDATE SET project_id = excluded.project_id, issue_id = excluded.issue_id,
+                 worktree_id = excluded.worktree_id, session = excluded.session",
+            params![t.path, t.project_id, t.issue_id, t.worktree_id, t.session, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn target_dirs(&self) -> Result<Vec<TargetDir>> {
+        let db = self.db();
+        let mut stmt =
+            db.prepare("SELECT path, project_id, issue_id, worktree_id, session FROM target_dirs ORDER BY path")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TargetDir {
+                path: r.get(0)?,
+                project_id: r.get(1)?,
+                issue_id: r.get(2)?,
+                worktree_id: r.get(3)?,
+                session: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn forget_target_dir(&self, path: &str) -> Result<()> {
+        self.db().execute("DELETE FROM target_dirs WHERE path = ?1", [path])?;
+        Ok(())
     }
 
     pub fn remove_worker(&self, session: SessionId) -> Result<()> {

@@ -294,6 +294,7 @@ pub fn remove_worktree(store: &Store, worktree_id: Id, force: bool) -> Result<()
     }
     store.forget_worktree(worktree_id)?;
     sync(store, w.project_id, None)?;
+    crate::target_dirs::release(store, &w, &crate::target_dirs::Ctx::system(store));
     Ok(())
 }
 

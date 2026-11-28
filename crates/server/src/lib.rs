@@ -34,6 +34,7 @@ pub mod runner;
 pub mod seed;
 pub mod store;
 pub mod supervisor_log;
+pub mod target_dirs;
 pub mod terminal;
 pub mod titles;
 pub mod tools;

@@ -104,7 +104,7 @@ fn gb(bytes: u64) -> f64 {
     bytes as f64 / GB
 }
 
-fn gb_text(bytes: u64) -> String {
+pub(crate) fn gb_text(bytes: u64) -> String {
     let g = gb(bytes);
     if g >= 10.0 { format!("{g:.0} GB") } else { format!("{g:.1} GB") }
 }

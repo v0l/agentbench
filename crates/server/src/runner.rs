@@ -436,6 +436,11 @@ impl Runner {
             (Some(p), Some(parent)) if !p.contains("PARENT=") => Some(format!("{p}\n\nPARENT={parent}")),
             (p, _) => p,
         };
+        if let Some(i) = issue.as_ref()
+            && !worktree.main
+        {
+            crate::target_dirs::record(store, &project, i, &worktree, session.id, prompt.as_deref());
+        }
         if prompt.is_some() || !new.attachments.is_empty() {
             self.send_with(&session, prompt.as_deref().unwrap_or_default(), &new.attachments)?;
         }
